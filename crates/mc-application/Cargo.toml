@@ -1,0 +1,16 @@
+[package]
+name = "mc-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mc-domain = { workspace = true }
+mc-shared = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }

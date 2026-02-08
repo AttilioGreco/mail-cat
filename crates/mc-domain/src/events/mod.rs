@@ -1,0 +1,377 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::model::account::{AccountId, ConnectionConfig, ProviderType};
+use crate::model::attachment::Attachment;
+use crate::model::mailbox::{MailboxId, MailboxType};
+use crate::model::message::Envelope;
+use crate::value_objects::email_address::EmailAddress;
+use crate::value_objects::flag::Flag;
+use crate::value_objects::mailbox_path::MailboxPath;
+use crate::value_objects::message_id::MessageId;
+use crate::value_objects::uid::ProviderUid;
+
+/// Metadata wrapper for all domain events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    pub event_id: Uuid,
+    pub aggregate_id: String,
+    pub aggregate_type: AggregateType,
+    pub sequence_number: u64,
+    pub occurred_at: DateTime<Utc>,
+    pub payload: DomainEvent,
+}
+
+impl EventEnvelope {
+    pub fn new(
+        aggregate_id: String,
+        aggregate_type: AggregateType,
+        sequence_number: u64,
+        payload: DomainEvent,
+    ) -> Self {
+        Self {
+            event_id: Uuid::now_v7(),
+            aggregate_id,
+            aggregate_type,
+            sequence_number,
+            occurred_at: Utc::now(),
+            payload,
+        }
+    }
+}
+
+/// Aggregate type discriminator for the event store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AggregateType {
+    Account,
+    Mailbox,
+    Message,
+}
+
+impl std::fmt::Display for AggregateType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Account => write!(f, "account"),
+            Self::Mailbox => write!(f, "mailbox"),
+            Self::Message => write!(f, "message"),
+        }
+    }
+}
+
+/// Complete catalog of domain events.
+///
+/// These are the source of truth in the event-sourced architecture.
+/// Every state change is represented as an event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DomainEvent {
+    // ── Account Events ──────────────────────────────────────────────
+
+    /// A new email account was configured.
+    AccountAdded {
+        account_id: AccountId,
+        name: String,
+        email: EmailAddress,
+        provider_type: ProviderType,
+    },
+
+    /// An existing account's settings were updated.
+    AccountUpdated {
+        account_id: AccountId,
+        name: Option<String>,
+        connection_config: Option<ConnectionConfig>,
+    },
+
+    /// An account was removed.
+    AccountRemoved {
+        account_id: AccountId,
+    },
+
+    /// A sync operation started for an account.
+    AccountSyncStarted {
+        account_id: AccountId,
+    },
+
+    /// A sync operation completed successfully.
+    AccountSyncCompleted {
+        account_id: AccountId,
+        mailboxes_synced: u32,
+        messages_synced: u32,
+    },
+
+    /// A sync operation failed.
+    AccountSyncFailed {
+        account_id: AccountId,
+        error: String,
+    },
+
+    // ── Mailbox Events ──────────────────────────────────────────────
+
+    /// A new mailbox was discovered during sync.
+    MailboxDiscovered {
+        mailbox_id: MailboxId,
+        account_id: AccountId,
+        path: MailboxPath,
+        mailbox_type: MailboxType,
+    },
+
+    /// Mailbox message counts were updated.
+    MailboxCountsUpdated {
+        mailbox_id: MailboxId,
+        total_messages: u32,
+        unread_messages: u32,
+    },
+
+    /// A mailbox was renamed.
+    MailboxRenamed {
+        mailbox_id: MailboxId,
+        old_path: MailboxPath,
+        new_path: MailboxPath,
+    },
+
+    /// A mailbox was deleted.
+    MailboxDeleted {
+        mailbox_id: MailboxId,
+        account_id: AccountId,
+    },
+
+    // ── Message Events ──────────────────────────────────────────────
+
+    /// A new message was received (envelope fetched from provider).
+    MessageReceived {
+        message_id: MessageId,
+        account_id: AccountId,
+        mailbox_id: MailboxId,
+        provider_uid: ProviderUid,
+        envelope: Envelope,
+        flags: Vec<Flag>,
+        size_bytes: u64,
+        has_attachments: bool,
+        received_at: DateTime<Utc>,
+    },
+
+    /// A message body and attachments metadata were fetched.
+    MessageBodyFetched {
+        message_id: MessageId,
+        body_text: Option<String>,
+        body_html: Option<String>,
+        attachments: Vec<Attachment>,
+    },
+
+    /// Flags on a message were changed.
+    MessageFlagged {
+        message_id: MessageId,
+        flags_added: Vec<Flag>,
+        flags_removed: Vec<Flag>,
+    },
+
+    /// A message was moved between mailboxes.
+    MessageMoved {
+        message_id: MessageId,
+        from_mailbox_id: MailboxId,
+        to_mailbox_id: MailboxId,
+    },
+
+    /// A message was deleted.
+    MessageDeleted {
+        message_id: MessageId,
+        mailbox_id: MailboxId,
+        permanently: bool,
+    },
+
+    /// A message was sent via SMTP or provider API.
+    MessageSent {
+        message_id: MessageId,
+        account_id: AccountId,
+        envelope: Envelope,
+        sent_at: DateTime<Utc>,
+    },
+
+    /// A draft was saved.
+    DraftSaved {
+        message_id: MessageId,
+        account_id: AccountId,
+        envelope: Envelope,
+        body_text: Option<String>,
+        body_html: Option<String>,
+    },
+
+    /// A draft was discarded.
+    DraftDiscarded {
+        message_id: MessageId,
+    },
+}
+
+impl DomainEvent {
+    /// Returns the aggregate type this event belongs to.
+    pub fn aggregate_type(&self) -> AggregateType {
+        match self {
+            Self::AccountAdded { .. }
+            | Self::AccountUpdated { .. }
+            | Self::AccountRemoved { .. }
+            | Self::AccountSyncStarted { .. }
+            | Self::AccountSyncCompleted { .. }
+            | Self::AccountSyncFailed { .. } => AggregateType::Account,
+
+            Self::MailboxDiscovered { .. }
+            | Self::MailboxCountsUpdated { .. }
+            | Self::MailboxRenamed { .. }
+            | Self::MailboxDeleted { .. } => AggregateType::Mailbox,
+
+            Self::MessageReceived { .. }
+            | Self::MessageBodyFetched { .. }
+            | Self::MessageFlagged { .. }
+            | Self::MessageMoved { .. }
+            | Self::MessageDeleted { .. }
+            | Self::MessageSent { .. }
+            | Self::DraftSaved { .. }
+            | Self::DraftDiscarded { .. } => AggregateType::Message,
+        }
+    }
+
+    /// Returns a human-readable event name.
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            Self::AccountAdded { .. } => "AccountAdded",
+            Self::AccountUpdated { .. } => "AccountUpdated",
+            Self::AccountRemoved { .. } => "AccountRemoved",
+            Self::AccountSyncStarted { .. } => "AccountSyncStarted",
+            Self::AccountSyncCompleted { .. } => "AccountSyncCompleted",
+            Self::AccountSyncFailed { .. } => "AccountSyncFailed",
+            Self::MailboxDiscovered { .. } => "MailboxDiscovered",
+            Self::MailboxCountsUpdated { .. } => "MailboxCountsUpdated",
+            Self::MailboxRenamed { .. } => "MailboxRenamed",
+            Self::MailboxDeleted { .. } => "MailboxDeleted",
+            Self::MessageReceived { .. } => "MessageReceived",
+            Self::MessageBodyFetched { .. } => "MessageBodyFetched",
+            Self::MessageFlagged { .. } => "MessageFlagged",
+            Self::MessageMoved { .. } => "MessageMoved",
+            Self::MessageDeleted { .. } => "MessageDeleted",
+            Self::MessageSent { .. } => "MessageSent",
+            Self::DraftSaved { .. } => "DraftSaved",
+            Self::DraftDiscarded { .. } => "DraftDiscarded",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_envelope_creation() {
+        let event = DomainEvent::AccountRemoved {
+            account_id: AccountId::new(),
+        };
+        let envelope =
+            EventEnvelope::new("acc-123".into(), AggregateType::Account, 1, event);
+
+        assert_eq!(envelope.aggregate_id, "acc-123");
+        assert_eq!(envelope.aggregate_type, AggregateType::Account);
+        assert_eq!(envelope.sequence_number, 1);
+    }
+
+    #[test]
+    fn event_aggregate_type_classification() {
+        let account_event = DomainEvent::AccountAdded {
+            account_id: AccountId::new(),
+            name: "Test".into(),
+            email: EmailAddress::new("test@example.com").unwrap(),
+            provider_type: ProviderType::Imap,
+        };
+        assert_eq!(account_event.aggregate_type(), AggregateType::Account);
+
+        let mailbox_event = DomainEvent::MailboxDeleted {
+            mailbox_id: MailboxId::new(),
+            account_id: AccountId::new(),
+        };
+        assert_eq!(mailbox_event.aggregate_type(), AggregateType::Mailbox);
+
+        let message_event = DomainEvent::DraftDiscarded {
+            message_id: MessageId::new(),
+        };
+        assert_eq!(message_event.aggregate_type(), AggregateType::Message);
+    }
+
+    #[test]
+    fn event_name() {
+        let event = DomainEvent::MessageFlagged {
+            message_id: MessageId::new(),
+            flags_added: vec![Flag::Seen],
+            flags_removed: vec![],
+        };
+        assert_eq!(event.event_name(), "MessageFlagged");
+    }
+
+    #[test]
+    fn event_serialization_roundtrip() {
+        let event = DomainEvent::AccountAdded {
+            account_id: AccountId::new(),
+            name: "Work Email".into(),
+            email: EmailAddress::new("work@company.com").unwrap(),
+            provider_type: ProviderType::Imap,
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: DomainEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.event_name(), "AccountAdded");
+        assert_eq!(deserialized.aggregate_type(), AggregateType::Account);
+    }
+
+    #[test]
+    fn envelope_serialization_roundtrip() {
+        let event = DomainEvent::MailboxCountsUpdated {
+            mailbox_id: MailboxId::new(),
+            total_messages: 42,
+            unread_messages: 5,
+        };
+        let envelope =
+            EventEnvelope::new("mbx-1".into(), AggregateType::Mailbox, 3, event);
+
+        let json = serde_json::to_string(&envelope).unwrap();
+        let deserialized: EventEnvelope = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.aggregate_id, "mbx-1");
+        assert_eq!(deserialized.sequence_number, 3);
+        assert_eq!(deserialized.payload.event_name(), "MailboxCountsUpdated");
+    }
+
+    #[test]
+    fn message_received_event_serialization() {
+        let event = DomainEvent::MessageReceived {
+            message_id: MessageId::new(),
+            account_id: AccountId::new(),
+            mailbox_id: MailboxId::new(),
+            provider_uid: ProviderUid::new(1234),
+            envelope: Envelope {
+                from: vec![],
+                to: vec![],
+                cc: vec![],
+                bcc: vec![],
+                reply_to: vec![],
+                subject: "Test subject".into(),
+                date: Utc::now(),
+            },
+            flags: vec![Flag::Recent],
+            size_bytes: 4096,
+            has_attachments: false,
+            received_at: Utc::now(),
+        };
+
+        let json = serde_json::to_string_pretty(&event).unwrap();
+        assert!(json.contains("MessageReceived"));
+        assert!(json.contains("Test subject"));
+        assert!(json.contains("1234"));
+
+        let deserialized: DomainEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.event_name(), "MessageReceived");
+    }
+
+    #[test]
+    fn aggregate_type_display() {
+        assert_eq!(format!("{}", AggregateType::Account), "account");
+        assert_eq!(format!("{}", AggregateType::Mailbox), "mailbox");
+        assert_eq!(format!("{}", AggregateType::Message), "message");
+    }
+}

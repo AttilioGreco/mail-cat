@@ -1,0 +1,27 @@
+[package]
+name = "mc-interfaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mc-domain = { workspace = true }
+mc-application = { workspace = true }
+mc-shared = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+async-graphql = { workspace = true }
+async-graphql-axum = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tokio-stream = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }

@@ -1,0 +1,74 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/mc-domain",
+    "crates/mc-application",
+    "crates/mc-infrastructure",
+    "crates/mc-interfaces",
+    "crates/mc-shared",
+    "crates/mc-server",
+    "crates/mc-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# Internal crates
+mc-domain = { path = "crates/mc-domain" }
+mc-application = { path = "crates/mc-application" }
+mc-infrastructure = { path = "crates/mc-infrastructure" }
+mc-interfaces = { path = "crates/mc-interfaces" }
+mc-shared = { path = "crates/mc-shared" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# gRPC
+tonic = "0.13"
+tonic-build = "0.13"
+prost = "0.13"
+prost-types = "0.13"
+
+# GraphQL
+async-graphql = "7"
+async-graphql-axum = "7"
+axum = "0.8"
+
+# Email
+lettre = { version = "0.11", features = ["tokio1-native-tls"] }
+
+# Storage
+sled = "0.34"
+
+# Search
+tantivy = "0.22"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Unique IDs
+uuid = { version = "1", features = ["v7", "serde"] }
+
+# Config
+toml = "0.8"
+dirs = "6"
+
+# Utilities
+futures = "0.3"
+tokio-stream = "0.1"
+bytes = "1"
