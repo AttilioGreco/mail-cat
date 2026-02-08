@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::events::DomainEvent;
 use crate::model::account::AccountId;
 use crate::model::attachment::Attachment;
 use crate::model::mailbox::MailboxId;
@@ -50,6 +51,148 @@ pub struct Message {
     pub internal_date: DateTime<Utc>,
 }
 
+impl Message {
+    /// Create a message from provider data (received during sync) and produce the event.
+    pub fn receive(
+        account_id: AccountId,
+        mailbox_id: MailboxId,
+        provider_uid: ProviderUid,
+        envelope: Envelope,
+        flags: Vec<Flag>,
+        size_bytes: u64,
+        has_attachments: bool,
+    ) -> (Self, DomainEvent) {
+        let id = MessageId::new();
+        let received_at = Utc::now();
+
+        let event = DomainEvent::MessageReceived {
+            message_id: id.clone(),
+            account_id: account_id.clone(),
+            mailbox_id: mailbox_id.clone(),
+            provider_uid,
+            envelope: envelope.clone(),
+            flags: flags.clone(),
+            size_bytes,
+            has_attachments,
+            received_at,
+        };
+
+        let message = Self {
+            id,
+            account_id,
+            mailbox_id,
+            provider_uid: Some(provider_uid),
+            message_rfc_id: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            envelope,
+            flags,
+            size_bytes,
+            has_attachments,
+            attachments: Vec::new(),
+            body_text: None,
+            body_html: None,
+            raw_headers: None,
+            received_at,
+            internal_date: received_at,
+        };
+
+        (message, event)
+    }
+
+    /// Attach the body content after fetching it from the provider.
+    pub fn set_body(
+        &mut self,
+        body_text: Option<String>,
+        body_html: Option<String>,
+        attachments: Vec<Attachment>,
+    ) -> DomainEvent {
+        self.body_text = body_text.clone();
+        self.body_html = body_html.clone();
+        self.attachments = attachments.clone();
+        self.has_attachments = !self.attachments.is_empty();
+
+        DomainEvent::MessageBodyFetched {
+            message_id: self.id.clone(),
+            body_text,
+            body_html,
+            attachments,
+        }
+    }
+
+    /// Change flags on the message and produce the event.
+    pub fn change_flags(
+        &mut self,
+        flags_to_add: Vec<Flag>,
+        flags_to_remove: Vec<Flag>,
+    ) -> DomainEvent {
+        for flag in &flags_to_remove {
+            self.flags.retain(|f| f != flag);
+        }
+        for flag in &flags_to_add {
+            if !self.flags.contains(flag) {
+                self.flags.push(flag.clone());
+            }
+        }
+
+        DomainEvent::MessageFlagged {
+            message_id: self.id.clone(),
+            flags_added: flags_to_add,
+            flags_removed: flags_to_remove,
+        }
+    }
+
+    /// Mark as read (add Seen flag).
+    pub fn mark_as_read(&mut self) -> DomainEvent {
+        self.change_flags(vec![Flag::Seen], vec![])
+    }
+
+    /// Mark as unread (remove Seen flag).
+    pub fn mark_as_unread(&mut self) -> DomainEvent {
+        self.change_flags(vec![], vec![Flag::Seen])
+    }
+
+    /// Toggle the Flagged (starred) flag.
+    pub fn toggle_flagged(&mut self) -> DomainEvent {
+        if self.flags.contains(&Flag::Flagged) {
+            self.change_flags(vec![], vec![Flag::Flagged])
+        } else {
+            self.change_flags(vec![Flag::Flagged], vec![])
+        }
+    }
+
+    /// Move the message to another mailbox and produce the event.
+    pub fn move_to(&mut self, to_mailbox_id: MailboxId) -> DomainEvent {
+        let from = self.mailbox_id.clone();
+        self.mailbox_id = to_mailbox_id.clone();
+
+        DomainEvent::MessageMoved {
+            message_id: self.id.clone(),
+            from_mailbox_id: from,
+            to_mailbox_id: to_mailbox_id,
+        }
+    }
+
+    /// Produce a deletion event.
+    pub fn delete(&self, permanently: bool) -> DomainEvent {
+        DomainEvent::MessageDeleted {
+            message_id: self.id.clone(),
+            mailbox_id: self.mailbox_id.clone(),
+            permanently,
+        }
+    }
+
+    /// Whether the message has been read.
+    pub fn is_read(&self) -> bool {
+        self.flags.contains(&Flag::Seen)
+    }
+
+    /// Whether the message is flagged/starred.
+    pub fn is_flagged(&self) -> bool {
+        self.flags.contains(&Flag::Flagged)
+    }
+}
+
 /// Outgoing message for sending.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutgoingMessage {
@@ -71,4 +214,189 @@ pub struct OutgoingAttachment {
     pub filename: String,
     pub mime_type: String,
     pub data: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_envelope() -> Envelope {
+        Envelope {
+            from: vec![Address {
+                name: Some("Sender".into()),
+                email: EmailAddress::new("sender@example.com").unwrap(),
+            }],
+            to: vec![Address {
+                name: None,
+                email: EmailAddress::new("recipient@example.com").unwrap(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: "Test subject".into(),
+            date: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn receive_message_produces_event() {
+        let (msg, event) = Message::receive(
+            AccountId::new(),
+            MailboxId::new(),
+            ProviderUid::new(42),
+            test_envelope(),
+            vec![Flag::Recent],
+            2048,
+            false,
+        );
+
+        assert_eq!(msg.envelope.subject, "Test subject");
+        assert_eq!(msg.provider_uid, Some(ProviderUid::new(42)));
+        assert!(!msg.is_read());
+        assert_eq!(event.event_name(), "MessageReceived");
+    }
+
+    #[test]
+    fn set_body_produces_event() {
+        let (mut msg, _) = Message::receive(
+            AccountId::new(),
+            MailboxId::new(),
+            ProviderUid::new(1),
+            test_envelope(),
+            vec![],
+            1024,
+            false,
+        );
+
+        let event = msg.set_body(
+            Some("Hello plain text".into()),
+            Some("<p>Hello HTML</p>".into()),
+            vec![],
+        );
+
+        assert_eq!(msg.body_text.as_deref(), Some("Hello plain text"));
+        assert_eq!(msg.body_html.as_deref(), Some("<p>Hello HTML</p>"));
+        assert_eq!(event.event_name(), "MessageBodyFetched");
+    }
+
+    #[test]
+    fn mark_as_read_and_unread() {
+        let (mut msg, _) = Message::receive(
+            AccountId::new(),
+            MailboxId::new(),
+            ProviderUid::new(1),
+            test_envelope(),
+            vec![],
+            512,
+            false,
+        );
+
+        assert!(!msg.is_read());
+
+        let event = msg.mark_as_read();
+        assert!(msg.is_read());
+        assert_eq!(event.event_name(), "MessageFlagged");
+
+        let event = msg.mark_as_unread();
+        assert!(!msg.is_read());
+        assert_eq!(event.event_name(), "MessageFlagged");
+    }
+
+    #[test]
+    fn toggle_flagged() {
+        let (mut msg, _) = Message::receive(
+            AccountId::new(),
+            MailboxId::new(),
+            ProviderUid::new(1),
+            test_envelope(),
+            vec![],
+            512,
+            false,
+        );
+
+        assert!(!msg.is_flagged());
+        msg.toggle_flagged();
+        assert!(msg.is_flagged());
+        msg.toggle_flagged();
+        assert!(!msg.is_flagged());
+    }
+
+    #[test]
+    fn move_message() {
+        let original_mailbox = MailboxId::new();
+        let target_mailbox = MailboxId::new();
+
+        let (mut msg, _) = Message::receive(
+            AccountId::new(),
+            original_mailbox.clone(),
+            ProviderUid::new(1),
+            test_envelope(),
+            vec![],
+            512,
+            false,
+        );
+
+        let event = msg.move_to(target_mailbox.clone());
+
+        assert_eq!(msg.mailbox_id, target_mailbox);
+        assert_eq!(event.event_name(), "MessageMoved");
+    }
+
+    #[test]
+    fn delete_message() {
+        let (msg, _) = Message::receive(
+            AccountId::new(),
+            MailboxId::new(),
+            ProviderUid::new(1),
+            test_envelope(),
+            vec![],
+            512,
+            false,
+        );
+
+        let soft_delete = msg.delete(false);
+        assert_eq!(soft_delete.event_name(), "MessageDeleted");
+
+        let hard_delete = msg.delete(true);
+        assert_eq!(hard_delete.event_name(), "MessageDeleted");
+    }
+
+    #[test]
+    fn message_serialization_roundtrip() {
+        let (msg, _) = Message::receive(
+            AccountId::new(),
+            MailboxId::new(),
+            ProviderUid::new(99),
+            test_envelope(),
+            vec![Flag::Seen, Flag::Flagged],
+            4096,
+            true,
+        );
+
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: Message = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.envelope.subject, "Test subject");
+        assert!(deserialized.is_read());
+        assert!(deserialized.is_flagged());
+        assert_eq!(deserialized.size_bytes, 4096);
+    }
+
+    #[test]
+    fn change_flags_no_duplicates() {
+        let (mut msg, _) = Message::receive(
+            AccountId::new(),
+            MailboxId::new(),
+            ProviderUid::new(1),
+            test_envelope(),
+            vec![Flag::Seen],
+            512,
+            false,
+        );
+
+        // Adding Seen again should not duplicate
+        msg.change_flags(vec![Flag::Seen], vec![]);
+        let seen_count = msg.flags.iter().filter(|f| f.is_seen()).count();
+        assert_eq!(seen_count, 1);
+    }
 }
