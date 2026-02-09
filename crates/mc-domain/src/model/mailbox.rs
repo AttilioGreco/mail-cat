@@ -134,6 +134,70 @@ impl Mailbox {
             account_id: self.account_id.clone(),
         }
     }
+
+    // ── Event Sourcing rehydration ─────────────────────────────────────
+
+    /// Apply a single domain event to mutate aggregate state.
+    pub fn apply(&mut self, event: &DomainEvent) {
+        match event {
+            DomainEvent::MailboxDiscovered { .. } => {
+                // Initial state is set by the constructor.
+            }
+            DomainEvent::MailboxCountsUpdated {
+                total_messages,
+                unread_messages,
+                ..
+            } => {
+                self.total_messages = *total_messages;
+                self.unread_messages = *unread_messages;
+            }
+            DomainEvent::MailboxRenamed { new_path, .. } => {
+                self.display_name = new_path.name().to_string();
+                self.path = new_path.clone();
+            }
+            DomainEvent::MailboxDeleted { .. } => {
+                // Mailbox is logically deleted; upstream handles removal.
+            }
+            _ => {} // Ignore events belonging to other aggregates.
+        }
+    }
+
+    /// Rehydrate a Mailbox from a sequence of domain events.
+    ///
+    /// The first event must be `MailboxDiscovered`. Returns `None` if the
+    /// events slice is empty or doesn't start with a creation event.
+    pub fn rehydrate(events: &[DomainEvent]) -> Option<Self> {
+        let first = events.first()?;
+        let DomainEvent::MailboxDiscovered {
+            mailbox_id,
+            account_id,
+            path,
+            mailbox_type,
+        } = first
+        else {
+            return None;
+        };
+
+        let display_name = path.name().to_string();
+        let mut mailbox = Self {
+            id: mailbox_id.clone(),
+            account_id: account_id.clone(),
+            path: path.clone(),
+            display_name,
+            mailbox_type: *mailbox_type,
+            flags: Vec::new(),
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        };
+
+        for event in &events[1..] {
+            mailbox.apply(event);
+        }
+
+        Some(mailbox)
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +246,42 @@ mod tests {
         assert_eq!(mailbox.display_name, "Work-Archive");
         assert_eq!(mailbox.path.full_path(), "Work-Archive");
         assert_eq!(event.event_name(), "MailboxRenamed");
+    }
+
+    #[test]
+    fn rehydrate_mailbox_from_events() {
+        let id = MailboxId::new();
+        let account_id = AccountId::new();
+        let events = vec![
+            DomainEvent::MailboxDiscovered {
+                mailbox_id: id.clone(),
+                account_id: account_id.clone(),
+                path: MailboxPath::inbox(),
+                mailbox_type: MailboxType::Inbox,
+            },
+            DomainEvent::MailboxCountsUpdated {
+                mailbox_id: id.clone(),
+                total_messages: 42,
+                unread_messages: 5,
+            },
+            DomainEvent::MailboxRenamed {
+                mailbox_id: id.clone(),
+                old_path: MailboxPath::inbox(),
+                new_path: MailboxPath::parse("Primary", '/').unwrap(),
+            },
+        ];
+
+        let mailbox = Mailbox::rehydrate(&events).unwrap();
+        assert_eq!(mailbox.total_messages, 42);
+        assert_eq!(mailbox.unread_messages, 5);
+        assert_eq!(mailbox.display_name, "Primary");
+        assert_eq!(mailbox.path.full_path(), "Primary");
+    }
+
+    #[test]
+    fn rehydrate_empty_events_returns_none() {
+        let result = Mailbox::rehydrate(&[]);
+        assert!(result.is_none());
     }
 
     #[test]

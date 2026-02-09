@@ -191,6 +191,102 @@ impl Message {
     pub fn is_flagged(&self) -> bool {
         self.flags.contains(&Flag::Flagged)
     }
+
+    // ── Event Sourcing rehydration ─────────────────────────────────────
+
+    /// Apply a single domain event to mutate aggregate state.
+    pub fn apply(&mut self, event: &DomainEvent) {
+        match event {
+            DomainEvent::MessageReceived { .. } => {
+                // Initial state is set by the constructor.
+            }
+            DomainEvent::MessageBodyFetched {
+                body_text,
+                body_html,
+                attachments,
+                ..
+            } => {
+                self.body_text = body_text.clone();
+                self.body_html = body_html.clone();
+                self.attachments = attachments.clone();
+                self.has_attachments = !self.attachments.is_empty();
+            }
+            DomainEvent::MessageFlagged {
+                flags_added,
+                flags_removed,
+                ..
+            } => {
+                for flag in flags_removed {
+                    self.flags.retain(|f| f != flag);
+                }
+                for flag in flags_added {
+                    if !self.flags.contains(flag) {
+                        self.flags.push(flag.clone());
+                    }
+                }
+            }
+            DomainEvent::MessageMoved {
+                to_mailbox_id, ..
+            } => {
+                self.mailbox_id = to_mailbox_id.clone();
+            }
+            DomainEvent::MessageDeleted { .. }
+            | DomainEvent::MessageSent { .. }
+            | DomainEvent::DraftSaved { .. }
+            | DomainEvent::DraftDiscarded { .. } => {
+                // These don't further mutate in-memory message state.
+            }
+            _ => {} // Ignore events belonging to other aggregates.
+        }
+    }
+
+    /// Rehydrate a Message from a sequence of domain events.
+    ///
+    /// The first event must be `MessageReceived`. Returns `None` if the
+    /// events slice is empty or doesn't start with a creation event.
+    pub fn rehydrate(events: &[DomainEvent]) -> Option<Self> {
+        let first = events.first()?;
+        let DomainEvent::MessageReceived {
+            message_id,
+            account_id,
+            mailbox_id,
+            provider_uid,
+            envelope,
+            flags,
+            size_bytes,
+            has_attachments,
+            received_at,
+        } = first
+        else {
+            return None;
+        };
+
+        let mut message = Self {
+            id: message_id.clone(),
+            account_id: account_id.clone(),
+            mailbox_id: mailbox_id.clone(),
+            provider_uid: Some(*provider_uid),
+            message_rfc_id: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            envelope: envelope.clone(),
+            flags: flags.clone(),
+            size_bytes: *size_bytes,
+            has_attachments: *has_attachments,
+            attachments: Vec::new(),
+            body_text: None,
+            body_html: None,
+            raw_headers: None,
+            received_at: *received_at,
+            internal_date: *received_at,
+        };
+
+        for event in &events[1..] {
+            message.apply(event);
+        }
+
+        Some(message)
+    }
 }
 
 /// Outgoing message for sending.
@@ -380,6 +476,57 @@ mod tests {
         assert!(deserialized.is_read());
         assert!(deserialized.is_flagged());
         assert_eq!(deserialized.size_bytes, 4096);
+    }
+
+    #[test]
+    fn rehydrate_message_from_events() {
+        let msg_id = MessageId::new();
+        let account_id = AccountId::new();
+        let mailbox_id = MailboxId::new();
+        let target_mailbox = MailboxId::new();
+        let received_at = Utc::now();
+
+        let events = vec![
+            DomainEvent::MessageReceived {
+                message_id: msg_id.clone(),
+                account_id: account_id.clone(),
+                mailbox_id: mailbox_id.clone(),
+                provider_uid: ProviderUid::new(100),
+                envelope: test_envelope(),
+                flags: vec![],
+                size_bytes: 2048,
+                has_attachments: false,
+                received_at,
+            },
+            DomainEvent::MessageBodyFetched {
+                message_id: msg_id.clone(),
+                body_text: Some("Hello world".into()),
+                body_html: Some("<p>Hello world</p>".into()),
+                attachments: vec![],
+            },
+            DomainEvent::MessageFlagged {
+                message_id: msg_id.clone(),
+                flags_added: vec![Flag::Seen, Flag::Flagged],
+                flags_removed: vec![],
+            },
+            DomainEvent::MessageMoved {
+                message_id: msg_id.clone(),
+                from_mailbox_id: mailbox_id.clone(),
+                to_mailbox_id: target_mailbox.clone(),
+            },
+        ];
+
+        let message = Message::rehydrate(&events).unwrap();
+        assert_eq!(message.body_text.as_deref(), Some("Hello world"));
+        assert!(message.is_read());
+        assert!(message.is_flagged());
+        assert_eq!(message.mailbox_id, target_mailbox);
+    }
+
+    #[test]
+    fn rehydrate_empty_events_returns_none() {
+        let result = Message::rehydrate(&[]);
+        assert!(result.is_none());
     }
 
     #[test]
