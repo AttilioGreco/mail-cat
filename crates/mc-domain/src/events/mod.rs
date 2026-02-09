@@ -13,12 +13,18 @@ use crate::value_objects::message_id::MessageId;
 use crate::value_objects::uid::ProviderUid;
 
 /// Metadata wrapper for all domain events.
+///
+/// # Semantics
+/// - `sequence_number`: per-aggregate, starts at 1 for the first event.
+/// - `global_position`: monotonically increasing across all events in the store.
+///   Assigned by the EventStore on append. 0 means not yet persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub event_id: Uuid,
     pub aggregate_id: String,
     pub aggregate_type: AggregateType,
     pub sequence_number: u64,
+    pub global_position: u64,
     pub occurred_at: DateTime<Utc>,
     pub payload: DomainEvent,
 }
@@ -35,6 +41,7 @@ impl EventEnvelope {
             aggregate_id,
             aggregate_type,
             sequence_number,
+            global_position: 0, // assigned by EventStore on persist
             occurred_at: Utc::now(),
             payload,
         }

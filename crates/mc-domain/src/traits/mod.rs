@@ -1,5 +1,7 @@
-// Traits will be fully implemented on Day 3.
-// Modules declared here for the workspace to compile.
+/// Domain trait definitions (ports in hexagonal architecture).
+///
+/// These traits are implemented by adapters in `mc-infrastructure`.
+/// The domain and application layers depend only on these abstractions.
 
 pub mod email_provider;
 pub mod event_store;

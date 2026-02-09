@@ -1,0 +1,3 @@
+## Progress
+- **Day 1 DONE**: Workspace setup, mc-shared (pagination, errors, telemetry), mc-domain value objects (EmailAddress, MessageId, AccountId, MailboxId, Flag, MailboxPath, ProviderUid), domain model stubs (Account, Mailbox, Message aggregates), events stub, traits stub. 25 tests passing.
+- **Day 2 DONE**: Complete DomainEvent enum (18 events: Account/Mailbox/Message), EventEnvelope with constructor, DomainError expanded (validation, provider, event store, repository, search, serialization). Aggregate constructors with event production (Account::create, Mailbox::discover, Message::receive). Full domain behavior methods (mark_as_read, toggle_flagged, move_to, set_body, change_flags, etc.). 48 tests passing.

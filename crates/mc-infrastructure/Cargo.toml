@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 mc-domain = { workspace = true }
-mc-application = { workspace = true }
 mc-shared = { workspace = true }
 tokio = { workspace = true }
 sled = { workspace = true }

@@ -1,1 +1,67 @@
-// Full EventStore trait will be implemented on Day 3.
+use std::pin::Pin;
+
+use futures::Stream;
+
+use crate::error::DomainError;
+use crate::events::{AggregateType, DomainEvent, EventEnvelope};
+
+/// Append-only event store. Source of truth in the event-sourced architecture.
+///
+/// # Semantics
+///
+/// - **`expected_sequence`**: The last known sequence number for the aggregate.
+///   Pass `0` for a brand-new aggregate (no events yet). The store checks that the
+///   current last sequence matches `expected_sequence` before appending (optimistic
+///   concurrency control). If they don't match, returns `DomainError::ConcurrencyConflict`.
+///
+/// - **`append` return value**: Returns the sequence number of the **last event written**
+///   in this batch. For a new aggregate with 3 events, returns `3`.
+///
+/// - **`global_position`**: A monotonically increasing `u64` assigned by the store on
+///   each event append. It is total-ordered across all aggregates and all event types.
+///   Used by projections and subscribers to track their checkpoint.
+///
+/// - **`subscribe`**: Delivers events in **global_position order**, with **at-least-once**
+///   semantics. Consumers (projections) must be idempotent and persist their last
+///   processed `global_position` as a checkpoint.
+pub trait EventStore: Send + Sync {
+    /// Append events for a given aggregate.
+    ///
+    /// Returns the sequence number of the last event written.
+    /// Fails with `DomainError::ConcurrencyConflict` if `expected_sequence` doesn't
+    /// match the actual last sequence in the store.
+    async fn append(
+        &self,
+        aggregate_id: &str,
+        aggregate_type: AggregateType,
+        expected_sequence: u64,
+        events: Vec<DomainEvent>,
+    ) -> Result<u64, DomainError>;
+
+    /// Load all events for an aggregate, starting from `from_sequence` (inclusive).
+    ///
+    /// Pass `0` to load all events from the beginning.
+    async fn load_events(
+        &self,
+        aggregate_id: &str,
+        from_sequence: u64,
+    ) -> Result<Vec<EventEnvelope>, DomainError>;
+
+    /// Load events across all aggregates, optionally filtered by type.
+    ///
+    /// Events are returned in `global_position` order.
+    /// Pass `from_global_position = 0` to read from the beginning.
+    async fn load_all_events(
+        &self,
+        aggregate_type: Option<AggregateType>,
+        from_global_position: u64,
+    ) -> Result<Vec<EventEnvelope>, DomainError>;
+
+    /// Subscribe to new events as they are appended.
+    ///
+    /// Returns a boxed stream delivering events in `global_position` order.
+    /// At-least-once delivery: consumers must be idempotent.
+    fn subscribe(
+        &self,
+    ) -> Pin<Box<dyn Stream<Item = EventEnvelope> + Send + '_>>;
+}

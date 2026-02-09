@@ -179,6 +179,94 @@ impl Account {
             account_id: self.id.clone(),
         }
     }
+
+    // ── Event Sourcing rehydration ─────────────────────────────────────
+
+    /// Apply a single domain event to mutate aggregate state.
+    ///
+    /// Used during rehydration from the event store. This method is
+    /// infallible: events are facts that already happened.
+    pub fn apply(&mut self, event: &DomainEvent) {
+        match event {
+            DomainEvent::AccountAdded { .. } => {
+                // Initial state is set by the constructor; nothing to do.
+            }
+            DomainEvent::AccountUpdated {
+                name,
+                connection_config,
+                ..
+            } => {
+                if let Some(new_name) = name {
+                    self.name = new_name.clone();
+                }
+                if let Some(new_config) = connection_config {
+                    self.connection_config = new_config.clone();
+                }
+                self.updated_at = Utc::now();
+            }
+            DomainEvent::AccountRemoved { .. } => {
+                self.status = AccountStatus::Disabled;
+            }
+            DomainEvent::AccountSyncStarted { .. }
+            | DomainEvent::AccountSyncCompleted { .. }
+            | DomainEvent::AccountSyncFailed { .. } => {
+                // Sync events don't mutate aggregate state.
+                // They're tracked for audit/projection purposes.
+            }
+            _ => {} // Ignore events belonging to other aggregates.
+        }
+    }
+
+    /// Rehydrate an Account from a sequence of domain events.
+    ///
+    /// The first event must be `AccountAdded`. Returns `None` if the
+    /// events slice is empty or doesn't start with a creation event.
+    pub fn rehydrate(events: &[DomainEvent]) -> Option<Self> {
+        let first = events.first()?;
+        let DomainEvent::AccountAdded {
+            account_id,
+            name,
+            email,
+            provider_type,
+        } = first
+        else {
+            return None;
+        };
+
+        let now = Utc::now();
+        let mut account = Self {
+            id: account_id.clone(),
+            name: name.clone(),
+            email: email.clone(),
+            provider_type: *provider_type,
+            connection_config: ConnectionConfig {
+                imap_host: None,
+                imap_port: None,
+                smtp_host: None,
+                smtp_port: None,
+                use_tls: true,
+                auth: AuthConfig::Plain {
+                    username: String::new(),
+                    password: String::new(),
+                },
+            },
+            identity: Identity {
+                display_name: name.clone(),
+                email: email.clone(),
+                signature_html: None,
+                signature_text: None,
+            },
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        };
+
+        for event in &events[1..] {
+            account.apply(event);
+        }
+
+        Some(account)
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +338,52 @@ mod tests {
 
         let event = account.remove();
         assert_eq!(event.event_name(), "AccountRemoved");
+    }
+
+    #[test]
+    fn rehydrate_account_from_events() {
+        let events = vec![
+            DomainEvent::AccountAdded {
+                account_id: AccountId::new(),
+                name: "Original".into(),
+                email: EmailAddress::new("test@example.com").unwrap(),
+                provider_type: ProviderType::Imap,
+            },
+            DomainEvent::AccountUpdated {
+                account_id: AccountId::new(),
+                name: Some("Updated Name".into()),
+                connection_config: None,
+            },
+        ];
+
+        let account = Account::rehydrate(&events).unwrap();
+        assert_eq!(account.name, "Updated Name");
+        assert_eq!(account.status, AccountStatus::Active);
+    }
+
+    #[test]
+    fn rehydrate_removed_account() {
+        let id = AccountId::new();
+        let events = vec![
+            DomainEvent::AccountAdded {
+                account_id: id.clone(),
+                name: "Test".into(),
+                email: EmailAddress::new("test@example.com").unwrap(),
+                provider_type: ProviderType::Imap,
+            },
+            DomainEvent::AccountRemoved {
+                account_id: id.clone(),
+            },
+        ];
+
+        let account = Account::rehydrate(&events).unwrap();
+        assert_eq!(account.status, AccountStatus::Disabled);
+    }
+
+    #[test]
+    fn rehydrate_empty_events_returns_none() {
+        let result = Account::rehydrate(&[]);
+        assert!(result.is_none());
     }
 
     #[test]

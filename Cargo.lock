@@ -1433,7 +1433,6 @@ dependencies = [
  "chrono",
  "futures",
  "lettre",
- "mc-application",
  "mc-domain",
  "mc-shared",
  "serde",
