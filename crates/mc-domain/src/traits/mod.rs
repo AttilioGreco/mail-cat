@@ -5,5 +5,6 @@
 
 pub mod email_provider;
 pub mod event_store;
+pub mod read_model_projector;
 pub mod repository;
 pub mod search_index;

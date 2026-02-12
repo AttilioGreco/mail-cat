@@ -10,7 +10,11 @@ pub mod queries;
 pub mod services;
 
 // Re-exports for ergonomics
-pub use bus::{CommandBus, EventPublisher, EventSubscriber, InProcessEventBus, QueryBus};
+pub use bus::{
+    CommandBus, EventPublisher, EventSubscriber, InProcessCommandBus, InProcessEventBus,
+    InProcessQueryBus, QueryBus,
+};
 pub use commands::{Command, CommandResult};
 pub use error::ApplicationError;
+pub use projections::ProjectionEventHandler;
 pub use queries::{Query, QueryResult};

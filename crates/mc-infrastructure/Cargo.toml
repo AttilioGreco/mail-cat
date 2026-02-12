@@ -17,5 +17,6 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
+async-stream = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }

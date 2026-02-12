@@ -1,0 +1,637 @@
+//! Command handler for Message aggregate operations.
+//!
+//! Message handlers orchestrate local event-sourced state changes.
+//! For operations that need remote provider interaction (set flags,
+//! move, delete on IMAP), the handler calls the EmailProvider first,
+//! then produces domain events on success.
+
+use std::sync::Arc;
+
+use mc_domain::{
+    AccountId, AggregateType, DomainEvent, EmailProvider, Envelope, EventEnvelope, EventStore,
+    Flag, MailboxId, MailboxPath, Message, MessageId, OutgoingMessage,
+};
+use tracing::info;
+
+use crate::bus::EventPublisher;
+use crate::commands::CommandResult;
+use crate::error::ApplicationError;
+
+/// Handles Message-related commands.
+///
+/// Works directly with the EventStore for message aggregate persistence
+/// (pure ES pattern). Uses EmailProvider for remote operations.
+pub struct MessageCommandHandler<ES: EventStore, EP: EmailProvider, B: EventPublisher> {
+    event_store: Arc<ES>,
+    email_provider: Arc<EP>,
+    event_bus: Arc<B>,
+}
+
+impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler<ES, EP, B> {
+    pub fn new(event_store: Arc<ES>, email_provider: Arc<EP>, event_bus: Arc<B>) -> Self {
+        Self {
+            event_store,
+            email_provider,
+            event_bus,
+        }
+    }
+
+    pub async fn handle_fetch_body(
+        &self,
+        message_id: MessageId,
+        mailbox_path: MailboxPath,
+    ) -> Result<CommandResult, ApplicationError> {
+        let mut message = self.load_message(&message_id).await?;
+
+        let provider_uid = message
+            .provider_uid
+            .ok_or_else(|| ApplicationError::PreconditionFailed("message has no provider UID".into()))?;
+
+        // Fetch full message from the remote provider.
+        let detail = self
+            .email_provider
+            .fetch_message_detail(&mailbox_path, provider_uid)
+            .await?;
+
+        let event = message.set_body(
+            detail.body_text.clone(),
+            detail.body_html.clone(),
+            detail.attachments.clone(),
+        );
+
+        self.append_and_publish(&message_id, AggregateType::Message, event)
+            .await?;
+
+        info!(%message_id, "message body fetched");
+        Ok(CommandResult::MessageBodyFetched)
+    }
+
+    pub async fn handle_set_flags(
+        &self,
+        message_id: MessageId,
+        mailbox_path: MailboxPath,
+        flags_to_add: Vec<Flag>,
+        flags_to_remove: Vec<Flag>,
+    ) -> Result<CommandResult, ApplicationError> {
+        let mut message = self.load_message(&message_id).await?;
+
+        let provider_uid = message
+            .provider_uid
+            .ok_or_else(|| ApplicationError::PreconditionFailed("message has no provider UID".into()))?;
+
+        // Update flags on the remote provider first.
+        self.email_provider
+            .set_flags(&mailbox_path, provider_uid, &flags_to_add, &flags_to_remove)
+            .await?;
+
+        let event = message.change_flags(flags_to_add, flags_to_remove);
+
+        self.append_and_publish(&message_id, AggregateType::Message, event)
+            .await?;
+
+        info!(%message_id, "message flags updated");
+        Ok(CommandResult::FlagsSet)
+    }
+
+    pub async fn handle_move(
+        &self,
+        message_id: MessageId,
+        _from_mailbox_id: MailboxId,
+        to_mailbox_id: MailboxId,
+        from_mailbox_path: MailboxPath,
+        to_mailbox_path: MailboxPath,
+    ) -> Result<CommandResult, ApplicationError> {
+        let mut message = self.load_message(&message_id).await?;
+
+        let provider_uid = message
+            .provider_uid
+            .ok_or_else(|| ApplicationError::PreconditionFailed("message has no provider UID".into()))?;
+
+        // Move on the remote provider.
+        let _new_uid = self
+            .email_provider
+            .move_message(provider_uid, &from_mailbox_path, &to_mailbox_path)
+            .await?;
+
+        let event = message.move_to(to_mailbox_id);
+
+        self.append_and_publish(&message_id, AggregateType::Message, event)
+            .await?;
+
+        info!(%message_id, "message moved");
+        Ok(CommandResult::MessageMoved)
+    }
+
+    pub async fn handle_delete(
+        &self,
+        message_id: MessageId,
+        _mailbox_id: MailboxId,
+        mailbox_path: MailboxPath,
+        permanently: bool,
+    ) -> Result<CommandResult, ApplicationError> {
+        let message = self.load_message(&message_id).await?;
+
+        let provider_uid = message
+            .provider_uid
+            .ok_or_else(|| ApplicationError::PreconditionFailed("message has no provider UID".into()))?;
+
+        // Delete on the remote provider.
+        self.email_provider
+            .delete_message(&mailbox_path, provider_uid, permanently)
+            .await?;
+
+        let event = message.delete(permanently);
+
+        self.append_and_publish(&message_id, AggregateType::Message, event)
+            .await?;
+
+        info!(%message_id, permanently, "message deleted");
+        Ok(CommandResult::MessageDeleted)
+    }
+
+    pub async fn handle_send(
+        &self,
+        account_id: AccountId,
+        outgoing: OutgoingMessage,
+    ) -> Result<CommandResult, ApplicationError> {
+        // Send via the provider (SMTP or API).
+        self.email_provider.send_message(&outgoing).await?;
+
+        let message_id = MessageId::new();
+        let envelope = Envelope {
+            from: vec![mc_domain::Address {
+                name: Some(outgoing.from.name.clone().unwrap_or_default()),
+                email: outgoing.from.email.clone(),
+            }],
+            to: outgoing
+                .to
+                .iter()
+                .map(|a| mc_domain::Address {
+                    name: a.name.clone(),
+                    email: a.email.clone(),
+                })
+                .collect(),
+            cc: outgoing
+                .cc
+                .iter()
+                .map(|a| mc_domain::Address {
+                    name: a.name.clone(),
+                    email: a.email.clone(),
+                })
+                .collect(),
+            bcc: vec![],
+            reply_to: vec![],
+            subject: outgoing.subject.clone(),
+            date: chrono::Utc::now(),
+        };
+
+        let event = DomainEvent::MessageSent {
+            message_id: message_id.clone(),
+            account_id,
+            envelope,
+            sent_at: chrono::Utc::now(),
+        };
+
+        self.append_and_publish(&message_id, AggregateType::Message, event)
+            .await?;
+
+        info!(%message_id, "message sent");
+        Ok(CommandResult::MessageSent { message_id })
+    }
+
+    pub async fn handle_discard_draft(
+        &self,
+        message_id: MessageId,
+    ) -> Result<CommandResult, ApplicationError> {
+        // Verify the message exists.
+        let _message = self.load_message(&message_id).await?;
+
+        let event = DomainEvent::DraftDiscarded {
+            message_id: message_id.clone(),
+        };
+
+        self.append_and_publish(&message_id, AggregateType::Message, event)
+            .await?;
+
+        info!(%message_id, "draft discarded");
+        Ok(CommandResult::DraftDiscarded)
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────
+
+    async fn load_message(&self, id: &MessageId) -> Result<Message, ApplicationError> {
+        let events = self
+            .event_store
+            .load_events(&id.to_string(), 0)
+            .await?;
+
+        let domain_events: Vec<DomainEvent> = events.into_iter().map(|e| e.payload).collect();
+
+        Message::rehydrate(&domain_events)
+            .ok_or_else(|| ApplicationError::NotFound("Message", id.to_string()))
+    }
+
+    async fn append_and_publish(
+        &self,
+        message_id: &MessageId,
+        aggregate_type: AggregateType,
+        event: DomainEvent,
+    ) -> Result<(), ApplicationError> {
+        // We pass expected_sequence=0 here as a simplification; the real
+        // event store impl should track the actual sequence for OCC.
+        self.event_store
+            .append(&message_id.to_string(), aggregate_type, 0, vec![event.clone()])
+            .await?;
+
+        let envelope =
+            EventEnvelope::new(message_id.to_string(), aggregate_type, 0, event);
+        self.event_bus.publish(envelope);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mc_domain::{
+        AggregateType, DomainError, EventEnvelope, FetchRange, Mailbox, MailboxStatus,
+        MessageEnvelopeSummary, ProviderNotification, ProviderUid,
+    };
+    use std::collections::HashMap;
+    use std::pin::Pin;
+    use std::sync::RwLock;
+
+    // ── Mock EventStore ────────────────────────────────────────────────
+
+    struct MockEventStore {
+        events: RwLock<HashMap<String, Vec<EventEnvelope>>>,
+    }
+
+    impl MockEventStore {
+        fn new() -> Self {
+            Self {
+                events: RwLock::new(HashMap::new()),
+            }
+        }
+
+        fn with_message(message: &Message) -> Self {
+            let store = Self::new();
+            // Seed with a MessageReceived event.
+            let event = DomainEvent::MessageReceived {
+                message_id: message.id.clone(),
+                account_id: message.account_id.clone(),
+                mailbox_id: message.mailbox_id.clone(),
+                provider_uid: message.provider_uid.unwrap(),
+                envelope: message.envelope.clone(),
+                flags: message.flags.clone(),
+                size_bytes: message.size_bytes,
+                has_attachments: message.has_attachments,
+                received_at: message.received_at,
+            };
+            let env =
+                EventEnvelope::new(message.id.to_string(), AggregateType::Message, 1, event);
+            store
+                .events
+                .write()
+                .unwrap()
+                .insert(message.id.to_string(), vec![env]);
+            store
+        }
+    }
+
+    impl EventStore for MockEventStore {
+        async fn append(
+            &self,
+            aggregate_id: &str,
+            _aggregate_type: AggregateType,
+            _expected_sequence: u64,
+            events: Vec<DomainEvent>,
+        ) -> Result<u64, DomainError> {
+            let mut store = self.events.write().unwrap();
+            let list = store.entry(aggregate_id.to_string()).or_default();
+            let mut seq = list.len() as u64;
+            for event in events {
+                seq += 1;
+                let env = EventEnvelope::new(
+                    aggregate_id.to_string(),
+                    _aggregate_type,
+                    seq,
+                    event,
+                );
+                list.push(env);
+            }
+            Ok(seq)
+        }
+
+        async fn load_events(
+            &self,
+            aggregate_id: &str,
+            _from_sequence: u64,
+        ) -> Result<Vec<EventEnvelope>, DomainError> {
+            Ok(self
+                .events
+                .read()
+                .unwrap()
+                .get(aggregate_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn load_all_events(
+            &self,
+            _aggregate_type: Option<AggregateType>,
+            _from_global_position: u64,
+        ) -> Result<Vec<EventEnvelope>, DomainError> {
+            Ok(vec![])
+        }
+
+        fn subscribe(
+            &self,
+        ) -> Pin<Box<dyn futures::Stream<Item = EventEnvelope> + Send + '_>> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    // ── Mock EmailProvider ─────────────────────────────────────────────
+
+    struct MockEmailProvider {
+        /// Message to return from fetch_message_detail.
+        detail_response: RwLock<Option<Message>>,
+    }
+
+    impl MockEmailProvider {
+        fn new() -> Self {
+            Self {
+                detail_response: RwLock::new(None),
+            }
+        }
+
+    }
+
+    impl EmailProvider for MockEmailProvider {
+        async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
+            Ok(vec![])
+        }
+        async fn fetch_message_envelopes(
+            &self,
+            _mailbox: &MailboxPath,
+            _range: FetchRange,
+        ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
+            Ok(vec![])
+        }
+        async fn fetch_message_detail(
+            &self,
+            _mailbox: &MailboxPath,
+            _uid: ProviderUid,
+        ) -> Result<Message, DomainError> {
+            self.detail_response
+                .read()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| DomainError::Provider("no detail configured".into()))
+        }
+        async fn fetch_raw_message(
+            &self,
+            _mailbox: &MailboxPath,
+            _uid: ProviderUid,
+        ) -> Result<Vec<u8>, DomainError> {
+            Ok(vec![])
+        }
+        async fn set_flags(
+            &self,
+            _mailbox: &MailboxPath,
+            _uid: ProviderUid,
+            _add: &[Flag],
+            _remove: &[Flag],
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn move_message(
+            &self,
+            _uid: ProviderUid,
+            _from: &MailboxPath,
+            _to: &MailboxPath,
+        ) -> Result<Option<ProviderUid>, DomainError> {
+            Ok(None)
+        }
+        async fn delete_message(
+            &self,
+            _mailbox: &MailboxPath,
+            _uid: ProviderUid,
+            _permanently: bool,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn send_message(&self, _message: &OutgoingMessage) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn mailbox_status(
+            &self,
+            _mailbox: &MailboxPath,
+        ) -> Result<MailboxStatus, DomainError> {
+            Ok(MailboxStatus {
+                uid_validity: 1,
+                uid_next: 1,
+                total_messages: 0,
+                unseen_messages: 0,
+            })
+        }
+        fn watch_mailbox(
+            &self,
+            _mailbox: &MailboxPath,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>>
+        {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    // ── Mock EventBus ──────────────────────────────────────────────────
+
+    struct MockEventBus {
+        published: RwLock<Vec<EventEnvelope>>,
+    }
+
+    impl MockEventBus {
+        fn new() -> Self {
+            Self {
+                published: RwLock::new(Vec::new()),
+            }
+        }
+
+        fn last_event_name(&self) -> Option<String> {
+            self.published
+                .read()
+                .unwrap()
+                .last()
+                .map(|e| e.payload.event_name().to_string())
+        }
+    }
+
+    impl EventPublisher for MockEventBus {
+        fn publish(&self, envelope: EventEnvelope) {
+            self.published.write().unwrap().push(envelope);
+        }
+    }
+
+    // ── Test helpers ───────────────────────────────────────────────────
+
+    use mc_domain::{Address, EmailAddress};
+
+    fn test_envelope() -> Envelope {
+        Envelope {
+            from: vec![Address {
+                name: Some("Sender".into()),
+                email: EmailAddress::new("sender@example.com").unwrap(),
+            }],
+            to: vec![Address {
+                name: None,
+                email: EmailAddress::new("recipient@example.com").unwrap(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: "Test".into(),
+            date: chrono::Utc::now(),
+        }
+    }
+
+    fn make_test_message() -> Message {
+        let (msg, _) = Message::receive(
+            AccountId::new(),
+            MailboxId::new(),
+            ProviderUid::new(42),
+            test_envelope(),
+            vec![],
+            2048,
+            false,
+        );
+        msg
+    }
+
+    // ── Tests ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_set_flags_marks_as_read() {
+        let msg = make_test_message();
+        let msg_id = msg.id.clone();
+
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let ep = Arc::new(MockEmailProvider::new());
+        let bus = Arc::new(MockEventBus::new());
+        let handler = MessageCommandHandler::new(es, ep, bus.clone());
+
+        let result = handler
+            .handle_set_flags(
+                msg_id,
+                MailboxPath::inbox(),
+                vec![Flag::Seen],
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, CommandResult::FlagsSet));
+        assert_eq!(bus.last_event_name().unwrap(), "MessageFlagged");
+    }
+
+    #[tokio::test]
+    async fn handle_move_produces_event() {
+        let msg = make_test_message();
+        let msg_id = msg.id.clone();
+
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let ep = Arc::new(MockEmailProvider::new());
+        let bus = Arc::new(MockEventBus::new());
+        let handler = MessageCommandHandler::new(es, ep, bus.clone());
+
+        let result = handler
+            .handle_move(
+                msg_id,
+                MailboxId::new(),
+                MailboxId::new(),
+                MailboxPath::inbox(),
+                MailboxPath::parse("Archive", '/').unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, CommandResult::MessageMoved));
+        assert_eq!(bus.last_event_name().unwrap(), "MessageMoved");
+    }
+
+    #[tokio::test]
+    async fn handle_delete_produces_event() {
+        let msg = make_test_message();
+        let msg_id = msg.id.clone();
+        let mbx_id = msg.mailbox_id.clone();
+
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let ep = Arc::new(MockEmailProvider::new());
+        let bus = Arc::new(MockEventBus::new());
+        let handler = MessageCommandHandler::new(es, ep, bus.clone());
+
+        let result = handler
+            .handle_delete(msg_id, mbx_id, MailboxPath::inbox(), false)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, CommandResult::MessageDeleted));
+        assert_eq!(bus.last_event_name().unwrap(), "MessageDeleted");
+    }
+
+    #[tokio::test]
+    async fn handle_nonexistent_message_returns_not_found() {
+        let es = Arc::new(MockEventStore::new());
+        let ep = Arc::new(MockEmailProvider::new());
+        let bus = Arc::new(MockEventBus::new());
+        let handler = MessageCommandHandler::new(es, ep, bus);
+
+        let err = handler
+            .handle_set_flags(
+                MessageId::new(),
+                MailboxPath::inbox(),
+                vec![Flag::Seen],
+                vec![],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ApplicationError::NotFound(..)));
+    }
+
+    #[tokio::test]
+    async fn handle_send_produces_sent_event() {
+        let es = Arc::new(MockEventStore::new());
+        let ep = Arc::new(MockEmailProvider::new());
+        let bus = Arc::new(MockEventBus::new());
+        let handler = MessageCommandHandler::new(es, ep, bus.clone());
+
+        let outgoing = OutgoingMessage {
+            from: Address {
+                name: Some("Me".into()),
+                email: EmailAddress::new("me@example.com").unwrap(),
+            },
+            to: vec![Address {
+                name: None,
+                email: EmailAddress::new("you@example.com").unwrap(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Hello".into(),
+            body_text: Some("Hi".into()),
+            body_html: None,
+            in_reply_to: None,
+            references: vec![],
+            attachments: vec![],
+        };
+
+        let result = handler
+            .handle_send(AccountId::new(), outgoing)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, CommandResult::MessageSent { .. }));
+        assert_eq!(bus.last_event_name().unwrap(), "MessageSent");
+    }
+}
