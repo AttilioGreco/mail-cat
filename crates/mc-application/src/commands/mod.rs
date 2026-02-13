@@ -12,7 +12,6 @@ use mc_domain::{
 #[derive(Debug, Clone)]
 pub enum Command {
     // ── Account ────────────────────────────────────────────────────────
-
     /// Configure a new email account.
     AddAccount {
         name: String,
@@ -30,17 +29,12 @@ pub enum Command {
     },
 
     /// Remove an account and all associated data.
-    RemoveAccount {
-        account_id: AccountId,
-    },
+    RemoveAccount { account_id: AccountId },
 
     /// Start a full sync for an account.
-    SyncAccount {
-        account_id: AccountId,
-    },
+    SyncAccount { account_id: AccountId },
 
     // ── Message ────────────────────────────────────────────────────────
-
     /// Fetch the body and attachments for a message.
     FetchMessageBody {
         message_id: MessageId,
@@ -85,9 +79,7 @@ pub enum Command {
     },
 
     /// Discard a draft.
-    DiscardDraft {
-        message_id: MessageId,
-    },
+    DiscardDraft { message_id: MessageId },
 }
 
 /// Result of a successfully dispatched command.

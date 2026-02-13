@@ -93,7 +93,9 @@ impl EventPublisher for InProcessEventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mc_domain::{AccountId, AggregateType, DomainEvent, EmailAddress, EventEnvelope, ProviderType};
+    use mc_domain::{
+        AccountId, AggregateType, DomainEvent, EmailAddress, EventEnvelope, ProviderType,
+    };
 
     fn make_envelope() -> EventEnvelope {
         EventEnvelope::new(

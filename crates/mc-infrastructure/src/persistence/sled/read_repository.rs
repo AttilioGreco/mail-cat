@@ -19,8 +19,8 @@ use tracing::debug;
 use mc_domain::{
     Account, AccountId, AccountReadRepository, AccountStatus, AccountSummary,
     AccountWriteRepository, DomainError, DomainEvent, EventEnvelope, EventStore, Flag, Mailbox,
-    MailboxId, MailboxReadRepository, Message, MessageId, MessageReadRepository,
-    MessageSummary, ProjectionCheckpoint, ReadModelProjector,
+    MailboxId, MailboxReadRepository, Message, MessageId, MessageReadRepository, MessageSummary,
+    ProjectionCheckpoint, ReadModelProjector,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -56,11 +56,7 @@ impl<ES: EventStore> SledRepository<ES> {
 // ── AccountWriteRepository ─────────────────────────────────────────────
 
 impl<ES: EventStore> AccountWriteRepository for SledRepository<ES> {
-    async fn save(
-        &self,
-        account: &Account,
-        events: Vec<DomainEvent>,
-    ) -> Result<(), DomainError> {
+    async fn save(&self, account: &Account, events: Vec<DomainEvent>) -> Result<(), DomainError> {
         // Determine expected sequence: load current from event store.
         let current_events = self
             .event_store
@@ -87,8 +83,8 @@ impl<ES: EventStore> AccountWriteRepository for SledRepository<ES> {
             total_unread: 0,
         };
         let tree = self.tree(ACCOUNTS_TREE)?;
-        let json = serde_json::to_vec(&summary)
-            .map_err(|e| DomainError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_vec(&summary).map_err(|e| DomainError::Serialization(e.to_string()))?;
         tree.insert(account.id.to_string().as_bytes(), json)
             .map_err(|e| DomainError::Repository(e.to_string()))?;
 
@@ -96,10 +92,7 @@ impl<ES: EventStore> AccountWriteRepository for SledRepository<ES> {
     }
 
     async fn load(&self, id: &AccountId) -> Result<Option<Account>, DomainError> {
-        let events = self
-            .event_store
-            .load_events(&id.to_string(), 0)
-            .await?;
+        let events = self.event_store.load_events(&id.to_string(), 0).await?;
 
         if events.is_empty() {
             return Ok(None);
@@ -113,10 +106,7 @@ impl<ES: EventStore> AccountWriteRepository for SledRepository<ES> {
 // ── AccountReadRepository ──────────────────────────────────────────────
 
 impl<ES: EventStore> AccountReadRepository for SledRepository<ES> {
-    async fn get_account(
-        &self,
-        id: &AccountId,
-    ) -> Result<Option<AccountSummary>, DomainError> {
+    async fn get_account(&self, id: &AccountId) -> Result<Option<AccountSummary>, DomainError> {
         let tree = self.tree(ACCOUNTS_TREE)?;
         let val = tree
             .get(id.to_string().as_bytes())
@@ -166,10 +156,7 @@ impl<ES: EventStore> MailboxReadRepository for SledRepository<ES> {
         }
     }
 
-    async fn list_mailboxes(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<Vec<Mailbox>, DomainError> {
+    async fn list_mailboxes(&self, account_id: &AccountId) -> Result<Vec<Mailbox>, DomainError> {
         let index_tree = self.tree(MAILBOXES_BY_ACCOUNT_TREE)?;
         let mailbox_tree = self.tree(MAILBOXES_TREE)?;
         let prefix = format!("{}:", account_id);
@@ -177,19 +164,18 @@ impl<ES: EventStore> MailboxReadRepository for SledRepository<ES> {
         let mut mailboxes = Vec::new();
         for item in index_tree.scan_prefix(prefix.as_bytes()) {
             let (key, _) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
-            let key_str = std::str::from_utf8(&key)
-                .map_err(|e| DomainError::Repository(e.to_string()))?;
+            let key_str =
+                std::str::from_utf8(&key).map_err(|e| DomainError::Repository(e.to_string()))?;
 
             // Key format: "{account_id}:{mailbox_id}"
-            if let Some(mailbox_id) = key_str.strip_prefix(&prefix) {
-                if let Some(val) = mailbox_tree
+            if let Some(mailbox_id) = key_str.strip_prefix(&prefix)
+                && let Some(val) = mailbox_tree
                     .get(mailbox_id.as_bytes())
                     .map_err(|e| DomainError::Repository(e.to_string()))?
-                {
-                    let mailbox: Mailbox = serde_json::from_slice(&val)
-                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                    mailboxes.push(mailbox);
-                }
+            {
+                let mailbox: Mailbox = serde_json::from_slice(&val)
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                mailboxes.push(mailbox);
             }
         }
 
@@ -250,10 +236,7 @@ impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
         })
     }
 
-    async fn get_thread(
-        &self,
-        message_id: &MessageId,
-    ) -> Result<Vec<Message>, DomainError> {
+    async fn get_thread(&self, message_id: &MessageId) -> Result<Vec<Message>, DomainError> {
         // Simple implementation: return just the single message for now.
         // Full threading (by References/In-Reply-To) is a future enhancement.
         let msg = self.get_message(message_id).await?;
@@ -270,7 +253,6 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
     async fn project(&self, envelope: &EventEnvelope) -> Result<(), DomainError> {
         match &envelope.payload {
             // ── Account events ──────────────────────────────────────
-
             DomainEvent::AccountAdded {
                 account_id,
                 name,
@@ -330,7 +312,6 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
             }
 
             // ── Mailbox events ──────────────────────────────────────
-
             DomainEvent::MailboxDiscovered {
                 mailbox_id,
                 account_id,
@@ -429,7 +410,6 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
             }
 
             // ── Message events ──────────────────────────────────────
-
             DomainEvent::MessageReceived {
                 message_id,
                 account_id,
@@ -472,11 +452,7 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 let from_display = envelope
                     .from
                     .first()
-                    .map(|a| {
-                        a.name
-                            .clone()
-                            .unwrap_or_else(|| a.email.to_string())
-                    })
+                    .map(|a| a.name.clone().unwrap_or_else(|| a.email.to_string()))
                     .unwrap_or_default();
                 let summary = MessageSummary {
                     id: message_id.clone(),
@@ -776,10 +752,7 @@ impl<ES: EventStore> SledRepository<ES> {
 // ── ProjectionCheckpoint ───────────────────────────────────────────────
 
 impl<ES: EventStore> ProjectionCheckpoint for SledRepository<ES> {
-    async fn get_checkpoint(
-        &self,
-        projection_name: &str,
-    ) -> Result<u64, DomainError> {
+    async fn get_checkpoint(&self, projection_name: &str) -> Result<u64, DomainError> {
         let tree = self.tree(PROJECTION_CHECKPOINTS_TREE)?;
         let val = tree
             .get(projection_name.as_bytes())
@@ -1140,7 +1113,10 @@ mod tests {
         let page = MessageReadRepository::list_messages(
             &repo,
             &mailbox_id,
-            &Pagination { page: 1, page_size: 10 },
+            &Pagination {
+                page: 1,
+                page_size: 10,
+            },
         )
         .await
         .unwrap();
@@ -1194,7 +1170,10 @@ mod tests {
         let page = MessageReadRepository::list_messages(
             &repo,
             &mailbox_id,
-            &Pagination { page: 1, page_size: 10 },
+            &Pagination {
+                page: 1,
+                page_size: 10,
+            },
         )
         .await
         .unwrap();
@@ -1222,7 +1201,10 @@ mod tests {
         let page = MessageReadRepository::list_messages(
             &repo,
             &mailbox_id,
-            &Pagination { page: 1, page_size: 10 },
+            &Pagination {
+                page: 1,
+                page_size: 10,
+            },
         )
         .await
         .unwrap();
@@ -1283,7 +1265,10 @@ mod tests {
         let inbox_msgs = MessageReadRepository::list_messages(
             &repo,
             &inbox_id,
-            &Pagination { page: 1, page_size: 10 },
+            &Pagination {
+                page: 1,
+                page_size: 10,
+            },
         )
         .await
         .unwrap();
@@ -1292,7 +1277,10 @@ mod tests {
         let archive_msgs = MessageReadRepository::list_messages(
             &repo,
             &archive_id,
-            &Pagination { page: 1, page_size: 10 },
+            &Pagination {
+                page: 1,
+                page_size: 10,
+            },
         )
         .await
         .unwrap();

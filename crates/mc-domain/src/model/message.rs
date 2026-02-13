@@ -169,7 +169,7 @@ impl Message {
         DomainEvent::MessageMoved {
             message_id: self.id.clone(),
             from_mailbox_id: from,
-            to_mailbox_id: to_mailbox_id,
+            to_mailbox_id,
         }
     }
 
@@ -225,9 +225,7 @@ impl Message {
                     }
                 }
             }
-            DomainEvent::MessageMoved {
-                to_mailbox_id, ..
-            } => {
+            DomainEvent::MessageMoved { to_mailbox_id, .. } => {
                 self.mailbox_id = to_mailbox_id.clone();
             }
             DomainEvent::MessageDeleted { .. }

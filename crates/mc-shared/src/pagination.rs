@@ -56,6 +56,6 @@ impl<T> PagedResult<T> {
         if self.page_size == 0 {
             return 0;
         }
-        ((self.total_count + self.page_size as u64 - 1) / self.page_size as u64) as u32
+        self.total_count.div_ceil(self.page_size as u64) as u32
     }
 }

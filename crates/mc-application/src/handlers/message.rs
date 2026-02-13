@@ -43,9 +43,9 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
     ) -> Result<CommandResult, ApplicationError> {
         let mut message = self.load_message(&message_id).await?;
 
-        let provider_uid = message
-            .provider_uid
-            .ok_or_else(|| ApplicationError::PreconditionFailed("message has no provider UID".into()))?;
+        let provider_uid = message.provider_uid.ok_or_else(|| {
+            ApplicationError::PreconditionFailed("message has no provider UID".into())
+        })?;
 
         // Fetch full message from the remote provider.
         let detail = self
@@ -75,9 +75,9 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
     ) -> Result<CommandResult, ApplicationError> {
         let mut message = self.load_message(&message_id).await?;
 
-        let provider_uid = message
-            .provider_uid
-            .ok_or_else(|| ApplicationError::PreconditionFailed("message has no provider UID".into()))?;
+        let provider_uid = message.provider_uid.ok_or_else(|| {
+            ApplicationError::PreconditionFailed("message has no provider UID".into())
+        })?;
 
         // Update flags on the remote provider first.
         self.email_provider
@@ -103,9 +103,9 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
     ) -> Result<CommandResult, ApplicationError> {
         let mut message = self.load_message(&message_id).await?;
 
-        let provider_uid = message
-            .provider_uid
-            .ok_or_else(|| ApplicationError::PreconditionFailed("message has no provider UID".into()))?;
+        let provider_uid = message.provider_uid.ok_or_else(|| {
+            ApplicationError::PreconditionFailed("message has no provider UID".into())
+        })?;
 
         // Move on the remote provider.
         let _new_uid = self
@@ -131,9 +131,9 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
     ) -> Result<CommandResult, ApplicationError> {
         let message = self.load_message(&message_id).await?;
 
-        let provider_uid = message
-            .provider_uid
-            .ok_or_else(|| ApplicationError::PreconditionFailed("message has no provider UID".into()))?;
+        let provider_uid = message.provider_uid.ok_or_else(|| {
+            ApplicationError::PreconditionFailed("message has no provider UID".into())
+        })?;
 
         // Delete on the remote provider.
         self.email_provider
@@ -220,10 +220,7 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
     // ── Helpers ────────────────────────────────────────────────────────
 
     async fn load_message(&self, id: &MessageId) -> Result<Message, ApplicationError> {
-        let events = self
-            .event_store
-            .load_events(&id.to_string(), 0)
-            .await?;
+        let events = self.event_store.load_events(&id.to_string(), 0).await?;
 
         let domain_events: Vec<DomainEvent> = events.into_iter().map(|e| e.payload).collect();
 
@@ -240,11 +237,15 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
         // We pass expected_sequence=0 here as a simplification; the real
         // event store impl should track the actual sequence for OCC.
         self.event_store
-            .append(&message_id.to_string(), aggregate_type, 0, vec![event.clone()])
+            .append(
+                &message_id.to_string(),
+                aggregate_type,
+                0,
+                vec![event.clone()],
+            )
             .await?;
 
-        let envelope =
-            EventEnvelope::new(message_id.to_string(), aggregate_type, 0, event);
+        let envelope = EventEnvelope::new(message_id.to_string(), aggregate_type, 0, event);
         self.event_bus.publish(envelope);
 
         Ok(())
@@ -289,8 +290,7 @@ mod tests {
                 has_attachments: message.has_attachments,
                 received_at: message.received_at,
             };
-            let env =
-                EventEnvelope::new(message.id.to_string(), AggregateType::Message, 1, event);
+            let env = EventEnvelope::new(message.id.to_string(), AggregateType::Message, 1, event);
             store
                 .events
                 .write()
@@ -313,12 +313,7 @@ mod tests {
             let mut seq = list.len() as u64;
             for event in events {
                 seq += 1;
-                let env = EventEnvelope::new(
-                    aggregate_id.to_string(),
-                    _aggregate_type,
-                    seq,
-                    event,
-                );
+                let env = EventEnvelope::new(aggregate_id.to_string(), _aggregate_type, seq, event);
                 list.push(env);
             }
             Ok(seq)
@@ -346,9 +341,7 @@ mod tests {
             Ok(vec![])
         }
 
-        fn subscribe(
-            &self,
-        ) -> Pin<Box<dyn futures::Stream<Item = EventEnvelope> + Send + '_>> {
+        fn subscribe(&self) -> Pin<Box<dyn futures::Stream<Item = EventEnvelope> + Send + '_>> {
             Box::pin(futures::stream::empty())
         }
     }
@@ -366,7 +359,6 @@ mod tests {
                 detail_response: RwLock::new(None),
             }
         }
-
     }
 
     impl EmailProvider for MockEmailProvider {
@@ -440,8 +432,9 @@ mod tests {
         fn watch_mailbox(
             &self,
             _mailbox: &MailboxPath,
-        ) -> Pin<Box<dyn futures::Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>>
-        {
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>,
+        > {
             Box::pin(futures::stream::empty())
         }
     }
@@ -522,12 +515,7 @@ mod tests {
         let handler = MessageCommandHandler::new(es, ep, bus.clone());
 
         let result = handler
-            .handle_set_flags(
-                msg_id,
-                MailboxPath::inbox(),
-                vec![Flag::Seen],
-                vec![],
-            )
+            .handle_set_flags(msg_id, MailboxPath::inbox(), vec![Flag::Seen], vec![])
             .await
             .unwrap();
 

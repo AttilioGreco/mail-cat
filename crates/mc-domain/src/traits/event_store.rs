@@ -61,7 +61,5 @@ pub trait EventStore: Send + Sync {
     ///
     /// Returns a boxed stream delivering events in `global_position` order.
     /// At-least-once delivery: consumers must be idempotent.
-    fn subscribe(
-        &self,
-    ) -> Pin<Box<dyn Stream<Item = EventEnvelope> + Send + '_>>;
+    fn subscribe(&self) -> Pin<Box<dyn Stream<Item = EventEnvelope> + Send + '_>>;
 }

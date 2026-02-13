@@ -76,10 +76,7 @@ pub trait EmailProvider: Send + Sync {
     async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError>;
 
     /// Get UIDVALIDITY and UIDNEXT for a mailbox (for sync state detection).
-    async fn mailbox_status(
-        &self,
-        mailbox: &MailboxPath,
-    ) -> Result<MailboxStatus, DomainError>;
+    async fn mailbox_status(&self, mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError>;
 
     /// Subscribe to real-time notifications (IMAP IDLE, push, etc.).
     ///

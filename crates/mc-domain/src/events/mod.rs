@@ -73,7 +73,6 @@ impl std::fmt::Display for AggregateType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DomainEvent {
     // ── Account Events ──────────────────────────────────────────────
-
     /// A new email account was configured.
     AccountAdded {
         account_id: AccountId,
@@ -90,14 +89,10 @@ pub enum DomainEvent {
     },
 
     /// An account was removed.
-    AccountRemoved {
-        account_id: AccountId,
-    },
+    AccountRemoved { account_id: AccountId },
 
     /// A sync operation started for an account.
-    AccountSyncStarted {
-        account_id: AccountId,
-    },
+    AccountSyncStarted { account_id: AccountId },
 
     /// A sync operation completed successfully.
     AccountSyncCompleted {
@@ -113,7 +108,6 @@ pub enum DomainEvent {
     },
 
     // ── Mailbox Events ──────────────────────────────────────────────
-
     /// A new mailbox was discovered during sync.
     MailboxDiscovered {
         mailbox_id: MailboxId,
@@ -143,7 +137,6 @@ pub enum DomainEvent {
     },
 
     // ── Message Events ──────────────────────────────────────────────
-
     /// A new message was received (envelope fetched from provider).
     MessageReceived {
         message_id: MessageId,
@@ -204,9 +197,7 @@ pub enum DomainEvent {
     },
 
     /// A draft was discarded.
-    DraftDiscarded {
-        message_id: MessageId,
-    },
+    DraftDiscarded { message_id: MessageId },
 }
 
 impl DomainEvent {
@@ -270,8 +261,7 @@ mod tests {
         let event = DomainEvent::AccountRemoved {
             account_id: AccountId::new(),
         };
-        let envelope =
-            EventEnvelope::new("acc-123".into(), AggregateType::Account, 1, event);
+        let envelope = EventEnvelope::new("acc-123".into(), AggregateType::Account, 1, event);
 
         assert_eq!(envelope.aggregate_id, "acc-123");
         assert_eq!(envelope.aggregate_type, AggregateType::Account);
@@ -333,8 +323,7 @@ mod tests {
             total_messages: 42,
             unread_messages: 5,
         };
-        let envelope =
-            EventEnvelope::new("mbx-1".into(), AggregateType::Mailbox, 3, event);
+        let envelope = EventEnvelope::new("mbx-1".into(), AggregateType::Mailbox, 3, event);
 
         let json = serde_json::to_string(&envelope).unwrap();
         let deserialized: EventEnvelope = serde_json::from_str(&json).unwrap();

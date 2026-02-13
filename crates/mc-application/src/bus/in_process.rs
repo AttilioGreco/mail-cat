@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountWriteRepository, EmailProvider, EventStore,
-    AccountReadRepository, MailboxReadRepository, MessageReadRepository, SearchIndex,
+    AccountReadRepository, AccountWriteRepository, EmailProvider, EventStore,
+    MailboxReadRepository, MessageReadRepository, SearchIndex,
 };
 
 use crate::commands::{Command, CommandResult};
@@ -17,9 +17,9 @@ use crate::handlers::message::MessageCommandHandler;
 use crate::handlers::query::QueryHandler;
 use crate::queries::{Query, QueryResult};
 
-use super::event_bus::EventPublisher;
 use super::CommandBus;
 use super::QueryBus;
+use super::event_bus::EventPublisher;
 
 /// In-process command bus that dispatches to Account and Message handlers.
 pub struct InProcessCommandBus<AW, ES, EP, B>
@@ -47,15 +47,8 @@ where
         event_bus: Arc<B>,
     ) -> Self {
         Self {
-            account_handler: AccountCommandHandler::new(
-                account_write_repo,
-                event_bus.clone(),
-            ),
-            message_handler: MessageCommandHandler::new(
-                event_store,
-                email_provider,
-                event_bus,
-            ),
+            account_handler: AccountCommandHandler::new(account_write_repo, event_bus.clone()),
+            message_handler: MessageCommandHandler::new(event_store, email_provider, event_bus),
         }
     }
 }
@@ -156,9 +149,7 @@ where
                 })
             }
             Command::DiscardDraft { message_id } => {
-                self.message_handler
-                    .handle_discard_draft(message_id)
-                    .await
+                self.message_handler.handle_discard_draft(message_id).await
             }
         }
     }
@@ -189,7 +180,12 @@ where
         search_index: Arc<SI>,
     ) -> Self {
         Self {
-            query_handler: QueryHandler::new(account_repo, mailbox_repo, message_repo, search_index),
+            query_handler: QueryHandler::new(
+                account_repo,
+                mailbox_repo,
+                message_repo,
+                search_index,
+            ),
         }
     }
 }

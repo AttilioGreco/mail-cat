@@ -7,7 +7,6 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum DomainError {
     // ── Validation Errors ───────────────────────────────────────────
-
     #[error("Invalid email address: {0}")]
     InvalidEmailAddress(String),
 
@@ -18,7 +17,6 @@ pub enum DomainError {
     Validation(String),
 
     // ── Not Found Errors ────────────────────────────────────────────
-
     #[error("Account not found: {0}")]
     AccountNotFound(String),
 
@@ -29,7 +27,6 @@ pub enum DomainError {
     MessageNotFound(String),
 
     // ── Provider Errors ─────────────────────────────────────────────
-
     #[error("Provider error: {0}")]
     Provider(String),
 
@@ -46,7 +43,6 @@ pub enum DomainError {
     NotSupported(String),
 
     // ── Event Store Errors ──────────────────────────────────────────
-
     #[error("Concurrency conflict: expected sequence {expected}, found {actual}")]
     ConcurrencyConflict { expected: u64, actual: u64 },
 
@@ -54,12 +50,10 @@ pub enum DomainError {
     EventStore(String),
 
     // ── Repository Errors ───────────────────────────────────────────
-
     #[error("Repository error: {0}")]
     Repository(String),
 
     // ── Search Errors ───────────────────────────────────────────────
-
     #[error("Search index error: {0}")]
     SearchIndex(String),
 
@@ -67,7 +61,6 @@ pub enum DomainError {
     SearchQuery(String),
 
     // ── Serialization ───────────────────────────────────────────────
-
     #[error("Serialization error: {0}")]
     Serialization(String),
 }

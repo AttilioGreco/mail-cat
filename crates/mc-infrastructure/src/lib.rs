@@ -7,4 +7,5 @@ pub mod persistence;
 pub mod search;
 
 // Re-exports for ergonomics
+pub use email::ImapEmailProvider;
 pub use persistence::{SledEventStore, SledRepository};

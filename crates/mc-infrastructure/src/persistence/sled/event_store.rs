@@ -24,9 +24,7 @@ use sled::Db;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
-use mc_domain::{
-    AggregateType, DomainError, DomainEvent, EventEnvelope, EventStore,
-};
+use mc_domain::{AggregateType, DomainError, DomainEvent, EventEnvelope, EventStore};
 
 const EVENTS_BY_AGGREGATE_TREE: &str = "events_by_aggregate";
 const EVENTS_GLOBAL_TREE: &str = "events_global";
@@ -228,8 +226,8 @@ impl EventStore for SledEventStore {
             let (key, value) = item.map_err(|e| DomainError::EventStore(e.to_string()))?;
 
             // Stop when we leave this aggregate's prefix.
-            let key_str = std::str::from_utf8(&key)
-                .map_err(|e| DomainError::EventStore(e.to_string()))?;
+            let key_str =
+                std::str::from_utf8(&key).map_err(|e| DomainError::EventStore(e.to_string()))?;
             if !key_str.starts_with(&prefix) {
                 break;
             }
@@ -257,10 +255,10 @@ impl EventStore for SledEventStore {
             let envelope: EventEnvelope = serde_json::from_slice(&value)
                 .map_err(|e| DomainError::Serialization(e.to_string()))?;
 
-            if let Some(ref filter_type) = aggregate_type {
-                if &envelope.aggregate_type != filter_type {
-                    continue;
-                }
+            if let Some(ref filter_type) = aggregate_type
+                && &envelope.aggregate_type != filter_type
+            {
+                continue;
             }
 
             envelopes.push(envelope);

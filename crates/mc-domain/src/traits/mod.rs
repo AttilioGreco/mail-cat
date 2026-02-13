@@ -2,7 +2,6 @@
 ///
 /// These traits are implemented by adapters in `mc-infrastructure`.
 /// The domain and application layers depend only on these abstractions.
-
 pub mod email_provider;
 pub mod event_store;
 pub mod read_model_projector;

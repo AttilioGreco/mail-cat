@@ -206,11 +206,8 @@ mod tests {
 
     #[test]
     fn discover_mailbox_produces_event() {
-        let (mailbox, event) = Mailbox::discover(
-            AccountId::new(),
-            MailboxPath::inbox(),
-            MailboxType::Inbox,
-        );
+        let (mailbox, event) =
+            Mailbox::discover(AccountId::new(), MailboxPath::inbox(), MailboxType::Inbox);
 
         assert_eq!(mailbox.display_name, "INBOX");
         assert_eq!(mailbox.mailbox_type, MailboxType::Inbox);
@@ -220,11 +217,8 @@ mod tests {
 
     #[test]
     fn update_counts() {
-        let (mut mailbox, _) = Mailbox::discover(
-            AccountId::new(),
-            MailboxPath::inbox(),
-            MailboxType::Inbox,
-        );
+        let (mut mailbox, _) =
+            Mailbox::discover(AccountId::new(), MailboxPath::inbox(), MailboxType::Inbox);
 
         let event = mailbox.update_counts(150, 12);
 

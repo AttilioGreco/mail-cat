@@ -64,18 +64,21 @@ where
             }
             Query::GetMessage { message_id } => {
                 let message = self.message_repo.get_message(&message_id).await?;
-                Ok(QueryResult::Message(message))
+                Ok(QueryResult::Message(Box::new(message)))
             }
             Query::ListMessages {
                 mailbox_id,
                 pagination,
             } => {
-                let messages = self.message_repo.list_messages(&mailbox_id, &pagination).await?;
+                let messages = self
+                    .message_repo
+                    .list_messages(&mailbox_id, &pagination)
+                    .await?;
                 Ok(QueryResult::Messages(messages))
             }
             Query::GetThread { message_id } => {
                 let thread = self.message_repo.get_thread(&message_id).await?;
-                Ok(QueryResult::Thread(thread))
+                Ok(QueryResult::Thread(Box::new(thread)))
             }
             Query::SearchMessages {
                 query,
@@ -102,7 +105,7 @@ where
 mod tests {
     use super::*;
     use mc_domain::{
-        AccountId, AccountSummary, AccountStatus, DomainError, EmailAddress, Mailbox, MailboxId,
+        AccountId, AccountStatus, AccountSummary, DomainError, EmailAddress, Mailbox, MailboxId,
         Message, MessageId, MessageSummary, ProviderType, SearchResults,
     };
     use mc_shared::pagination::{PagedResult, Pagination};
@@ -112,10 +115,7 @@ mod tests {
     struct MockAccountReadRepo;
 
     impl AccountReadRepository for MockAccountReadRepo {
-        async fn get_account(
-            &self,
-            id: &AccountId,
-        ) -> Result<Option<AccountSummary>, DomainError> {
+        async fn get_account(&self, id: &AccountId) -> Result<Option<AccountSummary>, DomainError> {
             Ok(Some(AccountSummary {
                 id: id.clone(),
                 name: "Test Account".into(),
@@ -215,8 +215,8 @@ mod tests {
 
     // ── Tests ──────────────────────────────────────────────────────────
 
-    fn make_handler(
-    ) -> QueryHandler<MockAccountReadRepo, MockMailboxReadRepo, MockMessageReadRepo, MockSearchIndex>
+    fn make_handler()
+    -> QueryHandler<MockAccountReadRepo, MockMailboxReadRepo, MockMessageReadRepo, MockSearchIndex>
     {
         QueryHandler::new(
             Arc::new(MockAccountReadRepo),

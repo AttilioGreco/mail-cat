@@ -14,7 +14,6 @@ use crate::error::ApplicationError;
 #[derive(Debug, Clone)]
 pub enum Query {
     // ── Account ────────────────────────────────────────────────────────
-
     /// Get a single account summary.
     GetAccount { account_id: AccountId },
 
@@ -22,7 +21,6 @@ pub enum Query {
     ListAccounts,
 
     // ── Mailbox ────────────────────────────────────────────────────────
-
     /// Get a single mailbox.
     GetMailbox { mailbox_id: MailboxId },
 
@@ -30,7 +28,6 @@ pub enum Query {
     ListMailboxes { account_id: AccountId },
 
     // ── Message ────────────────────────────────────────────────────────
-
     /// Get a single message with full body.
     GetMessage { message_id: MessageId },
 
@@ -44,7 +41,6 @@ pub enum Query {
     GetThread { message_id: MessageId },
 
     // ── Search ─────────────────────────────────────────────────────────
-
     /// Full-text search across messages.
     SearchMessages {
         query: String,
@@ -66,9 +62,9 @@ pub enum QueryResult {
     Accounts(Vec<AccountSummary>),
     Mailbox(Option<Mailbox>),
     Mailboxes(Vec<Mailbox>),
-    Message(Option<Message>),
+    Message(Box<Option<Message>>),
     Messages(PagedResult<MessageSummary>),
-    Thread(Vec<Message>),
+    Thread(Box<Vec<Message>>),
     SearchResults(SearchResults),
 }
 
@@ -116,7 +112,7 @@ impl QueryResult {
 
     pub fn into_message(self) -> Result<Option<Message>, ApplicationError> {
         match self {
-            Self::Message(v) => Ok(v),
+            Self::Message(v) => Ok(*v),
             _ => Err(ApplicationError::Internal(
                 "unexpected query result variant".into(),
             )),
@@ -134,7 +130,7 @@ impl QueryResult {
 
     pub fn into_thread(self) -> Result<Vec<Message>, ApplicationError> {
         match self {
-            Self::Thread(v) => Ok(v),
+            Self::Thread(v) => Ok(*v),
             _ => Err(ApplicationError::Internal(
                 "unexpected query result variant".into(),
             )),

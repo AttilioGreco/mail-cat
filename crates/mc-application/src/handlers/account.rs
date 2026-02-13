@@ -37,7 +37,8 @@ impl<W: AccountWriteRepository, B: EventPublisher> AccountCommandHandler<W, B> {
         connection_config: ConnectionConfig,
         identity: Identity,
     ) -> Result<CommandResult, ApplicationError> {
-        let (account, event) = Account::create(name, email, provider_type, connection_config, identity);
+        let (account, event) =
+            Account::create(name, email, provider_type, connection_config, identity);
         let account_id = account.id.clone();
 
         self.write_repo.save(&account, vec![event.clone()]).await?;
@@ -104,8 +105,8 @@ impl<W: AccountWriteRepository, B: EventPublisher> AccountCommandHandler<W, B> {
 mod tests {
     use super::*;
     use mc_domain::{AccountStatus, AuthConfig, DomainError};
-    use std::sync::RwLock;
     use std::collections::HashMap;
+    use std::sync::RwLock;
 
     // ── Mock implementations ───────────────────────────────────────────
 

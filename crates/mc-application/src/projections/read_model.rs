@@ -86,10 +86,7 @@ where
     ///
     /// Resets the checkpoint to 0 before replaying. Returns the number of
     /// events processed.
-    pub async fn rebuild<ES: EventStore>(
-        &self,
-        store: &ES,
-    ) -> Result<u64, ApplicationError> {
+    pub async fn rebuild<ES: EventStore>(&self, store: &ES) -> Result<u64, ApplicationError> {
         info!("starting read-model rebuild from event store");
 
         // Reset checkpoint so we replay everything.
@@ -118,7 +115,7 @@ where
                 .map_err(ApplicationError::Domain)?;
 
             count += 1;
-            if count % 1000 == 0 {
+            if count.is_multiple_of(1000) {
                 info!(progress = count, total, "rebuild progress");
             }
         }
@@ -131,10 +128,7 @@ where
     ///
     /// Loads events from the store starting after the last checkpoint and
     /// processes them sequentially. Returns the number of events processed.
-    pub async fn catch_up<ES: EventStore>(
-        &self,
-        store: &ES,
-    ) -> Result<u64, ApplicationError> {
+    pub async fn catch_up<ES: EventStore>(&self, store: &ES) -> Result<u64, ApplicationError> {
         let last_pos = self
             .checkpoint
             .get_checkpoint(PROJECTION_NAME)
@@ -306,8 +300,12 @@ mod tests {
     // ── Helpers ──────────────────────────────────────────────────────
 
     fn make_envelope(global_position: u64, event: DomainEvent) -> EventEnvelope {
-        let mut env =
-            EventEnvelope::new("acc-1".into(), AggregateType::Account, global_position, event);
+        let mut env = EventEnvelope::new(
+            "acc-1".into(),
+            AggregateType::Account,
+            global_position,
+            event,
+        );
         env.global_position = global_position;
         env
     }

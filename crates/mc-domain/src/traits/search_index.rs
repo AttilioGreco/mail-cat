@@ -38,10 +38,7 @@ pub trait SearchIndex: Send + Sync {
     ///
     /// The caller provides an iterator of messages. Returns the number of
     /// documents indexed.
-    async fn rebuild(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<u64, DomainError>;
+    async fn rebuild(&self, messages: Vec<Message>) -> Result<u64, DomainError>;
 }
 
 /// Search results container.
