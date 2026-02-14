@@ -1,0 +1,212 @@
+syntax = "proto3";
+
+package mail_cat.v1;
+
+import "mail_cat/v1/common.proto";
+
+// Message service for email operations.
+service MessageService {
+  // List messages in a mailbox.
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+
+  // Get full message details.
+  rpc GetMessage(GetMessageRequest) returns (GetMessageResponse);
+
+  // Get email thread (conversation).
+  rpc GetThread(GetThreadRequest) returns (GetThreadResponse);
+
+  // Set message flags.
+  rpc SetFlags(SetFlagsRequest) returns (SetFlagsResponse);
+
+  // Move message to another mailbox.
+  rpc MoveMessage(MoveMessageRequest) returns (MoveMessageResponse);
+
+  // Delete message.
+  rpc DeleteMessage(DeleteMessageRequest) returns (DeleteMessageResponse);
+
+  // Send a new message.
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+  // Save draft.
+  rpc SaveDraft(SaveDraftRequest) returns (SaveDraftResponse);
+
+  // Watch mailbox for real-time updates (server-streaming).
+  rpc WatchMailbox(WatchMailboxRequest) returns (stream MailboxEvent);
+}
+
+// Message envelope (header summary).
+message MessageEnvelope {
+  repeated EmailAddress from = 1;
+  repeated EmailAddress to = 2;
+  repeated EmailAddress cc = 3;
+  repeated EmailAddress bcc = 4;
+  repeated EmailAddress reply_to = 5;
+  string subject = 6;
+  Timestamp date = 7;
+}
+
+// Attachment info.
+message AttachmentInfo {
+  string id = 1;
+  string filename = 2;
+  string mime_type = 3;
+  uint64 size_bytes = 4;
+  bool is_inline = 5;
+  optional string content_id = 6;
+}
+
+// Message summary (list view).
+message MessageSummary {
+  string id = 1;
+  string account_id = 2;
+  string mailbox_id = 3;
+  MessageEnvelope envelope = 4;
+  repeated Flag flags = 5;
+  uint64 size_bytes = 6;
+  bool has_attachments = 7;
+  Timestamp received_at = 8;
+}
+
+// Message detail (full view with body).
+message MessageDetail {
+  string id = 1;
+  string account_id = 2;
+  string mailbox_id = 3;
+  optional uint32 provider_uid = 4;
+  optional string message_rfc_id = 5;
+  optional string in_reply_to = 6;
+  repeated string references = 7;
+  MessageEnvelope envelope = 8;
+  repeated Flag flags = 9;
+  uint64 size_bytes = 10;
+  repeated AttachmentInfo attachments = 11;
+  optional string body_text = 12;
+  optional string body_html = 13;
+  optional string raw_headers = 14;
+  Timestamp received_at = 15;
+  Timestamp internal_date = 16;
+}
+
+// === Requests/Responses ===
+
+message ListMessagesRequest {
+  string mailbox_id = 1;
+  Pagination pagination = 2;
+}
+
+message ListMessagesResponse {
+  repeated MessageSummary messages = 1;
+  PageInfo page_info = 2;
+}
+
+message GetMessageRequest {
+  string message_id = 1;
+}
+
+message GetMessageResponse {
+  MessageDetail message = 1;
+}
+
+message GetThreadRequest {
+  string message_id = 1;  // Any message in the thread
+}
+
+message GetThreadResponse {
+  repeated MessageDetail messages = 1;
+}
+
+message SetFlagsRequest {
+  string message_id = 1;
+  repeated Flag flags_to_add = 2;
+  repeated Flag flags_to_remove = 3;
+}
+
+message SetFlagsResponse {
+  MessageSummary message = 1;
+}
+
+message MoveMessageRequest {
+  string message_id = 1;
+  string to_mailbox_id = 2;
+}
+
+message MoveMessageResponse {
+  MessageSummary message = 1;
+}
+
+message DeleteMessageRequest {
+  string message_id = 1;
+  bool permanently = 2;  // If true, expunge; if false, mark as deleted
+}
+
+message DeleteMessageResponse {
+  bool success = 1;
+}
+
+message SendMessageRequest {
+  string account_id = 1;
+  EmailAddress from = 2;
+  repeated EmailAddress to = 3;
+  repeated EmailAddress cc = 4;
+  repeated EmailAddress bcc = 5;
+  string subject = 6;
+  optional string body_text = 7;
+  optional string body_html = 8;
+  optional string in_reply_to = 9;
+  repeated string references = 10;
+  // Note: attachments would be handled separately or via streaming
+}
+
+message SendMessageResponse {
+  string message_id = 1;  // ID of sent message in Sent folder
+}
+
+message SaveDraftRequest {
+  string account_id = 1;
+  optional string draft_id = 2;  // If updating existing draft
+  EmailAddress from = 3;
+  repeated EmailAddress to = 4;
+  repeated EmailAddress cc = 5;
+  repeated EmailAddress bcc = 6;
+  string subject = 7;
+  optional string body_text = 8;
+  optional string body_html = 9;
+}
+
+message SaveDraftResponse {
+  string draft_id = 1;
+}
+
+message WatchMailboxRequest {
+  string mailbox_id = 1;
+}
+
+// Streaming event for mailbox changes.
+message MailboxEvent {
+  string mailbox_id = 1;
+  oneof event_type {
+    NewMessageEvent new_message = 2;
+    FlagsChangedEvent flags_changed = 3;
+    MessageExpungedEvent message_expunged = 4;
+    CountsChangedEvent counts_changed = 5;
+  }
+}
+
+message NewMessageEvent {
+  string message_id = 1;
+  uint32 provider_uid = 2;
+}
+
+message FlagsChangedEvent {
+  string message_id = 1;
+  repeated Flag flags = 2;
+}
+
+message MessageExpungedEvent {
+  string message_id = 1;
+}
+
+message CountsChangedEvent {
+  uint32 total = 1;
+  uint32 unseen = 2;
+}

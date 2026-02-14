@@ -1,5 +1,6 @@
 use std::pin::Pin;
 
+use async_trait::async_trait;
 use futures::Stream;
 
 use crate::error::DomainError;
@@ -24,6 +25,7 @@ use crate::events::{AggregateType, DomainEvent, EventEnvelope};
 /// - **`subscribe`**: Delivers events in **global_position order**, with **at-least-once**
 ///   semantics. Consumers (projections) must be idempotent and persist their last
 ///   processed `global_position` as a checkpoint.
+#[async_trait]
 pub trait EventStore: Send + Sync {
     /// Append events for a given aggregate.
     ///

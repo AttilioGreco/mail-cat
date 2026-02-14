@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package mail_cat.v1;
+
+// Pagination parameters for list requests.
+message Pagination {
+  uint32 page = 1;
+  uint32 page_size = 2;
+}
+
+// Pagination metadata in responses.
+message PageInfo {
+  uint64 total_count = 1;
+  uint32 page = 2;
+  uint32 page_size = 3;
+  bool has_next_page = 4;
+  uint32 total_pages = 5;
+}
+
+// Timestamp representation (compatible with google.protobuf.Timestamp).
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
+
+// Email address with optional display name.
+message EmailAddress {
+  string email = 1;
+  optional string name = 2;
+}
+
+// Email flags.
+enum Flag {
+  FLAG_UNSPECIFIED = 0;
+  FLAG_SEEN = 1;
+  FLAG_ANSWERED = 2;
+  FLAG_FLAGGED = 3;
+  FLAG_DELETED = 4;
+  FLAG_DRAFT = 5;
+  FLAG_RECENT = 6;
+}

@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package mail_cat.v1;
+
+import "mail_cat/v1/common.proto";
+
+// Mailbox service for managing email folders.
+service MailboxService {
+  // List mailboxes for an account.
+  rpc ListMailboxes(ListMailboxesRequest) returns (ListMailboxesResponse);
+
+  // Get mailbox details.
+  rpc GetMailbox(GetMailboxRequest) returns (GetMailboxResponse);
+
+  // Create a new mailbox.
+  rpc CreateMailbox(CreateMailboxRequest) returns (CreateMailboxResponse);
+
+  // Rename a mailbox.
+  rpc RenameMailbox(RenameMailboxRequest) returns (RenameMailboxResponse);
+
+  // Delete a mailbox.
+  rpc DeleteMailbox(DeleteMailboxRequest) returns (DeleteMailboxResponse);
+}
+
+// Mailbox type classification.
+enum MailboxType {
+  MAILBOX_TYPE_UNSPECIFIED = 0;
+  MAILBOX_TYPE_INBOX = 1;
+  MAILBOX_TYPE_SENT = 2;
+  MAILBOX_TYPE_DRAFTS = 3;
+  MAILBOX_TYPE_TRASH = 4;
+  MAILBOX_TYPE_SPAM = 5;
+  MAILBOX_TYPE_ARCHIVE = 6;
+  MAILBOX_TYPE_CUSTOM = 7;
+}
+
+// Mailbox summary.
+message MailboxSummary {
+  string id = 1;
+  string account_id = 2;
+  string path = 3;          // e.g., "INBOX", "Sent", "Work/Projects"
+  string display_name = 4;
+  MailboxType mailbox_type = 5;
+  uint32 total_messages = 6;
+  uint32 unread_messages = 7;
+  repeated Flag flags = 8;
+}
+
+// === Requests/Responses ===
+
+message ListMailboxesRequest {
+  string account_id = 1;
+}
+
+message ListMailboxesResponse {
+  repeated MailboxSummary mailboxes = 1;
+}
+
+message GetMailboxRequest {
+  string mailbox_id = 1;
+}
+
+message GetMailboxResponse {
+  MailboxSummary mailbox = 1;
+}
+
+message CreateMailboxRequest {
+  string account_id = 1;
+  string path = 2;
+}
+
+message CreateMailboxResponse {
+  MailboxSummary mailbox = 1;
+}
+
+message RenameMailboxRequest {
+  string mailbox_id = 1;
+  string new_path = 2;
+}
+
+message RenameMailboxResponse {
+  MailboxSummary mailbox = 1;
+}
+
+message DeleteMailboxRequest {
+  string mailbox_id = 1;
+}
+
+message DeleteMailboxResponse {
+  bool success = 1;
+}

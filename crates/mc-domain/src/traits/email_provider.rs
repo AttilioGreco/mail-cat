@@ -1,5 +1,6 @@
 use std::pin::Pin;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -16,11 +17,12 @@ use crate::value_objects::uid::ProviderUid;
 /// Implementors live in `mc-infrastructure`; the domain only knows this trait.
 ///
 /// # Design notes
-/// - Uses `async fn` (Rust 2024 native, no `async-trait` crate needed).
+/// - Uses `async-trait` for Send-safe futures required by tonic/gRPC.
 /// - `watch_mailbox` returns a `BoxStream` instead of `impl Stream` for
 ///   compatibility with trait-object usage and easier mocking.
 /// - Intended to be used via **generics** (`<P: EmailProvider>`) in the
 ///   application layer. The server wiring knows the concrete type.
+#[async_trait]
 pub trait EmailProvider: Send + Sync {
     /// List all mailboxes (folders) for the account.
     async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError>;

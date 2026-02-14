@@ -18,6 +18,7 @@
 //! atomic increments.
 
 use std::pin::Pin;
+use async_trait::async_trait;
 
 use futures::Stream;
 use sled::Db;
@@ -128,6 +129,7 @@ impl SledEventStore {
     }
 }
 
+#[async_trait]
 impl EventStore for SledEventStore {
     async fn append(
         &self,

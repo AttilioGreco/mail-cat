@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package mail_cat.v1;
+
+import "mail_cat/v1/common.proto";
+
+// Search service for full-text message search.
+service SearchService {
+  // Search messages across all accounts or specific account/mailbox.
+  rpc Search(SearchRequest) returns (SearchResponse);
+
+  // Rebuild search index (server-streaming for progress).
+  rpc RebuildIndex(RebuildIndexRequest) returns (stream RebuildIndexProgress);
+}
+
+// Search hit result.
+message SearchHit {
+  string message_id = 1;
+  float score = 2;
+  optional string snippet = 3;  // Highlighted excerpt from subject/body
+}
+
+// === Requests/Responses ===
+
+message SearchRequest {
+  string query = 1;
+  optional string account_id = 2;  // Filter by account
+  optional string mailbox_id = 3;  // Filter by mailbox
+  Pagination pagination = 4;
+}
+
+message SearchResponse {
+  repeated SearchHit hits = 1;
+  PageInfo page_info = 2;
+}
+
+message RebuildIndexRequest {
+  optional string account_id = 1;  // If specified, rebuild only this account
+}
+
+// Streaming progress event for rebuild operation.
+message RebuildIndexProgress {
+  RebuildPhase phase = 1;
+  uint32 processed = 2;
+  optional uint32 total = 3;
+  optional string message = 4;
+}
+
+enum RebuildPhase {
+  REBUILD_PHASE_UNSPECIFIED = 0;
+  REBUILD_PHASE_CLEARING_INDEX = 1;
+  REBUILD_PHASE_LOADING_MESSAGES = 2;
+  REBUILD_PHASE_INDEXING = 3;
+  REBUILD_PHASE_COMPLETE = 4;
+  REBUILD_PHASE_ERROR = 5;
+}

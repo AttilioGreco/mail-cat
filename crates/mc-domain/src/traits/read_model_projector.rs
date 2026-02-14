@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use crate::error::DomainError;
 use crate::events::EventEnvelope;
 
@@ -7,6 +8,7 @@ use crate::events::EventEnvelope;
 /// message summaries, etc.) based on incoming events. Each call to `project`
 /// must be **idempotent** — projecting the same event twice should produce the
 /// same result, since the projection handler replays events on rebuild.
+#[async_trait]
 pub trait ReadModelProjector: Send + Sync {
     /// Project a single event envelope into the read model.
     ///

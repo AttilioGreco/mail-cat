@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use mc_shared::pagination::Pagination;
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +18,7 @@ use crate::value_objects::message_id::MessageId;
 ///
 /// Implementations should batch commits for performance (e.g., commit every N
 /// documents or every M milliseconds).
+#[async_trait]
 pub trait SearchIndex: Send + Sync {
     /// Index a message for full-text search.
     /// Idempotent: re-indexing the same message_id updates the existing document.

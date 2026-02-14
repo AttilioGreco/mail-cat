@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use mc_shared::pagination::{PagedResult, Pagination};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,7 @@ use crate::events::DomainEvent;
 use crate::model::account::Account;
 
 /// Write-side repository for Account aggregate.
+#[async_trait]
 pub trait AccountWriteRepository: Send + Sync {
     /// Persist new events for the account. The repository handles event store
     /// interaction (append with expected sequence).
@@ -47,6 +49,7 @@ pub struct AccountSummary {
 }
 
 /// Read-side repository for accounts.
+#[async_trait]
 pub trait AccountReadRepository: Send + Sync {
     async fn get_account(&self, id: &AccountId) -> Result<Option<AccountSummary>, DomainError>;
     async fn list_accounts(&self) -> Result<Vec<AccountSummary>, DomainError>;
@@ -68,12 +71,14 @@ pub struct MessageSummary {
 }
 
 /// Read-side repository for mailboxes.
+#[async_trait]
 pub trait MailboxReadRepository: Send + Sync {
     async fn get_mailbox(&self, id: &MailboxId) -> Result<Option<Mailbox>, DomainError>;
     async fn list_mailboxes(&self, account_id: &AccountId) -> Result<Vec<Mailbox>, DomainError>;
 }
 
 /// Read-side repository for messages.
+#[async_trait]
 pub trait MessageReadRepository: Send + Sync {
     async fn get_message(&self, id: &MessageId) -> Result<Option<Message>, DomainError>;
 
@@ -87,6 +92,7 @@ pub trait MessageReadRepository: Send + Sync {
 }
 
 /// Checkpoint store for projections — tracks last processed global_position.
+#[async_trait]
 pub trait ProjectionCheckpoint: Send + Sync {
     async fn get_checkpoint(&self, projection_name: &str) -> Result<u64, DomainError>;
     async fn save_checkpoint(

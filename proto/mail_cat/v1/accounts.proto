@@ -1,0 +1,175 @@
+syntax = "proto3";
+
+package mail_cat.v1;
+
+import "mail_cat/v1/common.proto";
+
+// Account service for managing email accounts.
+service AccountService {
+  // Add a new email account.
+  rpc AddAccount(AddAccountRequest) returns (AddAccountResponse);
+
+  // Get account details by ID.
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+
+  // List all accounts.
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+
+  // Update account configuration.
+  rpc UpdateAccount(UpdateAccountRequest) returns (UpdateAccountResponse);
+
+  // Remove an account.
+  rpc RemoveAccount(RemoveAccountRequest) returns (RemoveAccountResponse);
+
+  // Sync account mailboxes and messages (server-streaming for progress).
+  rpc SyncAccount(SyncAccountRequest) returns (stream SyncProgressEvent);
+}
+
+// Provider type for email account.
+enum ProviderType {
+  PROVIDER_TYPE_UNSPECIFIED = 0;
+  PROVIDER_TYPE_IMAP = 1;
+  PROVIDER_TYPE_GMAIL_API = 2;
+  PROVIDER_TYPE_OUTLOOK_API = 3;
+}
+
+// Account status.
+enum AccountStatus {
+  ACCOUNT_STATUS_UNSPECIFIED = 0;
+  ACCOUNT_STATUS_ACTIVE = 1;
+  ACCOUNT_STATUS_DISABLED = 2;
+  ACCOUNT_STATUS_ERROR = 3;
+}
+
+// Authentication configuration (oneof pattern).
+message AuthConfig {
+  oneof auth_type {
+    PlainAuth plain = 1;
+    OAuth2Auth oauth2 = 2;
+    AppPasswordAuth app_password = 3;
+  }
+}
+
+message PlainAuth {
+  string username = 1;
+  string password = 2;
+}
+
+message OAuth2Auth {
+  string client_id = 1;
+  string client_secret = 2;
+  string refresh_token = 3;
+  string access_token = 4;
+  int64 expires_at = 5;
+}
+
+message AppPasswordAuth {
+  string username = 1;
+  string app_password = 2;
+}
+
+// Connection configuration for IMAP/SMTP.
+message ConnectionConfig {
+  optional string imap_host = 1;
+  optional uint32 imap_port = 2;
+  optional string smtp_host = 3;
+  optional uint32 smtp_port = 4;
+  bool use_tls = 5;
+  AuthConfig auth = 6;
+}
+
+// Account summary (list view).
+message AccountSummary {
+  string id = 1;
+  string name = 2;
+  EmailAddress email = 3;
+  ProviderType provider_type = 4;
+  AccountStatus status = 5;
+  Timestamp created_at = 6;
+  Timestamp updated_at = 7;
+}
+
+// Account detail (full view).
+message AccountDetail {
+  string id = 1;
+  string name = 2;
+  EmailAddress email = 3;
+  ProviderType provider_type = 4;
+  ConnectionConfig connection_config = 5;
+  AccountStatus status = 6;
+  Timestamp created_at = 7;
+  Timestamp updated_at = 8;
+}
+
+// === Requests/Responses ===
+
+message AddAccountRequest {
+  string name = 1;
+  string email = 2;
+  ProviderType provider_type = 3;
+  ConnectionConfig connection_config = 4;
+}
+
+message AddAccountResponse {
+  AccountDetail account = 1;
+}
+
+message GetAccountRequest {
+  string account_id = 1;
+}
+
+message GetAccountResponse {
+  AccountDetail account = 1;
+}
+
+message ListAccountsRequest {
+  Pagination pagination = 1;
+}
+
+message ListAccountsResponse {
+  repeated AccountSummary accounts = 1;
+  PageInfo page_info = 2;
+}
+
+message UpdateAccountRequest {
+  string account_id = 1;
+  optional string name = 2;
+  optional ConnectionConfig connection_config = 3;
+}
+
+message UpdateAccountResponse {
+  AccountDetail account = 1;
+}
+
+message RemoveAccountRequest {
+  string account_id = 1;
+}
+
+message RemoveAccountResponse {
+  bool success = 1;
+}
+
+message SyncAccountRequest {
+  string account_id = 1;
+  bool full_sync = 2;  // If true, sync all mailboxes; if false, incremental
+}
+
+// Streaming progress event for sync operation.
+message SyncProgressEvent {
+  string account_id = 1;
+  SyncPhase phase = 2;
+  optional string mailbox_name = 3;
+  uint32 processed = 4;
+  optional uint32 total = 5;
+  optional string message = 6;
+}
+
+enum SyncPhase {
+  SYNC_PHASE_UNSPECIFIED = 0;
+  SYNC_PHASE_DISCOVERING_MAILBOXES = 1;
+  SYNC_PHASE_FETCHING_ENVELOPES = 2;
+  SYNC_PHASE_FETCHING_BODIES = 3;
+  SYNC_PHASE_INDEXING = 4;
+  SYNC_PHASE_COMPLETE = 5;
+  SYNC_PHASE_ERROR = 6;
+}

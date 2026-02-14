@@ -12,7 +12,9 @@
 //! - **`messages_by_thread`**: `"{in_reply_to}:{message_id}"` → `""` (index)
 //! - **`projection_checkpoints`**: `"{projection_name}"` → `"{global_position}"`
 
+use async_trait::async_trait;
 use sled::Db;
+use std::sync::Arc;
 
 use tracing::debug;
 
@@ -55,6 +57,7 @@ impl<ES: EventStore> SledRepository<ES> {
 
 // ── AccountWriteRepository ─────────────────────────────────────────────
 
+#[async_trait]
 impl<ES: EventStore> AccountWriteRepository for SledRepository<ES> {
     async fn save(&self, account: &Account, events: Vec<DomainEvent>) -> Result<(), DomainError> {
         // Determine expected sequence: load current from event store.
@@ -105,6 +108,7 @@ impl<ES: EventStore> AccountWriteRepository for SledRepository<ES> {
 
 // ── AccountReadRepository ──────────────────────────────────────────────
 
+#[async_trait]
 impl<ES: EventStore> AccountReadRepository for SledRepository<ES> {
     async fn get_account(&self, id: &AccountId) -> Result<Option<AccountSummary>, DomainError> {
         let tree = self.tree(ACCOUNTS_TREE)?;
@@ -139,6 +143,7 @@ impl<ES: EventStore> AccountReadRepository for SledRepository<ES> {
 
 // ── MailboxReadRepository ──────────────────────────────────────────────
 
+#[async_trait]
 impl<ES: EventStore> MailboxReadRepository for SledRepository<ES> {
     async fn get_mailbox(&self, id: &MailboxId) -> Result<Option<Mailbox>, DomainError> {
         let tree = self.tree(MAILBOXES_TREE)?;
@@ -185,6 +190,7 @@ impl<ES: EventStore> MailboxReadRepository for SledRepository<ES> {
 
 // ── MessageReadRepository ──────────────────────────────────────────────
 
+#[async_trait]
 impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
     async fn get_message(&self, id: &MessageId) -> Result<Option<Message>, DomainError> {
         let tree = self.tree(MESSAGES_TREE)?;
@@ -249,6 +255,7 @@ impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
 // Handles all 18 DomainEvent variants, updating the appropriate sled trees.
 // Each method is idempotent — safe to call on the same event multiple times.
 
+#[async_trait]
 impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
     async fn project(&self, envelope: &EventEnvelope) -> Result<(), DomainError> {
         match &envelope.payload {
@@ -751,6 +758,7 @@ impl<ES: EventStore> SledRepository<ES> {
 
 // ── ProjectionCheckpoint ───────────────────────────────────────────────
 
+#[async_trait]
 impl<ES: EventStore> ProjectionCheckpoint for SledRepository<ES> {
     async fn get_checkpoint(&self, projection_name: &str) -> Result<u64, DomainError> {
         let tree = self.tree(PROJECTION_CHECKPOINTS_TREE)?;
@@ -781,6 +789,92 @@ impl<ES: EventStore> ProjectionCheckpoint for SledRepository<ES> {
         )
         .map_err(|e| DomainError::Repository(e.to_string()))?;
         Ok(())
+    }
+}
+
+// ── Shared repository wrapper ──────────────────────────────────────────
+// Newtype wrapper to enable implementing domain traits for Arc<SledRepository>
+
+#[derive(Clone)]
+pub struct SharedSledRepository<ES: EventStore>(pub Arc<SledRepository<ES>>);
+
+#[async_trait]
+impl<ES: EventStore> AccountWriteRepository for SharedSledRepository<ES> {
+    async fn save(&self, account: &Account, events: Vec<DomainEvent>) -> Result<(), DomainError> {
+        self.0.save(account, events).await
+    }
+
+    async fn load(&self, id: &AccountId) -> Result<Option<Account>, DomainError> {
+        self.0.load(id).await
+    }
+}
+
+impl<ES: EventStore> SharedSledRepository<ES> {
+    pub fn new(repo: Arc<SledRepository<ES>>) -> Self {
+        Self(repo)
+    }
+}
+
+#[async_trait]
+impl<ES: EventStore> ReadModelProjector for SharedSledRepository<ES> {
+    async fn project(&self, envelope: &EventEnvelope) -> Result<(), DomainError> {
+        self.0.project(envelope).await
+    }
+}
+
+#[async_trait]
+impl<ES: EventStore> ProjectionCheckpoint for SharedSledRepository<ES> {
+    async fn get_checkpoint(&self, projection_name: &str) -> Result<u64, DomainError> {
+        self.0.get_checkpoint(projection_name).await
+    }
+
+    async fn save_checkpoint(
+        &self,
+        projection_name: &str,
+        global_position: u64,
+    ) -> Result<(), DomainError> {
+        self.0.save_checkpoint(projection_name, global_position).await
+    }
+}
+
+#[async_trait]
+impl<ES: EventStore> AccountReadRepository for SharedSledRepository<ES> {
+    async fn get_account(&self, id: &AccountId) -> Result<Option<AccountSummary>, DomainError> {
+        self.0.get_account(id).await
+    }
+
+    async fn list_accounts(&self) -> Result<Vec<AccountSummary>, DomainError> {
+        self.0.list_accounts().await
+    }
+}
+
+#[async_trait]
+impl<ES: EventStore> MailboxReadRepository for SharedSledRepository<ES> {
+    async fn get_mailbox(&self, id: &MailboxId) -> Result<Option<Mailbox>, DomainError> {
+        self.0.get_mailbox(id).await
+    }
+
+    async fn list_mailboxes(&self, account_id: &AccountId) -> Result<Vec<Mailbox>, DomainError> {
+        self.0.list_mailboxes(account_id).await
+    }
+}
+
+#[async_trait]
+impl<ES: EventStore> MessageReadRepository for SharedSledRepository<ES> {
+    async fn get_message(&self, id: &MessageId) -> Result<Option<Message>, DomainError> {
+        self.0.get_message(id).await
+    }
+
+    async fn list_messages(
+        &self,
+        mailbox_id: &MailboxId,
+        pagination: &Pagination,
+    ) -> Result<PagedResult<MessageSummary>, DomainError> {
+        self.0.list_messages(mailbox_id, pagination).await
+    }
+
+    async fn get_thread(&self, message_id: &MessageId) -> Result<Vec<Message>, DomainError> {
+        self.0.get_thread(message_id).await
     }
 }
 

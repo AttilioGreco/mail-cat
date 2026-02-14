@@ -4,6 +4,7 @@
 //! to the appropriate handler methods.
 
 use std::sync::Arc;
+use async_trait::async_trait;
 
 use mc_domain::{
     AccountReadRepository, AccountWriteRepository, EmailProvider, EventStore,
@@ -53,6 +54,7 @@ where
     }
 }
 
+#[async_trait]
 impl<AW, ES, EP, B> CommandBus for InProcessCommandBus<AW, ES, EP, B>
 where
     AW: AccountWriteRepository,
@@ -190,6 +192,7 @@ where
     }
 }
 
+#[async_trait]
 impl<AR, MBR, MR, SI> QueryBus for InProcessQueryBus<AR, MBR, MR, SI>
 where
     AR: AccountReadRepository,

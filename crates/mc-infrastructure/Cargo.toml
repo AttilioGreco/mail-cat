@@ -22,5 +22,12 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
+async-trait = { workspace = true }
+tokio-util = { workspace = true }
+async-compat = { workspace = true }
+parking_lot = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
