@@ -5,7 +5,7 @@ use anyhow::Context;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::projections::ProjectionEventHandler;
-use mc_infrastructure::{ImapEmailProvider, SledEventStore, SledRepository, SharedSledRepository, TantivySearchIndex};
+use mc_infrastructure::{ImapEmailProvider, SledEventStore, SledRepository, TantivySearchIndex};
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
 };
@@ -14,15 +14,15 @@ use crate::config::ServerConfig;
 
 // Type aliases for concrete bus implementations
 type CommandBusImpl = InProcessCommandBus<
-    SharedSledRepository<SledEventStore>,
+    SledRepository<SledEventStore>,
     SledEventStore,
     ImapEmailProvider,
     InProcessEventBus,
 >;
 type QueryBusImpl = InProcessQueryBus<
-    SharedSledRepository<SledEventStore>,
-    SharedSledRepository<SledEventStore>,
-    SharedSledRepository<SledEventStore>,
+    SledRepository<SledEventStore>,
+    SledRepository<SledEventStore>,
+    SledRepository<SledEventStore>,
     TantivySearchIndex,
 >;
 
@@ -51,8 +51,9 @@ impl AppContext {
         tracing::info!("Initialized event store");
 
         // Create repository (implements both write and read repos + projector)
-        let repository = Arc::new(SledRepository::new(db.clone(), event_store.clone()));
-        let shared_repo = SharedSledRepository::new(repository);
+        // We create a bare version for the projector and an Arc-wrapped version for the buses
+        let bare_repository = SledRepository::new(db.clone(), event_store.clone());
+        let repository_arc = Arc::new(bare_repository.clone());
         tracing::info!("Initialized repositories");
 
         // Create search index
@@ -69,13 +70,12 @@ impl AppContext {
             Arc::new(ImapEmailProvider::new(
                 account_config.imap_host.clone(),
                 account_config.imap_port,
-                account_config.use_tls,
                 account_config.username.clone(),
                 account_config.password.clone(),
-                Some((
-                    account_config.smtp_host.clone(),
-                    account_config.smtp_port,
-                )),
+                account_config.use_tls,
+                account_config.smtp_host.clone(),
+                account_config.smtp_port,
+                account_config.use_tls, // Use same TLS setting for SMTP
             ))
         } else {
             tracing::warn!("No email accounts configured, using mock provider");
@@ -83,10 +83,12 @@ impl AppContext {
             Arc::new(ImapEmailProvider::new(
                 "localhost".to_string(),
                 993,
-                false,
                 "user".to_string(),
                 "pass".to_string(),
-                None,
+                false,
+                "smtp.localhost".to_string(),
+                587,
+                false,
             ))
         };
 
@@ -98,7 +100,7 @@ impl AppContext {
 
         // Create command bus
         let command_bus = Arc::new(InProcessCommandBus::new(
-            shared_repo.clone(),
+            repository_arc.clone(),
             event_store.clone(),
             email_provider.clone(),
             event_bus.clone(),
@@ -107,24 +109,24 @@ impl AppContext {
 
         // Create query bus
         let query_bus = Arc::new(InProcessQueryBus::new(
-            shared_repo.clone(),
-            shared_repo.clone(),
-            shared_repo.clone(),
+            repository_arc.clone(),
+            repository_arc.clone(),
+            repository_arc.clone(),
             search_index.clone(),
         ));
         tracing::info!("Initialized query bus");
 
         // Create projection event handler and start catching up
-        let projection_handler = Arc::new(ProjectionEventHandler::new(
-            shared_repo.clone(),
-            shared_repo.clone(),
-        ));
+        let projection_handler = ProjectionEventHandler::new(
+            bare_repository.clone(),
+            bare_repository,
+        );
         tracing::info!("Initialized projection handler");
 
         // Catch up projections on startup (rebuild read models from events)
         tracing::info!("Catching up projections from event store...");
         projection_handler
-            .catch_up()
+            .catch_up(event_store.as_ref())
             .await
             .context("failed to catch up projections")?;
         tracing::info!("Projections caught up successfully");

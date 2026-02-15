@@ -1,5 +1,7 @@
 //! Query handler — dispatches read-side queries to projected read models.
 
+#[allow(unused_imports)]
+use async_trait::async_trait;
 use std::sync::Arc;
 
 use mc_domain::{AccountReadRepository, MailboxReadRepository, MessageReadRepository, SearchIndex};
@@ -114,6 +116,7 @@ mod tests {
 
     struct MockAccountReadRepo;
 
+    #[async_trait]
     impl AccountReadRepository for MockAccountReadRepo {
         async fn get_account(&self, id: &AccountId) -> Result<Option<AccountSummary>, DomainError> {
             Ok(Some(AccountSummary {
@@ -142,6 +145,7 @@ mod tests {
 
     struct MockMailboxReadRepo;
 
+    #[async_trait]
     impl MailboxReadRepository for MockMailboxReadRepo {
         async fn get_mailbox(&self, _id: &MailboxId) -> Result<Option<Mailbox>, DomainError> {
             Ok(None)
@@ -159,6 +163,7 @@ mod tests {
 
     struct MockMessageReadRepo;
 
+    #[async_trait]
     impl MessageReadRepository for MockMessageReadRepo {
         async fn get_message(&self, _id: &MessageId) -> Result<Option<Message>, DomainError> {
             Ok(None)
@@ -186,6 +191,7 @@ mod tests {
 
     struct MockSearchIndex;
 
+    #[async_trait]
     impl SearchIndex for MockSearchIndex {
         async fn index_message(&self, _message: &Message) -> Result<(), DomainError> {
             Ok(())

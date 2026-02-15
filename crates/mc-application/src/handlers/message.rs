@@ -5,6 +5,8 @@
 //! move, delete on IMAP), the handler calls the EmailProvider first,
 //! then produces domain events on success.
 
+#[allow(unused_imports)]
+use async_trait::async_trait;
 use std::sync::Arc;
 
 use mc_domain::{
@@ -300,6 +302,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl EventStore for MockEventStore {
         async fn append(
             &self,
@@ -361,6 +364,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl EmailProvider for MockEmailProvider {
         async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
             Ok(vec![])

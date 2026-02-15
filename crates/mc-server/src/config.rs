@@ -76,13 +76,6 @@ impl ServerConfig {
         Ok(config)
     }
 
-    /// Save configuration to TOML file.
-    pub fn to_file(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
-        let contents = toml::to_string_pretty(self)?;
-        std::fs::write(path, contents)?;
-        Ok(())
-    }
-
     /// Load from file if exists, otherwise return default.
     pub fn load_or_default(path: impl AsRef<Path>) -> Self {
         Self::from_file(path).unwrap_or_default()

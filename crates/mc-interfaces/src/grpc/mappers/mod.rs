@@ -58,6 +58,7 @@ pub fn application_error_to_status(error: ApplicationError) -> Status {
         ApplicationError::NotFound(resource, id) => Status::not_found(format!("{} not found: {}", resource, id)),
         ApplicationError::PreconditionFailed(msg) => Status::failed_precondition(msg),
         ApplicationError::Unauthorized(msg) => Status::permission_denied(msg),
+        ApplicationError::SyncFailed(msg) => Status::internal(format!("Sync failed: {}", msg)),
     }
 }
 

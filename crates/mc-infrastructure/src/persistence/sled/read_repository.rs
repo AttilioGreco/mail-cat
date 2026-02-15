@@ -43,6 +43,15 @@ pub struct SledRepository<ES: EventStore> {
     event_store: std::sync::Arc<ES>,
 }
 
+impl<ES: EventStore> Clone for SledRepository<ES> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            event_store: self.event_store.clone(),
+        }
+    }
+}
+
 impl<ES: EventStore> SledRepository<ES> {
     pub fn new(db: Db, event_store: std::sync::Arc<ES>) -> Self {
         Self { db, event_store }

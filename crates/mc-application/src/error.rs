@@ -25,6 +25,10 @@ pub enum ApplicationError {
     /// Internal application error (bug, unexpected state).
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// A sync operation failed.
+    #[error("sync failed: {0}")]
+    SyncFailed(String),
 }
 
 #[cfg(test)]

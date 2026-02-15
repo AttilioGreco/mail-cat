@@ -1,5 +1,7 @@
 //! Command handler for Account aggregate operations.
 
+#[allow(unused_imports)]
+use async_trait::async_trait;
 use std::sync::Arc;
 
 use mc_domain::{
@@ -139,6 +141,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl AccountWriteRepository for MockAccountWriteRepo {
         async fn save(
             &self,

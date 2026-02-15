@@ -39,6 +39,15 @@ pub struct SledEventStore {
     notifier: broadcast::Sender<EventEnvelope>,
 }
 
+impl Clone for SledEventStore {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            notifier: self.notifier.clone(),
+        }
+    }
+}
+
 impl SledEventStore {
     /// Open or create an event store at the given sled database.
     pub fn new(db: Db) -> Self {

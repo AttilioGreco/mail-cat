@@ -21,14 +21,16 @@ use crate::grpc::mappers::{
 
 /// Message service implementation with CQRS bus integration.
 pub struct MessageServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
-    command_bus: Arc<C>,
+    // Command bus used for mutations (set_flags, move_message, delete_message, send_message, save_draft)
+    // Currently unimplemented but will be used in Day 14 message service methods
+    _command_bus: Arc<C>,
     query_bus: Arc<Q>,
 }
 
 impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageServiceImpl<C, Q> {
     pub fn new(command_bus: Arc<C>, query_bus: Arc<Q>) -> Self {
         Self {
-            command_bus,
+            _command_bus: command_bus,
             query_bus,
         }
     }

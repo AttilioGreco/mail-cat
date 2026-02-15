@@ -4,6 +4,8 @@
 //! read model via a [`ReadModelProjector`]. Tracks progress with a
 //! [`ProjectionCheckpoint`] to enable resume after restart and idempotent replay.
 
+#[allow(unused_imports)]
+use async_trait::async_trait;
 use tracing::{debug, info};
 
 use mc_domain::{EventEnvelope, EventStore, ProjectionCheckpoint, ReadModelProjector};
@@ -198,6 +200,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl ReadModelProjector for MockProjector {
         async fn project(&self, envelope: &EventEnvelope) -> Result<(), DomainError> {
             self.projected
@@ -231,6 +234,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl ProjectionCheckpoint for MockCheckpoint {
         async fn get_checkpoint(&self, _name: &str) -> Result<u64, DomainError> {
             Ok(*self.position.lock().unwrap())
@@ -258,6 +262,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl EventStore for MockEventStore {
         async fn append(
             &self,

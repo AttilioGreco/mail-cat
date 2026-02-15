@@ -210,7 +210,7 @@ impl EmailProvider for ImapEmailProvider {
             let flags_str: Vec<String> = flags_to_add.iter().map(flag_to_imap).collect();
             let flags_query = flags_str.join(" ");
 
-            CompatExt::compat(
+            let _ = CompatExt::compat(
                 session.uid_store(format!("{}", seq), format!("+FLAGS ({})", flags_query)),
             )
             .await
@@ -224,7 +224,7 @@ impl EmailProvider for ImapEmailProvider {
             let flags_str: Vec<String> = flags_to_remove.iter().map(flag_to_imap).collect();
             let flags_query = flags_str.join(" ");
 
-            CompatExt::compat(
+            let _ = CompatExt::compat(
                 session.uid_store(format!("{}", seq), format!("-FLAGS ({})", flags_query)),
             )
             .await
@@ -274,12 +274,12 @@ impl EmailProvider for ImapEmailProvider {
             .map_err(|e| DomainError::Provider(format!("Copy failed: {}", e)))?;
 
         // Mark as deleted in source
-        CompatExt::compat(session.uid_store(format!("{}", seq), "+FLAGS (\\Deleted)"))
+        let _ = CompatExt::compat(session.uid_store(format!("{}", seq), "+FLAGS (\\Deleted)"))
             .await
             .map_err(|e| DomainError::Provider(format!("Delete flag failed: {}", e)))?;
 
         // Expunge to remove from source
-        CompatExt::compat(session.expunge())
+        let _ = CompatExt::compat(session.expunge())
             .await
             .map_err(|e| DomainError::Provider(format!("Expunge failed: {}", e)))?;
 
@@ -320,13 +320,13 @@ impl EmailProvider for ImapEmailProvider {
         let seq = Self::uid_to_seq(&uid);
 
         // Mark as deleted
-        CompatExt::compat(session.uid_store(format!("{}", seq), "+FLAGS (\\Deleted)"))
+        let _ = CompatExt::compat(session.uid_store(format!("{}", seq), "+FLAGS (\\Deleted)"))
             .await
             .map_err(|e| DomainError::Provider(format!("Delete flag failed: {}", e)))?;
 
         // If permanent deletion, expunge
         if permanently {
-            CompatExt::compat(session.expunge())
+            let _ = CompatExt::compat(session.expunge())
                 .await
                 .map_err(|e| DomainError::Provider(format!("Expunge failed: {}", e)))?;
             debug!("Message permanently deleted via expunge");
