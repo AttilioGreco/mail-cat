@@ -1,8 +1,8 @@
 //! Command bus trait — dispatches write-side commands to their handlers.
 
-use async_trait::async_trait;
 use crate::commands::{Command, CommandResult};
 use crate::error::ApplicationError;
+use async_trait::async_trait;
 
 /// Dispatches [`Command`]s to the appropriate handler.
 ///

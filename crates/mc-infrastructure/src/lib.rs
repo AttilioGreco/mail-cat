@@ -8,5 +8,5 @@ pub mod search;
 
 // Re-exports for ergonomics
 pub use email::{ImapEmailProvider, SmtpSender};
-pub use persistence::{SledEventStore, SledRepository, SharedSledRepository};
+pub use persistence::{SharedSledRepository, SledEventStore, SledRepository};
 pub use search::TantivySearchIndex;

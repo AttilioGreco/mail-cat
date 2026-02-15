@@ -842,7 +842,9 @@ impl<ES: EventStore> ProjectionCheckpoint for SharedSledRepository<ES> {
         projection_name: &str,
         global_position: u64,
     ) -> Result<(), DomainError> {
-        self.0.save_checkpoint(projection_name, global_position).await
+        self.0
+            .save_checkpoint(projection_name, global_position)
+            .await
     }
 }
 

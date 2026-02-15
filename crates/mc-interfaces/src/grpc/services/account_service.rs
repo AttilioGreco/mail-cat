@@ -1,23 +1,23 @@
 use std::sync::Arc;
-use tonic::{Request, Response, Status};
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status};
 
+use crate::grpc::mappers::{
+    application_error_to_status, domain_account_summary_to_detail, domain_account_summary_to_proto,
+    proto_connection_to_domain, proto_email_to_domain, proto_provider_type_to_domain,
+};
+use crate::grpc::proto::{
+    self, AddAccountRequest, AddAccountResponse, GetAccountRequest, GetAccountResponse,
+    ListAccountsRequest, ListAccountsResponse, RemoveAccountRequest, RemoveAccountResponse,
+    SyncAccountRequest, SyncProgressEvent, UpdateAccountRequest, UpdateAccountResponse,
+    account_service_server::AccountService,
+};
 use mc_application::{
     bus::{CommandBus, QueryBus},
     commands::{Command, CommandResult},
     queries::Query,
 };
 use mc_domain::{AccountId, Identity};
-use crate::grpc::proto::{
-    self, account_service_server::AccountService, AddAccountRequest, AddAccountResponse,
-    GetAccountRequest, GetAccountResponse, ListAccountsRequest, ListAccountsResponse,
-    RemoveAccountRequest, RemoveAccountResponse, SyncAccountRequest, SyncProgressEvent,
-    UpdateAccountRequest, UpdateAccountResponse,
-};
-use crate::grpc::mappers::{
-    application_error_to_status, domain_account_summary_to_detail, domain_account_summary_to_proto,
-    proto_connection_to_domain, proto_email_to_domain, proto_provider_type_to_domain,
-};
 
 /// Account service implementation with CQRS bus integration.
 pub struct AccountServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
@@ -51,12 +51,13 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             .map_err(Status::invalid_argument)?
             .email;
 
-        let provider_type = proto_provider_type_to_domain(req.provider_type)
-            .map_err(Status::invalid_argument)?;
+        let provider_type =
+            proto_provider_type_to_domain(req.provider_type).map_err(Status::invalid_argument)?;
 
-        let connection_config = proto_connection_to_domain(&req.connection_config.ok_or_else(|| {
-            Status::invalid_argument("connection_config is required")
-        })?)
+        let connection_config = proto_connection_to_domain(
+            &req.connection_config
+                .ok_or_else(|| Status::invalid_argument("connection_config is required"))?,
+        )
         .map_err(Status::invalid_argument)?;
 
         // Create default identity
@@ -80,7 +81,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             .command_bus
             .dispatch(command)
             .await
-            .map_err(|e| application_error_to_status(e))?;
+            .map_err(application_error_to_status)?;
 
         // Extract account_id from result
         let account_id = match result {
@@ -94,7 +95,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             .query_bus
             .dispatch(query)
             .await
-            .map_err(|e| application_error_to_status(e))?;
+            .map_err(application_error_to_status)?;
 
         let account = query_result
             .into_account()
@@ -113,7 +114,8 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         let req = request.into_inner();
 
         let account_id = AccountId::from_uuid(
-            uuid::Uuid::parse_str(&req.account_id).map_err(|e| Status::invalid_argument(e.to_string()))?
+            uuid::Uuid::parse_str(&req.account_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
         );
 
         let query = Query::GetAccount { account_id };
@@ -121,7 +123,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             .query_bus
             .dispatch(query)
             .await
-            .map_err(|e| application_error_to_status(e))?;
+            .map_err(application_error_to_status)?;
 
         let account = result
             .into_account()
@@ -142,13 +144,16 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             .query_bus
             .dispatch(query)
             .await
-            .map_err(|e| application_error_to_status(e))?;
+            .map_err(application_error_to_status)?;
 
         let accounts = result
             .into_accounts()
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let summaries = accounts.iter().map(domain_account_summary_to_proto).collect();
+        let summaries = accounts
+            .iter()
+            .map(domain_account_summary_to_proto)
+            .collect();
 
         Ok(Response::new(ListAccountsResponse {
             accounts: summaries,
@@ -163,13 +168,12 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         let req = request.into_inner();
 
         let account_id = AccountId::from_uuid(
-            uuid::Uuid::parse_str(&req.account_id).map_err(|e| Status::invalid_argument(e.to_string()))?
+            uuid::Uuid::parse_str(&req.account_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
         );
 
         let connection_config = if let Some(config) = req.connection_config {
-            Some(
-                proto_connection_to_domain(&config).map_err(Status::invalid_argument)?,
-            )
+            Some(proto_connection_to_domain(&config).map_err(Status::invalid_argument)?)
         } else {
             None
         };
@@ -183,7 +187,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         self.command_bus
             .dispatch(command)
             .await
-            .map_err(|e| application_error_to_status(e))?;
+            .map_err(application_error_to_status)?;
 
         // Re-query the updated account
         let query = Query::GetAccount { account_id };
@@ -191,7 +195,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             .query_bus
             .dispatch(query)
             .await
-            .map_err(|e| application_error_to_status(e))?;
+            .map_err(application_error_to_status)?;
 
         let account = result
             .into_account()
@@ -210,7 +214,8 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         let req = request.into_inner();
 
         let account_id = AccountId::from_uuid(
-            uuid::Uuid::parse_str(&req.account_id).map_err(|e| Status::invalid_argument(e.to_string()))?
+            uuid::Uuid::parse_str(&req.account_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
         );
 
         let command = Command::RemoveAccount { account_id };
@@ -218,7 +223,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         self.command_bus
             .dispatch(command)
             .await
-            .map_err(|e| application_error_to_status(e))?;
+            .map_err(application_error_to_status)?;
 
         Ok(Response::new(RemoveAccountResponse { success: true }))
     }
@@ -232,7 +237,8 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         let req = request.into_inner();
 
         let account_id = AccountId::from_uuid(
-            uuid::Uuid::parse_str(&req.account_id).map_err(|e| Status::invalid_argument(e.to_string()))?
+            uuid::Uuid::parse_str(&req.account_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
         );
 
         let command = Command::SyncAccount { account_id };
@@ -241,7 +247,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         self.command_bus
             .dispatch(command)
             .await
-            .map_err(|e| application_error_to_status(e))?;
+            .map_err(application_error_to_status)?;
 
         // TODO Day 13: Implement progress streaming with EventSubscriber
         // For now, return empty stream

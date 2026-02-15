@@ -42,6 +42,7 @@ impl ImapEmailProvider {
     /// Create a new IMAP provider configuration.
     ///
     /// For SMTP, uses the same credentials but separate host/port.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: String,
         port: u16,
@@ -86,7 +87,9 @@ impl ImapEmailProvider {
     async fn create_imap_session(
         &self,
     ) -> Result<
-        async_imap::Session<tokio_util::compat::Compat<tokio_native_tls::TlsStream<tokio::net::TcpStream>>>,
+        async_imap::Session<
+            tokio_util::compat::Compat<tokio_native_tls::TlsStream<tokio::net::TcpStream>>,
+        >,
         DomainError,
     > {
         use async_compat::CompatExt;
@@ -120,9 +123,7 @@ impl ImapEmailProvider {
         // Login with async-compat wrapper (wraps async-std future for tokio)
         let session = CompatExt::compat(client.login(&self.username, &self.password))
             .await
-            .map_err(|e| {
-                DomainError::Provider(format!("IMAP authentication failed: {:?}", e.0))
-            })?;
+            .map_err(|e| DomainError::Provider(format!("IMAP authentication failed: {:?}", e.0)))?;
 
         Ok(session)
     }

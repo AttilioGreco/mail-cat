@@ -1,6 +1,6 @@
+use crate::grpc::proto::{self, Flag as ProtoFlag, Timestamp};
 use chrono::{DateTime, Utc};
 use mc_domain::value_objects::flag::Flag as DomainFlag;
-use crate::grpc::proto::{self, Flag as ProtoFlag, Timestamp};
 
 /// Convert chrono DateTime to proto Timestamp.
 pub fn datetime_to_timestamp(dt: &DateTime<Utc>) -> Timestamp {
@@ -50,7 +50,9 @@ pub fn domain_address_to_proto(addr: &mc_domain::model::message::Address) -> pro
 }
 
 /// Convert proto EmailAddress to domain Address.
-pub fn proto_email_to_domain(email: &proto::EmailAddress) -> Result<mc_domain::model::message::Address, String> {
+pub fn proto_email_to_domain(
+    email: &proto::EmailAddress,
+) -> Result<mc_domain::model::message::Address, String> {
     Ok(mc_domain::model::message::Address {
         name: email.name.clone(),
         email: mc_domain::value_objects::email_address::EmailAddress::new(&email.email)

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, Value, STORED, TEXT};
+use tantivy::schema::{Field, STORED, Schema, TEXT, Value};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use tracing::{debug, info};
 
@@ -59,8 +59,9 @@ impl TantivySearchIndex {
             Index::open_in_dir(index_path)
                 .map_err(|e| DomainError::SearchIndex(format!("Failed to open index: {}", e)))?
         } else {
-            std::fs::create_dir_all(&index_path)
-                .map_err(|e| DomainError::SearchIndex(format!("Failed to create index dir: {}", e)))?;
+            std::fs::create_dir_all(&index_path).map_err(|e| {
+                DomainError::SearchIndex(format!("Failed to create index dir: {}", e))
+            })?;
             Index::create_in_dir(index_path, schema.clone())
                 .map_err(|e| DomainError::SearchIndex(format!("Failed to create index: {}", e)))?
         };
@@ -296,9 +297,7 @@ impl SearchIndex for TantivySearchIndex {
             .filter_map(|(score, doc_address)| {
                 let doc: TantivyDocument = searcher.doc(*doc_address).ok()?;
 
-                let message_id_str = doc
-                    .get_first(self.fields.message_id)?
-                    .as_str()?;
+                let message_id_str = doc.get_first(self.fields.message_id)?.as_str()?;
 
                 // Parse UUID from string
                 let uuid = uuid::Uuid::parse_str(message_id_str).ok()?;
@@ -318,7 +317,11 @@ impl SearchIndex for TantivySearchIndex {
             })
             .collect();
 
-        info!("Search returned {} hits (total: {})", hits.len(), total_count);
+        info!(
+            "Search returned {} hits (total: {})",
+            hits.len(),
+            total_count
+        );
 
         Ok(SearchResults {
             hits,
@@ -332,7 +335,8 @@ impl SearchIndex for TantivySearchIndex {
         let mut writer = self.writer.lock();
 
         // Delete all documents
-        writer.delete_all_documents()
+        writer
+            .delete_all_documents()
             .map_err(|e| DomainError::SearchIndex(format!("Delete all failed: {}", e)))?;
 
         // Add all messages
@@ -345,7 +349,7 @@ impl SearchIndex for TantivySearchIndex {
             count += 1;
 
             // Commit every 1000 documents
-            if count % 1000 == 0 {
+            if count.is_multiple_of(1000) {
                 writer
                     .commit()
                     .map_err(|e| DomainError::SearchIndex(format!("Commit failed: {}", e)))?;

@@ -1,8 +1,8 @@
 //! Query bus trait — dispatches read-side queries to their handlers.
 
-use async_trait::async_trait;
 use crate::error::ApplicationError;
 use crate::queries::{Query, QueryResult};
+use async_trait::async_trait;
 
 /// Dispatches [`Query`]s to the appropriate handler.
 ///

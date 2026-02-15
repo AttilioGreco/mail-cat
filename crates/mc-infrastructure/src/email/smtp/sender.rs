@@ -1,4 +1,4 @@
-use lettre::message::{header, Mailbox, Message, MultiPart, SinglePart};
+use lettre::message::{Mailbox, Message, MultiPart, SinglePart, header};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{SmtpTransport, Transport};
 use tracing::{debug, info};
@@ -104,9 +104,7 @@ impl SmtpSender {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Start building message
-        let mut email_builder = Message::builder()
-            .from(from)
-            .subject(&outgoing.subject);
+        let mut email_builder = Message::builder().from(from).subject(&outgoing.subject);
 
         // Add to recipients
         for mailbox in to {
@@ -292,7 +290,10 @@ mod tests {
             body_text: Some("Plain text version".to_string()),
             body_html: Some("<p>HTML version</p>".to_string()),
             in_reply_to: Some("<previous@example.com>".to_string()),
-            references: vec!["<ref1@example.com>".to_string(), "<ref2@example.com>".to_string()],
+            references: vec![
+                "<ref1@example.com>".to_string(),
+                "<ref2@example.com>".to_string(),
+            ],
             attachments: vec![],
         };
 

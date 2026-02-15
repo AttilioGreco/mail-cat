@@ -1,4 +1,4 @@
-use mailparse::{parse_mail, MailParseError};
+use mailparse::{MailParseError, parse_mail};
 
 use mc_domain::error::DomainError;
 use mc_domain::{Attachment, AttachmentId, Flag, MailboxPath, MailboxType};

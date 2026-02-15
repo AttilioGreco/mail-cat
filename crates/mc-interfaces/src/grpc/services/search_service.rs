@@ -1,18 +1,15 @@
 use std::sync::Arc;
-use tonic::{Request, Response, Status};
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status};
 
-use mc_application::{
-    bus::QueryBus,
-    queries::Query,
+use crate::grpc::mappers::application_error_to_status;
+use crate::grpc::proto::{
+    RebuildIndexProgress, RebuildIndexRequest, SearchRequest, SearchResponse,
+    search_service_server::SearchService,
 };
+use mc_application::{bus::QueryBus, queries::Query};
 use mc_domain::{AccountId, MailboxId};
 use mc_shared::pagination::Pagination;
-use crate::grpc::proto::{
-    search_service_server::SearchService, RebuildIndexProgress, RebuildIndexRequest,
-    SearchRequest, SearchResponse,
-};
-use crate::grpc::mappers::application_error_to_status;
 
 /// Search service implementation with QueryBus integration.
 pub struct SearchServiceImpl<Q: QueryBus + 'static> {
@@ -33,19 +30,16 @@ impl<Q: QueryBus + 'static> SearchService for SearchServiceImpl<Q> {
     ) -> Result<Response<SearchResponse>, Status> {
         let req = request.into_inner();
 
-        let account_id = req.account_id.and_then(|id| {
-            uuid::Uuid::parse_str(&id)
-                .ok()
-                .map(AccountId::from_uuid)
-        });
+        let account_id = req
+            .account_id
+            .and_then(|id| uuid::Uuid::parse_str(&id).ok().map(AccountId::from_uuid));
 
-        let mailbox_id = req.mailbox_id.and_then(|id| {
-            uuid::Uuid::parse_str(&id)
-                .ok()
-                .map(MailboxId::from_uuid)
-        });
+        let mailbox_id = req
+            .mailbox_id
+            .and_then(|id| uuid::Uuid::parse_str(&id).ok().map(MailboxId::from_uuid));
 
-        let pagination = req.pagination
+        let pagination = req
+            .pagination
             .map(|p| Pagination {
                 page: p.page,
                 page_size: p.page_size,
@@ -70,21 +64,26 @@ impl<Q: QueryBus + 'static> SearchService for SearchServiceImpl<Q> {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Convert SearchResults to proto format
-        let hits = search_results.hits.iter().map(|hit| {
-            crate::grpc::proto::SearchHit {
+        let hits = search_results
+            .hits
+            .iter()
+            .map(|hit| crate::grpc::proto::SearchHit {
                 message_id: hit.message_id.to_string(),
                 score: hit.score,
                 snippet: hit.snippet.clone(),
-            }
-        }).collect();
+            })
+            .collect();
 
         // Create PageInfo from total_count
         let page_info = crate::grpc::proto::PageInfo {
             total_count: search_results.total_count,
             page: pagination.page,
             page_size: pagination.page_size,
-            has_next_page: (pagination.page * pagination.page_size as u32) < search_results.total_count as u32,
-            total_pages: ((search_results.total_count + pagination.page_size as u64 - 1) / pagination.page_size as u64) as u32,
+            has_next_page: (pagination.page as u64 * pagination.page_size as u64)
+                < search_results.total_count,
+            total_pages: search_results
+                .total_count
+                .div_ceil(pagination.page_size as u64) as u32,
         };
 
         Ok(Response::new(SearchResponse {
@@ -101,6 +100,8 @@ impl<Q: QueryBus + 'static> SearchService for SearchServiceImpl<Q> {
     ) -> Result<Response<Self::RebuildIndexStream>, Status> {
         // TODO: Implement rebuild with streaming progress
         // Requires SearchIndex::rebuild() which returns progress updates
-        Err(Status::unimplemented("rebuild_index streaming not yet implemented"))
+        Err(Status::unimplemented(
+            "rebuild_index streaming not yet implemented",
+        ))
     }
 }

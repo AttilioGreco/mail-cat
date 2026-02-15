@@ -1,11 +1,11 @@
 //! Dependency injection and application wiring.
 
-use std::sync::Arc;
 use anyhow::Context;
+use std::sync::Arc;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::projections::ProjectionEventHandler;
-use mc_application::{SyncService, SyncConfig};
+use mc_application::{SyncConfig, SyncService};
 use mc_infrastructure::{ImapEmailProvider, SledEventStore, SledRepository, TantivySearchIndex};
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
@@ -26,7 +26,8 @@ type QueryBusImpl = InProcessQueryBus<
     SledRepository<SledEventStore>,
     TantivySearchIndex,
 >;
-type SyncServiceImpl = SyncService<ImapEmailProvider, SledEventStore, SledRepository<SledEventStore>>;
+type SyncServiceImpl =
+    SyncService<ImapEmailProvider, SledEventStore, SledRepository<SledEventStore>>;
 
 /// Application context with all wired dependencies.
 pub struct AppContext {
@@ -46,8 +47,7 @@ impl AppContext {
         // ── Infrastructure Layer ────────────────────────────────────────────
 
         // Open sled database
-        let db = sled::open(&config.db_path)
-            .context("failed to open sled database")?;
+        let db = sled::open(&config.db_path).context("failed to open sled database")?;
         tracing::info!("Opened sled database at {}", config.db_path);
 
         // Create event store
@@ -62,8 +62,7 @@ impl AppContext {
 
         // Create search index
         let search_index = Arc::new(
-            TantivySearchIndex::new(&config.index_path)
-                .context("failed to create search index")?
+            TantivySearchIndex::new(&config.index_path).context("failed to create search index")?,
         );
         tracing::info!("Initialized search index at {}", config.index_path);
 
@@ -135,10 +134,8 @@ impl AppContext {
         tracing::info!("Initialized sync service");
 
         // Create projection event handler and start catching up
-        let projection_handler = ProjectionEventHandler::new(
-            bare_repository.clone(),
-            bare_repository,
-        );
+        let projection_handler =
+            ProjectionEventHandler::new(bare_repository.clone(), bare_repository);
         tracing::info!("Initialized projection handler");
 
         // Catch up projections on startup (rebuild read models from events)
@@ -152,17 +149,11 @@ impl AppContext {
         // ── Interface Layer ─────────────────────────────────────────────────
 
         // Create gRPC services
-        let account_service = AccountServiceImpl::new(
-            command_bus.clone(),
-            query_bus.clone(),
-        );
+        let account_service = AccountServiceImpl::new(command_bus.clone(), query_bus.clone());
 
         let mailbox_service = MailboxServiceImpl::new(query_bus.clone());
 
-        let message_service = MessageServiceImpl::new(
-            command_bus.clone(),
-            query_bus.clone(),
-        );
+        let message_service = MessageServiceImpl::new(command_bus.clone(), query_bus.clone());
 
         let search_service = SearchServiceImpl::new(query_bus.clone());
 

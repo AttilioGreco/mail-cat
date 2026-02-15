@@ -1,6 +1,6 @@
-use mc_domain::model::mailbox::{Mailbox as DomainMailbox, MailboxType as DomainMailboxType};
-use crate::grpc::proto::{MailboxSummary, MailboxType as ProtoMailboxType};
 use super::domain_flag_to_proto;
+use crate::grpc::proto::{MailboxSummary, MailboxType as ProtoMailboxType};
+use mc_domain::model::mailbox::{Mailbox as DomainMailbox, MailboxType as DomainMailboxType};
 
 /// Convert domain MailboxType to proto MailboxType.
 pub fn domain_mailbox_type_to_proto(mailbox_type: &DomainMailboxType) -> i32 {

@@ -14,10 +14,8 @@ use config::ServerConfig;
 use wiring::AppContext;
 
 use mc_interfaces::grpc::proto::{
-    account_service_server::AccountServiceServer,
-    mailbox_service_server::MailboxServiceServer,
-    message_service_server::MessageServiceServer,
-    search_service_server::SearchServiceServer,
+    account_service_server::AccountServiceServer, mailbox_service_server::MailboxServiceServer,
+    message_service_server::MessageServiceServer, search_service_server::SearchServiceServer,
 };
 
 #[tokio::main]
@@ -25,8 +23,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "mc_server=info,mc_application=debug,mc_infrastructure=debug".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "mc_server=info,mc_application=debug,mc_infrastructure=debug".into()
+            }),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -34,8 +33,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("🚀 Starting mail-cat server...");
 
     // Load configuration
-    let config_path = std::env::var("MAIL_CAT_CONFIG")
-        .unwrap_or_else(|_| "config.toml".to_string());
+    let config_path =
+        std::env::var("MAIL_CAT_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
 
     let config = ServerConfig::load_or_default(&config_path);
     tracing::info!("Loaded configuration from {}", config_path);
@@ -50,10 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to initialize application context")?;
 
     // Parse gRPC address
-    let addr = config
-        .grpc_addr
-        .parse()
-        .context("invalid gRPC address")?;
+    let addr = config.grpc_addr.parse().context("invalid gRPC address")?;
 
     tracing::info!("✨ All components initialized successfully");
     tracing::info!("📡 Starting gRPC server on {}...", addr);

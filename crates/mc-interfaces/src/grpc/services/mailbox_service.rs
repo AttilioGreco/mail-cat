@@ -1,17 +1,14 @@
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
-use mc_application::{
-    bus::QueryBus,
-    queries::Query,
-};
-use mc_domain::MailboxId;
-use crate::grpc::proto::{
-    mailbox_service_server::MailboxService, CreateMailboxRequest, CreateMailboxResponse,
-    DeleteMailboxRequest, DeleteMailboxResponse, GetMailboxRequest, GetMailboxResponse,
-    ListMailboxesRequest, ListMailboxesResponse, RenameMailboxRequest, RenameMailboxResponse,
-};
 use crate::grpc::mappers::{application_error_to_status, domain_mailbox_to_proto};
+use crate::grpc::proto::{
+    CreateMailboxRequest, CreateMailboxResponse, DeleteMailboxRequest, DeleteMailboxResponse,
+    GetMailboxRequest, GetMailboxResponse, ListMailboxesRequest, ListMailboxesResponse,
+    RenameMailboxRequest, RenameMailboxResponse, mailbox_service_server::MailboxService,
+};
+use mc_application::{bus::QueryBus, queries::Query};
+use mc_domain::MailboxId;
 
 /// Mailbox service implementation with QueryBus integration.
 pub struct MailboxServiceImpl<Q: QueryBus + 'static> {
@@ -33,7 +30,8 @@ impl<Q: QueryBus + 'static> MailboxService for MailboxServiceImpl<Q> {
         let req = request.into_inner();
 
         let account_id = mc_domain::AccountId::from_uuid(
-            uuid::Uuid::parse_str(&req.account_id).map_err(|e| Status::invalid_argument(e.to_string()))?
+            uuid::Uuid::parse_str(&req.account_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
         );
 
         let query = Query::ListMailboxes { account_id };
@@ -61,7 +59,8 @@ impl<Q: QueryBus + 'static> MailboxService for MailboxServiceImpl<Q> {
         let req = request.into_inner();
 
         let mailbox_id = MailboxId::from_uuid(
-            uuid::Uuid::parse_str(&req.mailbox_id).map_err(|e| Status::invalid_argument(e.to_string()))?
+            uuid::Uuid::parse_str(&req.mailbox_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
         );
 
         let query = Query::GetMailbox { mailbox_id };

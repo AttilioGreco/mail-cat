@@ -1,13 +1,13 @@
+use super::datetime_to_timestamp;
+use crate::grpc::proto::{
+    self, AccountDetail, AccountStatus as ProtoAccountStatus, AccountSummary, AppPasswordAuth,
+    AuthConfig as ProtoAuthConfig, ConnectionConfig as ProtoConnectionConfig, OAuth2Auth,
+    PlainAuth, ProviderType as ProtoProviderType,
+};
 use mc_domain::model::account::{
     Account, AccountStatus as DomainAccountStatus, AuthConfig as DomainAuthConfig,
     ConnectionConfig as DomainConnectionConfig, ProviderType as DomainProviderType,
 };
-use crate::grpc::proto::{
-    self, AccountDetail, AccountStatus as ProtoAccountStatus, AccountSummary,
-    AppPasswordAuth, AuthConfig as ProtoAuthConfig, ConnectionConfig as ProtoConnectionConfig,
-    OAuth2Auth, PlainAuth, ProviderType as ProtoProviderType,
-};
-use super::datetime_to_timestamp;
 
 /// Convert domain ProviderType to proto ProviderType.
 pub fn domain_provider_type_to_proto(provider: &DomainProviderType) -> i32 {
@@ -61,7 +61,7 @@ pub fn domain_auth_to_proto(auth: &DomainAuthConfig) -> ProtoAuthConfig {
             refresh_token,
             expires_at,
         } => Some(proto::auth_config::AuthType::Oauth2(OAuth2Auth {
-            client_id: String::new(), // Not stored in domain model
+            client_id: String::new(),     // Not stored in domain model
             client_secret: String::new(), // Not stored in domain model
             refresh_token: refresh_token.clone(),
             access_token: access_token.clone(),
@@ -88,20 +88,18 @@ pub fn proto_auth_to_domain(auth: &ProtoAuthConfig) -> Result<DomainAuthConfig, 
         }),
         Some(proto::auth_config::AuthType::Oauth2(oauth2)) => {
             use chrono::{DateTime, Utc};
-            let expires_at = DateTime::from_timestamp(oauth2.expires_at, 0)
-                .unwrap_or_else(|| Utc::now());
+            let expires_at =
+                DateTime::from_timestamp(oauth2.expires_at, 0).unwrap_or_else(Utc::now);
             Ok(DomainAuthConfig::OAuth2 {
                 access_token: oauth2.access_token.clone(),
                 refresh_token: oauth2.refresh_token.clone(),
                 expires_at,
             })
         }
-        Some(proto::auth_config::AuthType::AppPassword(app)) => {
-            Ok(DomainAuthConfig::AppPassword {
-                username: app.username.clone(),
-                app_password: app.app_password.clone(),
-            })
-        }
+        Some(proto::auth_config::AuthType::AppPassword(app)) => Ok(DomainAuthConfig::AppPassword {
+            username: app.username.clone(),
+            app_password: app.app_password.clone(),
+        }),
         None => Err("Missing auth type".to_string()),
     }
 }
@@ -119,7 +117,9 @@ pub fn domain_connection_to_proto(config: &DomainConnectionConfig) -> ProtoConne
 }
 
 /// Convert proto ConnectionConfig to domain ConnectionConfig.
-pub fn proto_connection_to_domain(config: &ProtoConnectionConfig) -> Result<DomainConnectionConfig, String> {
+pub fn proto_connection_to_domain(
+    config: &ProtoConnectionConfig,
+) -> Result<DomainConnectionConfig, String> {
     let auth = config
         .auth
         .as_ref()

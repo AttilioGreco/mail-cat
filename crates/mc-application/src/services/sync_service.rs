@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 #[allow(unused_imports)]
 use mc_domain::{
-    AccountId, MailboxId, MessageId, EmailProvider, EventStore, ReadModelProjector, MailboxPath,
-    ProviderUid, Message, DomainError,
+    AccountId, DomainError, EmailProvider, EventStore, MailboxId, MailboxPath, Message, MessageId,
+    ProviderUid, ReadModelProjector,
 };
 use tracing::{debug, error, info, instrument};
 
@@ -78,9 +78,7 @@ pub struct SyncService<P: EmailProvider, ES: EventStore, PR: ReadModelProjector>
     config: SyncConfig,
 }
 
-impl<P: EmailProvider, ES: EventStore, PR: ReadModelProjector>
-    SyncService<P, ES, PR>
-{
+impl<P: EmailProvider, ES: EventStore, PR: ReadModelProjector> SyncService<P, ES, PR> {
     /// Creates a new SyncService with the given dependencies.
     pub fn new(
         email_provider: Arc<P>,
@@ -117,14 +115,10 @@ impl<P: EmailProvider, ES: EventStore, PR: ReadModelProjector>
             message: "Listing mailboxes...".to_string(),
         });
 
-        let mailboxes = self
-            .email_provider
-            .list_mailboxes()
-            .await
-            .map_err(|e| {
-                error!("Failed to list mailboxes: {}", e);
-                ApplicationError::SyncFailed(format!("Failed to list mailboxes: {}", e))
-            })?;
+        let mailboxes = self.email_provider.list_mailboxes().await.map_err(|e| {
+            error!("Failed to list mailboxes: {}", e);
+            ApplicationError::SyncFailed(format!("Failed to list mailboxes: {}", e))
+        })?;
 
         info!("Discovered {} mailboxes", mailboxes.len());
 
@@ -292,8 +286,11 @@ mod tests {
         fn watch_mailbox(
             &self,
             _mailbox: &MailboxPath,
-        ) -> Pin<Box<dyn Stream<Item = Result<mc_domain::ProviderNotification, DomainError>> + Send + '_>>
-        {
+        ) -> Pin<
+            Box<
+                dyn Stream<Item = Result<mc_domain::ProviderNotification, DomainError>> + Send + '_,
+            >,
+        > {
             Box::pin(futures::stream::empty())
         }
     }
@@ -330,9 +327,7 @@ mod tests {
             Ok(vec![])
         }
 
-        fn subscribe(
-            &self,
-        ) -> Pin<Box<dyn Stream<Item = EventEnvelope> + Send + '_>> {
+        fn subscribe(&self) -> Pin<Box<dyn Stream<Item = EventEnvelope> + Send + '_>> {
             Box::pin(futures::stream::empty())
         }
     }
@@ -383,7 +378,11 @@ mod tests {
         let account_id = AccountId::new();
         let events = service.start_sync(&account_id).await.unwrap();
 
-        assert!(events.iter().any(|e| e.state == SyncState::ListingMailboxes));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.state == SyncState::ListingMailboxes)
+        );
         assert!(events.iter().any(|e| e.state == SyncState::Completed));
     }
 }

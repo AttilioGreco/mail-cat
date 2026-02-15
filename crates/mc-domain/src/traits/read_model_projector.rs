@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::DomainError;
 use crate::events::EventEnvelope;
+use async_trait::async_trait;
 
 /// Port for projecting domain events into read models.
 ///

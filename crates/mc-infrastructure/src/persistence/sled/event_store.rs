@@ -17,8 +17,8 @@
 //! The global position counter is stored in sled using `fetch_and_update` for
 //! atomic increments.
 
-use std::pin::Pin;
 use async_trait::async_trait;
+use std::pin::Pin;
 
 use futures::Stream;
 use sled::Db;

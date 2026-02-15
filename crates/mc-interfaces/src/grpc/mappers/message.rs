@@ -1,10 +1,11 @@
-use mc_domain::model::message::{Envelope as DomainEnvelope, Message};
-use mc_domain::model::attachment::Attachment as DomainAttachment;
-use mc_domain::value_objects::flag::Flag as DomainFlag;
-use crate::grpc::proto::{
-    AttachmentInfo, MessageDetail, MessageEnvelope, MessageSummary,
+use super::{
+    datetime_to_timestamp, domain_address_to_proto, domain_flag_to_proto, proto_email_to_domain,
+    proto_flag_to_domain, timestamp_to_datetime,
 };
-use super::{datetime_to_timestamp, timestamp_to_datetime, domain_flag_to_proto, proto_flag_to_domain, domain_address_to_proto, proto_email_to_domain};
+use crate::grpc::proto::{AttachmentInfo, MessageDetail, MessageEnvelope, MessageSummary};
+use mc_domain::model::attachment::Attachment as DomainAttachment;
+use mc_domain::model::message::{Envelope as DomainEnvelope, Message};
+use mc_domain::value_objects::flag::Flag as DomainFlag;
 
 /// Convert domain Envelope to proto MessageEnvelope.
 pub fn domain_envelope_to_proto(envelope: &DomainEnvelope) -> MessageEnvelope {
@@ -13,7 +14,11 @@ pub fn domain_envelope_to_proto(envelope: &DomainEnvelope) -> MessageEnvelope {
         to: envelope.to.iter().map(domain_address_to_proto).collect(),
         cc: envelope.cc.iter().map(domain_address_to_proto).collect(),
         bcc: envelope.bcc.iter().map(domain_address_to_proto).collect(),
-        reply_to: envelope.reply_to.iter().map(domain_address_to_proto).collect(),
+        reply_to: envelope
+            .reply_to
+            .iter()
+            .map(domain_address_to_proto)
+            .collect(),
         subject: envelope.subject.clone(),
         date: Some(datetime_to_timestamp(&envelope.date)),
     }
@@ -25,7 +30,11 @@ pub fn proto_envelope_to_domain(envelope: &MessageEnvelope) -> Result<DomainEnve
     let to: Result<Vec<_>, _> = envelope.to.iter().map(proto_email_to_domain).collect();
     let cc: Result<Vec<_>, _> = envelope.cc.iter().map(proto_email_to_domain).collect();
     let bcc: Result<Vec<_>, _> = envelope.bcc.iter().map(proto_email_to_domain).collect();
-    let reply_to: Result<Vec<_>, _> = envelope.reply_to.iter().map(proto_email_to_domain).collect();
+    let reply_to: Result<Vec<_>, _> = envelope
+        .reply_to
+        .iter()
+        .map(proto_email_to_domain)
+        .collect();
 
     Ok(DomainEnvelope {
         from: from?,
@@ -61,11 +70,7 @@ pub fn domain_message_to_summary(message: &Message) -> MessageSummary {
         account_id: message.account_id.to_string(),
         mailbox_id: message.mailbox_id.to_string(),
         envelope: Some(domain_envelope_to_proto(&message.envelope)),
-        flags: message
-            .flags
-            .iter()
-            .map(domain_flag_to_proto)
-            .collect(),
+        flags: message.flags.iter().map(domain_flag_to_proto).collect(),
         size_bytes: message.size_bytes,
         has_attachments: message.has_attachments,
         received_at: Some(datetime_to_timestamp(&message.received_at)),
@@ -83,11 +88,7 @@ pub fn domain_message_to_detail(message: &Message) -> MessageDetail {
         in_reply_to: message.in_reply_to.clone(),
         references: message.references.clone(),
         envelope: Some(domain_envelope_to_proto(&message.envelope)),
-        flags: message
-            .flags
-            .iter()
-            .map(domain_flag_to_proto)
-            .collect(),
+        flags: message.flags.iter().map(domain_flag_to_proto).collect(),
         size_bytes: message.size_bytes,
         attachments: message
             .attachments
@@ -108,4 +109,29 @@ pub fn proto_flags_to_domain(flags: &[i32]) -> Vec<DomainFlag> {
         .iter()
         .filter_map(|f| proto_flag_to_domain(*f))
         .collect()
+}
+
+/// Convert a SendMessageRequest into a domain OutgoingMessage.
+pub fn proto_send_request_to_outgoing(
+    req: &crate::grpc::proto::SendMessageRequest,
+) -> Result<mc_domain::model::message::OutgoingMessage, String> {
+    let from = req.from.as_ref().ok_or("from address is required")?;
+    let from = proto_email_to_domain(from)?;
+
+    let to: Result<Vec<_>, _> = req.to.iter().map(proto_email_to_domain).collect();
+    let cc: Result<Vec<_>, _> = req.cc.iter().map(proto_email_to_domain).collect();
+    let bcc: Result<Vec<_>, _> = req.bcc.iter().map(proto_email_to_domain).collect();
+
+    Ok(mc_domain::model::message::OutgoingMessage {
+        from,
+        to: to?,
+        cc: cc?,
+        bcc: bcc?,
+        subject: req.subject.clone(),
+        body_text: req.body_text.clone(),
+        body_html: req.body_html.clone(),
+        in_reply_to: req.in_reply_to.clone(),
+        references: req.references.clone(),
+        attachments: vec![],
+    })
 }

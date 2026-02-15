@@ -3,8 +3,8 @@
 //! These wire together the handler modules and dispatch commands/queries
 //! to the appropriate handler methods.
 
-use std::sync::Arc;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use mc_domain::{
     AccountReadRepository, AccountWriteRepository, EmailProvider, EventStore,
