@@ -5,6 +5,7 @@ use anyhow::Context;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::projections::ProjectionEventHandler;
+use mc_application::{SyncService, SyncConfig};
 use mc_infrastructure::{ImapEmailProvider, SledEventStore, SledRepository, TantivySearchIndex};
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
@@ -25,6 +26,7 @@ type QueryBusImpl = InProcessQueryBus<
     SledRepository<SledEventStore>,
     TantivySearchIndex,
 >;
+type SyncServiceImpl = SyncService<ImapEmailProvider, SledEventStore, SledRepository<SledEventStore>>;
 
 /// Application context with all wired dependencies.
 pub struct AppContext {
@@ -32,6 +34,8 @@ pub struct AppContext {
     pub mailbox_service: MailboxServiceImpl<QueryBusImpl>,
     pub message_service: MessageServiceImpl<CommandBusImpl, QueryBusImpl>,
     pub search_service: SearchServiceImpl<QueryBusImpl>,
+    #[allow(dead_code)]
+    pub sync_service: Arc<SyncServiceImpl>,
 }
 
 impl AppContext {
@@ -116,6 +120,20 @@ impl AppContext {
         ));
         tracing::info!("Initialized query bus");
 
+        // Create sync service with default configuration
+        let sync_config = SyncConfig {
+            batch_size: 50,
+            max_concurrent_bodies: 4,
+            eager_body_fetch: false,
+        };
+        let sync_service = Arc::new(SyncService::new(
+            email_provider.clone(),
+            event_store.clone(),
+            repository_arc.clone(),
+            sync_config,
+        ));
+        tracing::info!("Initialized sync service");
+
         // Create projection event handler and start catching up
         let projection_handler = ProjectionEventHandler::new(
             bare_repository.clone(),
@@ -155,6 +173,52 @@ impl AppContext {
             mailbox_service,
             message_service,
             search_service,
+            sync_service,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sync_service_integrated_in_app_context() {
+        // Use in-memory database paths (they will be created by sled)
+        let config = ServerConfig {
+            grpc_addr: "127.0.0.1:50051".to_string(),
+            db_path: "/tmp/test_db_sync".to_string(),
+            index_path: "/tmp/test_index_sync".to_string(),
+            accounts: vec![],
+        };
+
+        // Verify AppContext can be created with wired SyncService
+        let context = match AppContext::new(&config).await {
+            Ok(ctx) => ctx,
+            Err(e) => panic!("failed to create app context: {}", e),
+        };
+
+        // Test that SyncService is available and callable
+        let account_id = mc_domain::AccountId::new();
+        let result = context.sync_service.start_sync(&account_id).await;
+
+        // The actual sync will fail because ImapEmailProvider is not fully
+        // implemented (pending TLS integration), but this verifies that:
+        // 1. SyncService is properly wired in AppContext
+        // 2. Error handling works (SyncFailed error type is used)
+        match result {
+            Ok(_events) => {
+                // If this succeeds in the future when ImapEmailProvider is complete,
+                // we'll verify progress events are emitted
+            }
+            Err(e) => {
+                // Verify that the error is the expected SyncFailed type
+                assert!(
+                    e.to_string().contains("sync failed"),
+                    "error should be SyncFailed: {}",
+                    e
+                );
+            }
+        }
     }
 }
