@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, STORED, Schema, TEXT, Value};
+use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use tracing::{debug, info};
 
@@ -104,10 +104,10 @@ impl TantivySearchIndex {
     fn build_schema() -> Schema {
         let mut schema_builder = Schema::builder();
 
-        // IDs - stored and indexed for filtering
-        schema_builder.add_text_field("message_id", TEXT | STORED);
-        schema_builder.add_text_field("account_id", TEXT | STORED);
-        schema_builder.add_text_field("mailbox_id", TEXT | STORED);
+        // IDs - stored and indexed as exact (non-tokenized) strings for filtering and delete_term
+        schema_builder.add_text_field("message_id", STRING | STORED);
+        schema_builder.add_text_field("account_id", STRING | STORED);
+        schema_builder.add_text_field("mailbox_id", STRING | STORED);
 
         // Email fields - full text search
         schema_builder.add_text_field("subject", TEXT | STORED);
@@ -451,10 +451,7 @@ mod tests {
         assert_eq!(results.hits[0].message_id, msg.id);
     }
 
-    // TODO: Fix delete_term issue - documents remain in search results after delete
-    // The index_message and rebuild tests work correctly
     #[tokio::test]
-    #[ignore]
     async fn test_remove_message() {
         let temp_dir = TempDir::new().unwrap();
         let index = TantivySearchIndex::new(temp_dir.path()).unwrap();
