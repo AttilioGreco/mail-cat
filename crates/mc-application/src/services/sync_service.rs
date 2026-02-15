@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use mc_domain::{
     AccountId, AggregateType, DomainEvent, EmailProvider, EventEnvelope, EventStore, FetchRange,
     Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message, MessageId,
-    ProjectionCheckpoint, ProviderUid, ReadModelProjector,
+    ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
 };
 use tracing::{debug, error, info, instrument, warn};
 
@@ -73,33 +73,33 @@ impl Default for SyncConfig {
 /// Manages the full sync lifecycle: mailbox discovery, envelope fetching,
 /// checkpoint-based resume, and cancellation.
 pub struct SyncService<
-    P: EmailProvider,
+    PR: ProviderRegistry,
     ES: EventStore,
-    PR: ReadModelProjector + MailboxReadRepository + ProjectionCheckpoint,
+    P: ReadModelProjector + MailboxReadRepository + ProjectionCheckpoint,
 > {
-    email_provider: Arc<P>,
+    provider_registry: Arc<PR>,
     event_store: Arc<ES>,
-    projector: Arc<PR>,
+    projector: Arc<P>,
     #[allow(dead_code)]
     config: SyncConfig,
     cancelled: AtomicBool,
 }
 
 impl<
-    P: EmailProvider,
+    PR: ProviderRegistry,
     ES: EventStore,
-    PR: ReadModelProjector + MailboxReadRepository + ProjectionCheckpoint,
-> SyncService<P, ES, PR>
+    P: ReadModelProjector + MailboxReadRepository + ProjectionCheckpoint,
+> SyncService<PR, ES, P>
 {
     /// Creates a new SyncService with the given dependencies.
     pub fn new(
-        email_provider: Arc<P>,
+        provider_registry: Arc<PR>,
         event_store: Arc<ES>,
-        projector: Arc<PR>,
+        projector: Arc<P>,
         config: SyncConfig,
     ) -> Self {
         Self {
-            email_provider,
+            provider_registry,
             event_store,
             projector,
             config,
@@ -122,6 +122,9 @@ impl<
     ) -> Result<Vec<SyncProgressEvent>, ApplicationError> {
         // Reset cancellation flag at start
         self.cancelled.store(false, Ordering::SeqCst);
+
+        // Resolve the provider for this account
+        let provider = self.provider_registry.get_provider(account_id)?;
 
         let mut progress = vec![];
         let mut mailboxes_synced = 0u32;
@@ -148,7 +151,7 @@ impl<
             message: "Listing mailboxes...".to_string(),
         });
 
-        let remote_mailboxes = self.email_provider.list_mailboxes().await.map_err(|e| {
+        let remote_mailboxes = provider.list_mailboxes().await.map_err(|e| {
             error!("Failed to list mailboxes: {}", e);
             ApplicationError::SyncFailed(format!("Failed to list mailboxes: {e}"))
         })?;
@@ -215,7 +218,7 @@ impl<
             });
 
             // Get remote status (uid_validity, uid_next)
-            let status = match self.email_provider.mailbox_status(&remote.path).await {
+            let status = match provider.mailbox_status(&remote.path).await {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(path = %remote.path, error = %e, "Failed to get mailbox status, skipping");
@@ -285,11 +288,7 @@ impl<
                 "Fetching envelopes"
             );
 
-            let envelopes = match self
-                .email_provider
-                .fetch_message_envelopes(&remote.path, range)
-                .await
-            {
+            let envelopes = match provider.fetch_message_envelopes(&remote.path, range).await {
                 Ok(e) => e,
                 Err(e) => {
                     warn!(path = %remote.path, error = %e, "Failed to fetch envelopes, skipping");
@@ -398,15 +397,16 @@ impl<
     #[instrument(skip(self))]
     pub async fn fetch_message_body(
         &self,
-        _account_id: &AccountId,
+        account_id: &AccountId,
         mailbox_path: &MailboxPath,
         message_id: &MessageId,
         provider_uid: ProviderUid,
     ) -> Result<Option<Message>, ApplicationError> {
         debug!("Fetching message body");
 
-        let fetched = self
-            .email_provider
+        let provider = self.provider_registry.get_provider(account_id)?;
+
+        let fetched = provider
             .fetch_message_detail(mailbox_path, provider_uid)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("Failed to fetch body: {e}")))?;
@@ -631,6 +631,33 @@ mod tests {
         }
     }
 
+    // ── Mock ProviderRegistry ──────────────────────────────────────────
+
+    struct MockProviderRegistry {
+        provider: Arc<MockEmailProvider>,
+    }
+
+    impl MockProviderRegistry {
+        fn new(provider: Arc<MockEmailProvider>) -> Self {
+            Self { provider }
+        }
+    }
+
+    impl ProviderRegistry for MockProviderRegistry {
+        type Provider = MockEmailProvider;
+
+        fn get_provider(
+            &self,
+            _account_id: &AccountId,
+        ) -> Result<Arc<MockEmailProvider>, mc_domain::DomainError> {
+            Ok(self.provider.clone())
+        }
+
+        fn register_provider(&self, _account_id: AccountId, _provider: Arc<MockEmailProvider>) {}
+
+        fn remove_provider(&self, _account_id: &AccountId) {}
+    }
+
     // ── Mock EventStore ───────────────────────────────────────────────
 
     struct MockEventStore {
@@ -827,13 +854,9 @@ mod tests {
         provider: MockEmailProvider,
         event_store: Arc<MockEventStore>,
         projector: Arc<MockProjector>,
-    ) -> SyncService<MockEmailProvider, MockEventStore, MockProjector> {
-        SyncService::new(
-            Arc::new(provider),
-            event_store,
-            projector,
-            SyncConfig::default(),
-        )
+    ) -> SyncService<MockProviderRegistry, MockEventStore, MockProjector> {
+        let registry = Arc::new(MockProviderRegistry::new(Arc::new(provider)));
+        SyncService::new(registry, event_store, projector, SyncConfig::default())
     }
 
     // ── Tests ─────────────────────────────────────────────────────────

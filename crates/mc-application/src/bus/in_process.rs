@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountReadRepository, AccountWriteRepository, EmailProvider, EventStore,
-    MailboxReadRepository, MessageReadRepository, SearchIndex,
+    AccountReadRepository, AccountWriteRepository, EventStore, MailboxReadRepository,
+    MessageReadRepository, ProviderRegistry, SearchIndex,
 };
 
 use crate::commands::{Command, CommandResult};
@@ -23,43 +23,43 @@ use super::QueryBus;
 use super::event_bus::EventPublisher;
 
 /// In-process command bus that dispatches to Account and Message handlers.
-pub struct InProcessCommandBus<AW, ES, EP, B>
+pub struct InProcessCommandBus<AW, ES, PR, B>
 where
     AW: AccountWriteRepository,
     ES: EventStore,
-    EP: EmailProvider,
+    PR: ProviderRegistry,
     B: EventPublisher,
 {
     account_handler: AccountCommandHandler<AW, B>,
-    message_handler: MessageCommandHandler<ES, EP, B>,
+    message_handler: MessageCommandHandler<ES, PR, B>,
 }
 
-impl<AW, ES, EP, B> InProcessCommandBus<AW, ES, EP, B>
+impl<AW, ES, PR, B> InProcessCommandBus<AW, ES, PR, B>
 where
     AW: AccountWriteRepository,
     ES: EventStore,
-    EP: EmailProvider,
+    PR: ProviderRegistry,
     B: EventPublisher,
 {
     pub fn new(
         account_write_repo: Arc<AW>,
         event_store: Arc<ES>,
-        email_provider: Arc<EP>,
+        provider_registry: Arc<PR>,
         event_bus: Arc<B>,
     ) -> Self {
         Self {
             account_handler: AccountCommandHandler::new(account_write_repo, event_bus.clone()),
-            message_handler: MessageCommandHandler::new(event_store, email_provider, event_bus),
+            message_handler: MessageCommandHandler::new(event_store, provider_registry, event_bus),
         }
     }
 }
 
 #[async_trait]
-impl<AW, ES, EP, B> CommandBus for InProcessCommandBus<AW, ES, EP, B>
+impl<AW, ES, PR, B> CommandBus for InProcessCommandBus<AW, ES, PR, B>
 where
     AW: AccountWriteRepository,
     ES: EventStore,
-    EP: EmailProvider,
+    PR: ProviderRegistry,
     B: EventPublisher,
 {
     async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {

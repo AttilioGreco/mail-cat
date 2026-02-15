@@ -29,6 +29,7 @@ pub use traits::email_provider::{
     EmailProvider, FetchRange, MailboxStatus, MessageEnvelopeSummary, ProviderNotification,
 };
 pub use traits::event_store::EventStore;
+pub use traits::provider_registry::ProviderRegistry;
 pub use traits::read_model_projector::ReadModelProjector;
 pub use traits::repository::{
     AccountReadRepository, AccountSummary, AccountWriteRepository, MailboxReadRepository,

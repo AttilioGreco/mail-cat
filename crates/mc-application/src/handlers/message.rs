@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use mc_domain::{
     AccountId, AggregateType, DomainEvent, EmailProvider, Envelope, EventEnvelope, EventStore,
-    Flag, MailboxId, MailboxPath, Message, MessageId, OutgoingMessage,
+    Flag, MailboxId, MailboxPath, Message, MessageId, OutgoingMessage, ProviderRegistry,
 };
 use tracing::info;
 
@@ -22,18 +22,19 @@ use crate::error::ApplicationError;
 /// Handles Message-related commands.
 ///
 /// Works directly with the EventStore for message aggregate persistence
-/// (pure ES pattern). Uses EmailProvider for remote operations.
-pub struct MessageCommandHandler<ES: EventStore, EP: EmailProvider, B: EventPublisher> {
+/// (pure ES pattern). Uses ProviderRegistry to resolve the correct
+/// EmailProvider per account for remote operations.
+pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> {
     event_store: Arc<ES>,
-    email_provider: Arc<EP>,
+    provider_registry: Arc<PR>,
     event_bus: Arc<B>,
 }
 
-impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler<ES, EP, B> {
-    pub fn new(event_store: Arc<ES>, email_provider: Arc<EP>, event_bus: Arc<B>) -> Self {
+impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHandler<ES, PR, B> {
+    pub fn new(event_store: Arc<ES>, provider_registry: Arc<PR>, event_bus: Arc<B>) -> Self {
         Self {
             event_store,
-            email_provider,
+            provider_registry,
             event_bus,
         }
     }
@@ -49,9 +50,10 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
             ApplicationError::PreconditionFailed("message has no provider UID".into())
         })?;
 
+        let provider = self.provider_registry.get_provider(&message.account_id)?;
+
         // Fetch full message from the remote provider.
-        let detail = self
-            .email_provider
+        let detail = provider
             .fetch_message_detail(&mailbox_path, provider_uid)
             .await?;
 
@@ -81,8 +83,10 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
             ApplicationError::PreconditionFailed("message has no provider UID".into())
         })?;
 
+        let provider = self.provider_registry.get_provider(&message.account_id)?;
+
         // Update flags on the remote provider first.
-        self.email_provider
+        provider
             .set_flags(&mailbox_path, provider_uid, &flags_to_add, &flags_to_remove)
             .await?;
 
@@ -109,9 +113,10 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
             ApplicationError::PreconditionFailed("message has no provider UID".into())
         })?;
 
+        let provider = self.provider_registry.get_provider(&message.account_id)?;
+
         // Move on the remote provider.
-        let _new_uid = self
-            .email_provider
+        let _new_uid = provider
             .move_message(provider_uid, &from_mailbox_path, &to_mailbox_path)
             .await?;
 
@@ -137,8 +142,10 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
             ApplicationError::PreconditionFailed("message has no provider UID".into())
         })?;
 
+        let provider = self.provider_registry.get_provider(&message.account_id)?;
+
         // Delete on the remote provider.
-        self.email_provider
+        provider
             .delete_message(&mailbox_path, provider_uid, permanently)
             .await?;
 
@@ -156,8 +163,10 @@ impl<ES: EventStore, EP: EmailProvider, B: EventPublisher> MessageCommandHandler
         account_id: AccountId,
         outgoing: OutgoingMessage,
     ) -> Result<CommandResult, ApplicationError> {
+        let provider = self.provider_registry.get_provider(&account_id)?;
+
         // Send via the provider (SMTP or API).
-        self.email_provider.send_message(&outgoing).await?;
+        provider.send_message(&outgoing).await?;
 
         let message_id = MessageId::new();
         let envelope = Envelope {
@@ -443,6 +452,33 @@ mod tests {
         }
     }
 
+    // ── Mock ProviderRegistry ──────────────────────────────────────────
+
+    struct MockProviderRegistry {
+        provider: Arc<MockEmailProvider>,
+    }
+
+    impl MockProviderRegistry {
+        fn new(provider: Arc<MockEmailProvider>) -> Self {
+            Self { provider }
+        }
+    }
+
+    impl ProviderRegistry for MockProviderRegistry {
+        type Provider = MockEmailProvider;
+
+        fn get_provider(
+            &self,
+            _account_id: &AccountId,
+        ) -> Result<Arc<MockEmailProvider>, DomainError> {
+            Ok(self.provider.clone())
+        }
+
+        fn register_provider(&self, _account_id: AccountId, _provider: Arc<MockEmailProvider>) {}
+
+        fn remove_provider(&self, _account_id: &AccountId) {}
+    }
+
     // ── Mock EventBus ──────────────────────────────────────────────────
 
     struct MockEventBus {
@@ -514,9 +550,11 @@ mod tests {
         let msg_id = msg.id.clone();
 
         let es = Arc::new(MockEventStore::with_message(&msg));
-        let ep = Arc::new(MockEmailProvider::new());
+        let registry = Arc::new(MockProviderRegistry::new(
+            Arc::new(MockEmailProvider::new()),
+        ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, ep, bus.clone());
+        let handler = MessageCommandHandler::new(es, registry, bus.clone());
 
         let result = handler
             .handle_set_flags(msg_id, MailboxPath::inbox(), vec![Flag::Seen], vec![])
@@ -533,9 +571,11 @@ mod tests {
         let msg_id = msg.id.clone();
 
         let es = Arc::new(MockEventStore::with_message(&msg));
-        let ep = Arc::new(MockEmailProvider::new());
+        let registry = Arc::new(MockProviderRegistry::new(
+            Arc::new(MockEmailProvider::new()),
+        ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, ep, bus.clone());
+        let handler = MessageCommandHandler::new(es, registry, bus.clone());
 
         let result = handler
             .handle_move(
@@ -559,9 +599,11 @@ mod tests {
         let mbx_id = msg.mailbox_id.clone();
 
         let es = Arc::new(MockEventStore::with_message(&msg));
-        let ep = Arc::new(MockEmailProvider::new());
+        let registry = Arc::new(MockProviderRegistry::new(
+            Arc::new(MockEmailProvider::new()),
+        ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, ep, bus.clone());
+        let handler = MessageCommandHandler::new(es, registry, bus.clone());
 
         let result = handler
             .handle_delete(msg_id, mbx_id, MailboxPath::inbox(), false)
@@ -575,9 +617,11 @@ mod tests {
     #[tokio::test]
     async fn handle_nonexistent_message_returns_not_found() {
         let es = Arc::new(MockEventStore::new());
-        let ep = Arc::new(MockEmailProvider::new());
+        let registry = Arc::new(MockProviderRegistry::new(
+            Arc::new(MockEmailProvider::new()),
+        ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, ep, bus);
+        let handler = MessageCommandHandler::new(es, registry, bus);
 
         let err = handler
             .handle_set_flags(
@@ -594,10 +638,13 @@ mod tests {
 
     #[tokio::test]
     async fn handle_send_produces_sent_event() {
+        let account_id = AccountId::new();
         let es = Arc::new(MockEventStore::new());
-        let ep = Arc::new(MockEmailProvider::new());
+        let registry = Arc::new(MockProviderRegistry::new(
+            Arc::new(MockEmailProvider::new()),
+        ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, ep, bus.clone());
+        let handler = MessageCommandHandler::new(es, registry, bus.clone());
 
         let outgoing = OutgoingMessage {
             from: Address {
@@ -618,10 +665,7 @@ mod tests {
             attachments: vec![],
         };
 
-        let result = handler
-            .handle_send(AccountId::new(), outgoing)
-            .await
-            .unwrap();
+        let result = handler.handle_send(account_id, outgoing).await.unwrap();
 
         assert!(matches!(result, CommandResult::MessageSent { .. }));
         assert_eq!(bus.last_event_name().unwrap(), "MessageSent");

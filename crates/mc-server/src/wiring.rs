@@ -1,23 +1,28 @@
 //! Dependency injection and application wiring.
 
 use anyhow::Context;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::projections::ProjectionEventHandler;
 use mc_application::{SyncConfig, SyncService};
-use mc_infrastructure::{ImapEmailProvider, SledEventStore, SledRepository, TantivySearchIndex};
+use mc_domain::{AccountReadRepository, ProviderRegistry};
+use mc_infrastructure::{
+    ImapEmailProvider, InMemoryProviderRegistry, SledEventStore, SledRepository, TantivySearchIndex,
+};
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
 };
 
 use crate::config::ServerConfig;
 
-// Type aliases for concrete bus implementations
+// Type aliases for concrete implementations
+type ProviderRegistryImpl = InMemoryProviderRegistry<ImapEmailProvider>;
 type CommandBusImpl = InProcessCommandBus<
     SledRepository<SledEventStore>,
     SledEventStore,
-    ImapEmailProvider,
+    ProviderRegistryImpl,
     InProcessEventBus,
 >;
 type QueryBusImpl = InProcessQueryBus<
@@ -27,7 +32,7 @@ type QueryBusImpl = InProcessQueryBus<
     TantivySearchIndex,
 >;
 type SyncServiceImpl =
-    SyncService<ImapEmailProvider, SledEventStore, SledRepository<SledEventStore>>;
+    SyncService<ProviderRegistryImpl, SledEventStore, SledRepository<SledEventStore>>;
 
 /// Application context with all wired dependencies.
 pub struct AppContext {
@@ -37,6 +42,8 @@ pub struct AppContext {
     pub search_service: SearchServiceImpl<QueryBusImpl>,
     #[allow(dead_code)]
     pub sync_service: Arc<SyncServiceImpl>,
+    #[allow(dead_code)]
+    pub provider_registry: Arc<ProviderRegistryImpl>,
 }
 
 impl AppContext {
@@ -66,11 +73,12 @@ impl AppContext {
         );
         tracing::info!("Initialized search index at {}", config.index_path);
 
-        // Create email provider (using first account config for now)
-        // TODO: Support multiple accounts with a provider factory
-        let email_provider = if let Some(account_config) = config.accounts.first() {
-            tracing::info!("Initializing IMAP provider for {}", account_config.email);
-            Arc::new(ImapEmailProvider::new(
+        // Create provider registry and build providers from config
+        let provider_registry = Arc::new(InMemoryProviderRegistry::new());
+        let mut providers_by_email: HashMap<String, Arc<ImapEmailProvider>> = HashMap::new();
+        for account_config in &config.accounts {
+            tracing::info!("Creating IMAP provider for {}", account_config.email);
+            let provider = Arc::new(ImapEmailProvider::new(
                 account_config.imap_host.clone(),
                 account_config.imap_port,
                 account_config.username.clone(),
@@ -79,21 +87,13 @@ impl AppContext {
                 account_config.smtp_host.clone(),
                 account_config.smtp_port,
                 account_config.use_tls, // Use same TLS setting for SMTP
-            ))
-        } else {
-            tracing::warn!("No email accounts configured, using mock provider");
-            // For now, create a dummy provider (in production this would error)
-            Arc::new(ImapEmailProvider::new(
-                "localhost".to_string(),
-                993,
-                "user".to_string(),
-                "pass".to_string(),
-                false,
-                "smtp.localhost".to_string(),
-                587,
-                false,
-            ))
-        };
+            ));
+            providers_by_email.insert(account_config.email.clone(), provider);
+        }
+        tracing::info!(
+            "Created {} email provider(s) from config",
+            providers_by_email.len()
+        );
 
         // ── Application Layer ───────────────────────────────────────────────
 
@@ -105,7 +105,7 @@ impl AppContext {
         let command_bus = Arc::new(InProcessCommandBus::new(
             repository_arc.clone(),
             event_store.clone(),
-            email_provider.clone(),
+            provider_registry.clone(),
             event_bus.clone(),
         ));
         tracing::info!("Initialized command bus");
@@ -126,7 +126,7 @@ impl AppContext {
             eager_body_fetch: false,
         };
         let sync_service = Arc::new(SyncService::new(
-            email_provider.clone(),
+            provider_registry.clone(),
             event_store.clone(),
             repository_arc.clone(),
             sync_config,
@@ -145,6 +145,34 @@ impl AppContext {
             .await
             .context("failed to catch up projections")?;
         tracing::info!("Projections caught up successfully");
+
+        // Match existing accounts from read model to config and register providers
+        let accounts = repository_arc.list_accounts().await.unwrap_or_default();
+        let mut registered = 0u32;
+        for account in &accounts {
+            if let Some(provider) = providers_by_email.remove(account.email.as_str()) {
+                provider_registry.register_provider(account.id.clone(), provider);
+                tracing::info!(
+                    "Registered provider for account '{}' ({})",
+                    account.name,
+                    account.email
+                );
+                registered += 1;
+            }
+        }
+        if registered > 0 {
+            tracing::info!(
+                "Registered {} provider(s) for existing accounts",
+                registered
+            );
+        }
+        if !providers_by_email.is_empty() {
+            tracing::warn!(
+                "{} configured account(s) have no matching account in the database \
+                 (create via AddAccount gRPC, then restart to register provider)",
+                providers_by_email.len()
+            );
+        }
 
         // ── Interface Layer ─────────────────────────────────────────────────
 
@@ -165,6 +193,7 @@ impl AppContext {
             message_service,
             search_service,
             sync_service,
+            provider_registry,
         })
     }
 }
@@ -183,7 +212,7 @@ mod tests {
             accounts: vec![],
         };
 
-        // Verify AppContext can be created with wired SyncService
+        // Verify AppContext can be created with wired dependencies
         let context = match AppContext::new(&config).await {
             Ok(ctx) => ctx,
             Err(e) => panic!("failed to create app context: {}", e),
@@ -193,20 +222,18 @@ mod tests {
         let account_id = mc_domain::AccountId::new();
         let result = context.sync_service.start_sync(&account_id).await;
 
-        // The actual sync will fail because ImapEmailProvider is not fully
-        // implemented (pending TLS integration), but this verifies that:
-        // 1. SyncService is properly wired in AppContext
-        // 2. Error handling works (SyncFailed error type is used)
+        // With no providers registered, this should fail with a provider error
         match result {
             Ok(_events) => {
-                // If this succeeds in the future when ImapEmailProvider is complete,
+                // If this succeeds in the future with registered providers,
                 // we'll verify progress events are emitted
             }
             Err(e) => {
-                // Verify that the error is the expected SyncFailed type
+                // Verify that the error mentions provider not found
+                let msg = e.to_string();
                 assert!(
-                    e.to_string().contains("sync failed"),
-                    "error should be SyncFailed: {}",
+                    msg.contains("no provider registered") || msg.contains("sync failed"),
+                    "unexpected error: {}",
                     e
                 );
             }
