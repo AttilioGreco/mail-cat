@@ -1,13 +1,16 @@
 //! Dependency injection and application wiring.
 
 use anyhow::Context;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::projections::ProjectionEventHandler;
-use mc_application::{SyncConfig, SyncService};
-use mc_domain::{AccountReadRepository, ProviderRegistry};
+use mc_application::{SyncConfig, SyncService, SyncTrigger};
+use mc_domain::{
+    Account, AccountId, AccountReadRepository, AccountWriteRepository, AuthConfig,
+    ConnectionConfig, EmailAddress, Identity, ProviderRegistry, ProviderType,
+};
 use mc_infrastructure::{
     ImapEmailProvider, InMemoryProviderRegistry, SledEventStore, SledRepository, TantivySearchIndex,
 };
@@ -146,38 +149,124 @@ impl AppContext {
             .context("failed to catch up projections")?;
         tracing::info!("Projections caught up successfully");
 
-        // Match existing accounts from read model to config and register providers
-        let accounts = repository_arc.list_accounts().await.unwrap_or_default();
-        let mut registered = 0u32;
-        for account in &accounts {
-            if let Some(provider) = providers_by_email.remove(account.email.as_str()) {
-                provider_registry.register_provider(account.id.clone(), provider);
+        // ── Auto-create accounts from config ─────────────────────────────
+        let existing_accounts = repository_arc.list_accounts().await.unwrap_or_default();
+        let existing_emails: HashSet<String> = existing_accounts
+            .iter()
+            .map(|a| a.email.as_str().to_string())
+            .collect();
+
+        let mut registered_ids: Vec<(AccountId, String)> = Vec::new();
+        let mut created_new = false;
+
+        for account_config in &config.accounts {
+            let provider = providers_by_email
+                .remove(&account_config.email)
+                .expect("provider must exist for config account");
+
+            if existing_emails.contains(&account_config.email) {
+                // Already in DB — just register the provider
+                let summary = existing_accounts
+                    .iter()
+                    .find(|a| a.email.as_str() == account_config.email)
+                    .unwrap();
+                provider_registry.register_provider(summary.id.clone(), provider);
                 tracing::info!(
-                    "Registered provider for account '{}' ({})",
-                    account.name,
-                    account.email
+                    "Registered provider for existing account '{}' ({})",
+                    summary.name,
+                    summary.email
                 );
-                registered += 1;
+                registered_ids.push((summary.id.clone(), summary.name.clone()));
+            } else {
+                // Not in DB — create via aggregate + save
+                let email =
+                    EmailAddress::new(&account_config.email).context("invalid email in config")?;
+                let provider_type: ProviderType = account_config.provider_type.into();
+                let connection_config = ConnectionConfig {
+                    imap_host: Some(account_config.imap_host.clone()),
+                    imap_port: Some(account_config.imap_port),
+                    smtp_host: Some(account_config.smtp_host.clone()),
+                    smtp_port: Some(account_config.smtp_port),
+                    use_tls: account_config.use_tls,
+                    auth: AuthConfig::Plain {
+                        username: account_config.username.clone(),
+                        password: account_config.password.clone(),
+                    },
+                };
+                let identity = Identity {
+                    display_name: account_config.name.clone(),
+                    email: email.clone(),
+                    signature_html: None,
+                    signature_text: None,
+                };
+
+                let (account, event) = Account::create(
+                    account_config.name.clone(),
+                    email,
+                    provider_type,
+                    connection_config,
+                    identity,
+                );
+                let account_id = account.id.clone();
+
+                repository_arc
+                    .save(&account, vec![event])
+                    .await
+                    .context("failed to auto-create account")?;
+
+                provider_registry.register_provider(account_id.clone(), provider);
+                tracing::info!(
+                    "Auto-created account '{}' ({}) and registered provider",
+                    account_config.name,
+                    account_config.email
+                );
+                registered_ids.push((account_id, account_config.name.clone()));
+                created_new = true;
             }
         }
-        if registered > 0 {
-            tracing::info!(
-                "Registered {} provider(s) for existing accounts",
-                registered
-            );
+
+        // Re-run projection catch-up if new accounts were created
+        if created_new {
+            tracing::info!("Re-running projection catch-up for newly created accounts...");
+            projection_handler
+                .catch_up(event_store.as_ref())
+                .await
+                .context("failed to catch up projections after account creation")?;
+            tracing::info!("Projections caught up after account creation");
         }
-        if !providers_by_email.is_empty() {
-            tracing::warn!(
-                "{} configured account(s) have no matching account in the database \
-                 (create via AddAccount gRPC, then restart to register provider)",
-                providers_by_email.len()
+
+        // ── Auto-sync registered accounts in background ─────────────────
+        for (account_id, name) in &registered_ids {
+            let sync = sync_service.clone();
+            let id = account_id.clone();
+            let account_name = name.clone();
+            tokio::spawn(async move {
+                match sync.start_sync(&id).await {
+                    Ok(events) => {
+                        tracing::info!(
+                            "Background sync done for '{}': {} event(s)",
+                            account_name,
+                            events.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Background sync failed for '{}': {}", account_name, e);
+                    }
+                }
+            });
+        }
+        if !registered_ids.is_empty() {
+            tracing::info!(
+                "Launched background sync for {} account(s)",
+                registered_ids.len()
             );
         }
 
         // ── Interface Layer ─────────────────────────────────────────────────
 
         // Create gRPC services
-        let account_service = AccountServiceImpl::new(command_bus.clone(), query_bus.clone());
+        let account_service = AccountServiceImpl::new(command_bus.clone(), query_bus.clone())
+            .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>);
 
         let mailbox_service = MailboxServiceImpl::new(query_bus.clone());
 

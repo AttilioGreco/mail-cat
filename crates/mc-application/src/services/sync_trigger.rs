@@ -1,0 +1,20 @@
+//! Thin trait for triggering account sync from the interface layer.
+//!
+//! `SyncTrigger` is object-safe (`Arc<dyn SyncTrigger>`) so that gRPC services
+//! don't need to thread `SyncService`'s three generic parameters.
+
+use async_trait::async_trait;
+
+use mc_domain::AccountId;
+
+use crate::error::ApplicationError;
+use crate::services::sync_service::SyncProgressEvent;
+
+/// Trigger an email sync for a given account.
+#[async_trait]
+pub trait SyncTrigger: Send + Sync {
+    async fn trigger_sync(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Vec<SyncProgressEvent>, ApplicationError>;
+}

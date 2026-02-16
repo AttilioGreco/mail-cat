@@ -9,10 +9,11 @@ use crate::grpc::mappers::{
 use crate::grpc::proto::{
     self, AddAccountRequest, AddAccountResponse, GetAccountRequest, GetAccountResponse,
     ListAccountsRequest, ListAccountsResponse, RemoveAccountRequest, RemoveAccountResponse,
-    SyncAccountRequest, SyncProgressEvent, UpdateAccountRequest, UpdateAccountResponse,
+    SyncAccountRequest, UpdateAccountRequest, UpdateAccountResponse,
     account_service_server::AccountService,
 };
 use mc_application::{
+    SyncState, SyncTrigger,
     bus::{CommandBus, QueryBus},
     commands::{Command, CommandResult},
     queries::Query,
@@ -23,6 +24,7 @@ use mc_domain::{AccountId, Identity};
 pub struct AccountServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
     command_bus: Arc<C>,
     query_bus: Arc<Q>,
+    sync_trigger: Option<Arc<dyn SyncTrigger>>,
 }
 
 impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
@@ -30,7 +32,13 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
         Self {
             command_bus,
             query_bus,
+            sync_trigger: None,
         }
+    }
+
+    pub fn with_sync_trigger(mut self, trigger: Arc<dyn SyncTrigger>) -> Self {
+        self.sync_trigger = Some(trigger);
+        self
     }
 }
 
@@ -228,7 +236,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         Ok(Response::new(RemoveAccountResponse { success: true }))
     }
 
-    type SyncAccountStream = ReceiverStream<Result<SyncProgressEvent, Status>>;
+    type SyncAccountStream = ReceiverStream<Result<proto::SyncProgressEvent, Status>>;
 
     async fn sync_account(
         &self,
@@ -241,17 +249,47 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
                 .map_err(|e| Status::invalid_argument(e.to_string()))?,
         );
 
-        let command = Command::SyncAccount { account_id };
+        let sync_trigger = self
+            .sync_trigger
+            .clone()
+            .ok_or_else(|| Status::unavailable("sync service not configured"))?;
 
-        // Dispatch sync command (fire and forget for now)
-        self.command_bus
-            .dispatch(command)
-            .await
-            .map_err(application_error_to_status)?;
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
 
-        // TODO Day 13: Implement progress streaming with EventSubscriber
-        // For now, return empty stream
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            match sync_trigger.trigger_sync(&account_id).await {
+                Ok(events) => {
+                    for event in events {
+                        let proto_event = proto::SyncProgressEvent {
+                            account_id: account_id.to_string(),
+                            phase: sync_state_to_phase(&event.state),
+                            mailbox_name: None,
+                            processed: event.processed,
+                            total: Some(event.total),
+                            message: Some(event.message),
+                        };
+                        if tx.send(Ok(proto_event)).await.is_err() {
+                            break; // client disconnected
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                }
+            }
+        });
+
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+fn sync_state_to_phase(state: &SyncState) -> i32 {
+    match state {
+        SyncState::Idle => proto::SyncPhase::Unspecified as i32,
+        SyncState::ListingMailboxes => proto::SyncPhase::DiscoveringMailboxes as i32,
+        SyncState::FetchingEnvelopes { .. } => proto::SyncPhase::FetchingEnvelopes as i32,
+        SyncState::FetchingMessageBody { .. } => proto::SyncPhase::FetchingBodies as i32,
+        SyncState::Completed => proto::SyncPhase::Complete as i32,
+        SyncState::Failed => proto::SyncPhase::Error as i32,
     }
 }

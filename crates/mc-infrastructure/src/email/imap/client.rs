@@ -137,24 +137,253 @@ impl ImapEmailProvider {
 #[async_trait]
 impl EmailProvider for ImapEmailProvider {
     async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
-        debug!("Listing mailboxes (Day 8 stub)");
-        // Day 9: Full implementation with async-imap
-        Err(DomainError::Provider(
-            "list_mailboxes implementation pending full TLS integration (Day 9)".to_string(),
-        ))
+        use async_compat::CompatExt;
+        use futures::stream::StreamExt;
+        use mc_domain::model::account::AccountId;
+        use mc_domain::model::mailbox::MailboxId;
+
+        debug!("Listing mailboxes");
+        let mut session = self.create_imap_session().await?;
+
+        // Get mailbox list as stream and collect into Vec
+        let mailbox_stream = CompatExt::compat(session.list(None, Some("*")))
+            .await
+            .map_err(|e| DomainError::Provider(format!("List mailboxes failed: {}", e)))?;
+
+        // Collect stream results
+        let mailbox_list: Vec<Result<_, _>> = mailbox_stream.collect().await;
+
+        // Logout
+        CompatExt::compat(session.logout())
+            .await
+            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+
+        // Convert IMAP mailbox names to Mailbox objects
+        let mut mailboxes = Vec::new();
+        for result in mailbox_list {
+            let mb = result.map_err(|e| DomainError::Provider(format!("Mailbox name error: {}", e)))?;
+
+            let imap_name = mb.name();
+            let delimiter_str = mb.delimiter().unwrap_or("/");
+            let delimiter = delimiter_str.chars().next().unwrap_or('/');
+
+            // Parse mailbox path
+            let path = super::mapper::parse_mailbox_path(imap_name, delimiter)?;
+
+            // Infer mailbox type
+            let mailbox_type = super::mapper::infer_mailbox_type(imap_name);
+
+            // Create placeholder Mailbox - account_id and id will be set during sync
+            let mailbox = Mailbox {
+                id: MailboxId::new(),
+                account_id: AccountId::new(), // Placeholder, will be updated during sync
+                path,
+                display_name: imap_name.to_string(),
+                mailbox_type,
+                flags: Vec::new(),
+                total_messages: 0,
+                unread_messages: 0,
+                uid_validity: None,
+                uid_next: None,
+            };
+
+            mailboxes.push(mailbox);
+        }
+
+        info!("Listed {} mailboxes", mailboxes.len());
+        Ok(mailboxes)
     }
 
     async fn fetch_message_envelopes(
         &self,
-        _mailbox: &MailboxPath,
-        _range: FetchRange,
+        mailbox: &MailboxPath,
+        range: FetchRange,
     ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
-        debug!("Fetching envelopes (Day 8 stub)");
-        // Day 9: Full implementation
-        Err(DomainError::Provider(
-            "fetch_message_envelopes implementation pending full TLS integration (Day 9)"
-                .to_string(),
-        ))
+        use async_compat::CompatExt;
+        use futures::stream::StreamExt;
+
+        debug!("Fetching envelopes from mailbox: {:?}", mailbox);
+        let mut session = self.create_imap_session().await?;
+
+        // Select mailbox
+        let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
+        CompatExt::compat(session.select(&mailbox_name))
+            .await
+            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
+
+        // Build UID range query
+        let uid_query = match range {
+            FetchRange::All => "1:*".to_string(),
+            FetchRange::UidRange { from, to } => format!("{}:{}", from, to),
+            FetchRange::Last(n) => {
+                // Fetch last N: request from (max-n+1):*
+                format!("{}:*", std::cmp::max(1, (1_000_000_u32).saturating_sub(n)))
+            }
+            FetchRange::Since(_date) => {
+                // Will use SEARCH instead for Since
+                String::new()
+            }
+        };
+
+        // Special handling for Since - use SEARCH instead of FETCH
+        let actual_query = if let FetchRange::Since(date) = range {
+            // Use SEARCH to get UIDs since date
+            let search_results = CompatExt::compat(session.uid_search(&format!("SINCE {}", date.format("%d-%b-%Y"))))
+                .await
+                .map_err(|e| DomainError::Provider(format!("Search failed: {}", e)))?;
+
+            if search_results.is_empty() {
+                CompatExt::compat(session.logout()).await.ok();
+                return Ok(Vec::new());
+            }
+
+            search_results
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            uid_query
+        };
+
+        // Fetch envelopes and basic headers
+        let fetch_stream = CompatExt::compat(
+            session.uid_fetch(&actual_query, "ENVELOPE BODYSTRUCTURE")
+        )
+        .await
+        .map_err(|e| DomainError::Provider(format!("Fetch envelopes failed: {}", e)))?;
+
+        // Collect fetch results
+        let fetch_results: Vec<Result<_, _>> = fetch_stream.collect().await;
+
+        let mut envelopes = Vec::new();
+        for result in fetch_results {
+            let fetch_data = result.map_err(|e| DomainError::Provider(format!("Fetch error: {}", e)))?;
+            
+            if let Some(envelope_data) = fetch_data.envelope() {
+                let provider_uid = ProviderUid::new(fetch_data.uid.ok_or_else(|| {
+                    DomainError::Provider("Missing UID in fetch response".to_string())
+                })?);
+
+                // Convert IMAP envelope to domain Envelope
+                let from: Vec<mc_domain::Address> = envelope_data
+                    .from
+                    .as_ref()
+                    .map(|addrs| {
+                        addrs
+                            .iter()
+                            .filter_map(|addr| {
+                                let mailbox_part = addr.mailbox.as_ref()?;
+                                let host = addr.host.as_ref()?;
+                                let email_str = format!(
+                                    "{}@{}",
+                                    String::from_utf8_lossy(mailbox_part),
+                                    String::from_utf8_lossy(host)
+                                );
+                                let email = mc_domain::value_objects::email_address::EmailAddress::new(&email_str).ok()?;
+                                let name = addr.name.as_ref().map(|n| String::from_utf8_lossy(n).to_string());
+                                Some(mc_domain::Address { email, name })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let to: Vec<mc_domain::Address> = envelope_data
+                    .to
+                    .as_ref()
+                    .map(|addrs| {
+                        addrs
+                            .iter()
+                            .filter_map(|addr| {
+                                let mailbox_part = addr.mailbox.as_ref()?;
+                                let host = addr.host.as_ref()?;
+                                let email_str = format!(
+                                    "{}@{}",
+                                    String::from_utf8_lossy(mailbox_part),
+                                    String::from_utf8_lossy(host)
+                                );
+                                let email = mc_domain::value_objects::email_address::EmailAddress::new(&email_str).ok()?;
+                                let name = addr.name.as_ref().map(|n| String::from_utf8_lossy(n).to_string());
+                                Some(mc_domain::Address { email, name })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let cc: Vec<mc_domain::Address> = envelope_data
+                    .cc
+                    .as_ref()
+                    .map(|addrs| {
+                        addrs
+                            .iter()
+                            .filter_map(|addr| {
+                                let mailbox_part = addr.mailbox.as_ref()?;
+                                let host = addr.host.as_ref()?;
+                                let email_str = format!(
+                                    "{}@{}",
+                                    String::from_utf8_lossy(mailbox_part),
+                                    String::from_utf8_lossy(host)
+                                );
+                                let email = mc_domain::value_objects::email_address::EmailAddress::new(&email_str).ok()?;
+                                let name = addr.name.as_ref().map(|n| String::from_utf8_lossy(n).to_string());
+                                Some(mc_domain::Address { email, name })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let subject = envelope_data
+                    .subject
+                    .as_ref()
+                    .map(|s| String::from_utf8_lossy(s).to_string())
+                    .unwrap_or_default();
+
+                // Parse date
+                let date = envelope_data
+                    .date
+                    .as_ref()
+                    .and_then(|date_bytes| {
+                        let date_str = String::from_utf8_lossy(date_bytes);
+                        chrono::DateTime::parse_from_rfc2822(&date_str)
+                            .ok()
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                    })
+                    .unwrap_or_else(|| chrono::Utc::now());
+
+                let envelope = mc_domain::Envelope {
+                    from,
+                    to,
+                    cc,
+                    bcc: Vec::new(), // IMAP doesn't provide BCC in envelope
+                    reply_to: Vec::new(), // TODO: extract from headers if needed
+                    subject,
+                    date,
+                };
+
+                // Check for attachments in body structure
+                let has_attachments = false; // TODO: properly detect attachments from body structure
+
+                let summary = MessageEnvelopeSummary {
+                    provider_uid,
+                    message_rfc_id: None, // TODO: extract from headers if available
+                    envelope,
+                    flags: Vec::new(), // TODO: extract from fetch_data.flags()
+                    size_bytes: 0, // TODO: get from RFC822.SIZE
+                    has_attachments,
+                    internal_date: chrono::Utc::now(), // TODO: use INTERNALDATE from fetch
+                };
+
+                envelopes.push(summary);
+            }
+        }
+
+        // Logout
+        CompatExt::compat(session.logout())
+            .await
+            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+
+        info!("Fetched {} envelopes", envelopes.len());
+        Ok(envelopes)
     }
 
     async fn fetch_message_detail(

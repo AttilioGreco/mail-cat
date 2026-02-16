@@ -1,0 +1,15 @@
+grpc_addr = "127.0.0.1:50051"
+db_path = "./data/mail-cat.db"
+index_path = "./data/search-index"
+
+[[accounts]]
+name = "Crazy Linux"
+email = "attilio.greco@crazylinux.it"
+provider_type = "imap"
+imap_host = "mail.crazylinux.it"
+imap_port = 993
+smtp_host = "mail.crazylinux.it"
+smtp_port = 587
+use_tls = true
+username = "attilio.greco@crazylinux.it"
+password = "3NtOERgtqxRdTRJ4"

@@ -18,4 +18,4 @@ pub use commands::{Command, CommandResult};
 pub use error::ApplicationError;
 pub use projections::ProjectionEventHandler;
 pub use queries::{Query, QueryResult};
-pub use services::{SyncConfig, SyncProgressEvent, SyncService, SyncState};
+pub use services::{SyncConfig, SyncProgressEvent, SyncService, SyncState, SyncTrigger};

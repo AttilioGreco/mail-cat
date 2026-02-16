@@ -45,6 +45,16 @@ pub enum ProviderTypeConfig {
     OutlookApi,
 }
 
+impl From<ProviderTypeConfig> for mc_domain::ProviderType {
+    fn from(config: ProviderTypeConfig) -> Self {
+        match config {
+            ProviderTypeConfig::Imap => Self::Imap,
+            ProviderTypeConfig::GmailApi => Self::GmailApi,
+            ProviderTypeConfig::OutlookApi => Self::OutlookApi,
+        }
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
