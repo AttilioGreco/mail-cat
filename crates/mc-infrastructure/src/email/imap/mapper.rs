@@ -156,6 +156,20 @@ pub fn flag_to_imap(flag: &Flag) -> String {
     }
 }
 
+/// Convert async-imap Flag enum to domain Flag.
+pub fn imap_flag_to_domain(flag: &async_imap::types::Flag<'_>) -> Option<Flag> {
+    match flag {
+        async_imap::types::Flag::Seen => Some(Flag::Seen),
+        async_imap::types::Flag::Answered => Some(Flag::Answered),
+        async_imap::types::Flag::Flagged => Some(Flag::Flagged),
+        async_imap::types::Flag::Deleted => Some(Flag::Deleted),
+        async_imap::types::Flag::Draft => Some(Flag::Draft),
+        async_imap::types::Flag::Recent => Some(Flag::Recent),
+        async_imap::types::Flag::Custom(s) => Some(Flag::Custom(s.to_string())),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
