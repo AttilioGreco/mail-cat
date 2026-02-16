@@ -19,6 +19,7 @@ use mc_domain::{
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::error::ApplicationError;
+use crate::services::sync_trigger::SyncTrigger;
 
 /// Tracks the state of a sync operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,6 +494,21 @@ impl<
         };
         self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
             .await
+    }
+}
+
+#[async_trait::async_trait]
+impl<
+    PR: ProviderRegistry,
+    ES: EventStore,
+    P: ReadModelProjector + MailboxReadRepository + ProjectionCheckpoint,
+> SyncTrigger for SyncService<PR, ES, P>
+{
+    async fn trigger_sync(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Vec<SyncProgressEvent>, ApplicationError> {
+        self.start_sync(account_id).await
     }
 }
 
