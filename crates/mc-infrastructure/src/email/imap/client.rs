@@ -3,7 +3,6 @@ use std::pin::Pin;
 use async_imap::types::Seq;
 use async_trait::async_trait;
 use futures::Stream;
-use native_tls::TlsConnector;
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
@@ -22,10 +21,8 @@ use super::mapper::{flag_to_imap, mailbox_path_to_string};
 
 /// IMAP email provider implementation.
 ///
-/// Day 8 NOTE: This is a structural implementation focusing on the EmailProvider trait
-/// and mapper layer. Full connection management with TLS will be completed in integration.
-/// The async-imap crate uses async-std internally, requiring compatibility layers
-/// with tokio which will be handled in Day 9.
+/// Uses async-native-tls for TLS (natively futures-compatible with async-imap).
+/// tokio TcpStream is wrapped via tokio_util::compat before passing to async-native-tls.
 pub struct ImapEmailProvider {
     host: String,
     port: u16,
@@ -81,18 +78,14 @@ impl ImapEmailProvider {
         )
     }
 
-    /// Create an authenticated IMAP session.
-    ///
-    /// Day 9: Uses async-compat and tokio-util compat to bridge async-imap (async-std) with tokio.
     async fn create_imap_session(
         &self,
     ) -> Result<
         async_imap::Session<
-            tokio_util::compat::Compat<tokio_native_tls::TlsStream<tokio::net::TcpStream>>,
+            async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>,
         >,
         DomainError,
     > {
-        use async_compat::CompatExt;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         info!(
@@ -100,28 +93,23 @@ impl ImapEmailProvider {
             self.host, self.port, self.use_tls
         );
 
-        // Connect with TLS
+        // Connect TCP, then wrap with compat for futures AsyncRead/Write compatibility
         let tcp_stream = tokio::net::TcpStream::connect((&self.host as &str, self.port))
             .await
             .map_err(|e| DomainError::Provider(format!("TCP connection failed: {}", e)))?;
+        let compat_stream = tcp_stream.compat();
 
-        let tls = TlsConnector::builder()
-            .build()
-            .map_err(|e| DomainError::Provider(format!("TLS setup failed: {}", e)))?;
-
-        let tls_stream = tokio_native_tls::TlsConnector::from(tls)
-            .connect(&self.host, tcp_stream)
+        // TLS via async-native-tls (natively futures-compatible, no compat needed)
+        let tls = async_native_tls::TlsConnector::new();
+        let tls_stream = tls
+            .connect(&self.host, compat_stream)
             .await
             .map_err(|e| DomainError::Provider(format!("TLS connection failed: {}", e)))?;
 
-        // Wrap with compat to convert tokio AsyncRead/Write to futures AsyncRead/Write
-        let compat_stream = TokioAsyncReadCompatExt::compat(tls_stream);
-
-        // Create IMAP client
-        let client = async_imap::Client::new(compat_stream);
-
-        // Login with async-compat wrapper (wraps async-std future for tokio)
-        let session = CompatExt::compat(client.login(&self.username, &self.password))
+        // Create IMAP client and login
+        let client = async_imap::Client::new(tls_stream);
+        let session = client
+            .login(&self.username, &self.password)
             .await
             .map_err(|e| DomainError::Provider(format!("IMAP authentication failed: {:?}", e.0)))?;
 
@@ -205,7 +193,6 @@ impl ImapEmailProvider {
 #[async_trait]
 impl EmailProvider for ImapEmailProvider {
     async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
-        use async_compat::CompatExt;
         use futures::stream::StreamExt;
         use mc_domain::model::account::AccountId;
         use mc_domain::model::mailbox::MailboxId;
@@ -213,19 +200,15 @@ impl EmailProvider for ImapEmailProvider {
         debug!("Listing mailboxes");
         let mut session = self.create_imap_session().await?;
 
-        // Wrap list + stream consumption in single compat context
-        // (async-imap streams use async-std I/O internally)
-        let mailbox_list: Vec<Result<_, _>> = CompatExt::compat(async {
-            let stream = session
-                .list(None, Some("*"))
-                .await
-                .map_err(|e| DomainError::Provider(format!("List mailboxes failed: {}", e)))?;
-            Ok::<_, DomainError>(stream.collect::<Vec<_>>().await)
-        })
-        .await?;
+        let stream = session
+            .list(None, Some("*"))
+            .await
+            .map_err(|e| DomainError::Provider(format!("List mailboxes failed: {}", e)))?;
+        let mailbox_list: Vec<Result<_, _>> = stream.collect::<Vec<_>>().await;
 
         // Logout
-        CompatExt::compat(session.logout())
+        session
+            .logout()
             .await
             .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
 
@@ -271,15 +254,12 @@ impl EmailProvider for ImapEmailProvider {
         mailbox: &MailboxPath,
         range: FetchRange,
     ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
-        use async_compat::CompatExt;
-        use futures::stream::StreamExt;
-
         debug!("Fetching envelopes from mailbox: {:?}", mailbox);
         let mut session = self.create_imap_session().await?;
 
         // Select mailbox
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
-        CompatExt::compat(session.select(&mailbox_name))
+        session.select(&mailbox_name)
             .await
             .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
 
@@ -292,13 +272,14 @@ impl EmailProvider for ImapEmailProvider {
         };
 
         debug!("Executing UID SEARCH with criteria: {}", search_criteria);
-        let search_results = CompatExt::compat(session.uid_search(&search_criteria))
+        let search_results = session
+            .uid_search(&search_criteria)
             .await
             .map_err(|e| DomainError::Provider(format!("Search failed: {}", e)))?;
 
         if search_results.is_empty() {
             debug!("No messages found matching search criteria");
-            CompatExt::compat(session.logout()).await.ok();
+            session.logout().await.ok();
             return Ok(Vec::new());
         }
 
@@ -323,28 +304,22 @@ impl EmailProvider for ImapEmailProvider {
             let query = Self::compress_uid_ranges(chunk);
             debug!("Batch {}: fetching {} UIDs (query: {})", batch_idx, chunk.len(), &query[..query.len().min(100)]);
 
-            // Critical: wrap BOTH uid_fetch AND stream consumption in a SINGLE compat context.
-            // async-imap uses async-std I/O internally; the stream returned by uid_fetch
-            // holds a &mut reference to the session's connection and reads lazily.
-            // If we split into two compat contexts, the stream's I/O fails silently under tokio.
-            let batch_results: Vec<Result<async_imap::types::Fetch, _>> =
-                CompatExt::compat(async {
-                    let stream = session
-                        .uid_fetch(&query, "ENVELOPE FLAGS INTERNALDATE")
-                        .await
-                        .map_err(|e| {
-                            DomainError::Provider(format!("Fetch envelopes failed: {}", e))
-                        })?;
-                    Ok::<_, DomainError>(stream.collect::<Vec<_>>().await)
-                })
-                .await?;
+            use futures::TryStreamExt;
+            let batch_results: Vec<async_imap::types::Fetch> = session
+                .uid_fetch(&query, "(ENVELOPE FLAGS INTERNALDATE)")
+                .await
+                .map_err(|e| {
+                    DomainError::Provider(format!("Fetch envelopes failed: {}", e))
+                })?
+                .try_collect()
+                .await
+                .map_err(|e| {
+                    DomainError::Provider(format!("Fetch stream error: {}", e))
+                })?;
 
-            debug!("Batch {}: collected {} fetch results", batch_idx, batch_results.len());
+            debug!("Batch {}: fetched {} envelopes", batch_idx, batch_results.len());
 
-            for result in batch_results {
-                let fetch_data = result
-                    .map_err(|e| DomainError::Provider(format!("Fetch error: {}", e)))?;
-
+            for fetch_data in &batch_results {
                 if let Some(envelope_data) = fetch_data.envelope() {
                     let provider_uid = ProviderUid::new(fetch_data.uid.ok_or_else(|| {
                         DomainError::Provider("Missing UID in fetch response".to_string())
@@ -410,7 +385,8 @@ impl EmailProvider for ImapEmailProvider {
         }
 
         // Logout
-        CompatExt::compat(session.logout())
+        session
+            .logout()
             .await
             .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
 
@@ -449,7 +425,6 @@ impl EmailProvider for ImapEmailProvider {
         flags_to_add: &[Flag],
         flags_to_remove: &[Flag],
     ) -> Result<(), DomainError> {
-        use async_compat::CompatExt;
 
         info!(
             "Setting flags for message {} in mailbox {}",
@@ -461,7 +436,7 @@ impl EmailProvider for ImapEmailProvider {
 
         // Select mailbox
         let mailbox_name = mailbox_path_to_string(mailbox);
-        CompatExt::compat(session.select(&mailbox_name))
+        session.select(&mailbox_name)
             .await
             .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
 
@@ -472,11 +447,10 @@ impl EmailProvider for ImapEmailProvider {
             let flags_str: Vec<String> = flags_to_add.iter().map(flag_to_imap).collect();
             let flags_query = flags_str.join(" ");
 
-            let _ = CompatExt::compat(
-                session.uid_store(format!("{}", seq), format!("+FLAGS ({})", flags_query)),
-            )
-            .await
-            .map_err(|e| DomainError::Provider(format!("Add flags failed: {}", e)))?;
+            let _ = session
+                .uid_store(format!("{}", seq), format!("+FLAGS ({})", flags_query))
+                .await
+                .map_err(|e| DomainError::Provider(format!("Add flags failed: {}", e)))?;
 
             debug!("Added flags: {}", flags_query);
         }
@@ -486,17 +460,17 @@ impl EmailProvider for ImapEmailProvider {
             let flags_str: Vec<String> = flags_to_remove.iter().map(flag_to_imap).collect();
             let flags_query = flags_str.join(" ");
 
-            let _ = CompatExt::compat(
-                session.uid_store(format!("{}", seq), format!("-FLAGS ({})", flags_query)),
-            )
-            .await
-            .map_err(|e| DomainError::Provider(format!("Remove flags failed: {}", e)))?;
+            let _ = session
+                .uid_store(format!("{}", seq), format!("-FLAGS ({})", flags_query))
+                .await
+                .map_err(|e| DomainError::Provider(format!("Remove flags failed: {}", e)))?;
 
             debug!("Removed flags: {}", flags_query);
         }
 
         // Logout
-        CompatExt::compat(session.logout())
+        session
+            .logout()
             .await
             .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
 
@@ -510,7 +484,6 @@ impl EmailProvider for ImapEmailProvider {
         from: &MailboxPath,
         to: &MailboxPath,
     ) -> Result<Option<ProviderUid>, DomainError> {
-        use async_compat::CompatExt;
 
         info!(
             "Moving message {} from {} to {}",
@@ -523,7 +496,8 @@ impl EmailProvider for ImapEmailProvider {
 
         // Select source mailbox
         let from_name = mailbox_path_to_string(from);
-        CompatExt::compat(session.select(&from_name))
+        session
+            .select(&from_name)
             .await
             .map_err(|e| DomainError::Provider(format!("Source mailbox select failed: {}", e)))?;
 
@@ -531,22 +505,26 @@ impl EmailProvider for ImapEmailProvider {
         let to_name = mailbox_path_to_string(to);
 
         // Copy to destination
-        CompatExt::compat(session.uid_copy(format!("{}", seq), &to_name))
+        session
+            .uid_copy(format!("{}", seq), &to_name)
             .await
             .map_err(|e| DomainError::Provider(format!("Copy failed: {}", e)))?;
 
         // Mark as deleted in source
-        let _ = CompatExt::compat(session.uid_store(format!("{}", seq), "+FLAGS (\\Deleted)"))
+        let _ = session
+            .uid_store(format!("{}", seq), "+FLAGS (\\Deleted)")
             .await
             .map_err(|e| DomainError::Provider(format!("Delete flag failed: {}", e)))?;
 
         // Expunge to remove from source
-        let _ = CompatExt::compat(session.expunge())
+        let _ = session
+            .expunge()
             .await
             .map_err(|e| DomainError::Provider(format!("Expunge failed: {}", e)))?;
 
         // Logout
-        CompatExt::compat(session.logout())
+        session
+            .logout()
             .await
             .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
 
@@ -562,7 +540,6 @@ impl EmailProvider for ImapEmailProvider {
         uid: ProviderUid,
         permanently: bool,
     ) -> Result<(), DomainError> {
-        use async_compat::CompatExt;
 
         info!(
             "Deleting message {} from {} (permanent: {})",
@@ -575,20 +552,22 @@ impl EmailProvider for ImapEmailProvider {
 
         // Select mailbox
         let mailbox_name = mailbox_path_to_string(mailbox);
-        CompatExt::compat(session.select(&mailbox_name))
+        session.select(&mailbox_name)
             .await
             .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
 
         let seq = Self::uid_to_seq(&uid);
 
         // Mark as deleted
-        let _ = CompatExt::compat(session.uid_store(format!("{}", seq), "+FLAGS (\\Deleted)"))
+        let _ = session
+            .uid_store(format!("{}", seq), "+FLAGS (\\Deleted)")
             .await
             .map_err(|e| DomainError::Provider(format!("Delete flag failed: {}", e)))?;
 
         // If permanent deletion, expunge
         if permanently {
-            let _ = CompatExt::compat(session.expunge())
+            let _ = session
+                .expunge()
                 .await
                 .map_err(|e| DomainError::Provider(format!("Expunge failed: {}", e)))?;
             debug!("Message permanently deleted via expunge");
@@ -597,7 +576,8 @@ impl EmailProvider for ImapEmailProvider {
         }
 
         // Logout
-        CompatExt::compat(session.logout())
+        session
+            .logout()
             .await
             .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
 
@@ -612,19 +592,20 @@ impl EmailProvider for ImapEmailProvider {
     }
 
     async fn mailbox_status(&self, mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError> {
-        use async_compat::CompatExt;
 
         debug!("Getting mailbox status for: {:?}", mailbox);
         let mut session = self.create_imap_session().await?;
 
         // Select mailbox to get status
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
-        let mailbox_data = CompatExt::compat(session.select(&mailbox_name))
+        let mailbox_data = session
+            .select(&mailbox_name)
             .await
             .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
 
         // Logout
-        CompatExt::compat(session.logout())
+        session
+            .logout()
             .await
             .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
 
@@ -655,13 +636,12 @@ impl EmailProvider for ImapEmailProvider {
         let password = self.password.clone();
 
         Box::pin(async_stream::stream! {
-            use async_compat::CompatExt;
             use tokio_util::compat::TokioAsyncReadCompatExt;
 
             info!("Starting IMAP IDLE watch for mailbox: {}", mailbox_name);
 
             loop {
-                // Create session
+                // Connect TCP + TLS via async_native_tls (same as create_imap_session)
                 let tcp_stream = match tokio::net::TcpStream::connect((&host as &str, port)).await {
                     Ok(stream) => stream,
                     Err(e) => {
@@ -672,20 +652,9 @@ impl EmailProvider for ImapEmailProvider {
                     }
                 };
 
-                let tls = match TlsConnector::builder().build() {
-                    Ok(tls) => tls,
-                    Err(e) => {
-                        warn!("Watch TLS setup failed: {}", e);
-                        yield Err(DomainError::Provider(format!("TLS setup failed: {}", e)));
-                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                        continue;
-                    }
-                };
-
-                let tls_stream = match tokio_native_tls::TlsConnector::from(tls)
-                    .connect(&host, tcp_stream)
-                    .await
-                {
+                let compat_stream = TokioAsyncReadCompatExt::compat(tcp_stream);
+                let tls = async_native_tls::TlsConnector::new();
+                let tls_stream = match tls.connect(&host, compat_stream).await {
                     Ok(stream) => stream,
                     Err(e) => {
                         warn!("Watch TLS connection failed: {}", e);
@@ -695,11 +664,9 @@ impl EmailProvider for ImapEmailProvider {
                     }
                 };
 
-                // Wrap with compat for async-imap
-                let compat_stream = TokioAsyncReadCompatExt::compat(tls_stream);
-                let client = async_imap::Client::new(compat_stream);
+                let client = async_imap::Client::new(tls_stream);
 
-                let mut session = match CompatExt::compat(client.login(&username, &password)).await {
+                let mut session = match client.login(&username, &password).await {
                     Ok(session) => session,
                     Err(e) => {
                         warn!("Watch login failed: {:?}", e);
@@ -710,12 +677,12 @@ impl EmailProvider for ImapEmailProvider {
                 };
 
                 // Select mailbox
-                let _select_result = match CompatExt::compat(session.select(&mailbox_name)).await {
+                let _select_result = match session.select(&mailbox_name).await {
                     Ok(mb) => mb,
                     Err(e) => {
                         warn!("Watch mailbox select failed: {}", e);
                         yield Err(DomainError::Provider(format!("Mailbox select failed: {}", e)));
-                        let _ = CompatExt::compat(session.logout()).await;
+                        let _ = session.logout().await;
                         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                         continue;
                     }
@@ -725,20 +692,18 @@ impl EmailProvider for ImapEmailProvider {
                 let mut idle = session.idle();
 
                 // Wait for IDLE events with timeout
-                // wait_with_timeout returns (future, StopSource), we need the first element
                 let (wait_future, _stop_source) = idle.wait_with_timeout(std::time::Duration::from_secs(29 * 60));
-                let idle_response = match CompatExt::compat(wait_future).await {
+                let idle_response = match wait_future.await {
                     Ok(response) => response,
                     Err(e) => {
                         warn!("IDLE wait failed: {}", e);
-                        // Try to recover session and continue
                         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                         continue;
                     }
                 };
 
                 // Get session back
-                session = match CompatExt::compat(idle.done()).await {
+                session = match idle.done().await {
                     Ok(session) => session,
                     Err(e) => {
                         warn!("IDLE done failed: {}", e);
@@ -751,11 +716,11 @@ impl EmailProvider for ImapEmailProvider {
                 debug!("IDLE activity detected: {:?}", idle_response);
 
                 // Get updated mailbox status
-                let updated_mb = match CompatExt::compat(session.select(&mailbox_name)).await {
+                let updated_mb = match session.select(&mailbox_name).await {
                     Ok(mb) => mb,
                     Err(e) => {
                         warn!("Failed to get updated mailbox status: {}", e);
-                        let _ = CompatExt::compat(session.logout()).await;
+                        let _ = session.logout().await;
                         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                         continue;
                     }
@@ -767,7 +732,7 @@ impl EmailProvider for ImapEmailProvider {
                     Ok(path) => path,
                     Err(_) => {
                         warn!("Failed to parse mailbox path");
-                        let _ = CompatExt::compat(session.logout()).await;
+                        let _ = session.logout().await;
                         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                         continue;
                     }
@@ -781,7 +746,7 @@ impl EmailProvider for ImapEmailProvider {
                 });
 
                 // Logout
-                let _ = CompatExt::compat(session.logout()).await;
+                let _ = session.logout().await;
 
                 // Small delay before reconnecting
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;

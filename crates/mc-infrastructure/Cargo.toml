@@ -12,9 +12,8 @@ sled = { workspace = true }
 tantivy = { workspace = true }
 lettre = { workspace = true }
 async-imap = { workspace = true }
+async-native-tls = { workspace = true }
 mailparse = { workspace = true }
-native-tls = { workspace = true }
-tokio-native-tls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -24,7 +23,6 @@ futures = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 tokio-util = { workspace = true }
-async-compat = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }

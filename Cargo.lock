@@ -104,19 +104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-compat"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1ba85bc55464dcbf728b56d97e119d673f4cf9062be330a9a26f3acf504a590"
-dependencies = [
- "futures-core",
- "futures-io",
- "once_cell",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "async-compression"
 version = "0.4.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -269,6 +256,18 @@ dependencies = [
  "event-listener 5.4.1",
  "event-listener-strategy",
  "pin-project-lite",
+]
+
+[[package]]
+name = "async-native-tls"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9343dc5acf07e79ff82d0c37899f079db3534d99f189a1837c8e549c99405bec"
+dependencies = [
+ "futures-util",
+ "native-tls",
+ "thiserror 1.0.69",
+ "url",
 ]
 
 [[package]]
@@ -1705,8 +1704,8 @@ name = "mc-infrastructure"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compat",
  "async-imap",
+ "async-native-tls",
  "async-stream",
  "async-trait",
  "chrono",
@@ -1715,7 +1714,6 @@ dependencies = [
  "mailparse",
  "mc-domain",
  "mc-shared",
- "native-tls",
  "parking_lot 0.12.5",
  "serde",
  "serde_json",
@@ -1724,7 +1722,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-native-tls",
  "tokio-util",
  "tracing",
  "uuid",
