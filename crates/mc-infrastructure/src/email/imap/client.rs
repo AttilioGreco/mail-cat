@@ -579,12 +579,36 @@ impl EmailProvider for ImapEmailProvider {
         sender.send(message).await
     }
 
-    async fn mailbox_status(&self, _mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError> {
-        debug!("Getting mailbox status (Day 8 stub)");
-        // Day 9: Full implementation
-        Err(DomainError::Provider(
-            "mailbox_status implementation pending full TLS integration (Day 9)".to_string(),
-        ))
+    async fn mailbox_status(&self, mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError> {
+        use async_compat::CompatExt;
+
+        debug!("Getting mailbox status for: {:?}", mailbox);
+        let mut session = self.create_imap_session().await?;
+
+        // Select mailbox to get status
+        let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
+        let mailbox_data = CompatExt::compat(session.select(&mailbox_name))
+            .await
+            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
+
+        // Logout
+        CompatExt::compat(session.logout())
+            .await
+            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+
+        // Convert IMAP mailbox data to MailboxStatus
+        let status = MailboxStatus {
+            uid_validity: mailbox_data.uid_validity.unwrap_or(0),
+            uid_next: mailbox_data.uid_next.unwrap_or(0),
+            total_messages: mailbox_data.exists,
+            unseen_messages: mailbox_data.unseen.unwrap_or(0),
+        };
+
+        info!(
+            "Mailbox status: total={}, unseen={}, uid_validity={}, uid_next={}",
+            status.total_messages, status.unseen_messages, status.uid_validity, status.uid_next
+        );
+        Ok(status)
     }
 
     fn watch_mailbox(
