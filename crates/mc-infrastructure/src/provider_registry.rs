@@ -123,6 +123,12 @@ mod tests {
                 unseen_messages: 0,
             })
         }
+        async fn fetch_uid_flags(
+            &self,
+            _mailbox: &MailboxPath,
+        ) -> Result<Vec<mc_domain::traits::email_provider::UidFlagEntry>, DomainError> {
+            Ok(vec![])
+        }
         fn watch_mailbox(
             &self,
             _mailbox: &MailboxPath,
@@ -130,6 +136,13 @@ mod tests {
             Box<dyn futures::Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>,
         > {
             Box::pin(futures::stream::empty())
+        }
+        async fn fetch_bodies_bulk(
+            &self,
+            _mailbox: &MailboxPath,
+            _uids: &[ProviderUid],
+        ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError> {
+            Ok(vec![])
         }
     }
 

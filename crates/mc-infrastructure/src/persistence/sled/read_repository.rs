@@ -22,7 +22,7 @@ use mc_domain::{
     Account, AccountId, AccountReadRepository, AccountStatus, AccountSummary,
     AccountWriteRepository, DomainError, DomainEvent, EventEnvelope, EventStore, Flag, Mailbox,
     MailboxId, MailboxReadRepository, Message, MessageId, MessageReadRepository, MessageSummary,
-    ProjectionCheckpoint, ReadModelProjector,
+    ProjectionCheckpoint, ProviderUid, ReadModelProjector,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -256,6 +256,24 @@ impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
         // Full threading (by References/In-Reply-To) is a future enhancement.
         let msg = self.get_message(message_id).await?;
         Ok(msg.into_iter().collect())
+    }
+
+    async fn find_by_provider_uid(
+        &self,
+        mailbox_id: &MailboxId,
+        provider_uid: u32,
+    ) -> Result<Option<MessageSummary>, DomainError> {
+        let tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
+        let prefix = format!("{}:", mailbox_id);
+        for item in tree.scan_prefix(prefix.as_bytes()) {
+            let (_key, value) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let summary: MessageSummary = serde_json::from_slice(&value)
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            if summary.provider_uid == Some(ProviderUid::new(provider_uid)) {
+                return Ok(Some(summary));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -886,6 +904,14 @@ impl<ES: EventStore> MessageReadRepository for SharedSledRepository<ES> {
 
     async fn get_thread(&self, message_id: &MessageId) -> Result<Vec<Message>, DomainError> {
         self.0.get_thread(message_id).await
+    }
+
+    async fn find_by_provider_uid(
+        &self,
+        mailbox_id: &MailboxId,
+        provider_uid: u32,
+    ) -> Result<Option<MessageSummary>, DomainError> {
+        self.0.find_by_provider_uid(mailbox_id, provider_uid).await
     }
 }
 

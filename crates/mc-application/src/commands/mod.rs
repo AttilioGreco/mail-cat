@@ -7,6 +7,7 @@ use mc_domain::{
     AccountId, ConnectionConfig, EmailAddress, Flag, Identity, MailboxId, MailboxPath, MessageId,
     OutgoingMessage, ProviderType,
 };
+pub use mc_domain::value_objects::uid::ProviderUid;
 
 /// All write-side commands in the application.
 #[derive(Debug, Clone)]
@@ -80,6 +81,15 @@ pub enum Command {
 
     /// Discard a draft.
     DiscardDraft { message_id: MessageId },
+
+    /// Apply a flag change that originated from a remote IMAP client (e.g. IDLE notification).
+    /// Does NOT call the provider — flags are already changed on the server.
+    /// Only updates the local projection.
+    ApplyRemoteFlagChange {
+        mailbox_id: MailboxId,
+        provider_uid: ProviderUid,
+        new_flags: Vec<Flag>,
+    },
 }
 
 /// Result of a successfully dispatched command.
@@ -96,4 +106,5 @@ pub enum CommandResult {
     MessageSent { message_id: MessageId },
     DraftSaved { message_id: MessageId },
     DraftDiscarded,
+    RemoteFlagApplied,
 }

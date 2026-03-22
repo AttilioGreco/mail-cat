@@ -9,8 +9,24 @@ name = "mail-cat-ui"
 path = "src/main.rs"
 
 [dependencies]
-tonic = { workspace = true }
-prost = { workspace = true }
-tokio = { workspace = true }
+# Tauri
+tauri = { version = "2.2", features = ["devtools"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Client SDK
+mc-client = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+
+# Error handling
 anyhow = { workspace = true }
+
+# Logging
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+tauri-build = { version = "2.2", features = [] }

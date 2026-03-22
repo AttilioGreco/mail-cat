@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use mc_domain::{
     AccountId, AggregateType, DomainEvent, EmailProvider, Envelope, EventEnvelope, EventStore,
-    Flag, MailboxId, MailboxPath, Message, MessageId, OutgoingMessage, ProviderRegistry,
+    Flag, MailboxId, MailboxPath, Message, MessageId, MessageReadRepository, OutgoingMessage,
+    ProviderRegistry, ReadModelProjector, value_objects::uid::ProviderUid,
 };
 use tracing::info;
 
@@ -24,17 +25,26 @@ use crate::error::ApplicationError;
 /// Works directly with the EventStore for message aggregate persistence
 /// (pure ES pattern). Uses ProviderRegistry to resolve the correct
 /// EmailProvider per account for remote operations.
-pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> {
+pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector, B: EventPublisher> {
     event_store: Arc<ES>,
     provider_registry: Arc<PR>,
+    message_read_repo: Arc<MR>,
     event_bus: Arc<B>,
 }
 
-impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHandler<ES, PR, B> {
-    pub fn new(event_store: Arc<ES>, provider_registry: Arc<PR>, event_bus: Arc<B>) -> Self {
+impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector, B: EventPublisher>
+    MessageCommandHandler<ES, PR, MR, B>
+{
+    pub fn new(
+        event_store: Arc<ES>,
+        provider_registry: Arc<PR>,
+        message_read_repo: Arc<MR>,
+        event_bus: Arc<B>,
+    ) -> Self {
         Self {
             event_store,
             provider_registry,
+            message_read_repo,
             event_bus,
         }
     }
@@ -44,7 +54,7 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
         message_id: MessageId,
         mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
-        let mut message = self.load_message(&message_id).await?;
+        let (mut message, seq) = self.load_message(&message_id).await?;
 
         let provider_uid = message.provider_uid.ok_or_else(|| {
             ApplicationError::PreconditionFailed("message has no provider UID".into())
@@ -63,7 +73,7 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
             detail.attachments.clone(),
         );
 
-        self.append_and_publish(&message_id, AggregateType::Message, event)
+        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
         info!(%message_id, "message body fetched");
@@ -77,7 +87,7 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
         flags_to_add: Vec<Flag>,
         flags_to_remove: Vec<Flag>,
     ) -> Result<CommandResult, ApplicationError> {
-        let mut message = self.load_message(&message_id).await?;
+        let (mut message, seq) = self.load_message(&message_id).await?;
 
         let provider_uid = message.provider_uid.ok_or_else(|| {
             ApplicationError::PreconditionFailed("message has no provider UID".into())
@@ -92,11 +102,70 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
 
         let event = message.change_flags(flags_to_add, flags_to_remove);
 
-        self.append_and_publish(&message_id, AggregateType::Message, event)
+        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
         info!(%message_id, "message flags updated");
         Ok(CommandResult::FlagsSet)
+    }
+
+    /// Apply a flag change that arrived from a remote IMAP IDLE notification.
+    ///
+    /// Unlike `handle_set_flags`, this does NOT call the provider (flags are
+    /// already changed on the server). It only updates the local projection
+    /// by emitting a `MessageFlagged` domain event.
+    pub async fn handle_apply_remote_flag_change(
+        &self,
+        mailbox_id: MailboxId,
+        provider_uid: ProviderUid,
+        new_flags: Vec<Flag>,
+    ) -> Result<CommandResult, ApplicationError> {
+        info!(mailbox_id = %mailbox_id, uid = provider_uid.value(), ?new_flags,
+            "handle_apply_remote_flag_change: looking up message");
+
+        // Look up the local message by provider UID
+        let summary = self
+            .message_read_repo
+            .find_by_provider_uid(&mailbox_id, provider_uid.value())
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::NotFound(
+                    "Message",
+                    format!("provider_uid={} mailbox_id={}", provider_uid.value(), mailbox_id),
+                )
+            })?;
+
+        let message_id = summary.id.clone();
+        info!(%message_id, uid = provider_uid.value(), "message found, loading aggregate");
+
+        let (mut message, seq) = self.load_message(&message_id).await?;
+
+        // Compute diff vs current flags
+        let flags_to_add: Vec<Flag> = new_flags
+            .iter()
+            .filter(|f| !message.flags.contains(f))
+            .cloned()
+            .collect();
+        let flags_to_remove: Vec<Flag> = message
+            .flags
+            .iter()
+            .filter(|f| !new_flags.contains(f))
+            .cloned()
+            .collect();
+
+        info!(%message_id, ?flags_to_add, ?flags_to_remove, "computed flag diff");
+
+        if flags_to_add.is_empty() && flags_to_remove.is_empty() {
+            info!(%message_id, "no-op: flags already match");
+            return Ok(CommandResult::RemoteFlagApplied);
+        }
+
+        let event = message.change_flags(flags_to_add, flags_to_remove);
+        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
+            .await?;
+
+        info!(%message_id, uid = provider_uid.value(), "remote flag change applied");
+        Ok(CommandResult::RemoteFlagApplied)
     }
 
     pub async fn handle_move(
@@ -107,7 +176,7 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
         from_mailbox_path: MailboxPath,
         to_mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
-        let mut message = self.load_message(&message_id).await?;
+        let (mut message, seq) = self.load_message(&message_id).await?;
 
         let provider_uid = message.provider_uid.ok_or_else(|| {
             ApplicationError::PreconditionFailed("message has no provider UID".into())
@@ -122,7 +191,7 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
 
         let event = message.move_to(to_mailbox_id);
 
-        self.append_and_publish(&message_id, AggregateType::Message, event)
+        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
         info!(%message_id, "message moved");
@@ -136,7 +205,7 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
         mailbox_path: MailboxPath,
         permanently: bool,
     ) -> Result<CommandResult, ApplicationError> {
-        let message = self.load_message(&message_id).await?;
+        let (message, seq) = self.load_message(&message_id).await?;
 
         let provider_uid = message.provider_uid.ok_or_else(|| {
             ApplicationError::PreconditionFailed("message has no provider UID".into())
@@ -151,7 +220,7 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
 
         let event = message.delete(permanently);
 
-        self.append_and_publish(&message_id, AggregateType::Message, event)
+        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
         info!(%message_id, permanently, "message deleted");
@@ -203,7 +272,8 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
             sent_at: chrono::Utc::now(),
         };
 
-        self.append_and_publish(&message_id, AggregateType::Message, event)
+        // New message — no prior events, sequence starts at 0
+        self.append_and_publish(&message_id, AggregateType::Message, 0, event)
             .await?;
 
         info!(%message_id, "message sent");
@@ -215,13 +285,13 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
         message_id: MessageId,
     ) -> Result<CommandResult, ApplicationError> {
         // Verify the message exists.
-        let _message = self.load_message(&message_id).await?;
+        let (_message, seq) = self.load_message(&message_id).await?;
 
         let event = DomainEvent::DraftDiscarded {
             message_id: message_id.clone(),
         };
 
-        self.append_and_publish(&message_id, AggregateType::Message, event)
+        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
         info!(%message_id, "draft discarded");
@@ -230,33 +300,46 @@ impl<ES: EventStore, PR: ProviderRegistry, B: EventPublisher> MessageCommandHand
 
     // ── Helpers ────────────────────────────────────────────────────────
 
-    async fn load_message(&self, id: &MessageId) -> Result<Message, ApplicationError> {
+    /// Load a message aggregate from the event store.
+    /// Returns the rehydrated Message and the current event count (for OCC).
+    async fn load_message(&self, id: &MessageId) -> Result<(Message, u64), ApplicationError> {
         let events = self.event_store.load_events(&id.to_string(), 0).await?;
+        let event_count = events.len() as u64;
 
         let domain_events: Vec<DomainEvent> = events.into_iter().map(|e| e.payload).collect();
 
-        Message::rehydrate(&domain_events)
-            .ok_or_else(|| ApplicationError::NotFound("Message", id.to_string()))
+        let message = Message::rehydrate(&domain_events)
+            .ok_or_else(|| ApplicationError::NotFound("Message", id.to_string()))?;
+
+        Ok((message, event_count))
     }
 
     async fn append_and_publish(
         &self,
         message_id: &MessageId,
         aggregate_type: AggregateType,
+        expected_sequence: u64,
         event: DomainEvent,
     ) -> Result<(), ApplicationError> {
-        // We pass expected_sequence=0 here as a simplification; the real
-        // event store impl should track the actual sequence for OCC.
-        self.event_store
+        let new_seq = self
+            .event_store
             .append(
                 &message_id.to_string(),
                 aggregate_type,
-                0,
+                expected_sequence,
                 vec![event.clone()],
             )
             .await?;
 
-        let envelope = EventEnvelope::new(message_id.to_string(), aggregate_type, 0, event);
+        let envelope =
+            EventEnvelope::new(message_id.to_string(), aggregate_type, new_seq, event);
+
+        // Project inline so the read model is updated BEFORE we return.
+        // This ensures that any re-query after the command sees fresh data.
+        if let Err(e) = self.message_read_repo.project(&envelope).await {
+            tracing::warn!("Inline projection failed for {}: {}", envelope.payload.event_name(), e);
+        }
+
         self.event_bus.publish(envelope);
 
         Ok(())
@@ -442,6 +525,12 @@ mod tests {
                 unseen_messages: 0,
             })
         }
+        async fn fetch_uid_flags(
+            &self,
+            _mailbox: &MailboxPath,
+        ) -> Result<Vec<mc_domain::traits::email_provider::UidFlagEntry>, DomainError> {
+            Ok(vec![])
+        }
         fn watch_mailbox(
             &self,
             _mailbox: &MailboxPath,
@@ -449,6 +538,13 @@ mod tests {
             Box<dyn futures::Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>,
         > {
             Box::pin(futures::stream::empty())
+        }
+        async fn fetch_bodies_bulk(
+            &self,
+            _mailbox: &MailboxPath,
+            _uids: &[ProviderUid],
+        ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError> {
+            Ok(vec![])
         }
     }
 
@@ -477,6 +573,47 @@ mod tests {
         fn register_provider(&self, _account_id: AccountId, _provider: Arc<MockEmailProvider>) {}
 
         fn remove_provider(&self, _account_id: &AccountId) {}
+    }
+
+    // ── Mock MessageReadRepository ─────────────────────────────────────
+
+    struct MockMessageReadRepo;
+
+    #[async_trait]
+    impl MessageReadRepository for MockMessageReadRepo {
+        async fn get_message(&self, _id: &MessageId) -> Result<Option<Message>, DomainError> {
+            Ok(None)
+        }
+        async fn list_messages(
+            &self,
+            _mailbox_id: &MailboxId,
+            _pagination: &mc_shared::pagination::Pagination,
+        ) -> Result<mc_shared::pagination::PagedResult<mc_domain::MessageSummary>, DomainError>
+        {
+            Ok(mc_shared::pagination::PagedResult {
+                items: vec![],
+                total_count: 0,
+                page: 1,
+                page_size: 20,
+            })
+        }
+        async fn get_thread(&self, _id: &MessageId) -> Result<Vec<Message>, DomainError> {
+            Ok(vec![])
+        }
+        async fn find_by_provider_uid(
+            &self,
+            _mailbox_id: &MailboxId,
+            _provider_uid: u32,
+        ) -> Result<Option<mc_domain::MessageSummary>, DomainError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl ReadModelProjector for MockMessageReadRepo {
+        async fn project(&self, _envelope: &EventEnvelope) -> Result<(), DomainError> {
+            Ok(()) // no-op in tests
+        }
     }
 
     // ── Mock EventBus ──────────────────────────────────────────────────
@@ -554,7 +691,8 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, registry, bus.clone());
+        let read_repo = Arc::new(MockMessageReadRepo);
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
         let result = handler
             .handle_set_flags(msg_id, MailboxPath::inbox(), vec![Flag::Seen], vec![])
@@ -575,7 +713,8 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, registry, bus.clone());
+        let read_repo = Arc::new(MockMessageReadRepo);
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
         let result = handler
             .handle_move(
@@ -603,7 +742,8 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, registry, bus.clone());
+        let read_repo = Arc::new(MockMessageReadRepo);
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
         let result = handler
             .handle_delete(msg_id, mbx_id, MailboxPath::inbox(), false)
@@ -621,7 +761,8 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, registry, bus);
+        let read_repo = Arc::new(MockMessageReadRepo);
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus);
 
         let err = handler
             .handle_set_flags(
@@ -644,7 +785,8 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let handler = MessageCommandHandler::new(es, registry, bus.clone());
+        let read_repo = Arc::new(MockMessageReadRepo);
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
         let outgoing = OutgoingMessage {
             from: Address {

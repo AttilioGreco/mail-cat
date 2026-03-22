@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use mc_domain::{
     AccountReadRepository, AccountWriteRepository, EventStore, MailboxReadRepository,
-    MessageReadRepository, ProviderRegistry, SearchIndex,
+    MessageReadRepository, ProviderRegistry, ReadModelProjector, SearchIndex,
 };
 
 use crate::commands::{Command, CommandResult};
@@ -23,43 +23,52 @@ use super::QueryBus;
 use super::event_bus::EventPublisher;
 
 /// In-process command bus that dispatches to Account and Message handlers.
-pub struct InProcessCommandBus<AW, ES, PR, B>
+pub struct InProcessCommandBus<AW, ES, PR, MR, B>
 where
     AW: AccountWriteRepository,
     ES: EventStore,
     PR: ProviderRegistry,
+    MR: MessageReadRepository + ReadModelProjector,
     B: EventPublisher,
 {
     account_handler: AccountCommandHandler<AW, B>,
-    message_handler: MessageCommandHandler<ES, PR, B>,
+    message_handler: MessageCommandHandler<ES, PR, MR, B>,
 }
 
-impl<AW, ES, PR, B> InProcessCommandBus<AW, ES, PR, B>
+impl<AW, ES, PR, MR, B> InProcessCommandBus<AW, ES, PR, MR, B>
 where
     AW: AccountWriteRepository,
     ES: EventStore,
     PR: ProviderRegistry,
+    MR: MessageReadRepository + ReadModelProjector,
     B: EventPublisher,
 {
     pub fn new(
         account_write_repo: Arc<AW>,
         event_store: Arc<ES>,
         provider_registry: Arc<PR>,
+        message_read_repo: Arc<MR>,
         event_bus: Arc<B>,
     ) -> Self {
         Self {
             account_handler: AccountCommandHandler::new(account_write_repo, event_bus.clone()),
-            message_handler: MessageCommandHandler::new(event_store, provider_registry, event_bus),
+            message_handler: MessageCommandHandler::new(
+                event_store,
+                provider_registry,
+                message_read_repo,
+                event_bus,
+            ),
         }
     }
 }
 
 #[async_trait]
-impl<AW, ES, PR, B> CommandBus for InProcessCommandBus<AW, ES, PR, B>
+impl<AW, ES, PR, MR, B> CommandBus for InProcessCommandBus<AW, ES, PR, MR, B>
 where
     AW: AccountWriteRepository,
     ES: EventStore,
     PR: ProviderRegistry,
+    MR: MessageReadRepository + ReadModelProjector,
     B: EventPublisher,
 {
     async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {
@@ -152,6 +161,15 @@ where
             }
             Command::DiscardDraft { message_id } => {
                 self.message_handler.handle_discard_draft(message_id).await
+            }
+            Command::ApplyRemoteFlagChange {
+                mailbox_id,
+                provider_uid,
+                new_flags,
+            } => {
+                self.message_handler
+                    .handle_apply_remote_flag_change(mailbox_id, provider_uid, new_flags)
+                    .await
             }
         }
     }

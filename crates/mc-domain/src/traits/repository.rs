@@ -89,6 +89,13 @@ pub trait MessageReadRepository: Send + Sync {
     ) -> Result<PagedResult<MessageSummary>, DomainError>;
 
     async fn get_thread(&self, message_id: &MessageId) -> Result<Vec<Message>, DomainError>;
+
+    /// Find a message summary by its provider UID within a specific mailbox.
+    async fn find_by_provider_uid(
+        &self,
+        mailbox_id: &MailboxId,
+        provider_uid: u32,
+    ) -> Result<Option<MessageSummary>, DomainError>;
 }
 
 /// Checkpoint store for projections — tracks last processed global_position.

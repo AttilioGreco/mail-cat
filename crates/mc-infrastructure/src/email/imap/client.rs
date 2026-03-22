@@ -10,6 +10,7 @@ use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::{Message, OutgoingMessage};
 use mc_domain::traits::email_provider::{
     EmailProvider, FetchRange, MailboxStatus, MessageEnvelopeSummary, ProviderNotification,
+    UidFlagEntry,
 };
 use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::mailbox_path::MailboxPath;
@@ -181,7 +182,7 @@ impl ImapEmailProvider {
                         let name = addr
                             .name
                             .as_ref()
-                            .map(|n| String::from_utf8_lossy(n).to_string());
+                            .map(|n| decode_rfc2047_header(n));
                         Some(mc_domain::Address { email, name })
                     })
                     .collect()
@@ -332,7 +333,7 @@ impl EmailProvider for ImapEmailProvider {
                     let subject = envelope_data
                         .subject
                         .as_ref()
-                        .map(|s| String::from_utf8_lossy(s).to_string())
+                        .map(|s| decode_rfc2047_header(s))
                         .unwrap_or_default();
 
                     let date = envelope_data
@@ -344,7 +345,7 @@ impl EmailProvider for ImapEmailProvider {
                                 .ok()
                                 .map(|dt| dt.with_timezone(&chrono::Utc))
                         })
-                        .unwrap_or_else(|| chrono::Utc::now());
+                        .unwrap_or_else(chrono::Utc::now);
 
                     let envelope = mc_domain::Envelope {
                         from,
@@ -396,26 +397,143 @@ impl EmailProvider for ImapEmailProvider {
 
     async fn fetch_message_detail(
         &self,
-        _mailbox: &MailboxPath,
-        _uid: ProviderUid,
+        mailbox: &MailboxPath,
+        uid: ProviderUid,
     ) -> Result<Message, DomainError> {
-        debug!("Fetching message detail (Day 8 stub)");
-        // Day 9: Full implementation
-        Err(DomainError::Provider(
-            "fetch_message_detail implementation pending full TLS integration (Day 9)".to_string(),
-        ))
+        use futures::TryStreamExt;
+
+        let mut session = self.create_imap_session().await?;
+        let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
+        session
+            .select(&mailbox_name)
+            .await
+            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+
+        let fetched: Vec<async_imap::types::Fetch> = session
+            .uid_fetch(uid.value().to_string(), "BODY.PEEK[]")
+            .await
+            .map_err(|e| DomainError::Provider(format!("Body fetch failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| DomainError::Provider(format!("Body stream error: {e}")))?;
+
+        session.logout().await.ok();
+
+        let item = fetched
+            .into_iter()
+            .next()
+            .ok_or_else(|| DomainError::Provider("Message not found".into()))?;
+
+        let (body_text, body_html) = item.body().map(parse_mime_body).unwrap_or((None, None));
+
+        // Produce a minimal Message with only body fields populated.
+        // SyncService::fetch_message_body only reads body_text / body_html / attachments.
+        let now = chrono::Utc::now();
+        let empty_envelope = mc_domain::Envelope {
+            from: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: String::new(),
+            date: now,
+        };
+        let (msg, _event) = Message::receive(
+            mc_domain::AccountId::new(),
+            mc_domain::MailboxId::new(),
+            uid,
+            empty_envelope,
+            vec![],
+            0,
+            false,
+        );
+        Ok(Message { body_text, body_html, ..msg })
+    }
+
+    async fn fetch_bodies_bulk(
+        &self,
+        mailbox: &MailboxPath,
+        uids: &[ProviderUid],
+    ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError> {
+        use futures::TryStreamExt;
+        use mc_domain::traits::email_provider::MessageBodyResult;
+
+        if uids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut session = self.create_imap_session().await?;
+        let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
+        session
+            .select(&mailbox_name)
+            .await
+            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+
+        let uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
+        let mut results = Vec::with_capacity(uids.len());
+
+        for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
+            let query = Self::compress_uid_ranges(chunk);
+            debug!(
+                "Bulk body fetch: {} UIDs (query: {}…)",
+                chunk.len(),
+                &query[..query.len().min(60)]
+            );
+
+            let fetched: Vec<async_imap::types::Fetch> = session
+                .uid_fetch(&query, "BODY.PEEK[]")
+                .await
+                .map_err(|e| DomainError::Provider(format!("Body fetch failed: {e}")))?
+                .try_collect()
+                .await
+                .map_err(|e| DomainError::Provider(format!("Body stream error: {e}")))?;
+
+            for item in &fetched {
+                let provider_uid = match item.uid {
+                    Some(u) => ProviderUid::new(u),
+                    None => continue,
+                };
+                let (body_text, body_html) = item
+                    .body()
+                    .map(parse_mime_body)
+                    .unwrap_or((None, None));
+
+                results.push(MessageBodyResult { provider_uid, body_text, body_html });
+            }
+        }
+
+        session.logout().await.ok();
+        Ok(results)
     }
 
     async fn fetch_raw_message(
         &self,
-        _mailbox: &MailboxPath,
-        _uid: ProviderUid,
+        mailbox: &MailboxPath,
+        uid: ProviderUid,
     ) -> Result<Vec<u8>, DomainError> {
-        debug!("Fetching raw message (Day 8 stub)");
-        // Day 9: Full implementation
-        Err(DomainError::Provider(
-            "fetch_raw_message implementation pending full TLS integration (Day 9)".to_string(),
-        ))
+        use futures::TryStreamExt;
+
+        let mut session = self.create_imap_session().await?;
+        let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
+        session
+            .select(&mailbox_name)
+            .await
+            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+
+        let fetched: Vec<async_imap::types::Fetch> = session
+            .uid_fetch(uid.value().to_string(), "BODY.PEEK[]")
+            .await
+            .map_err(|e| DomainError::Provider(format!("Raw fetch failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| DomainError::Provider(format!("Raw stream error: {e}")))?;
+
+        session.logout().await.ok();
+        fetched
+            .into_iter()
+            .next()
+            .and_then(|f| f.body().map(|b| b.to_vec()))
+            .ok_or_else(|| DomainError::Provider("Message not found".into()))
     }
 
     async fn set_flags(
@@ -624,134 +742,263 @@ impl EmailProvider for ImapEmailProvider {
         Ok(status)
     }
 
+    async fn fetch_uid_flags(
+        &self,
+        mailbox: &MailboxPath,
+    ) -> Result<Vec<UidFlagEntry>, DomainError> {
+        use futures::TryStreamExt;
+
+        let mailbox_name = mailbox_path_to_string(mailbox);
+        let mut session = self.create_imap_session().await?;
+
+        session
+            .select(&mailbox_name)
+            .await
+            .map_err(|e| DomainError::Provider(format!("SELECT failed: {e}")))?;
+
+        // UID FETCH 1:* (FLAGS) — lightweight, returns only UID + flags
+        let fetches: Vec<async_imap::types::Fetch> = session
+            .uid_fetch("1:*", "(FLAGS)")
+            .await
+            .map_err(|e| DomainError::Provider(format!("UID FETCH FLAGS failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| DomainError::Provider(format!("UID FETCH FLAGS stream error: {e}")))?;
+
+        let entries: Vec<UidFlagEntry> = fetches
+            .iter()
+            .filter_map(|f| {
+                let uid = f.uid?;
+                let flags: Vec<Flag> = f
+                    .flags()
+                    .filter_map(|flag| super::mapper::imap_flag_to_domain(&flag))
+                    .collect();
+                Some(UidFlagEntry {
+                    uid: ProviderUid::new(uid),
+                    flags,
+                })
+            })
+            .collect();
+
+        info!(
+            mailbox = %mailbox_name,
+            count = entries.len(),
+            "Fetched UID+flags for reconciliation"
+        );
+
+        session.logout().await.ok();
+        Ok(entries)
+    }
+
     fn watch_mailbox(
         &self,
         mailbox: &MailboxPath,
     ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>> {
-        // Day 9: IMAP IDLE implementation with fallback to polling
         let mailbox_name = mailbox_path_to_string(mailbox);
-        let host = self.host.clone();
-        let port = self.port;
-        let username = self.username.clone();
-        let password = self.password.clone();
 
         Box::pin(async_stream::stream! {
-            use tokio_util::compat::TokioAsyncReadCompatExt;
+            use async_imap::extensions::idle::IdleResponse;
 
-            info!("Starting IMAP IDLE watch for mailbox: {}", mailbox_name);
+            info!("[watch] Starting IMAP IDLE for mailbox '{}'", mailbox_name);
 
             loop {
-                // Connect TCP + TLS via async_native_tls (same as create_imap_session)
-                let tcp_stream = match tokio::net::TcpStream::connect((&host as &str, port)).await {
-                    Ok(stream) => stream,
+                // Reuse the same TLS session creation as the rest of the provider
+                let mut session = match self.create_imap_session().await {
+                    Ok(s) => s,
                     Err(e) => {
-                        warn!("Watch TCP connection failed: {}", e);
-                        yield Err(DomainError::Provider(format!("TCP connection failed: {}", e)));
+                        warn!("[watch] Session creation failed: {}", e);
                         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                         continue;
                     }
                 };
 
-                let compat_stream = TokioAsyncReadCompatExt::compat(tcp_stream);
-                let tls = async_native_tls::TlsConnector::new();
-                let tls_stream = match tls.connect(&host, compat_stream).await {
-                    Ok(stream) => stream,
-                    Err(e) => {
-                        warn!("Watch TLS connection failed: {}", e);
-                        yield Err(DomainError::Provider(format!("TLS connection failed: {}", e)));
-                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                        continue;
-                    }
-                };
+                if let Err(e) = session.select(&mailbox_name).await {
+                    warn!("[watch] SELECT '{}' failed: {}", mailbox_name, e);
+                    let _ = session.logout().await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                    continue;
+                }
 
-                let client = async_imap::Client::new(tls_stream);
-
-                let mut session = match client.login(&username, &password).await {
-                    Ok(session) => session,
-                    Err(e) => {
-                        warn!("Watch login failed: {:?}", e);
-                        yield Err(DomainError::Provider(format!("Authentication failed: {:?}", e.0)));
-                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                        continue;
-                    }
-                };
-
-                // Select mailbox
-                let _select_result = match session.select(&mailbox_name).await {
-                    Ok(mb) => mb,
-                    Err(e) => {
-                        warn!("Watch mailbox select failed: {}", e);
-                        yield Err(DomainError::Provider(format!("Mailbox select failed: {}", e)));
-                        let _ = session.logout().await;
-                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                        continue;
-                    }
-                };
-
-                // Start IDLE
+                info!("[watch] IDLE active for '{}'", mailbox_name);
                 let mut idle = session.idle();
+                // init() sends the IDLE command to the server — required before wait_with_timeout
+                if let Err(e) = idle.init().await {
+                    warn!("[watch] IDLE init failed: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+                let (wait_future, _stop_source) =
+                    idle.wait_with_timeout(std::time::Duration::from_secs(29 * 60));
 
-                // Wait for IDLE events with timeout
-                let (wait_future, _stop_source) = idle.wait_with_timeout(std::time::Duration::from_secs(29 * 60));
                 let idle_response = match wait_future.await {
-                    Ok(response) => response,
+                    Ok(r) => r,
                     Err(e) => {
-                        warn!("IDLE wait failed: {}", e);
+                        warn!("[watch] IDLE wait error: {}", e);
                         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                         continue;
                     }
                 };
 
-                // Get session back
                 session = match idle.done().await {
-                    Ok(session) => session,
+                    Ok(s) => s,
                     Err(e) => {
-                        warn!("IDLE done failed: {}", e);
+                        warn!("[watch] IDLE done error: {}", e);
                         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                         continue;
                     }
                 };
 
-                // IDLE returned, indicating activity in the mailbox
-                debug!("IDLE activity detected: {:?}", idle_response);
-
-                // Get updated mailbox status
-                let updated_mb = match session.select(&mailbox_name).await {
-                    Ok(mb) => mb,
-                    Err(e) => {
-                        warn!("Failed to get updated mailbox status: {}", e);
+                // Inspect response to classify the event
+                let raw_upper = match &idle_response {
+                    IdleResponse::NewData(data) => {
+                        let raw = String::from_utf8_lossy(data.borrow_owner()).to_ascii_uppercase();
+                        info!("[watch] IDLE NewData for '{}': {}", mailbox_name, raw.trim());
+                        raw
+                    }
+                    IdleResponse::Timeout => {
+                        info!("[watch] IDLE timeout for '{}', reconnecting", mailbox_name);
                         let _ = session.logout().await;
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                         continue;
+                    }
+                    IdleResponse::ManualInterrupt => {
+                        info!("[watch] IDLE interrupted for '{}'", mailbox_name);
+                        let _ = session.logout().await;
+                        break;
                     }
                 };
 
-                // Parse mailbox path from name (split by '/')
+                let has_flags   = raw_upper.contains("FETCH") && raw_upper.contains("FLAGS");
+                let has_expunge = raw_upper.contains("EXPUNGE");
+                let has_exists  = raw_upper.contains("EXISTS");
+
                 let parts: Vec<String> = mailbox_name.split('/').map(|s| s.to_string()).collect();
                 let mb_path = match mc_domain::value_objects::mailbox_path::MailboxPath::new(parts, '/') {
-                    Ok(path) => path,
+                    Ok(p) => p,
                     Err(_) => {
-                        warn!("Failed to parse mailbox path");
+                        warn!("[watch] Failed to parse mailbox path '{}'", mailbox_name);
                         let _ = session.logout().await;
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                         continue;
                     }
                 };
 
-                // Yield notification with mailbox counts
-                yield Ok(ProviderNotification::MailboxCountChanged {
-                    mailbox: mb_path,
-                    total: updated_mb.exists,
-                    unseen: updated_mb.unseen.unwrap_or(0),
-                });
+                if has_flags && !has_exists && !has_expunge {
+                    // Pure flag change (e.g. marking read in another client).
+                    // Parse the sequence number from "* N FETCH ..." to resolve UID + flags.
+                    let seq_num: Option<u32> = raw_upper
+                        .split_whitespace()
+                        .nth(1) // skip "*", get seq num
+                        .and_then(|s| s.parse().ok());
 
-                // Logout
+                    if let Some(seq) = seq_num {
+                        use futures::TryStreamExt;
+                        let fetches: Result<Vec<async_imap::types::Fetch>, _> =
+                            match session.fetch(seq.to_string(), "(UID FLAGS)").await {
+                                Ok(stream) => stream.try_collect().await,
+                                Err(e) => Err(e),
+                            };
+                        match fetches {
+                            Ok(items) => {
+                                for fetch_data in &items {
+                                    let uid = fetch_data.uid.unwrap_or(0);
+                                    let flags: Vec<Flag> = fetch_data
+                                        .flags()
+                                        .filter_map(|f| super::mapper::imap_flag_to_domain(&f))
+                                        .collect();
+                                    info!("[watch] FlagsChanged in '{}': uid={} flags={:?}",
+                                        mailbox_name, uid, flags);
+                                    yield Ok(ProviderNotification::FlagsChanged {
+                                        mailbox: mb_path.clone(),
+                                        uid: ProviderUid::new(uid),
+                                        flags,
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                warn!("[watch] FETCH (UID FLAGS) failed for seq {}: {}", seq, e);
+                                yield Ok(ProviderNotification::FlagsChanged {
+                                    mailbox: mb_path,
+                                    uid: ProviderUid::new(0),
+                                    flags: vec![],
+                                });
+                            }
+                        }
+                    } else {
+                        warn!("[watch] Could not parse seq num from IDLE response");
+                        yield Ok(ProviderNotification::FlagsChanged {
+                            mailbox: mb_path,
+                            uid: ProviderUid::new(0),
+                            flags: vec![],
+                        });
+                    }
+                } else {
+                    // New message, expunge, or combined — re-fetch counts
+                    let updated_mb = match session.select(&mailbox_name).await {
+                        Ok(mb) => mb,
+                        Err(e) => {
+                            warn!("[watch] Re-SELECT failed: {}", e);
+                            let _ = session.logout().await;
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
+                    info!("[watch] CountsChanged in '{}': total={} unseen={}",
+                        mailbox_name, updated_mb.exists, updated_mb.unseen.unwrap_or(0));
+                    yield Ok(ProviderNotification::MailboxCountChanged {
+                        mailbox: mb_path,
+                        total: updated_mb.exists,
+                        unseen: updated_mb.unseen.unwrap_or(0),
+                    });
+                }
+
                 let _ = session.logout().await;
-
-                // Small delay before reconnecting
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
         })
+    }
+}
+
+/// Parse a raw RFC 2822 message and extract plain-text and HTML body parts.
+fn parse_mime_body(raw: &[u8]) -> (Option<String>, Option<String>) {
+    let parsed = match mailparse::parse_mail(raw) {
+        Ok(p) => p,
+        Err(_) => return (None, None),
+    };
+    extract_body_parts(&parsed)
+}
+
+fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<String>) {
+    let mut text: Option<String> = None;
+    let mut html: Option<String> = None;
+
+    if mail.subparts.is_empty() {
+        match mail.ctype.mimetype.as_str() {
+            "text/plain" => text = mail.get_body().ok(),
+            "text/html" => html = mail.get_body().ok(),
+            _ => {}
+        }
+    } else {
+        for part in &mail.subparts {
+            let (t, h) = extract_body_parts(part);
+            if text.is_none() {
+                text = t;
+            }
+            if html.is_none() {
+                html = h;
+            }
+        }
+    }
+
+    (text, html)
+}
+
+/// Decode an RFC 2047 encoded header value (e.g. `=?UTF-8?Q?...?=`).
+/// Falls back to lossy UTF-8 if parsing fails.
+fn decode_rfc2047_header(raw: &[u8]) -> String {
+    // mailparse::parse_header expects a full "Name: value\r\n" line
+    let header_line = [b"Subject: ", raw, b"\r\n"].concat();
+    match mailparse::parse_header(&header_line) {
+        Ok((hdr, _)) => hdr.get_value(),
+        Err(_) => String::from_utf8_lossy(raw).to_string(),
     }
 }
 

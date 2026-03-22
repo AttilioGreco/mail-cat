@@ -185,6 +185,14 @@ mod tests {
         async fn get_thread(&self, _id: &MessageId) -> Result<Vec<Message>, DomainError> {
             Ok(vec![])
         }
+
+        async fn find_by_provider_uid(
+            &self,
+            _mailbox_id: &MailboxId,
+            _provider_uid: u32,
+        ) -> Result<Option<MessageSummary>, DomainError> {
+            Ok(None)
+        }
     }
 
     // ── Mock SearchIndex ──────────────────────────────────────────────

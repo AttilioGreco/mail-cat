@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -8,11 +9,12 @@ use crate::grpc::mappers::{
     proto_to_domain_pagination,
 };
 use crate::grpc::proto::{
-    DeleteMessageRequest, DeleteMessageResponse, GetMessageRequest, GetMessageResponse,
-    GetThreadRequest, GetThreadResponse, ListMessagesRequest, ListMessagesResponse, MailboxEvent,
-    MoveMessageRequest, MoveMessageResponse, SaveDraftRequest, SaveDraftResponse,
+    CountsChangedEvent, DeleteMessageRequest, DeleteMessageResponse, FlagsChangedEvent,
+    GetMessageRequest, GetMessageResponse, GetThreadRequest, GetThreadResponse,
+    ListMessagesRequest, ListMessagesResponse, MailboxEvent, MessageExpungedEvent,
+    MoveMessageRequest, MoveMessageResponse, NewMessageEvent, SaveDraftRequest, SaveDraftResponse,
     SendMessageRequest, SendMessageResponse, SetFlagsRequest, SetFlagsResponse,
-    WatchMailboxRequest, message_service_server::MessageService,
+    WatchMailboxRequest, mailbox_event, message_service_server::MessageService,
 };
 use mc_application::{
     bus::{CommandBus, QueryBus},
@@ -21,19 +23,24 @@ use mc_application::{
 };
 use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::Message;
-use mc_domain::{AccountId, MailboxId, MessageId};
+use mc_domain::traits::email_provider::ProviderNotification;
+use mc_domain::traits::provider_registry::ProviderRegistry;
+use mc_domain::{AccountId, EmailProvider, MailboxId, MessageId};
+use futures::StreamExt;
 
 /// Message service implementation with CQRS bus integration.
-pub struct MessageServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
+pub struct MessageServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static, R: ProviderRegistry + 'static> {
     command_bus: Arc<C>,
     query_bus: Arc<Q>,
+    provider_registry: Arc<R>,
 }
 
-impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageServiceImpl<C, Q> {
-    pub fn new(command_bus: Arc<C>, query_bus: Arc<Q>) -> Self {
+impl<C: CommandBus + 'static, Q: QueryBus + 'static, R: ProviderRegistry + 'static> MessageServiceImpl<C, Q, R> {
+    pub fn new(command_bus: Arc<C>, query_bus: Arc<Q>, provider_registry: Arc<R>) -> Self {
         Self {
             command_bus,
             query_bus,
+            provider_registry,
         }
     }
 
@@ -72,7 +79,13 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageServiceImpl<C, Q> {
 }
 
 #[tonic::async_trait]
-impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageService for MessageServiceImpl<C, Q> {
+impl<C, Q, R> MessageService for MessageServiceImpl<C, Q, R>
+where
+    C: CommandBus + 'static,
+    Q: QueryBus + 'static,
+    R: ProviderRegistry + 'static,
+    R::Provider: EmailProvider + Send + Sync + 'static,
+{
     async fn list_messages(
         &self,
         request: Request<ListMessagesRequest>,
@@ -104,21 +117,32 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageService for MessageS
         let messages = paged
             .items
             .iter()
-            .map(|summary| crate::grpc::proto::MessageSummary {
-                id: summary.id.to_string(),
-                account_id: summary.account_id.to_string(),
-                mailbox_id: summary.mailbox_id.to_string(),
-                envelope: None,
-                flags: summary
-                    .flags
-                    .iter()
-                    .map(crate::grpc::mappers::domain_flag_to_proto)
-                    .collect(),
-                size_bytes: summary.size_bytes,
-                has_attachments: summary.has_attachments,
-                received_at: Some(crate::grpc::mappers::datetime_to_timestamp(
-                    &summary.received_at,
-                )),
+            .map(|summary| {
+                let envelope = crate::grpc::proto::MessageEnvelope {
+                    from: vec![crate::grpc::proto::EmailAddress {
+                        email: summary.from_display.clone(),
+                        name: None,
+                    }],
+                    subject: summary.subject.clone(),
+                    date: Some(crate::grpc::mappers::datetime_to_timestamp(&summary.received_at)),
+                    ..Default::default()
+                };
+                crate::grpc::proto::MessageSummary {
+                    id: summary.id.to_string(),
+                    account_id: summary.account_id.to_string(),
+                    mailbox_id: summary.mailbox_id.to_string(),
+                    envelope: Some(envelope),
+                    flags: summary
+                        .flags
+                        .iter()
+                        .map(crate::grpc::mappers::domain_flag_to_proto)
+                        .collect(),
+                    size_bytes: summary.size_bytes,
+                    has_attachments: summary.has_attachments,
+                    received_at: Some(crate::grpc::mappers::datetime_to_timestamp(
+                        &summary.received_at,
+                    )),
+                }
             })
             .collect();
 
@@ -345,8 +369,102 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageService for MessageS
 
     async fn watch_mailbox(
         &self,
-        _request: Request<WatchMailboxRequest>,
+        request: Request<WatchMailboxRequest>,
     ) -> Result<Response<Self::WatchMailboxStream>, Status> {
-        Err(Status::unimplemented("watch_mailbox not yet implemented"))
+        let req = request.into_inner();
+
+        let mailbox_id = MailboxId::from_uuid(
+            uuid::Uuid::parse_str(&req.mailbox_id)
+                .map_err(|e| Status::invalid_argument(format!("invalid mailbox_id: {e}")))?,
+        );
+
+        // Resolve mailbox to get account_id and mailbox_path
+        let mailbox = self
+            .query_bus
+            .dispatch(Query::GetMailbox {
+                mailbox_id: mailbox_id.clone(),
+            })
+            .await
+            .map_err(application_error_to_status)?
+            .into_mailbox()
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("mailbox not found"))?;
+
+        let provider = self
+            .provider_registry
+            .get_provider(&mailbox.account_id)
+            .map_err(|e| Status::not_found(format!("no provider for account: {e}")))?;
+
+        let mailbox_path = mailbox.path.clone();
+        let mailbox_id_str = req.mailbox_id.clone();
+        let command_bus = self.command_bus.clone();
+
+        let (tx, rx) = mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let mut stream = provider.watch_mailbox(&mailbox_path);
+            while let Some(notification) = stream.next().await {
+                let event = match notification {
+                    Ok(ProviderNotification::MailboxCountChanged { total, unseen, .. }) => {
+                        MailboxEvent {
+                            mailbox_id: mailbox_id_str.clone(),
+                            event_type: Some(mailbox_event::EventType::CountsChanged(
+                                CountsChangedEvent { total, unseen },
+                            )),
+                        }
+                    }
+                    Ok(ProviderNotification::NewMessage { uid, .. }) => MailboxEvent {
+                        mailbox_id: mailbox_id_str.clone(),
+                        event_type: Some(mailbox_event::EventType::NewMessage(NewMessageEvent {
+                            message_id: String::new(),
+                            provider_uid: uid.value(),
+                        })),
+                    },
+                    Ok(ProviderNotification::MessageExpunged { uid, .. }) => MailboxEvent {
+                        mailbox_id: mailbox_id_str.clone(),
+                        event_type: Some(mailbox_event::EventType::MessageExpunged(
+                            MessageExpungedEvent {
+                                message_id: uid.value().to_string(),
+                            },
+                        )),
+                    },
+                    Ok(ProviderNotification::FlagsChanged { flags, uid, .. }) => {
+                        // Dispatch ApplyRemoteFlagChange to update local projection.
+                        // Only dispatch if we have a real UID (non-zero).
+                        if uid.value() > 0 {
+                            let cmd = mc_application::commands::Command::ApplyRemoteFlagChange {
+                                mailbox_id: mailbox_id.clone(),
+                                provider_uid: mc_application::commands::ProviderUid::new(uid.value()),
+                                new_flags: flags.clone(),
+                            };
+                            if let Err(e) = command_bus.dispatch(cmd).await {
+                                tracing::warn!("[watch] ApplyRemoteFlagChange failed for uid={}: {}", uid.value(), e);
+                            }
+                        }
+                        MailboxEvent {
+                            mailbox_id: mailbox_id_str.clone(),
+                            event_type: Some(mailbox_event::EventType::FlagsChanged(
+                                FlagsChangedEvent {
+                                    message_id: String::new(),
+                                    flags: flags
+                                        .iter()
+                                        .map(crate::grpc::mappers::domain_flag_to_proto)
+                                        .collect(),
+                                },
+                            )),
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                        break;
+                    }
+                };
+                if tx.send(Ok(event)).await.is_err() {
+                    break; // Client disconnected
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }

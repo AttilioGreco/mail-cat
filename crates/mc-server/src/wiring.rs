@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::projections::ProjectionEventHandler;
+use mc_domain::ReadModelProjector;
 use mc_application::{SyncConfig, SyncService, SyncTrigger};
 use mc_domain::{
     Account, AccountId, AccountReadRepository, AccountWriteRepository, AuthConfig,
@@ -26,6 +27,7 @@ type CommandBusImpl = InProcessCommandBus<
     SledRepository<SledEventStore>,
     SledEventStore,
     ProviderRegistryImpl,
+    SledRepository<SledEventStore>,
     InProcessEventBus,
 >;
 type QueryBusImpl = InProcessQueryBus<
@@ -41,7 +43,7 @@ type SyncServiceImpl =
 pub struct AppContext {
     pub account_service: AccountServiceImpl<CommandBusImpl, QueryBusImpl>,
     pub mailbox_service: MailboxServiceImpl<QueryBusImpl>,
-    pub message_service: MessageServiceImpl<CommandBusImpl, QueryBusImpl>,
+    pub message_service: MessageServiceImpl<CommandBusImpl, QueryBusImpl, ProviderRegistryImpl>,
     pub search_service: SearchServiceImpl<QueryBusImpl>,
     #[allow(dead_code)]
     pub sync_service: Arc<SyncServiceImpl>,
@@ -109,6 +111,7 @@ impl AppContext {
             repository_arc.clone(),
             event_store.clone(),
             provider_registry.clone(),
+            repository_arc.clone(),
             event_bus.clone(),
         ));
         tracing::info!("Initialized command bus");
@@ -126,7 +129,7 @@ impl AppContext {
         let sync_config = SyncConfig {
             batch_size: 50,
             max_concurrent_bodies: 4,
-            eager_body_fetch: false,
+            eager_body_fetch: true,
         };
         let sync_service = Arc::new(SyncService::new(
             provider_registry.clone(),
@@ -137,6 +140,7 @@ impl AppContext {
         tracing::info!("Initialized sync service");
 
         // Create projection event handler and start catching up
+        let live_projector = bare_repository.clone();
         let projection_handler =
             ProjectionEventHandler::new(bare_repository.clone(), bare_repository);
         tracing::info!("Initialized projection handler");
@@ -225,6 +229,25 @@ impl AppContext {
             }
         }
 
+        // ── Live projection subscriber ───────────────────────────────────────
+        // Subscribe the read-model projector to the event bus so that domain
+        // events emitted at runtime (e.g. ApplyRemoteFlagChange → MessageFlagged)
+        // are immediately reflected in the sled read model without waiting for
+        // the next server restart.
+        {
+            let mut sub = event_bus.subscribe();
+            let live_projector = live_projector.clone();
+            tokio::spawn(async move {
+                while let Some(envelope) = sub.recv().await {
+                    if let Err(e) = live_projector.project(&envelope).await {
+                        tracing::warn!("Live projection error for {}: {}", envelope.payload.event_name(), e);
+                    }
+                }
+                tracing::info!("Live projection subscriber exited");
+            });
+            tracing::info!("Live projection subscriber started");
+        }
+
         // Re-run projection catch-up if new accounts were created
         if created_new {
             tracing::info!("Re-running projection catch-up for newly created accounts...");
@@ -262,6 +285,39 @@ impl AppContext {
             );
         }
 
+        // ── Periodic re-sync (every 5 minutes) ──────────────────────────────
+        if !registered_ids.is_empty() {
+            let sync_periodic = sync_service.clone();
+            let ids: Vec<(AccountId, String)> = registered_ids.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
+                interval.tick().await; // skip immediate first tick (initial sync already running)
+                loop {
+                    interval.tick().await;
+                    tracing::info!("Periodic re-sync triggered for {} account(s)", ids.len());
+                    for (account_id, name) in &ids {
+                        match sync_periodic.start_sync(account_id).await {
+                            Ok(events) => {
+                                tracing::info!(
+                                    "Periodic sync done for '{}': {} event(s)",
+                                    name,
+                                    events.len()
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Periodic sync failed for '{}': {}",
+                                    name,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+            tracing::info!("Periodic re-sync timer started (every 5 minutes)");
+        }
+
         // ── Interface Layer ─────────────────────────────────────────────────
 
         // Create gRPC services
@@ -270,7 +326,7 @@ impl AppContext {
 
         let mailbox_service = MailboxServiceImpl::new(query_bus.clone());
 
-        let message_service = MessageServiceImpl::new(command_bus.clone(), query_bus.clone());
+        let message_service = MessageServiceImpl::new(command_bus.clone(), query_bus.clone(), provider_registry.clone());
 
         let search_service = SearchServiceImpl::new(query_bus.clone());
 

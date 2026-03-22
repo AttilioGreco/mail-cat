@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use mc_domain::{
     AccountId, AggregateType, DomainEvent, EmailProvider, EventEnvelope, EventStore, FetchRange,
-    Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message, MessageId,
-    ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
+    Flag, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message, MessageId,
+    MessageReadRepository, ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
 };
 use tracing::{debug, error, info, instrument, warn};
 
@@ -76,7 +76,7 @@ impl Default for SyncConfig {
 pub struct SyncService<
     PR: ProviderRegistry,
     ES: EventStore,
-    P: ReadModelProjector + MailboxReadRepository + ProjectionCheckpoint,
+    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint,
 > {
     provider_registry: Arc<PR>,
     event_store: Arc<ES>,
@@ -89,7 +89,7 @@ pub struct SyncService<
 impl<
     PR: ProviderRegistry,
     ES: EventStore,
-    P: ReadModelProjector + MailboxReadRepository + ProjectionCheckpoint,
+    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint,
 > SyncService<PR, ES, P>
 {
     /// Creates a new SyncService with the given dependencies.
@@ -273,6 +273,25 @@ impl<
                     .map_err(|e| {
                         ApplicationError::SyncFailed(format!("Checkpoint save failed: {e}"))
                     })?;
+
+                // Reconcile even when there are no new messages
+                let provider = self.provider_registry.get_provider(account_id)?;
+                let (expunged, flags_changed) = self
+                    .reconcile_mailbox(&provider, local, &remote.path)
+                    .await?;
+                if expunged > 0 || flags_changed > 0 {
+                    let updated_status = match provider.mailbox_status(&remote.path).await {
+                        Ok(s) => s,
+                        Err(_) => status,
+                    };
+                    self.update_mailbox_counts(
+                        local,
+                        updated_status.total_messages,
+                        updated_status.unseen_messages,
+                    )
+                    .await?;
+                }
+
                 mailboxes_synced += 1;
                 continue;
             }
@@ -303,7 +322,9 @@ impl<
                 "Fetched envelopes"
             );
 
-            // Process each envelope
+            // Process each envelope; collect (message_id, provider_uid) for body fetch
+            let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
+
             for envelope_summary in &envelopes {
                 if self.is_cancelled() {
                     break;
@@ -319,11 +340,53 @@ impl<
                     envelope_summary.has_attachments,
                 );
 
-                // Each message is a new aggregate
                 if let DomainEvent::MessageReceived { ref message_id, .. } = event {
+                    new_messages.push((message_id.clone(), envelope_summary.provider_uid));
                     self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
                         .await?;
                     messages_synced += 1;
+                }
+            }
+
+            // Eager body fetch for new messages — bulk IMAP fetch, one connection per batch
+            if self.config.eager_body_fetch && !new_messages.is_empty() {
+                let total_bodies = new_messages.len();
+                info!(path = %remote.path, count = total_bodies, "Bulk fetching bodies");
+
+                let uids: Vec<ProviderUid> = new_messages.iter().map(|(_, u)| *u).collect();
+                let uid_to_msg: std::collections::HashMap<u32, &MessageId> = new_messages
+                    .iter()
+                    .map(|(id, uid)| (uid.value(), id))
+                    .collect();
+
+                let provider = self.provider_registry.get_provider(account_id)?;
+                match provider.fetch_bodies_bulk(&remote.path, &uids).await {
+                    Ok(body_results) => {
+                        for result in body_results {
+                            if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
+                                let event = DomainEvent::MessageBodyFetched {
+                                    message_id: (*message_id).clone(),
+                                    body_text: result.body_text,
+                                    body_html: result.body_html,
+                                    attachments: vec![],
+                                };
+                                if let Err(e) = self
+                                    .append_and_project(
+                                        &message_id.to_string(),
+                                        AggregateType::Message,
+                                        event,
+                                    )
+                                    .await
+                                {
+                                    warn!(%message_id, error = %e, "Failed to project body");
+                                }
+                            }
+                        }
+                        info!(path = %remote.path, count = total_bodies, "Bodies fetched");
+                    }
+                    Err(e) => {
+                        warn!(path = %remote.path, error = %e, "Bulk body fetch failed, skipping");
+                    }
                 }
             }
 
@@ -344,6 +407,27 @@ impl<
                 .map_err(|e| {
                     ApplicationError::SyncFailed(format!("Checkpoint save failed: {e}"))
                 })?;
+
+            // Reconcile: detect expunged messages and flag changes
+            let provider = self.provider_registry.get_provider(account_id)?;
+            let (expunged, flags_changed) = self
+                .reconcile_mailbox(&provider, local, &remote.path)
+                .await?;
+            messages_synced = messages_synced.saturating_sub(expunged);
+
+            // Re-update counts after reconciliation if anything changed
+            if expunged > 0 || flags_changed > 0 {
+                let updated_status = match provider.mailbox_status(&remote.path).await {
+                    Ok(s) => s,
+                    Err(_) => status,
+                };
+                self.update_mailbox_counts(
+                    local,
+                    updated_status.total_messages,
+                    updated_status.unseen_messages,
+                )
+                .await?;
+            }
 
             mailboxes_synced += 1;
         }
@@ -480,6 +564,122 @@ impl<
         Ok(())
     }
 
+    /// Reconcile local state with remote: detect expunged messages and flag changes.
+    ///
+    /// Fetches current UIDs+flags from the remote mailbox (lightweight IMAP FETCH FLAGS),
+    /// compares with the local read model, and emits:
+    /// - `MessageDeleted` for local messages whose UID no longer exists remotely
+    /// - `MessageFlagged` for local messages whose flags differ from remote
+    #[instrument(skip(self, provider, local), fields(mailbox_id = %local.id))]
+    async fn reconcile_mailbox(
+        &self,
+        provider: &Arc<<PR as ProviderRegistry>::Provider>,
+        local: &Mailbox,
+        remote_path: &MailboxPath,
+    ) -> Result<(u32, u32), ApplicationError> {
+        let remote_entries = match provider.fetch_uid_flags(remote_path).await {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "fetch_uid_flags failed, skipping reconciliation");
+                return Ok((0, 0));
+            }
+        };
+
+        let remote_by_uid: std::collections::HashMap<u32, &Vec<Flag>> = remote_entries
+            .iter()
+            .map(|e| (e.uid.value(), &e.flags))
+            .collect();
+
+        // Load ALL local message summaries for this mailbox
+        let all_pagination = mc_shared::pagination::Pagination {
+            page: 1,
+            page_size: u32::MAX,
+        };
+        let local_messages = self
+            .projector
+            .list_messages(&local.id, &all_pagination)
+            .await
+            .map_err(|e| {
+                ApplicationError::SyncFailed(format!("Failed to list local messages: {e}"))
+            })?;
+
+        let mut expunged = 0u32;
+        let mut flags_changed = 0u32;
+
+        for summary in &local_messages.items {
+            let local_uid = match summary.provider_uid {
+                Some(uid) => uid.value(),
+                None => continue,
+            };
+
+            if let Some(remote_flags) = remote_by_uid.get(&local_uid) {
+                // Message exists remotely — check for flag differences
+                let flags_to_add: Vec<Flag> = remote_flags
+                    .iter()
+                    .filter(|f| !summary.flags.contains(f))
+                    .cloned()
+                    .collect();
+                let flags_to_remove: Vec<Flag> = summary
+                    .flags
+                    .iter()
+                    .filter(|f| !remote_flags.contains(f))
+                    .cloned()
+                    .collect();
+
+                if !flags_to_add.is_empty() || !flags_to_remove.is_empty() {
+                    debug!(
+                        message_id = %summary.id,
+                        uid = local_uid,
+                        ?flags_to_add,
+                        ?flags_to_remove,
+                        "Reconciling flag diff"
+                    );
+                    let event = DomainEvent::MessageFlagged {
+                        message_id: summary.id.clone(),
+                        flags_added: flags_to_add,
+                        flags_removed: flags_to_remove,
+                    };
+                    self.append_and_project(
+                        &summary.id.to_string(),
+                        AggregateType::Message,
+                        event,
+                    )
+                    .await?;
+                    flags_changed += 1;
+                }
+            } else {
+                // Message no longer exists remotely — expunged
+                info!(
+                    message_id = %summary.id,
+                    uid = local_uid,
+                    "Message expunged remotely, deleting locally"
+                );
+                let event = DomainEvent::MessageDeleted {
+                    message_id: summary.id.clone(),
+                    mailbox_id: local.id.clone(),
+                    permanently: false,
+                };
+                self.append_and_project(
+                    &summary.id.to_string(),
+                    AggregateType::Message,
+                    event,
+                )
+                .await?;
+                expunged += 1;
+            }
+        }
+
+        if expunged > 0 || flags_changed > 0 {
+            info!(
+                expunged,
+                flags_changed,
+                "Reconciliation complete for mailbox"
+            );
+        }
+
+        Ok((expunged, flags_changed))
+    }
+
     /// Update mailbox message counts via a MailboxCountsUpdated event.
     async fn update_mailbox_counts(
         &self,
@@ -501,7 +701,7 @@ impl<
 impl<
     PR: ProviderRegistry,
     ES: EventStore,
-    P: ReadModelProjector + MailboxReadRepository + ProjectionCheckpoint,
+    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint,
 > SyncTrigger for SyncService<PR, ES, P>
 {
     async fn trigger_sync(
@@ -519,7 +719,8 @@ mod tests {
     use futures::Stream;
     use mc_domain::{
         Address, AggregateType, DomainError, EmailAddress, Envelope, EventEnvelope, Flag,
-        MailboxStatus, MailboxType, MessageEnvelopeSummary, OutgoingMessage, ProviderNotification,
+        MailboxStatus, MailboxType, MessageEnvelopeSummary, MessageSummary, OutgoingMessage,
+        ProviderNotification,
     };
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -638,12 +839,32 @@ mod tests {
                 .ok_or_else(|| DomainError::Provider("No status".to_string()))
         }
 
+        async fn fetch_uid_flags(
+            &self,
+            _mailbox: &MailboxPath,
+        ) -> Result<Vec<mc_domain::traits::email_provider::UidFlagEntry>, DomainError> {
+            Ok(self
+                .envelopes
+                .iter()
+                .map(|e| mc_domain::traits::email_provider::UidFlagEntry {
+                    uid: e.provider_uid,
+                    flags: e.flags.clone(),
+                })
+                .collect())
+        }
         fn watch_mailbox(
             &self,
             _mailbox: &MailboxPath,
         ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>>
         {
             Box::pin(futures::stream::empty())
+        }
+        async fn fetch_bodies_bulk(
+            &self,
+            _mailbox: &MailboxPath,
+            _uids: &[ProviderUid],
+        ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError> {
+            Ok(vec![])
         }
     }
 
@@ -730,7 +951,7 @@ mod tests {
         }
     }
 
-    // ── Mock Projector (ReadModelProjector + MailboxReadRepository + ProjectionCheckpoint) ──
+    // ── Mock Projector (ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint) ──
 
     struct MockProjector {
         mailboxes: Mutex<Vec<Mailbox>>,
@@ -810,6 +1031,35 @@ mod tests {
                 .filter(|m| m.account_id == *account_id)
                 .cloned()
                 .collect())
+        }
+    }
+
+    #[async_trait]
+    impl MessageReadRepository for MockProjector {
+        async fn get_message(&self, _id: &MessageId) -> Result<Option<Message>, DomainError> {
+            Ok(None)
+        }
+        async fn list_messages(
+            &self,
+            _mailbox_id: &MailboxId,
+            _pagination: &mc_shared::pagination::Pagination,
+        ) -> Result<mc_shared::pagination::PagedResult<MessageSummary>, DomainError> {
+            Ok(mc_shared::pagination::PagedResult {
+                items: vec![],
+                total_count: 0,
+                page: 1,
+                page_size: 20,
+            })
+        }
+        async fn get_thread(&self, _id: &MessageId) -> Result<Vec<Message>, DomainError> {
+            Ok(vec![])
+        }
+        async fn find_by_provider_uid(
+            &self,
+            _mailbox_id: &MailboxId,
+            _provider_uid: u32,
+        ) -> Result<Option<MessageSummary>, DomainError> {
+            Ok(None)
         }
     }
 

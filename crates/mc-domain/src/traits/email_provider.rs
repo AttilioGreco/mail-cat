@@ -12,6 +12,13 @@ use crate::value_objects::flag::Flag;
 use crate::value_objects::mailbox_path::MailboxPath;
 use crate::value_objects::uid::ProviderUid;
 
+/// Lightweight UID + flags entry returned by `fetch_uid_flags`.
+#[derive(Debug, Clone)]
+pub struct UidFlagEntry {
+    pub uid: ProviderUid,
+    pub flags: Vec<Flag>,
+}
+
 /// Abstraction over email backends: IMAP, Gmail API, Outlook API, etc.
 ///
 /// Implementors live in `mc-infrastructure`; the domain only knows this trait.
@@ -41,6 +48,14 @@ pub trait EmailProvider: Send + Sync {
         mailbox: &MailboxPath,
         uid: ProviderUid,
     ) -> Result<Message, DomainError>;
+
+    /// Fetch bodies for multiple messages in bulk (single IMAP connection, batched UID FETCH).
+    /// Returns one result per UID; errors on individual messages are returned inline.
+    async fn fetch_bodies_bulk(
+        &self,
+        mailbox: &MailboxPath,
+        uids: &[ProviderUid],
+    ) -> Result<Vec<MessageBodyResult>, DomainError>;
 
     /// Fetch raw message bytes (RFC 2822).
     async fn fetch_raw_message(
@@ -80,6 +95,16 @@ pub trait EmailProvider: Send + Sync {
     /// Get UIDVALIDITY and UIDNEXT for a mailbox (for sync state detection).
     async fn mailbox_status(&self, mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError>;
 
+    /// Fetch UIDs and their current flags for all messages in a mailbox.
+    ///
+    /// This is a lightweight operation (IMAP `UID FETCH 1:* FLAGS`) used by
+    /// the sync service to detect expunged messages and reconcile flag changes
+    /// without re-downloading full envelopes.
+    async fn fetch_uid_flags(
+        &self,
+        mailbox: &MailboxPath,
+    ) -> Result<Vec<UidFlagEntry>, DomainError>;
+
     /// Subscribe to real-time notifications (IMAP IDLE, push, etc.).
     ///
     /// Returns a boxed stream for trait-object compatibility.
@@ -113,6 +138,14 @@ pub struct MessageEnvelopeSummary {
     pub size_bytes: u64,
     pub has_attachments: bool,
     pub internal_date: DateTime<Utc>,
+}
+
+/// Result of a bulk body fetch for a single message.
+#[derive(Debug, Clone)]
+pub struct MessageBodyResult {
+    pub provider_uid: ProviderUid,
+    pub body_text: Option<String>,
+    pub body_html: Option<String>,
 }
 
 /// Mailbox metadata for sync comparison.

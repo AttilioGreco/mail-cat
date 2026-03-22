@@ -7,6 +7,8 @@ members = [
     "crates/mc-interfaces",
     "crates/mc-shared",
     "crates/mc-server",
+    "crates/mc-client",
+    "crates/mc-cli",
     "crates/mc-ui",
 ]
 
@@ -22,6 +24,7 @@ mc-application = { path = "crates/mc-application" }
 mc-infrastructure = { path = "crates/mc-infrastructure" }
 mc-interfaces = { path = "crates/mc-interfaces" }
 mc-shared = { path = "crates/mc-shared" }
+mc-client = { path = "crates/mc-client" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
