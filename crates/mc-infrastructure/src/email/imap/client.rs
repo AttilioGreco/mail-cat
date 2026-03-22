@@ -714,20 +714,21 @@ impl EmailProvider for ImapEmailProvider {
         debug!("Getting mailbox status for: {:?}", mailbox);
         let mut session = self.create_imap_session().await?;
 
-        // Select mailbox to get status
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
-        let mailbox_data = session
-            .select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
 
-        // Logout
+        // Use STATUS command to get accurate counts.
+        // SELECT's "unseen" field is the sequence number of the first unseen message (RFC 3501),
+        // NOT the count — STATUS (MESSAGES UNSEEN UIDNEXT UIDVALIDITY) returns the actual count.
+        let mailbox_data = session
+            .status(&mailbox_name, "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)")
+            .await
+            .map_err(|e| DomainError::Provider(format!("Mailbox STATUS failed: {}", e)))?;
+
         session
             .logout()
             .await
             .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
 
-        // Convert IMAP mailbox data to MailboxStatus
         let status = MailboxStatus {
             uid_validity: mailbox_data.uid_validity.unwrap_or(0),
             uid_next: mailbox_data.uid_next.unwrap_or(0),
@@ -931,11 +932,11 @@ impl EmailProvider for ImapEmailProvider {
                         });
                     }
                 } else {
-                    // New message, expunge, or combined — re-fetch counts
-                    let updated_mb = match session.select(&mailbox_name).await {
+                    // New message, expunge, or combined — re-fetch counts via STATUS
+                    let updated_mb = match session.status(&mailbox_name, "(MESSAGES UNSEEN)").await {
                         Ok(mb) => mb,
                         Err(e) => {
-                            warn!("[watch] Re-SELECT failed: {}", e);
+                            warn!("[watch] STATUS failed: {}", e);
                             let _ = session.logout().await;
                             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                             continue;
