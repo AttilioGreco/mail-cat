@@ -31,7 +31,7 @@ build:
 [working-directory: 'crates/mc-ui']
 build-release:
     cargo build --workspace --release
-    cargo tauri build
+    NO_STRIP=1 cargo tauri build
 
 # ── Test & Check ──────────────────────────────────────────────────────────────
 
