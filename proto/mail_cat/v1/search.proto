@@ -9,15 +9,22 @@ service SearchService {
   // Search messages across all accounts or specific account/mailbox.
   rpc Search(SearchRequest) returns (SearchResponse);
 
+  // Search-as-you-type suggestions (autocomplete).
+  rpc Suggest(SuggestRequest) returns (SuggestResponse);
+
   // Rebuild search index (server-streaming for progress).
   rpc RebuildIndex(RebuildIndexRequest) returns (stream RebuildIndexProgress);
 }
 
-// Search hit result.
+// Search hit result with envelope summary.
 message SearchHit {
   string message_id = 1;
   float score = 2;
-  optional string snippet = 3;  // Highlighted excerpt from subject/body
+  optional string snippet = 3;  // Highlighted excerpt from body
+  string subject = 4;
+  optional string from_name = 5;
+  string from_email = 6;
+  int64 date = 7;               // Unix timestamp
 }
 
 // === Requests/Responses ===
@@ -32,6 +39,30 @@ message SearchRequest {
 message SearchResponse {
   repeated SearchHit hits = 1;
   PageInfo page_info = 2;
+}
+
+message SuggestRequest {
+  string prefix = 1;
+  optional SuggestScope scope = 2;  // If omitted, searches all fields
+  uint32 max_per_field = 3;         // Max suggestions per field (default 5)
+}
+
+message SuggestResponse {
+  repeated Suggestion suggestions = 1;
+}
+
+message Suggestion {
+  string field = 1;      // e.g. "from_email", "subject"
+  string value = 2;      // The suggested value
+  uint32 doc_count = 3;  // How many documents contain this value
+}
+
+enum SuggestScope {
+  SUGGEST_SCOPE_UNSPECIFIED = 0;
+  SUGGEST_SCOPE_FROM = 1;
+  SUGGEST_SCOPE_TO = 2;
+  SUGGEST_SCOPE_SUBJECT = 3;
+  SUGGEST_SCOPE_BODY = 4;
 }
 
 message RebuildIndexRequest {
