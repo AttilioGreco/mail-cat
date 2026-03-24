@@ -228,6 +228,35 @@ impl MailCatClient {
         Ok(resp.hits.into_iter().map(search_hit_from_proto).collect())
     }
 
+    /// Search-as-you-type suggestions.
+    pub async fn suggest(
+        &self,
+        prefix: &str,
+        scope: Option<&str>,
+        max_per_field: u32,
+    ) -> Result<Vec<Suggestion>> {
+        let mut client = SearchServiceClient::new(self.channel.clone());
+
+        let proto_scope = scope.and_then(|s| match s {
+            "from" => Some(pb::SuggestScope::From as i32),
+            "to" => Some(pb::SuggestScope::To as i32),
+            "subject" => Some(pb::SuggestScope::Subject as i32),
+            "body" => Some(pb::SuggestScope::Body as i32),
+            _ => None,
+        });
+
+        let resp = client
+            .suggest(pb::SuggestRequest {
+                prefix: prefix.to_owned(),
+                scope: proto_scope,
+                max_per_field: if max_per_field == 0 { 5 } else { max_per_field },
+            })
+            .await?
+            .into_inner();
+
+        Ok(resp.suggestions.into_iter().map(suggestion_from_proto).collect())
+    }
+
     // ── Watch ─────────────────────────────────────────────────────────────────
 
     /// Subscribe to real-time mailbox events. Returns a stream of notifications.

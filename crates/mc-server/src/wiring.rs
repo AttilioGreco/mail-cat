@@ -37,7 +37,7 @@ type QueryBusImpl = InProcessQueryBus<
     TantivySearchIndex,
 >;
 type SyncServiceImpl =
-    SyncService<ProviderRegistryImpl, SledEventStore, SledRepository<SledEventStore>>;
+    SyncService<ProviderRegistryImpl, SledEventStore, SledRepository<SledEventStore>, TantivySearchIndex>;
 
 /// Application context with all wired dependencies.
 pub struct AppContext {
@@ -135,6 +135,7 @@ impl AppContext {
             provider_registry.clone(),
             event_store.clone(),
             repository_arc.clone(),
+            search_index.clone(),
             sync_config,
         ));
         tracing::info!("Initialized sync service");

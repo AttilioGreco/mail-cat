@@ -7,7 +7,7 @@ use tokio_stream::StreamExt;
 
 use mc_client::{
     Account, Mailbox, MailCatClient, MailboxNotificationKind, MessageBody, MessageFlag,
-    MessageSummary, SearchHit, SendMessageParams,
+    MessageSummary, SearchHit, SendMessageParams, Suggestion,
 };
 
 /// Tauri managed state — single shared client instance.
@@ -308,6 +308,10 @@ pub struct SearchHitDto {
     pub message_id: String,
     pub score: f32,
     pub snippet: Option<String>,
+    pub subject: String,
+    pub from_name: Option<String>,
+    pub from_email: String,
+    pub date: i64,
 }
 
 fn search_hit_to_dto(h: SearchHit) -> SearchHitDto {
@@ -315,6 +319,10 @@ fn search_hit_to_dto(h: SearchHit) -> SearchHitDto {
         message_id: h.message_id,
         score: h.score,
         snippet: h.snippet,
+        subject: h.subject,
+        from_name: h.from_name,
+        from_email: h.from_email,
+        date: h.date,
     }
 }
 
@@ -418,5 +426,33 @@ pub async fn search_messages(
         .search(&query, account_id.as_deref(), mailbox_id.as_deref())
         .await
         .map(|v| v.into_iter().map(search_hit_to_dto).collect())
+        .map_err(|e| e.to_string())
+}
+
+// ── Suggest ──────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SuggestionDto {
+    pub field: String,
+    pub value: String,
+    pub doc_count: u32,
+}
+
+fn suggestion_to_dto(s: Suggestion) -> SuggestionDto {
+    SuggestionDto { field: s.field, value: s.value, doc_count: s.doc_count }
+}
+
+#[tauri::command]
+pub async fn suggest_messages(
+    prefix: String,
+    scope: Option<String>,
+    max_per_field: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<SuggestionDto>, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .suggest(&prefix, scope.as_deref(), max_per_field.unwrap_or(5))
+        .await
+        .map(|v| v.into_iter().map(suggestion_to_dto).collect())
         .map_err(|e| e.to_string())
 }

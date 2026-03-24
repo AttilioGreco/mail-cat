@@ -99,6 +99,17 @@ where
                     .await?;
                 Ok(QueryResult::SearchResults(results))
             }
+            Query::SuggestMessages {
+                prefix,
+                scope,
+                max_per_field,
+            } => {
+                let suggestions = self
+                    .search_index
+                    .suggest(&prefix, scope, max_per_field)
+                    .await?;
+                Ok(QueryResult::Suggestions(suggestions))
+            }
         }
     }
 }
@@ -220,6 +231,15 @@ mod tests {
                 hits: vec![],
                 total_count: 0,
             })
+        }
+
+        async fn suggest(
+            &self,
+            _prefix: &str,
+            _scope: Option<mc_domain::SuggestScope>,
+            _max_per_field: usize,
+        ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
+            Ok(vec![])
         }
 
         async fn rebuild(&self, _messages: Vec<Message>) -> Result<u64, DomainError> {

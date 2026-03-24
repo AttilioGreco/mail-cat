@@ -15,6 +15,7 @@ use mc_domain::{
     AccountId, AggregateType, DomainEvent, EmailProvider, EventEnvelope, EventStore, FetchRange,
     Flag, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message, MessageId,
     MessageReadRepository, ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
+    SearchIndex,
 };
 use tracing::{debug, error, info, instrument, warn};
 
@@ -77,10 +78,12 @@ pub struct SyncService<
     PR: ProviderRegistry,
     ES: EventStore,
     P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint,
+    SI: SearchIndex,
 > {
     provider_registry: Arc<PR>,
     event_store: Arc<ES>,
     projector: Arc<P>,
+    search_index: Arc<SI>,
     #[allow(dead_code)]
     config: SyncConfig,
     cancelled: AtomicBool,
@@ -90,19 +93,22 @@ impl<
     PR: ProviderRegistry,
     ES: EventStore,
     P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint,
-> SyncService<PR, ES, P>
+    SI: SearchIndex,
+> SyncService<PR, ES, P, SI>
 {
     /// Creates a new SyncService with the given dependencies.
     pub fn new(
         provider_registry: Arc<PR>,
         event_store: Arc<ES>,
         projector: Arc<P>,
+        search_index: Arc<SI>,
         config: SyncConfig,
     ) -> Self {
         Self {
             provider_registry,
             event_store,
             projector,
+            search_index,
             config,
             cancelled: AtomicBool::new(false),
         }
@@ -362,12 +368,14 @@ impl<
                 let provider = self.provider_registry.get_provider(account_id)?;
                 match provider.fetch_bodies_bulk(&remote.path, &uids).await {
                     Ok(body_results) => {
+                        let mut indexed = 0u32;
                         for result in body_results {
                             if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
                                 let event = DomainEvent::MessageBodyFetched {
                                     message_id: (*message_id).clone(),
                                     body_text: result.body_text,
                                     body_html: result.body_html,
+                                    // TODO: download and index attachments
                                     attachments: vec![],
                                 };
                                 if let Err(e) = self
@@ -379,10 +387,28 @@ impl<
                                     .await
                                 {
                                     warn!(%message_id, error = %e, "Failed to project body");
+                                    continue;
+                                }
+
+                                // Index the full message (envelope + body) for search
+                                match self.projector.get_message(message_id).await {
+                                    Ok(Some(full_msg)) => {
+                                        if let Err(e) = self.search_index.index_message(&full_msg).await {
+                                            warn!(%message_id, error = %e, "Failed to index message");
+                                        } else {
+                                            indexed += 1;
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        warn!(%message_id, "Message not found in read model after body projection");
+                                    }
+                                    Err(e) => {
+                                        warn!(%message_id, error = %e, "Failed to read message for indexing");
+                                    }
                                 }
                             }
                         }
-                        info!(path = %remote.path, count = total_bodies, "Bodies fetched");
+                        info!(path = %remote.path, bodies = total_bodies, indexed, "Bodies fetched and indexed");
                     }
                     Err(e) => {
                         warn!(path = %remote.path, error = %e, "Bulk body fetch failed, skipping");
@@ -702,7 +728,8 @@ impl<
     PR: ProviderRegistry,
     ES: EventStore,
     P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint,
-> SyncTrigger for SyncService<PR, ES, P>
+    SI: SearchIndex,
+> SyncTrigger for SyncService<PR, ES, P, SI>
 {
     async fn trigger_sync(
         &self,
@@ -1116,13 +1143,51 @@ mod tests {
         }
     }
 
+    // ── Mock SearchIndex ────────────────────────────────────────────
+
+    struct MockSearchIndex;
+
+    #[async_trait]
+    impl SearchIndex for MockSearchIndex {
+        async fn index_message(&self, _message: &Message) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn remove_message(&self, _message_id: &MessageId) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn search(
+            &self,
+            _query: &str,
+            _account_id: Option<&AccountId>,
+            _mailbox_id: Option<&MailboxId>,
+            _pagination: &mc_shared::pagination::Pagination,
+        ) -> Result<mc_domain::traits::search_index::SearchResults, DomainError> {
+            Ok(mc_domain::traits::search_index::SearchResults {
+                hits: vec![],
+                total_count: 0,
+            })
+        }
+        async fn suggest(
+            &self,
+            _prefix: &str,
+            _scope: Option<mc_domain::SuggestScope>,
+            _max_per_field: usize,
+        ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
+            Ok(vec![])
+        }
+        async fn rebuild(&self, _messages: Vec<Message>) -> Result<u64, DomainError> {
+            Ok(0)
+        }
+    }
+
     fn make_service(
         provider: MockEmailProvider,
         event_store: Arc<MockEventStore>,
         projector: Arc<MockProjector>,
-    ) -> SyncService<MockProviderRegistry, MockEventStore, MockProjector> {
+    ) -> SyncService<MockProviderRegistry, MockEventStore, MockProjector, MockSearchIndex> {
         let registry = Arc::new(MockProviderRegistry::new(Arc::new(provider)));
-        SyncService::new(registry, event_store, projector, SyncConfig::default())
+        let search_index = Arc::new(MockSearchIndex);
+        SyncService::new(registry, event_store, projector, search_index, SyncConfig::default())
     }
 
     // ── Tests ─────────────────────────────────────────────────────────

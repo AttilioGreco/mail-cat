@@ -59,7 +59,7 @@ pub enum MessagesCmd {
     },
     /// Search messages by full-text query
     Search {
-        /// Search query
+        /// Search query (supports from:, to:, sbj: prefixes)
         query: String,
         /// Limit to a specific account
         #[arg(long)]
@@ -67,6 +67,17 @@ pub enum MessagesCmd {
         /// Limit to a specific mailbox
         #[arg(long)]
         mailbox_id: Option<String>,
+    },
+    /// Autocomplete suggestions for search-as-you-type
+    Suggest {
+        /// Prefix to search for
+        prefix: String,
+        /// Scope: from, to, subject, body (optional)
+        #[arg(long)]
+        scope: Option<String>,
+        /// Max suggestions per field
+        #[arg(long, default_value = "5")]
+        max: u32,
     },
 }
 
@@ -99,6 +110,11 @@ pub async fn run(cmd: MessagesCmd, client: MailCatClient) -> Result<()> {
             account_id,
             mailbox_id,
         } => search(query, account_id, mailbox_id, client).await,
+        MessagesCmd::Suggest {
+            prefix,
+            scope,
+            max,
+        } => suggest(prefix, scope, max, client).await,
     }
 }
 
@@ -295,20 +311,70 @@ async fn search(
 
     #[derive(Tabled)]
     struct HitRow {
-        #[tabled(rename = "Message ID")]
-        id: String,
         #[tabled(rename = "Score")]
         score: String,
-        #[tabled(rename = "Snippet")]
-        snippet: String,
+        #[tabled(rename = "From")]
+        from: String,
+        #[tabled(rename = "Subject")]
+        subject: String,
+        #[tabled(rename = "ID")]
+        id: String,
     }
 
     let rows: Vec<HitRow> = hits
         .into_iter()
         .map(|h| HitRow {
-            id: h.message_id[..8.min(h.message_id.len())].to_string() + "…",
             score: format!("{:.2}", h.score),
-            snippet: h.snippet.unwrap_or_default().chars().take(60).collect(),
+            from: h.from_name.unwrap_or(h.from_email).chars().take(25).collect(),
+            subject: h.subject.chars().take(40).collect(),
+            id: h.message_id[..8.min(h.message_id.len())].to_string() + "…",
+        })
+        .collect();
+
+    println!("{}", Table::new(rows));
+    Ok(())
+}
+
+async fn suggest(
+    prefix: String,
+    scope: Option<String>,
+    max: u32,
+    client: MailCatClient,
+) -> Result<()> {
+    println!(
+        "{} Suggesting: prefix={} scope={:?}",
+        "→".blue(),
+        prefix.bold(),
+        scope
+    );
+
+    let suggestions = client
+        .suggest(&prefix, scope.as_deref(), max)
+        .await?;
+
+    if suggestions.is_empty() {
+        println!("{}", "  No suggestions.".yellow());
+        return Ok(());
+    }
+
+    println!("  {} suggestion(s)\n", suggestions.len().to_string().bold());
+
+    #[derive(Tabled)]
+    struct SuggestionRow {
+        #[tabled(rename = "Field")]
+        field: String,
+        #[tabled(rename = "Value")]
+        value: String,
+        #[tabled(rename = "Count")]
+        count: String,
+    }
+
+    let rows: Vec<SuggestionRow> = suggestions
+        .into_iter()
+        .map(|s| SuggestionRow {
+            field: s.field,
+            value: s.value,
+            count: s.doc_count.to_string(),
         })
         .collect();
 

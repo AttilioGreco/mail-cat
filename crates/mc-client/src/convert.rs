@@ -107,6 +107,18 @@ pub fn search_hit_from_proto(h: pb::SearchHit) -> SearchHit {
         message_id: h.message_id,
         score: h.score,
         snippet: h.snippet,
+        subject: h.subject,
+        from_name: h.from_name,
+        from_email: h.from_email,
+        date: h.date,
+    }
+}
+
+pub fn suggestion_from_proto(s: pb::Suggestion) -> Suggestion {
+    Suggestion {
+        field: s.field,
+        value: s.value,
+        doc_count: s.doc_count,
     }
 }
 

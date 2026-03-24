@@ -36,4 +36,4 @@ pub use traits::repository::{
     AccountReadRepository, AccountSummary, AccountWriteRepository, MailboxReadRepository,
     MessageReadRepository, MessageSummary, ProjectionCheckpoint,
 };
-pub use traits::search_index::{SearchHit, SearchIndex, SearchResults};
+pub use traits::search_index::{SearchHit, SearchIndex, SearchResults, SuggestScope, Suggestion};

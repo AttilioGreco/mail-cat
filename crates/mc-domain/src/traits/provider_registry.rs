@@ -9,7 +9,7 @@ use crate::traits::email_provider::EmailProvider;
 /// Allows multi-account support by resolving the correct provider
 /// for each account at runtime.
 pub trait ProviderRegistry: Send + Sync {
-    type Provider: EmailProvider;
+    type Provider: EmailProvider + 'static;
 
     /// Get the provider for the given account.
     fn get_provider(&self, account_id: &AccountId) -> Result<Arc<Self::Provider>, DomainError>;

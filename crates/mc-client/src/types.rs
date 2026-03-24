@@ -89,12 +89,24 @@ pub struct SendMessageParams {
     pub references: Vec<String>,
 }
 
-/// A search result hit.
+/// A search result hit with envelope summary.
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub message_id: String,
     pub score: f32,
     pub snippet: Option<String>,
+    pub subject: String,
+    pub from_name: Option<String>,
+    pub from_email: String,
+    pub date: i64,
+}
+
+/// A search suggestion (autocomplete).
+#[derive(Debug, Clone)]
+pub struct Suggestion {
+    pub field: String,
+    pub value: String,
+    pub doc_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -5,6 +5,7 @@
 
 use mc_domain::{
     AccountId, AccountSummary, Mailbox, MailboxId, Message, MessageSummary, SearchResults,
+    SuggestScope, Suggestion,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -48,6 +49,13 @@ pub enum Query {
         mailbox_id: Option<MailboxId>,
         pagination: Pagination,
     },
+
+    /// Search-as-you-type suggestions.
+    SuggestMessages {
+        prefix: String,
+        scope: Option<SuggestScope>,
+        max_per_field: usize,
+    },
 }
 
 use mc_domain::MessageId;
@@ -66,6 +74,7 @@ pub enum QueryResult {
     Messages(PagedResult<MessageSummary>),
     Thread(Box<Vec<Message>>),
     SearchResults(SearchResults),
+    Suggestions(Vec<Suggestion>),
 }
 
 // ── Typed extraction helpers ───────────────────────────────────────────────
@@ -140,6 +149,15 @@ impl QueryResult {
     pub fn into_search_results(self) -> Result<SearchResults, ApplicationError> {
         match self {
             Self::SearchResults(v) => Ok(v),
+            _ => Err(ApplicationError::Internal(
+                "unexpected query result variant".into(),
+            )),
+        }
+    }
+
+    pub fn into_suggestions(self) -> Result<Vec<Suggestion>, ApplicationError> {
+        match self {
+            Self::Suggestions(v) => Ok(v),
             _ => Err(ApplicationError::Internal(
                 "unexpected query result variant".into(),
             )),

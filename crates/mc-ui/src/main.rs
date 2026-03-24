@@ -32,6 +32,7 @@ async fn main() {
             commands::delete_message,
             commands::send_message,
             commands::search_messages,
+            commands::suggest_messages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

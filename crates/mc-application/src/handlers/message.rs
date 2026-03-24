@@ -95,17 +95,25 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
 
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
-        // Update flags on the remote provider first.
-        provider
-            .set_flags(&mailbox_path, provider_uid, &flags_to_add, &flags_to_remove)
-            .await?;
-
-        let event = message.change_flags(flags_to_add, flags_to_remove);
+        // Optimistic update: persist locally first for instant UI feedback,
+        // then sync to IMAP in background. Next sync reconciles if IMAP fails.
+        let event = message.change_flags(flags_to_add.clone(), flags_to_remove.clone());
 
         self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
-        info!(%message_id, "message flags updated");
+        info!(%message_id, "message flags updated locally, syncing to IMAP in background");
+
+        // Fire-and-forget IMAP update
+        tokio::spawn(async move {
+            if let Err(e) = provider
+                .set_flags(&mailbox_path, provider_uid, &flags_to_add, &flags_to_remove)
+                .await
+            {
+                tracing::warn!(%e, "Background IMAP set_flags failed — next sync will reconcile");
+            }
+        });
+
         Ok(CommandResult::FlagsSet)
     }
 
@@ -184,17 +192,23 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
 
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
-        // Move on the remote provider.
-        let _new_uid = provider
-            .move_message(provider_uid, &from_mailbox_path, &to_mailbox_path)
-            .await?;
-
+        // Optimistic: update locally first, sync to IMAP in background.
         let event = message.move_to(to_mailbox_id);
 
         self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
-        info!(%message_id, "message moved");
+        info!(%message_id, "message moved locally, syncing to IMAP in background");
+
+        tokio::spawn(async move {
+            if let Err(e) = provider
+                .move_message(provider_uid, &from_mailbox_path, &to_mailbox_path)
+                .await
+            {
+                tracing::warn!(%e, "Background IMAP move failed — next sync will reconcile");
+            }
+        });
+
         Ok(CommandResult::MessageMoved)
     }
 
@@ -213,17 +227,23 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
 
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
-        // Delete on the remote provider.
-        provider
-            .delete_message(&mailbox_path, provider_uid, permanently)
-            .await?;
-
+        // Optimistic: update locally first, sync to IMAP in background.
         let event = message.delete(permanently);
 
         self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
-        info!(%message_id, permanently, "message deleted");
+        info!(%message_id, permanently, "message deleted locally, syncing to IMAP in background");
+
+        tokio::spawn(async move {
+            if let Err(e) = provider
+                .delete_message(&mailbox_path, provider_uid, permanently)
+                .await
+            {
+                tracing::warn!(%e, "Background IMAP delete failed — next sync will reconcile");
+            }
+        });
+
         Ok(CommandResult::MessageDeleted)
     }
 

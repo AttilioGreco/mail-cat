@@ -36,11 +36,31 @@ pub trait SearchIndex: Send + Sync {
         pagination: &Pagination,
     ) -> Result<SearchResults, DomainError>;
 
+    /// Suggest completions for search-as-you-type.
+    ///
+    /// Given a prefix and an optional field scope, returns matching values
+    /// grouped by field with document frequency.
+    async fn suggest(
+        &self,
+        prefix: &str,
+        scope: Option<SuggestScope>,
+        max_per_field: usize,
+    ) -> Result<Vec<Suggestion>, DomainError>;
+
     /// Rebuild the entire index from scratch.
     ///
     /// The caller provides an iterator of messages. Returns the number of
     /// documents indexed.
     async fn rebuild(&self, messages: Vec<Message>) -> Result<u64, DomainError>;
+}
+
+/// Which field(s) to scope suggestions to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SuggestScope {
+    From,
+    To,
+    Subject,
+    Body,
 }
 
 /// Search results container.
@@ -50,10 +70,25 @@ pub struct SearchResults {
     pub total_count: u64,
 }
 
-/// A single search result hit.
+/// A single search result hit with envelope summary for display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub message_id: MessageId,
     pub score: f32,
     pub snippet: Option<String>,
+    pub subject: String,
+    pub from_name: Option<String>,
+    pub from_email: String,
+    pub date: i64,
+}
+
+/// A single suggestion from the search index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Suggestion {
+    /// Which field this suggestion came from.
+    pub field: String,
+    /// The suggested value (e.g. an email address, a subject line).
+    pub value: String,
+    /// How many documents contain this value.
+    pub doc_count: u32,
 }

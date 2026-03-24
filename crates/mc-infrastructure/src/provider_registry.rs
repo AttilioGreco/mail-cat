@@ -22,7 +22,7 @@ impl<P: EmailProvider> Default for InMemoryProviderRegistry<P> {
     }
 }
 
-impl<P: EmailProvider> ProviderRegistry for InMemoryProviderRegistry<P> {
+impl<P: EmailProvider + 'static> ProviderRegistry for InMemoryProviderRegistry<P> {
     type Provider = P;
 
     fn get_provider(&self, account_id: &AccountId) -> Result<Arc<P>, DomainError> {
