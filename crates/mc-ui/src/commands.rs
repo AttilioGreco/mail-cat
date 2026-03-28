@@ -16,9 +16,14 @@ pub struct AppState {
     pub server_url: String,
 }
 
-/// Tracks active mailbox watch tasks (mailbox_id → cancellation token).
+/// Tracks active mailbox watch tasks (mailbox_id → (token, ref_count)).
+///
+/// Multiple callers can independently request the same mailbox watcher
+/// (e.g. MessageList for the selected folder AND the permanent INBOX watcher
+/// in Sidebar). The background task runs as long as ref_count > 0 and is
+/// cancelled only when the last caller calls `stop_watching`.
 pub struct WatchState {
-    pub watchers: Mutex<HashMap<String, CancellationToken>>,
+    pub watchers: Mutex<HashMap<String, (CancellationToken, usize)>>,
 }
 
 impl WatchState {
@@ -189,17 +194,18 @@ pub async fn start_watching(
     state: State<'_, AppState>,
     watch_state: State<'_, WatchState>,
 ) -> Result<(), String> {
-    let mut watchers: tokio::sync::MutexGuard<'_, HashMap<String, CancellationToken>> =
+    let mut watchers: tokio::sync::MutexGuard<'_, HashMap<String, (CancellationToken, usize)>> =
         watch_state.watchers.lock().await;
 
-    // Already watching this mailbox — idempotent
-    if watchers.contains_key(&mailbox_id) {
+    // Already watching — just increment the ref count (idempotent task spawn)
+    if let Some((_, ref_count)) = watchers.get_mut(&mailbox_id) {
+        *ref_count += 1;
         return Ok(());
     }
 
     let client = get_or_connect(&state).await?;
     let token = CancellationToken::new();
-    watchers.insert(mailbox_id.clone(), token.clone());
+    watchers.insert(mailbox_id.clone(), (token.clone(), 1));
     drop(watchers); // release lock before spawning
 
     let mid = mailbox_id.clone();
@@ -292,10 +298,14 @@ pub async fn stop_watching(
     mailbox_id: String,
     watch_state: State<'_, WatchState>,
 ) -> Result<(), String> {
-    let mut watchers: tokio::sync::MutexGuard<'_, HashMap<String, CancellationToken>> =
+    let mut watchers: tokio::sync::MutexGuard<'_, HashMap<String, (CancellationToken, usize)>> =
         watch_state.watchers.lock().await;
-    if let Some(token) = watchers.remove(&mailbox_id) {
-        token.cancel();
+    if let Some((_, ref_count)) = watchers.get_mut(&mailbox_id) {
+        *ref_count -= 1;
+        if *ref_count == 0 {
+            let (token, _) = watchers.remove(&mailbox_id).unwrap();
+            token.cancel();
+        }
     }
     Ok(())
 }

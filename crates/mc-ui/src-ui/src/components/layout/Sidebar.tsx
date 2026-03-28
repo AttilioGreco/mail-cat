@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils';
 import { useUIStore } from '@/store/uiStore';
 import { useAccounts } from '@/hooks/useAccounts';
 import { useMailboxes } from '@/hooks/useMailboxes';
+import { useInboxWatcher } from '@/hooks/useInboxWatcher';
 import { FolderItem } from '@/components/folders/FolderItem';
 import type { Account, Mailbox } from '@/lib/types';
 
@@ -102,6 +103,10 @@ function FolderTree({
   onSelect: (mailbox: Mailbox) => void;
 }) {
   const { data: mailboxes = [], isLoading, error } = useMailboxes(accountId);
+
+  // Keep INBOX watched permanently so unread badges update even when viewing another folder.
+  const inbox = mailboxes.find((m) => m.path.toUpperCase() === 'INBOX') ?? null;
+  useInboxWatcher(accountId, inbox);
 
   if (isLoading) {
     return (
