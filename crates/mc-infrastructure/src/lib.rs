@@ -8,7 +8,7 @@ pub mod provider_registry;
 pub mod search;
 
 // Re-exports for ergonomics
-pub use email::{ImapEmailProvider, SmtpSender};
+pub use email::{ImapAccountEventSource, ImapEmailProvider, SmtpSender};
 pub use persistence::{SharedSledRepository, SledEventStore, SledRepository};
 pub use provider_registry::InMemoryProviderRegistry;
 pub use search::TantivySearchIndex;

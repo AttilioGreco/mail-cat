@@ -538,6 +538,7 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
 
             DomainEvent::MessageFlagged {
                 message_id,
+                mailbox_id: _,
                 flags_added,
                 flags_removed,
             } => {
@@ -1284,6 +1285,7 @@ mod tests {
             3,
             DomainEvent::MessageFlagged {
                 message_id: message_id.clone(),
+                mailbox_id: MailboxId::new(),
                 flags_added: vec![Flag::Seen],
                 flags_removed: vec![Flag::Recent],
             },

@@ -796,6 +796,11 @@ impl EmailProvider for ImapEmailProvider {
         mailbox: &MailboxPath,
     ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>> {
         let mailbox_name = mailbox_path_to_string(mailbox);
+        // Clone the original MailboxPath so notifications carry the same path
+        // (with the same delimiter) as the one stored in sled from list_mailboxes.
+        // Do NOT reconstruct from the string: splitting on '/' would hardcode the
+        // wrong delimiter and break PartialEq comparisons downstream.
+        let mb_path = mailbox.clone();
 
         Box::pin(async_stream::stream! {
             use async_imap::extensions::idle::IdleResponse;
@@ -813,12 +818,17 @@ impl EmailProvider for ImapEmailProvider {
                     }
                 };
 
-                if let Err(e) = session.select(&mailbox_name).await {
-                    warn!("[watch] SELECT '{}' failed: {}", mailbox_name, e);
-                    let _ = session.logout().await;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                    continue;
-                }
+                let select_data = match session.select(&mailbox_name).await {
+                    Ok(mb) => mb,
+                    Err(e) => {
+                        warn!("[watch] SELECT '{}' failed: {}", mailbox_name, e);
+                        let _ = session.logout().await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                        continue;
+                    }
+                };
+                // Remember the next expected UID so we can detect new arrivals after IDLE.
+                let uid_next = select_data.uid_next.unwrap_or(1);
 
                 info!("[watch] IDLE active for '{}'", mailbox_name);
                 let mut idle = session.idle();
@@ -872,16 +882,6 @@ impl EmailProvider for ImapEmailProvider {
                 let has_expunge = raw_upper.contains("EXPUNGE");
                 let has_exists  = raw_upper.contains("EXISTS");
 
-                let parts: Vec<String> = mailbox_name.split('/').map(|s| s.to_string()).collect();
-                let mb_path = match mc_domain::value_objects::mailbox_path::MailboxPath::new(parts, '/') {
-                    Ok(p) => p,
-                    Err(_) => {
-                        warn!("[watch] Failed to parse mailbox path '{}'", mailbox_name);
-                        let _ = session.logout().await;
-                        continue;
-                    }
-                };
-
                 if has_flags && !has_exists && !has_expunge {
                     // Pure flag change (e.g. marking read in another client).
                     // Parse the sequence number from "* N FETCH ..." to resolve UID + flags.
@@ -917,7 +917,7 @@ impl EmailProvider for ImapEmailProvider {
                             Err(e) => {
                                 warn!("[watch] FETCH (UID FLAGS) failed for seq {}: {}", seq, e);
                                 yield Ok(ProviderNotification::FlagsChanged {
-                                    mailbox: mb_path,
+                                    mailbox: mb_path.clone(),
                                     uid: ProviderUid::new(0),
                                     flags: vec![],
                                 });
@@ -926,13 +926,42 @@ impl EmailProvider for ImapEmailProvider {
                     } else {
                         warn!("[watch] Could not parse seq num from IDLE response");
                         yield Ok(ProviderNotification::FlagsChanged {
-                            mailbox: mb_path,
+                            mailbox: mb_path.clone(),
                             uid: ProviderUid::new(0),
                             flags: vec![],
                         });
                     }
                 } else {
-                    // New message, expunge, or combined — re-fetch counts via STATUS
+                    // EXISTS (new messages) and/or EXPUNGE.
+
+                    // If new messages arrived, fetch their UIDs and emit NewMessage
+                    // for each one. We use uid_next captured from SELECT: any UID
+                    // >= uid_next is a message that wasn't there when IDLE started.
+                    if has_exists {
+                        use futures::TryStreamExt as _;
+                        let range = format!("{}:*", uid_next);
+                        match session.uid_fetch(&range, "FLAGS").await {
+                            Ok(stream) => match stream.try_collect::<Vec<_>>().await {
+                                Ok(fetches) => {
+                                    for fetch in &fetches {
+                                        if let Some(uid) = fetch.uid
+                                            && uid >= uid_next
+                                        {
+                                            info!("[watch] NewMessage in '{}': uid={}", mailbox_name, uid);
+                                            yield Ok(ProviderNotification::NewMessage {
+                                                mailbox: mb_path.clone(),
+                                                uid: ProviderUid::new(uid),
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!("[watch] UID FETCH for new messages failed: {}", e),
+                            },
+                            Err(e) => warn!("[watch] UID FETCH for new messages failed: {}", e),
+                        }
+                    }
+
+                    // Always emit updated counts (covers both new messages and expunges).
                     let updated_mb = match session.status(&mailbox_name, "(MESSAGES UNSEEN)").await {
                         Ok(mb) => mb,
                         Err(e) => {
@@ -945,7 +974,7 @@ impl EmailProvider for ImapEmailProvider {
                     info!("[watch] CountsChanged in '{}': total={} unseen={}",
                         mailbox_name, updated_mb.exists, updated_mb.unseen.unwrap_or(0));
                     yield Ok(ProviderNotification::MailboxCountChanged {
-                        mailbox: mb_path,
+                        mailbox: mb_path.clone(),
                         total: updated_mb.exists,
                         unseen: updated_mb.unseen.unwrap_or(0),
                     });
