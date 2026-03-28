@@ -1,19 +1,23 @@
 //! Dependency injection and application wiring.
 
 use anyhow::Context;
+use futures::stream::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
+use mc_application::{CommandBus, QueryBus};
 use mc_application::projections::ProjectionEventHandler;
 use mc_domain::ReadModelProjector;
 use mc_application::{SyncConfig, SyncService, SyncTrigger};
 use mc_domain::{
-    Account, AccountId, AccountReadRepository, AccountWriteRepository, AuthConfig,
-    ConnectionConfig, EmailAddress, Identity, ProviderRegistry, ProviderType,
+    Account, AccountEventSource, AccountId, AccountReadRepository, AccountWriteRepository,
+    AuthConfig, ConnectionConfig, EmailAddress, Identity, MailboxId, MailboxPath,
+    ProviderNotification, ProviderRegistry, ProviderType, ProviderUid,
 };
 use mc_infrastructure::{
-    ImapEmailProvider, InMemoryProviderRegistry, SledEventStore, SledRepository, TantivySearchIndex,
+    ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SledEventStore,
+    SledRepository, TantivySearchIndex,
 };
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
@@ -43,7 +47,7 @@ type SyncServiceImpl =
 pub struct AppContext {
     pub account_service: AccountServiceImpl<CommandBusImpl, QueryBusImpl>,
     pub mailbox_service: MailboxServiceImpl<QueryBusImpl>,
-    pub message_service: MessageServiceImpl<CommandBusImpl, QueryBusImpl, ProviderRegistryImpl>,
+    pub message_service: MessageServiceImpl<CommandBusImpl, QueryBusImpl>,
     pub search_service: SearchServiceImpl<QueryBusImpl>,
     #[allow(dead_code)]
     pub sync_service: Arc<SyncServiceImpl>,
@@ -131,13 +135,16 @@ impl AppContext {
             max_concurrent_bodies: 4,
             eager_body_fetch: true,
         };
-        let sync_service = Arc::new(SyncService::new(
-            provider_registry.clone(),
-            event_store.clone(),
-            repository_arc.clone(),
-            search_index.clone(),
-            sync_config,
-        ));
+        let sync_service = Arc::new(
+            SyncService::new(
+                provider_registry.clone(),
+                event_store.clone(),
+                repository_arc.clone(),
+                search_index.clone(),
+                sync_config,
+            )
+            .with_event_publisher(event_bus.clone()),
+        );
         tracing::info!("Initialized sync service");
 
         // Create projection event handler and start catching up
@@ -249,6 +256,133 @@ impl AppContext {
             tracing::info!("Live projection subscriber started");
         }
 
+        // ── Desktop notification subscriber ──────────────────────────────────
+        // Listens for domain events on the event bus and fires OS desktop
+        // notifications (notify-rust → D-Bus on Linux, WinRT on Windows,
+        // NSUserNotification on macOS).
+        //
+        // Handled events:
+        //   • MessageReceived  – new unread mail popup with action buttons:
+        //       "Archivia" → MoveMessage to Archive mailbox via command bus
+        //       "Apri Mail Cat" → spawns the mail-cat-ui process
+        //   • AccountSyncFailed – error alert (no actions)
+        {
+            let mut sub = event_bus.subscribe();
+            let notif_cmd_bus = command_bus.clone();
+            let notif_q_bus = query_bus.clone();
+            tokio::spawn(async move {
+                while let Some(envelope) = sub.recv().await {
+                    match envelope.payload {
+                        mc_domain::DomainEvent::MessageReceived {
+                            message_id,
+                            account_id,
+                            mailbox_id,
+                            envelope: mail_envelope,
+                            flags,
+                            ..
+                        } => {
+                            if flags.contains(&mc_domain::Flag::Seen) {
+                                continue;
+                            }
+                            let from = mail_envelope
+                                .from
+                                .first()
+                                .map(|a| a.name.as_deref().unwrap_or(a.email.as_str()).to_owned())
+                                .unwrap_or_else(|| "Unknown".to_owned());
+                            let subject = mail_envelope.subject.clone();
+                            let cmd = notif_cmd_bus.clone();
+                            let q = notif_q_bus.clone();
+                            // Capture the tokio handle before entering the blocking task so we
+                            // can drive async work (command dispatch, mailbox lookup) from the
+                            // synchronous wait_for_action callback.
+                            let rt = tokio::runtime::Handle::current();
+                            tokio::task::spawn_blocking(move || {
+                                let Ok(handle) = notify_rust::Notification::new()
+                                    .summary(&format!("New message from {from}"))
+                                    .body(&subject)
+                                    .icon("mail-unread")
+                                    .action("archive", "Archivia")
+                                    .action("open", "Apri Mail Cat")
+                                    .show()
+                                else {
+                                    return;
+                                };
+                                handle.wait_for_action(move |action| match action {
+                                    "archive" => {
+                                        rt.block_on(async move {
+                                            // Fetch all mailboxes for the account so we can
+                                            // resolve both the source path and the Archive target.
+                                            let mailboxes = match q
+                                                .dispatch(mc_application::Query::ListMailboxes {
+                                                    account_id: account_id.clone(),
+                                                })
+                                                .await
+                                            {
+                                                Ok(mc_application::QueryResult::Mailboxes(m)) => m,
+                                                _ => return,
+                                            };
+                                            let from_mb =
+                                                mailboxes.iter().find(|m| m.id == mailbox_id);
+                                            let archive_mb = mailboxes.iter().find(|m| {
+                                                m.mailbox_type == mc_domain::MailboxType::Archive
+                                            });
+                                            match (from_mb, archive_mb) {
+                                                (Some(src), Some(dst)) => {
+                                                    if let Err(e) = cmd
+                                                        .dispatch(
+                                                            mc_application::Command::MoveMessage {
+                                                                message_id: message_id.clone(),
+                                                                from_mailbox_id: src.id.clone(),
+                                                                to_mailbox_id: dst.id.clone(),
+                                                                from_mailbox_path: src.path.clone(),
+                                                                to_mailbox_path: dst.path.clone(),
+                                                            },
+                                                        )
+                                                        .await
+                                                    {
+                                                        tracing::warn!(
+                                                            "Archive from notification failed: {e}"
+                                                        );
+                                                    }
+                                                }
+                                                _ => tracing::warn!(
+                                                    "Archive mailbox not found for account {}",
+                                                    account_id.as_uuid()
+                                                ),
+                                            }
+                                        });
+                                    }
+                                    "open" => {
+                                        if let Err(e) =
+                                            std::process::Command::new("mail-cat-ui").spawn()
+                                        {
+                                            tracing::warn!("Failed to open Mail Cat: {e}");
+                                        }
+                                    }
+                                    _ => {}
+                                });
+                            });
+                        }
+                        mc_domain::DomainEvent::AccountSyncFailed { account_id, error } => {
+                            tokio::task::spawn_blocking(move || {
+                                if let Err(e) = notify_rust::Notification::new()
+                                    .summary(&format!("Sync error – {}", account_id.as_uuid()))
+                                    .body(&error)
+                                    .icon("dialog-error")
+                                    .show()
+                                {
+                                    tracing::warn!("Desktop notification failed: {e}");
+                                }
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                tracing::info!("Notification subscriber exited");
+            });
+            tracing::info!("Desktop notification subscriber started");
+        }
+
         // Re-run projection catch-up if new accounts were created
         if created_new {
             tracing::info!("Re-running projection catch-up for newly created accounts...");
@@ -319,6 +453,201 @@ impl AppContext {
             tracing::info!("Periodic re-sync timer started (every 5 minutes)");
         }
 
+        // ── Server-side mailbox watchers ─────────────────────────────────────
+        // One background task per account watches INBOX via IMAP IDLE.
+        // Each ProviderNotification is mapped to a domain command/event so that
+        // all state changes flow through the single InProcessEventBus:
+        //
+        //   NewMessage / MailboxCountChanged → debounced sync (Semaphore 1)
+        //       └→ SyncService emits MessageReceived + MailboxCountsUpdated
+        //
+        //   FlagsChanged  → Command::ApplyRemoteFlagChange
+        //       └→ emits MessageFlagged on the bus
+        //
+        //   MessageExpunged → Command::ApplyRemoteExpunge
+        //       └→ emits MessageDeleted on the bus
+        //
+        // Subscribers on the bus (LiveProjector, DesktopNotifier, watch_mailbox
+        // gRPC stream) react to domain events only — no parallel raw-event bus.
+        for (account_id, name) in &registered_ids {
+            // Load local mailboxes once: used both to build path→MailboxId and
+            // to get the server-correct INBOX MailboxPath (with the real delimiter).
+            let local_mailboxes = match query_bus
+                .dispatch(mc_application::Query::ListMailboxes {
+                    account_id: account_id.clone(),
+                })
+                .await
+            {
+                Ok(mc_application::QueryResult::Mailboxes(m)) => m,
+                _ => vec![],
+            };
+
+            // Use the stored INBOX path (has the server's actual delimiter, e.g. '.')
+            // so that notifications emitted by watch_mailbox match what's in sled.
+            // Fall back to MailboxPath::inbox() only if INBOX hasn't been synced yet.
+            let inbox_path = local_mailboxes
+                .iter()
+                .find(|mb| mb.path.full_path().to_uppercase() == "INBOX")
+                .map(|mb| mb.path.clone())
+                .unwrap_or_else(MailboxPath::inbox);
+
+            // path→MailboxId map for FlagsChanged / MessageExpunged routing.
+            let path_to_id: HashMap<String, MailboxId> = local_mailboxes
+                .into_iter()
+                .map(|mb| (mb.path.full_path().to_string(), mb.id))
+                .collect();
+
+            if let Ok(provider) = provider_registry.get_provider(account_id) {
+                let event_source = ImapAccountEventSource::new(provider);
+                let mut stream = event_source.watch(&[inbox_path.clone()]);
+
+                let sync = Arc::clone(&sync_service);
+                let cmd_bus = command_bus.clone();
+                let id = account_id.clone();
+                let account_name = name.clone();
+
+                // Semaphore(1): at most one triggered sync in flight per account.
+                let sync_gate = Arc::new(tokio::sync::Semaphore::new(1));
+
+                tokio::spawn(async move {
+                    tracing::info!("[Watcher] Started INBOX IDLE for '{}'", account_name);
+
+                    while let Some(result) = stream.next().await {
+                        match result {
+                            Ok(notification) => match notification {
+                                // ── New message ──────────────────────────────
+                                // Targeted partial sync: fetch only from the
+                                // notified UID onward in this specific mailbox.
+                                // Emits MessageReceived + MailboxCountsUpdated
+                                // and advances the checkpoint so start_sync
+                                // won't re-fetch on the next periodic run.
+                                ProviderNotification::NewMessage {
+                                    ref mailbox,
+                                    ref uid,
+                                } => {
+                                    if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
+                                        let sync_clone = Arc::clone(&sync);
+                                        let id_clone = id.clone();
+                                        let mailbox_clone = mailbox.clone();
+                                        let from_uid = *uid;
+                                        tokio::spawn(async move {
+                                            let _permit = permit;
+                                            if let Err(e) = sync_clone
+                                                .sync_mailbox(&id_clone, &mailbox_clone, from_uid)
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    "[Watcher] Partial sync failed: {e}"
+                                                );
+                                            }
+                                        });
+                                    }
+                                }
+
+                                // ── Count changed (no UID) ────────────────────
+                                // Fallback: let the checkpoint decide what to fetch.
+                                // ProviderUid(0) → fetch_from = max(0, checkpoint) = checkpoint.
+                                ProviderNotification::MailboxCountChanged {
+                                    ref mailbox, ..
+                                } => {
+                                    if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
+                                        let sync_clone = Arc::clone(&sync);
+                                        let id_clone = id.clone();
+                                        let mailbox_clone = mailbox.clone();
+                                        tokio::spawn(async move {
+                                            let _permit = permit;
+                                            if let Err(e) = sync_clone
+                                                .sync_mailbox(
+                                                    &id_clone,
+                                                    &mailbox_clone,
+                                                    ProviderUid::new(0),
+                                                )
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    "[Watcher] Count-triggered sync failed: {e}"
+                                                );
+                                            }
+                                        });
+                                    }
+                                }
+
+                                // ── Remote flag change ───────────────────────
+                                // Map immediately to a domain command so the UI
+                                // gets a MessageFlagged event without waiting
+                                // for the next full sync.
+                                ProviderNotification::FlagsChanged {
+                                    ref mailbox,
+                                    ref uid,
+                                    ref flags,
+                                } if uid.value() > 0 => {
+                                    if let Some(mb_id) = path_to_id.get(&mailbox.full_path()) {
+                                        let cmd = mc_application::Command::ApplyRemoteFlagChange {
+                                            mailbox_id: mb_id.clone(),
+                                            provider_uid: mc_application::commands::ProviderUid::new(
+                                                uid.value(),
+                                            ),
+                                            new_flags: flags.clone(),
+                                        };
+                                        if let Err(e) = cmd_bus.dispatch(cmd).await {
+                                            tracing::warn!(
+                                                "[Watcher] ApplyRemoteFlagChange uid={}: {e}",
+                                                uid.value()
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // ── Remote expunge ───────────────────────────
+                                // Map immediately to a domain command so the UI
+                                // gets a MessageDeleted event without waiting
+                                // for the next full sync.
+                                ProviderNotification::MessageExpunged {
+                                    ref mailbox,
+                                    ref uid,
+                                } => {
+                                    if let Some(mb_id) = path_to_id.get(&mailbox.full_path()) {
+                                        let cmd = mc_application::Command::ApplyRemoteExpunge {
+                                            mailbox_id: mb_id.clone(),
+                                            provider_uid: mc_application::commands::ProviderUid::new(
+                                                uid.value(),
+                                            ),
+                                        };
+                                        if let Err(e) = cmd_bus.dispatch(cmd).await {
+                                            tracing::warn!(
+                                                "[Watcher] ApplyRemoteExpunge uid={}: {e}",
+                                                uid.value()
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // uid=0 FlagsChanged are spurious IMAP EXISTS echoes — ignore.
+                                ProviderNotification::FlagsChanged { .. } => {}
+                            },
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[Watcher] IDLE error for '{}': {e}",
+                                    account_name
+                                );
+                            }
+                        }
+                    }
+
+                    tracing::warn!(
+                        "[Watcher] Stream exited for '{}' — no reconnect scheduled",
+                        account_name
+                    );
+                });
+            }
+        }
+        if !registered_ids.is_empty() {
+            tracing::info!(
+                "Started server-side mailbox watchers for {} account(s)",
+                registered_ids.len()
+            );
+        }
+
         // ── Interface Layer ─────────────────────────────────────────────────
 
         // Create gRPC services
@@ -327,7 +656,11 @@ impl AppContext {
 
         let mailbox_service = MailboxServiceImpl::new(query_bus.clone());
 
-        let message_service = MessageServiceImpl::new(command_bus.clone(), query_bus.clone(), provider_registry.clone());
+        let message_service = MessageServiceImpl::new(
+            command_bus.clone(),
+            query_bus.clone(),
+            event_bus.clone(),
+        );
 
         let search_service = SearchServiceImpl::new(query_bus.clone());
 

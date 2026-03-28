@@ -18,8 +18,18 @@ use mc_interfaces::grpc::proto::{
     message_service_server::MessageServiceServer, search_service_server::SearchServiceServer,
 };
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_SHA: &str = env!("BUILD_GIT_SHA");
+const BUILD_DATE: &str = env!("BUILD_DATE");
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // --version
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE})");
+        return Ok(());
+    }
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
@@ -30,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("🚀 Starting mail-cat server...");
+    tracing::info!("🚀 Starting mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE})");
 
     // Load configuration
     let config_path =
