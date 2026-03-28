@@ -17,30 +17,33 @@ use crate::grpc::proto::{
     WatchMailboxRequest, mailbox_event, message_service_server::MessageService,
 };
 use mc_application::{
+    InProcessEventBus,
     bus::{CommandBus, QueryBus},
     commands::Command,
     queries::Query,
 };
 use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::Message;
-use mc_domain::traits::email_provider::ProviderNotification;
-use mc_domain::traits::provider_registry::ProviderRegistry;
-use mc_domain::{AccountId, EmailProvider, MailboxId, MessageId};
-use futures::StreamExt;
+use mc_domain::{AccountId, DomainEvent, MailboxId, MessageId};
 
 /// Message service implementation with CQRS bus integration.
-pub struct MessageServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static, R: ProviderRegistry + 'static> {
+pub struct MessageServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
     command_bus: Arc<C>,
     query_bus: Arc<Q>,
-    provider_registry: Arc<R>,
+    /// Domain event bus: watch_mailbox subscribes here and filters events by mailbox.
+    event_bus: Arc<InProcessEventBus>,
 }
 
-impl<C: CommandBus + 'static, Q: QueryBus + 'static, R: ProviderRegistry + 'static> MessageServiceImpl<C, Q, R> {
-    pub fn new(command_bus: Arc<C>, query_bus: Arc<Q>, provider_registry: Arc<R>) -> Self {
+impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageServiceImpl<C, Q> {
+    pub fn new(
+        command_bus: Arc<C>,
+        query_bus: Arc<Q>,
+        event_bus: Arc<InProcessEventBus>,
+    ) -> Self {
         Self {
             command_bus,
             query_bus,
-            provider_registry,
+            event_bus,
         }
     }
 
@@ -79,12 +82,10 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static, R: ProviderRegistry + 'stat
 }
 
 #[tonic::async_trait]
-impl<C, Q, R> MessageService for MessageServiceImpl<C, Q, R>
+impl<C, Q> MessageService for MessageServiceImpl<C, Q>
 where
     C: CommandBus + 'static,
     Q: QueryBus + 'static,
-    R: ProviderRegistry + 'static,
-    R::Provider: EmailProvider + Send + Sync + 'static,
 {
     async fn list_messages(
         &self,
@@ -378,7 +379,7 @@ where
                 .map_err(|e| Status::invalid_argument(format!("invalid mailbox_id: {e}")))?,
         );
 
-        // Resolve mailbox to get account_id and mailbox_path
+        // Resolve mailbox to get account_id and mailbox_path.
         let mailbox = self
             .query_bus
             .dispatch(Query::GetMailbox {
@@ -390,81 +391,326 @@ where
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("mailbox not found"))?;
 
-        let provider = self
-            .provider_registry
-            .get_provider(&mailbox.account_id)
-            .map_err(|e| Status::not_found(format!("no provider for account: {e}")))?;
-
-        let mailbox_path = mailbox.path.clone();
+        let account_id = mailbox.account_id.clone();
         let mailbox_id_str = req.mailbox_id.clone();
-        let command_bus = self.command_bus.clone();
 
+        // Subscribe to the domain event bus. Filter events that belong to the
+        // requested mailbox and map them to proto MailboxEvents.
+        let mut subscriber = self.event_bus.subscribe();
         let (tx, rx) = mpsc::channel(32);
 
         tokio::spawn(async move {
-            let mut stream = provider.watch_mailbox(&mailbox_path);
-            while let Some(notification) = stream.next().await {
-                let event = match notification {
-                    Ok(ProviderNotification::MailboxCountChanged { total, unseen, .. }) => {
-                        MailboxEvent {
-                            mailbox_id: mailbox_id_str.clone(),
-                            event_type: Some(mailbox_event::EventType::CountsChanged(
-                                CountsChangedEvent { total, unseen },
-                            )),
-                        }
+            while let Some(envelope) = subscriber.recv().await {
+                let event_opt = domain_event_to_mailbox_event(
+                    &envelope.payload,
+                    &account_id,
+                    &mailbox_id,
+                    &mailbox_id_str,
+                );
+                if let Some(event) = event_opt {
+                    if tx.send(Ok(event)).await.is_err() {
+                        break; // Client disconnected
                     }
-                    Ok(ProviderNotification::NewMessage { uid, .. }) => MailboxEvent {
-                        mailbox_id: mailbox_id_str.clone(),
-                        event_type: Some(mailbox_event::EventType::NewMessage(NewMessageEvent {
-                            message_id: String::new(),
-                            provider_uid: uid.value(),
-                        })),
-                    },
-                    Ok(ProviderNotification::MessageExpunged { uid, .. }) => MailboxEvent {
-                        mailbox_id: mailbox_id_str.clone(),
-                        event_type: Some(mailbox_event::EventType::MessageExpunged(
-                            MessageExpungedEvent {
-                                message_id: uid.value().to_string(),
-                            },
-                        )),
-                    },
-                    Ok(ProviderNotification::FlagsChanged { flags, uid, .. }) => {
-                        // Dispatch ApplyRemoteFlagChange to update local projection.
-                        // Only dispatch if we have a real UID (non-zero).
-                        if uid.value() > 0 {
-                            let cmd = mc_application::commands::Command::ApplyRemoteFlagChange {
-                                mailbox_id: mailbox_id.clone(),
-                                provider_uid: mc_application::commands::ProviderUid::new(uid.value()),
-                                new_flags: flags.clone(),
-                            };
-                            if let Err(e) = command_bus.dispatch(cmd).await {
-                                tracing::warn!("[watch] ApplyRemoteFlagChange failed for uid={}: {}", uid.value(), e);
-                            }
-                        }
-                        MailboxEvent {
-                            mailbox_id: mailbox_id_str.clone(),
-                            event_type: Some(mailbox_event::EventType::FlagsChanged(
-                                FlagsChangedEvent {
-                                    message_id: String::new(),
-                                    flags: flags
-                                        .iter()
-                                        .map(crate::grpc::mappers::domain_flag_to_proto)
-                                        .collect(),
-                                },
-                            )),
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(Status::internal(e.to_string()))).await;
-                        break;
-                    }
-                };
-                if tx.send(Ok(event)).await.is_err() {
-                    break; // Client disconnected
                 }
             }
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+/// Maps a domain event to a gRPC [`MailboxEvent`] if it belongs to the given mailbox.
+/// Returns `None` if the event is irrelevant to the requested mailbox.
+fn domain_event_to_mailbox_event(
+    event: &DomainEvent,
+    account_id: &AccountId,
+    mailbox_id: &MailboxId,
+    mailbox_id_str: &str,
+) -> Option<MailboxEvent> {
+    match event {
+        DomainEvent::MessageReceived {
+            message_id,
+            account_id: evt_account,
+            mailbox_id: evt_mailbox,
+            provider_uid,
+            ..
+        } if evt_account == account_id && evt_mailbox == mailbox_id => Some(MailboxEvent {
+            mailbox_id: mailbox_id_str.to_owned(),
+            event_type: Some(mailbox_event::EventType::NewMessage(NewMessageEvent {
+                message_id: message_id.to_string(),
+                provider_uid: provider_uid.value(),
+            })),
+        }),
+
+        DomainEvent::MailboxCountsUpdated {
+            mailbox_id: evt_mailbox,
+            total_messages,
+            unread_messages,
+        } if evt_mailbox == mailbox_id => Some(MailboxEvent {
+            mailbox_id: mailbox_id_str.to_owned(),
+            event_type: Some(mailbox_event::EventType::CountsChanged(CountsChangedEvent {
+                total: *total_messages,
+                unseen: *unread_messages,
+            })),
+        }),
+
+        DomainEvent::MessageDeleted {
+            message_id,
+            mailbox_id: evt_mailbox,
+            ..
+        } if evt_mailbox == mailbox_id => Some(MailboxEvent {
+            mailbox_id: mailbox_id_str.to_owned(),
+            event_type: Some(mailbox_event::EventType::MessageExpunged(
+                MessageExpungedEvent {
+                    message_id: message_id.to_string(),
+                },
+            )),
+        }),
+
+        DomainEvent::MessageFlagged {
+            message_id,
+            mailbox_id: evt_mailbox,
+            flags_added,
+            flags_removed,
+        } if evt_mailbox == mailbox_id => {
+            let mut flags: Vec<i32> = flags_added
+                .iter()
+                .map(crate::grpc::mappers::domain_flag_to_proto)
+                .collect();
+            flags.extend(
+                flags_removed
+                    .iter()
+                    .map(crate::grpc::mappers::domain_flag_to_proto),
+            );
+            Some(MailboxEvent {
+                mailbox_id: mailbox_id_str.to_owned(),
+                event_type: Some(mailbox_event::EventType::FlagsChanged(FlagsChangedEvent {
+                    message_id: message_id.to_string(),
+                    flags,
+                })),
+            })
+        }
+
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+    use tokio::time::{Duration, timeout};
+    use tokio_stream::StreamExt as _;
+    use tonic::Request;
+
+    use mc_application::{
+        ApplicationError, EventPublisher, InProcessEventBus,
+        bus::{CommandBus, QueryBus},
+        commands::{Command, CommandResult},
+        queries::{Query, QueryResult},
+    };
+    use mc_domain::{
+        AccountId, AggregateType, DomainEvent, EventEnvelope, Flag, Mailbox, MailboxId,
+        MailboxPath, MailboxType, MessageId, ProviderUid,
+    };
+
+    // ── Minimal mock buses ────────────────────────────────────────────────────
+
+    struct NopCommandBus;
+
+    #[async_trait::async_trait]
+    impl CommandBus for NopCommandBus {
+        async fn dispatch(&self, _: Command) -> Result<CommandResult, ApplicationError> {
+            unreachable!()
+        }
+    }
+
+    struct SingleMailboxQueryBus(Mailbox);
+
+    #[async_trait::async_trait]
+    impl QueryBus for SingleMailboxQueryBus {
+        async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError> {
+            match query {
+                Query::GetMailbox { .. } => Ok(QueryResult::Mailbox(Some(self.0.clone()))),
+                _ => Err(ApplicationError::Internal("unexpected".into())),
+            }
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn fake_mailbox(account_id: AccountId, mailbox_id: MailboxId) -> Mailbox {
+        Mailbox {
+            id: mailbox_id,
+            account_id,
+            path: MailboxPath::inbox(),
+            display_name: "INBOX".to_string(),
+            mailbox_type: MailboxType::Inbox,
+            flags: vec![],
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        }
+    }
+
+    fn make_svc(
+        bus: Arc<InProcessEventBus>,
+        mailbox: Mailbox,
+    ) -> MessageServiceImpl<NopCommandBus, SingleMailboxQueryBus> {
+        MessageServiceImpl::new(
+            Arc::new(NopCommandBus),
+            Arc::new(SingleMailboxQueryBus(mailbox)),
+            bus,
+        )
+    }
+
+    fn envelope(event: DomainEvent) -> EventEnvelope {
+        EventEnvelope::new("test".into(), AggregateType::Message, 1, event)
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────────────
+
+    /// MessageReceived domain event reaches the gRPC stream as NewMessage.
+    #[tokio::test]
+    async fn new_message_reaches_watch_stream() {
+        let bus = Arc::new(InProcessEventBus::new(16));
+        let account_id = AccountId::new();
+        let mailbox_id = MailboxId::new();
+        let message_id = MessageId::new();
+
+        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id.clone(), mailbox_id.clone()));
+        let mut stream = svc
+            .watch_mailbox(Request::new(WatchMailboxRequest {
+                mailbox_id: mailbox_id.as_uuid().to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        bus.publish(envelope(DomainEvent::MessageReceived {
+            message_id: message_id.clone(),
+            account_id: account_id.clone(),
+            mailbox_id: mailbox_id.clone(),
+            provider_uid: ProviderUid::new(42),
+            envelope: mc_domain::Envelope {
+                from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![],
+                subject: "Hi".into(),
+                date: chrono::Utc::now(),
+            },
+            flags: vec![],
+            size_bytes: 0,
+            has_attachments: false,
+            received_at: chrono::Utc::now(),
+        }));
+
+        let event = timeout(Duration::from_secs(1), stream.next())
+            .await.expect("timeout").expect("ended").expect("error");
+
+        assert_eq!(event.mailbox_id, mailbox_id.as_uuid().to_string());
+        assert!(matches!(
+            event.event_type,
+            Some(mailbox_event::EventType::NewMessage(ref n)) if n.provider_uid == 42
+        ));
+    }
+
+    /// Events from a different account are filtered out.
+    #[tokio::test]
+    async fn events_from_other_account_are_filtered() {
+        let bus = Arc::new(InProcessEventBus::new(16));
+        let account_id = AccountId::new();
+        let other_account = AccountId::new();
+        let mailbox_id = MailboxId::new();
+
+        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id.clone(), mailbox_id.clone()));
+        let mut stream = svc
+            .watch_mailbox(Request::new(WatchMailboxRequest {
+                mailbox_id: mailbox_id.as_uuid().to_string(),
+            }))
+            .await.unwrap().into_inner();
+
+        // Wrong account → filtered
+        bus.publish(envelope(DomainEvent::MessageReceived {
+            message_id: MessageId::new(),
+            account_id: other_account,
+            mailbox_id: mailbox_id.clone(),
+            provider_uid: ProviderUid::new(1),
+            envelope: mc_domain::Envelope { from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![], subject: "".into(), date: chrono::Utc::now() },
+            flags: vec![], size_bytes: 0, has_attachments: false, received_at: chrono::Utc::now(),
+        }));
+        // Correct account → arrives
+        bus.publish(envelope(DomainEvent::MessageReceived {
+            message_id: MessageId::new(),
+            account_id: account_id.clone(),
+            mailbox_id: mailbox_id.clone(),
+            provider_uid: ProviderUid::new(2),
+            envelope: mc_domain::Envelope { from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![], subject: "".into(), date: chrono::Utc::now() },
+            flags: vec![], size_bytes: 0, has_attachments: false, received_at: chrono::Utc::now(),
+        }));
+
+        let event = timeout(Duration::from_secs(1), stream.next())
+            .await.expect("timeout").unwrap().unwrap();
+        match event.event_type {
+            Some(mailbox_event::EventType::NewMessage(n)) => assert_eq!(n.provider_uid, 2),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// MailboxCountsUpdated reaches the stream as CountsChanged.
+    #[tokio::test]
+    async fn counts_updated_reaches_watch_stream() {
+        let bus = Arc::new(InProcessEventBus::new(16));
+        let account_id = AccountId::new();
+        let mailbox_id = MailboxId::new();
+
+        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id.clone(), mailbox_id.clone()));
+        let mut stream = svc
+            .watch_mailbox(Request::new(WatchMailboxRequest {
+                mailbox_id: mailbox_id.as_uuid().to_string(),
+            }))
+            .await.unwrap().into_inner();
+
+        bus.publish(EventEnvelope::new(
+            "mbx".into(), AggregateType::Mailbox, 1,
+            DomainEvent::MailboxCountsUpdated {
+                mailbox_id: mailbox_id.clone(),
+                total_messages: 100,
+                unread_messages: 5,
+            },
+        ));
+
+        let event = timeout(Duration::from_secs(1), stream.next())
+            .await.expect("timeout").unwrap().unwrap();
+        assert!(matches!(
+            event.event_type,
+            Some(mailbox_event::EventType::CountsChanged(ref c)) if c.total == 100 && c.unseen == 5
+        ));
+    }
+
+    /// MessageFlagged reaches the stream as FlagsChanged.
+    #[tokio::test]
+    async fn flags_changed_reaches_watch_stream() {
+        let bus = Arc::new(InProcessEventBus::new(16));
+        let account_id = AccountId::new();
+        let mailbox_id = MailboxId::new();
+
+        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id.clone(), mailbox_id.clone()));
+        let mut stream = svc
+            .watch_mailbox(Request::new(WatchMailboxRequest {
+                mailbox_id: mailbox_id.as_uuid().to_string(),
+            }))
+            .await.unwrap().into_inner();
+
+        bus.publish(envelope(DomainEvent::MessageFlagged {
+            message_id: MessageId::new(),
+            mailbox_id: mailbox_id.clone(),
+            flags_added: vec![Flag::Seen],
+            flags_removed: vec![],
+        }));
+
+        let event = timeout(Duration::from_secs(1), stream.next())
+            .await.expect("timeout").unwrap().unwrap();
+        assert!(matches!(event.event_type, Some(mailbox_event::EventType::FlagsChanged(_))));
     }
 }

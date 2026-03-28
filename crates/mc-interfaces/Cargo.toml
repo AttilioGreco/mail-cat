@@ -23,5 +23,8 @@ futures = { workspace = true }
 tracing = { workspace = true }
 tokio-stream = { workspace = true }
 
+[dev-dependencies]
+async-trait = { workspace = true }
+
 [build-dependencies]
 tonic-build = { workspace = true }
