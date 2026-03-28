@@ -21,6 +21,12 @@ pub struct ServerConfig {
     /// Email accounts configuration.
     #[serde(default)]
     pub accounts: Vec<AccountConfig>,
+
+    /// Path to the mail-cat-ui binary, launched when the user clicks
+    /// "Apri Mail Cat" in a desktop notification.
+    /// Defaults to `~/.local/bin/mail-cat-ui` (the `just install` location).
+    #[serde(default = "default_ui_bin")]
+    pub ui_bin: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +68,7 @@ impl Default for ServerConfig {
             db_path: default_db_path(),
             index_path: default_index_path(),
             accounts: vec![],
+            ui_bin: default_ui_bin(),
         }
     }
 }
@@ -76,6 +83,12 @@ fn default_db_path() -> String {
 
 fn default_index_path() -> String {
     xdg_data_dir("index")
+}
+
+fn default_ui_bin() -> String {
+    std::env::var("HOME")
+        .map(|h| format!("{h}/.local/bin/mail-cat-ui"))
+        .unwrap_or_else(|_| "mail-cat-ui".to_string())
 }
 
 /// Returns `~/.local/share/mail-cat/<subdir>`, falling back to `./data/<subdir>`.
@@ -139,7 +152,7 @@ mod tests {
     fn default_config() {
         let config = ServerConfig::default();
         assert_eq!(config.grpc_addr, "127.0.0.1:50051");
-        assert_eq!(config.db_path, "./data/db");
+        assert!(config.db_path.ends_with("mail-cat/db") || config.db_path.ends_with("data/db"));
     }
 
     #[test]
@@ -160,6 +173,7 @@ mod tests {
                 username: "test@example.com".into(),
                 password: "secret".into(),
             }],
+            ui_bin: "/usr/local/bin/mail-cat-ui".into(),
         };
 
         let toml = toml::to_string_pretty(&config).unwrap();

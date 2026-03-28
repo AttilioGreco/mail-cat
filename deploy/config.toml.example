@@ -13,6 +13,11 @@ grpc_addr = "127.0.0.1:50051"
 # Default: ~/.local/share/mail-cat/index
 # index_path = "/home/utente/.local/share/mail-cat/index"
 
+# Path del binario mail-cat-ui, lanciato quando si clicca "Apri Mail Cat"
+# in una notifica desktop.
+# Default: ~/.local/bin/mail-cat-ui  (posizione usata da `just install`)
+# ui_bin = "/home/utente/.local/bin/mail-cat-ui"
+
 # ── Account email ────────────────────────────────────────────────────────────
 # Aggiungere un blocco [[accounts]] per ogni casella da sincronizzare.
 

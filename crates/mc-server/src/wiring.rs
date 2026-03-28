@@ -285,6 +285,7 @@ impl AppContext {
             let mut sub = event_bus.subscribe();
             let notif_cmd_bus = command_bus.clone();
             let notif_q_bus = query_bus.clone();
+            let notif_ui_bin = config.ui_bin.clone();
             let sd = shutdown.clone();
             tokio::spawn(async move {
                 loop {
@@ -312,6 +313,7 @@ impl AppContext {
                             let subject = mail_envelope.subject.clone();
                             let cmd = notif_cmd_bus.clone();
                             let q = notif_q_bus.clone();
+                            let ui_bin = notif_ui_bin.clone();
                             // Capture the tokio handle before entering the blocking task so we
                             // can drive async work (command dispatch, mailbox lookup) from the
                             // synchronous wait_for_action callback.
@@ -374,9 +376,11 @@ impl AppContext {
                                     }
                                     "open" => {
                                         if let Err(e) =
-                                            std::process::Command::new("mail-cat-ui").spawn()
+                                            std::process::Command::new(&ui_bin).spawn()
                                         {
-                                            tracing::warn!("Failed to open Mail Cat: {e}");
+                                            tracing::warn!(
+                                                "Failed to open Mail Cat (ui_bin='{ui_bin}'): {e}"
+                                            );
                                         }
                                     }
                                     _ => {}
@@ -735,6 +739,7 @@ mod tests {
             db_path: "/tmp/test_db_sync".to_string(),
             index_path: "/tmp/test_index_sync".to_string(),
             accounts: vec![],
+            ui_bin: "mail-cat-ui".to_string(),
         };
 
         // Verify AppContext can be created with wired dependencies
