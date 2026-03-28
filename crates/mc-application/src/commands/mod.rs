@@ -90,6 +90,14 @@ pub enum Command {
         provider_uid: ProviderUid,
         new_flags: Vec<Flag>,
     },
+
+    /// Apply a remote expunge: a message was deleted on the server (e.g. IMAP EXPUNGE in IDLE).
+    /// Does NOT call the provider — message is already gone on the server.
+    /// Only marks the message as deleted in the local projection.
+    ApplyRemoteExpunge {
+        mailbox_id: MailboxId,
+        provider_uid: ProviderUid,
+    },
 }
 
 /// Result of a successfully dispatched command.
@@ -107,4 +115,5 @@ pub enum CommandResult {
     DraftSaved { message_id: MessageId },
     DraftDiscarded,
     RemoteFlagApplied,
+    RemoteExpungeApplied,
 }

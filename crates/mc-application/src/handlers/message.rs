@@ -176,6 +176,41 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         Ok(CommandResult::RemoteFlagApplied)
     }
 
+    /// Apply a remote expunge: a message was deleted on the server (e.g. IMAP EXPUNGE in IDLE).
+    ///
+    /// Unlike `handle_delete`, this does NOT call the provider (message is already
+    /// gone on the server). It only records the deletion locally by emitting a
+    /// `MessageDeleted` domain event.
+    pub async fn handle_apply_remote_expunge(
+        &self,
+        mailbox_id: MailboxId,
+        provider_uid: ProviderUid,
+    ) -> Result<CommandResult, ApplicationError> {
+        info!(mailbox_id = %mailbox_id, uid = provider_uid.value(),
+            "handle_apply_remote_expunge: looking up message");
+
+        let summary = self
+            .message_read_repo
+            .find_by_provider_uid(&mailbox_id, provider_uid.value())
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::NotFound(
+                    "Message",
+                    format!("provider_uid={} mailbox_id={}", provider_uid.value(), mailbox_id),
+                )
+            })?;
+
+        let message_id = summary.id.clone();
+        let (message, seq) = self.load_message(&message_id).await?;
+
+        let event = message.delete(true);
+        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
+            .await?;
+
+        info!(%message_id, uid = provider_uid.value(), "remote expunge applied");
+        Ok(CommandResult::RemoteExpungeApplied)
+    }
+
     pub async fn handle_move(
         &self,
         message_id: MessageId,

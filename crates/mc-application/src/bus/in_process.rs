@@ -171,6 +171,14 @@ where
                     .handle_apply_remote_flag_change(mailbox_id, provider_uid, new_flags)
                     .await
             }
+            Command::ApplyRemoteExpunge {
+                mailbox_id,
+                provider_uid,
+            } => {
+                self.message_handler
+                    .handle_apply_remote_expunge(mailbox_id, provider_uid)
+                    .await
+            }
         }
     }
 }

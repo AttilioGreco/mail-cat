@@ -19,6 +19,7 @@ use mc_domain::{
 };
 use tracing::{debug, error, info, instrument, warn};
 
+use crate::bus::EventPublisher;
 use crate::error::ApplicationError;
 use crate::services::sync_trigger::SyncTrigger;
 
@@ -87,6 +88,10 @@ pub struct SyncService<
     #[allow(dead_code)]
     config: SyncConfig,
     cancelled: AtomicBool,
+    /// Optional event publisher: when set, every stored domain event is also
+    /// published here so in-process subscribers (e.g. desktop notifications)
+    /// receive events emitted by the sync pipeline.
+    event_publisher: Option<Arc<dyn EventPublisher>>,
 }
 
 impl<
@@ -111,7 +116,15 @@ impl<
             search_index,
             config,
             cancelled: AtomicBool::new(false),
+            event_publisher: None,
         }
+    }
+
+    /// Attach an event publisher so that domain events stored during sync are
+    /// also broadcast to in-process subscribers (desktop notifications, etc.).
+    pub fn with_event_publisher(mut self, publisher: Arc<dyn EventPublisher>) -> Self {
+        self.event_publisher = Some(publisher);
+        self
     }
 
     /// Starts a full sync for the given account.
@@ -535,6 +548,165 @@ impl<
         Ok(Some(fetched))
     }
 
+    /// Lightweight sync for a single mailbox starting from a given UID.
+    ///
+    /// Called by the IMAP IDLE watcher on `NewMessage` notifications. Only fetches
+    /// new envelopes (no reconciliation, no account-wide scan). Updates the checkpoint
+    /// so the next `start_sync` won't re-fetch the same messages.
+    ///
+    /// Returns the number of new messages stored.
+    #[instrument(skip(self), fields(%account_id, %mailbox_path, uid = from_uid.value()))]
+    pub async fn sync_mailbox(
+        &self,
+        account_id: &AccountId,
+        mailbox_path: &MailboxPath,
+        from_uid: ProviderUid,
+    ) -> Result<u32, ApplicationError> {
+        let provider = self.provider_registry.get_provider(account_id)?;
+
+        // Find the local mailbox record
+        let local_mailboxes = self
+            .projector
+            .list_mailboxes(account_id)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("list_mailboxes failed: {e}")))?;
+        // Compare by full_path() string so that delimiter differences between
+        // the watcher's MailboxPath and the server-discovered stored path don't
+        // cause a false mismatch (e.g. inbox() delimiter '/' vs server '.').
+        let local = match local_mailboxes
+            .iter()
+            .find(|m| m.path.full_path() == mailbox_path.full_path())
+        {
+            Some(m) => m.clone(),
+            None => {
+                warn!(%mailbox_path, "sync_mailbox: local mailbox not found, skipping");
+                return Ok(0);
+            }
+        };
+
+        // Remote status (uid_next, uid_validity, counts)
+        let status = match provider.mailbox_status(mailbox_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(%mailbox_path, error = %e, "sync_mailbox: mailbox_status failed");
+                return Ok(0);
+            }
+        };
+
+        // Use max(checkpoint, from_uid) to skip already-synced messages
+        let checkpoint_key = format!("sync:{}:{}", account_id, mailbox_path);
+        let validity_key = format!("{checkpoint_key}:validity");
+        let stored_uid_next = self
+            .projector
+            .get_checkpoint(&checkpoint_key)
+            .await
+            .unwrap_or(0) as u32;
+        let fetch_from = stored_uid_next.max(from_uid.value());
+
+        if fetch_from >= status.uid_next {
+            debug!(%mailbox_path, "sync_mailbox: no new messages");
+            // Still update counts in case they changed
+            self.update_mailbox_counts(&local, status.total_messages, status.unseen_messages)
+                .await?;
+            return Ok(0);
+        }
+
+        // Fetch only the new envelopes
+        let range = FetchRange::UidRange {
+            from: fetch_from,
+            to: status.uid_next - 1,
+        };
+        let envelopes = match provider.fetch_message_envelopes(mailbox_path, range).await {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(%mailbox_path, error = %e, "sync_mailbox: fetch_message_envelopes failed");
+                return Ok(0);
+            }
+        };
+        info!(%mailbox_path, count = envelopes.len(), "sync_mailbox: fetched envelopes");
+
+        let mut new_count = 0u32;
+        let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
+
+        for envelope_summary in &envelopes {
+            let (_message, event) = Message::receive(
+                account_id.clone(),
+                local.id.clone(),
+                envelope_summary.provider_uid,
+                envelope_summary.envelope.clone(),
+                envelope_summary.flags.clone(),
+                envelope_summary.size_bytes,
+                envelope_summary.has_attachments,
+            );
+            if let DomainEvent::MessageReceived { ref message_id, .. } = event {
+                new_messages.push((message_id.clone(), envelope_summary.provider_uid));
+                self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
+                    .await?;
+                new_count += 1;
+            }
+        }
+
+        // Eager body fetch (same pattern as start_sync)
+        if self.config.eager_body_fetch && !new_messages.is_empty() {
+            let uids: Vec<ProviderUid> = new_messages.iter().map(|(_, u)| *u).collect();
+            let uid_to_msg: HashMap<u32, &MessageId> =
+                new_messages.iter().map(|(id, uid)| (uid.value(), id)).collect();
+            let provider2 = self.provider_registry.get_provider(account_id)?;
+            match provider2.fetch_bodies_bulk(mailbox_path, &uids).await {
+                Ok(body_results) => {
+                    for result in body_results {
+                        if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
+                            let body_event = DomainEvent::MessageBodyFetched {
+                                message_id: (*message_id).clone(),
+                                body_text: result.body_text,
+                                body_html: result.body_html,
+                                attachments: vec![],
+                            };
+                            if let Err(e) = self
+                                .append_and_project(
+                                    &message_id.to_string(),
+                                    AggregateType::Message,
+                                    body_event,
+                                )
+                                .await
+                            {
+                                warn!(%message_id, error = %e, "sync_mailbox: body projection failed");
+                                continue;
+                            }
+                            if let Ok(Some(full_msg)) =
+                                self.projector.get_message(message_id).await
+                            {
+                                if let Err(e) = self.search_index.index_message(&full_msg).await {
+                                    warn!(%message_id, error = %e, "sync_mailbox: search index failed");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(%mailbox_path, error = %e, "sync_mailbox: bulk body fetch failed");
+                }
+            }
+        }
+
+        // Update counts (emits MailboxCountsUpdated → event bus → UI refetch)
+        self.update_mailbox_counts(&local, status.total_messages, status.unseen_messages)
+            .await?;
+
+        // Advance checkpoint so start_sync won't re-fetch these messages
+        self.projector
+            .save_checkpoint(&checkpoint_key, status.uid_next as u64)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("checkpoint save failed: {e}")))?;
+        self.projector
+            .save_checkpoint(&validity_key, status.uid_validity as u64)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("checkpoint save failed: {e}")))?;
+
+        info!(%mailbox_path, new_count, "sync_mailbox: done");
+        Ok(new_count)
+    }
+
     /// Cancels an ongoing sync operation.
     ///
     /// The sync loop checks the cancellation flag between mailboxes and
@@ -586,6 +758,11 @@ impl<
             .project(&envelope)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("Failed to project event: {e}")))?;
+
+        // Broadcast to in-process subscribers (desktop notifications, live projection, etc.)
+        if let Some(publisher) = &self.event_publisher {
+            publisher.publish(envelope);
+        }
 
         Ok(())
     }
@@ -662,6 +839,7 @@ impl<
                     );
                     let event = DomainEvent::MessageFlagged {
                         message_id: summary.id.clone(),
+                        mailbox_id: local.id.clone(),
                         flags_added: flags_to_add,
                         flags_removed: flags_to_remove,
                     };
