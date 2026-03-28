@@ -90,6 +90,17 @@ install: build-release
     systemctl --user enable mail-cat-server
     systemctl --user restart mail-cat-server
 
+    @echo "→ icona..."
+    mkdir -p ~/.local/share/icons/hicolor/32x32/apps
+    mkdir -p ~/.local/share/icons/hicolor/64x64/apps
+    mkdir -p ~/.local/share/icons/hicolor/128x128/apps
+    mkdir -p ~/.local/share/icons/hicolor/256x256/apps
+    cp crates/mc-ui/icons/32x32.png   ~/.local/share/icons/hicolor/32x32/apps/mail-cat.png
+    cp crates/mc-ui/icons/64x64.png   ~/.local/share/icons/hicolor/64x64/apps/mail-cat.png
+    cp crates/mc-ui/icons/128x128.png ~/.local/share/icons/hicolor/128x128/apps/mail-cat.png
+    cp crates/mc-ui/icons/icon.png    ~/.local/share/icons/hicolor/256x256/apps/mail-cat.png
+    gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor; or true
+
     @echo "→ desktop entry..."
     mkdir -p ~/.local/share/applications
     cp deploy/mail-cat.desktop ~/.local/share/applications/

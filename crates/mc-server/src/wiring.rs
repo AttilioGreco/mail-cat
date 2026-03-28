@@ -300,7 +300,7 @@ impl AppContext {
                                 let Ok(handle) = notify_rust::Notification::new()
                                     .summary(&format!("New message from {from}"))
                                     .body(&subject)
-                                    .icon("mail-unread")
+                                    .icon(&app_icon_path())
                                     .action("archive", "Archivia")
                                     .action("open", "Apri Mail Cat")
                                     .show()
@@ -675,6 +675,22 @@ impl AppContext {
             provider_registry,
         })
     }
+}
+
+/// Returns the path or name to use as the icon for desktop notifications.
+///
+/// Prefers the installed hicolor path (`~/.local/share/icons/hicolor/128x128/apps/mail-cat.png`)
+/// because libnotify accepts absolute paths directly and renders them at full
+/// fidelity regardless of whether `gtk-update-icon-cache` has run.
+/// Falls back to the theme name `"mail-cat"` (works after `just install`).
+fn app_icon_path() -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        let path = format!("{home}/.local/share/icons/hicolor/128x128/apps/mail-cat.png");
+        if std::path::Path::new(&path).exists() {
+            return path;
+        }
+    }
+    "mail-cat".to_owned()
 }
 
 #[cfg(test)]
