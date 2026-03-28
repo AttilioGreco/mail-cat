@@ -8,7 +8,13 @@ use mc_client::MailCatClient;
 #[command(
     name = "mc",
     about = "mail-cat CLI — debug and explore the gRPC server",
-    version
+    version,
+    long_version = concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\ncommit: ", env!("BUILD_GIT_SHA"),
+        "\nbuilt:  ", env!("BUILD_DATE"),
+        "\n",        env!("BUILD_RUSTC"),
+    ),
 )]
 struct Cli {
     /// gRPC server URL

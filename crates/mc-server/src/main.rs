@@ -21,12 +21,14 @@ use mc_interfaces::grpc::proto::{
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const GIT_SHA: &str = env!("BUILD_GIT_SHA");
 const BUILD_DATE: &str = env!("BUILD_DATE");
+const RUSTC: &str = env!("BUILD_RUSTC");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // --version
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE})");
+        println!("{RUSTC}");
         return Ok(());
     }
 
@@ -40,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("🚀 Starting mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE})");
+    tracing::info!("🚀 Starting mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE}) [{RUSTC}]");
 
     // Load configuration
     let config_path =
