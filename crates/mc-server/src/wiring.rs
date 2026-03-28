@@ -4,6 +4,7 @@ use anyhow::Context;
 use futures::stream::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::{CommandBus, QueryBus};
@@ -53,12 +54,17 @@ pub struct AppContext {
     pub sync_service: Arc<SyncServiceImpl>,
     #[allow(dead_code)]
     pub provider_registry: Arc<ProviderRegistryImpl>,
+    /// Cancel this to trigger graceful shutdown of all background tasks.
+    pub shutdown: CancellationToken,
 }
 
 impl AppContext {
     /// Wire up all dependencies from configuration.
     pub async fn new(config: &ServerConfig) -> anyhow::Result<Self> {
         tracing::info!("Initializing application context...");
+
+        // Shared shutdown token — cancel this to stop all background tasks.
+        let shutdown = CancellationToken::new();
 
         // ── Infrastructure Layer ────────────────────────────────────────────
 
@@ -245,10 +251,19 @@ impl AppContext {
         {
             let mut sub = event_bus.subscribe();
             let live_projector = live_projector.clone();
+            let sd = shutdown.clone();
             tokio::spawn(async move {
-                while let Some(envelope) = sub.recv().await {
-                    if let Err(e) = live_projector.project(&envelope).await {
-                        tracing::warn!("Live projection error for {}: {}", envelope.payload.event_name(), e);
+                loop {
+                    tokio::select! {
+                        _ = sd.cancelled() => break,
+                        envelope = sub.recv() => match envelope {
+                            Some(e) => {
+                                if let Err(err) = live_projector.project(&e).await {
+                                    tracing::warn!("Live projection error for {}: {}", e.payload.event_name(), err);
+                                }
+                            }
+                            None => break,
+                        },
                     }
                 }
                 tracing::info!("Live projection subscriber exited");
@@ -270,8 +285,13 @@ impl AppContext {
             let mut sub = event_bus.subscribe();
             let notif_cmd_bus = command_bus.clone();
             let notif_q_bus = query_bus.clone();
+            let sd = shutdown.clone();
             tokio::spawn(async move {
-                while let Some(envelope) = sub.recv().await {
+                loop {
+                    let envelope = tokio::select! {
+                        _ = sd.cancelled() => break,
+                        e = sub.recv() => match e { Some(v) => v, None => break },
+                    };
                     match envelope.payload {
                         mc_domain::DomainEvent::MessageReceived {
                             message_id,
@@ -424,11 +444,15 @@ impl AppContext {
         if !registered_ids.is_empty() {
             let sync_periodic = sync_service.clone();
             let ids: Vec<(AccountId, String)> = registered_ids.clone();
+            let sd = shutdown.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
                 interval.tick().await; // skip immediate first tick (initial sync already running)
                 loop {
-                    interval.tick().await;
+                    tokio::select! {
+                        _ = sd.cancelled() => break,
+                        _ = interval.tick() => {}
+                    }
                     tracing::info!("Periodic re-sync triggered for {} account(s)", ids.len());
                     for (account_id, name) in &ids {
                         match sync_periodic.start_sync(account_id).await {
@@ -449,6 +473,7 @@ impl AppContext {
                         }
                     }
                 }
+                tracing::info!("Periodic re-sync timer stopped");
             });
             tracing::info!("Periodic re-sync timer started (every 5 minutes)");
         }
@@ -505,6 +530,7 @@ impl AppContext {
                 let cmd_bus = command_bus.clone();
                 let id = account_id.clone();
                 let account_name = name.clone();
+                let sd = shutdown.clone();
 
                 // Semaphore(1): at most one triggered sync in flight per account.
                 let sync_gate = Arc::new(tokio::sync::Semaphore::new(1));
@@ -512,7 +538,12 @@ impl AppContext {
                 tokio::spawn(async move {
                     tracing::info!("[Watcher] Started INBOX IDLE for '{}'", account_name);
 
-                    while let Some(result) = stream.next().await {
+                    loop {
+                    let result = tokio::select! {
+                        _ = sd.cancelled() => break,
+                        item = stream.next() => match item { Some(v) => v, None => break },
+                    };
+                    {
                         match result {
                             Ok(notification) => match notification {
                                 // ── New message ──────────────────────────────
@@ -632,12 +663,10 @@ impl AppContext {
                                 );
                             }
                         }
-                    }
+                    } // end inner block
+                    } // end loop
 
-                    tracing::warn!(
-                        "[Watcher] Stream exited for '{}' — no reconnect scheduled",
-                        account_name
-                    );
+                    tracing::info!("[Watcher] INBOX IDLE stopped for '{}'", account_name);
                 });
             }
         }
@@ -673,6 +702,7 @@ impl AppContext {
             search_service,
             sync_service,
             provider_registry,
+            shutdown,
         })
     }
 }

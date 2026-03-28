@@ -3029,6 +3029,7 @@ dependencies = [
  "serde",
  "sled",
  "tokio",
+ "tokio-util",
  "toml 0.8.23",
  "tonic",
  "tracing",
@@ -5859,6 +5860,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

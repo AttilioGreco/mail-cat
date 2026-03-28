@@ -15,6 +15,7 @@ mc-application = { workspace = true }
 mc-infrastructure = { workspace = true }
 mc-interfaces = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tonic = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }

@@ -81,7 +81,7 @@ futures = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
 tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
 bytes = "1"
 async-compat = "0.2"
 parking_lot = "0.12"

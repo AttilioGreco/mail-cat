@@ -58,6 +58,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to initialize application context")?;
 
+    let shutdown = app_ctx.shutdown.clone();
+
     // Parse gRPC address
     let addr = config.grpc_addr.parse().context("invalid gRPC address")?;
 
@@ -73,6 +75,13 @@ async fn main() -> anyhow::Result<()> {
         .serve_with_shutdown(addr, shutdown_signal())
         .await
         .context("gRPC server error")?;
+
+    tracing::info!("🛑 gRPC server stopped, cancelling background tasks...");
+    shutdown.cancel();
+
+    // Brief yield so spawned tasks can react to cancellation before the
+    // runtime is torn down.
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
     tracing::info!("👋 Server shut down gracefully");
     Ok(())
