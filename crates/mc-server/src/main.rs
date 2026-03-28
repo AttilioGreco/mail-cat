@@ -45,15 +45,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("🚀 Starting mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE}) [{RUSTC}]");
 
     // Load configuration
-    let config_path =
-        std::env::var("MAIL_CAT_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
-
+    let config_path = ServerConfig::default_path();
     let config = ServerConfig::load_or_default(&config_path);
-    tracing::info!("Loaded configuration from {}", config_path);
-    tracing::info!("gRPC server will listen on {}", config.grpc_addr);
-    tracing::info!("Database path: {}", config.db_path);
-    tracing::info!("Search index path: {}", config.index_path);
-    tracing::info!("Configured accounts: {}", config.accounts.len());
+    tracing::info!("Config:  {}", config_path);
+    tracing::info!("gRPC:    {}", config.grpc_addr);
+    tracing::info!("DB:      {}", config.db_path);
+    tracing::info!("Index:   {}", config.index_path);
+    if config.accounts.is_empty() {
+        tracing::warn!(
+            "⚠ No accounts configured — sync and IDLE will not start.\n  \
+             Create '{}' with at least one [[accounts]] entry.",
+            config_path
+        );
+    } else {
+        tracing::info!("Accounts: {}", config.accounts.len());
+    }
 
     // Wire up all dependencies
     let app_ctx = AppContext::new(&config)

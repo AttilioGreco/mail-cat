@@ -71,11 +71,18 @@ fn default_grpc_addr() -> String {
 }
 
 fn default_db_path() -> String {
-    "./data/db".to_string()
+    xdg_data_dir("db")
 }
 
 fn default_index_path() -> String {
-    "./data/index".to_string()
+    xdg_data_dir("index")
+}
+
+/// Returns `~/.local/share/mail-cat/<subdir>`, falling back to `./data/<subdir>`.
+fn xdg_data_dir(subdir: &str) -> String {
+    std::env::var("HOME")
+        .map(|h| format!("{h}/.local/share/mail-cat/{subdir}"))
+        .unwrap_or_else(|_| format!("./data/{subdir}"))
 }
 
 impl ServerConfig {
@@ -86,9 +93,41 @@ impl ServerConfig {
         Ok(config)
     }
 
-    /// Load from file if exists, otherwise return default.
+    /// Returns the default config file path: `$MAIL_CAT_CONFIG` →
+    /// `~/.config/mail-cat/config.toml` → `./config.toml`.
+    pub fn default_path() -> String {
+        std::env::var("MAIL_CAT_CONFIG").unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| format!("{h}/.config/mail-cat/config.toml"))
+                .unwrap_or_else(|_| "./config.toml".to_string())
+        })
+    }
+
+    /// Load from file, logging clearly if the file is missing or unparseable.
+    /// Returns default config (no accounts) only as a last resort.
     pub fn load_or_default(path: impl AsRef<Path>) -> Self {
-        Self::from_file(path).unwrap_or_default()
+        let path = path.as_ref();
+        match Self::from_file(path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                if path.exists() {
+                    // File exists but failed to parse — this is almost certainly a bug.
+                    eprintln!(
+                        "[mail-cat] ERROR: config file '{}' exists but could not be parsed: {e}\n\
+                         Falling back to empty configuration (no accounts will be synced).",
+                        path.display()
+                    );
+                } else {
+                    eprintln!(
+                        "[mail-cat] WARN: config file '{}' not found.\n\
+                         Create it to configure email accounts. \
+                         Falling back to empty configuration.",
+                        path.display()
+                    );
+                }
+                Self::default()
+            }
+        }
     }
 }
 

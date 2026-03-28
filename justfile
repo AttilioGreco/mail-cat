@@ -83,6 +83,10 @@ install: build-release
     cp target/release/mail-cat-server ~/.local/bin/
     cp target/release/mail-cat-ui ~/.local/bin/
 
+    @echo "→ config template (non sovrascrive se esiste già)..."
+    mkdir -p ~/.config/mail-cat
+    test -f ~/.config/mail-cat/config.toml; or cp deploy/config.toml.example ~/.config/mail-cat/config.toml
+
     @echo "→ systemd user service..."
     mkdir -p ~/.config/systemd/user
     cp deploy/mail-cat-server.service ~/.config/systemd/user/

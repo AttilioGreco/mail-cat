@@ -1,0 +1,37 @@
+# mail-cat server configuration
+# Copia questo file in ~/.config/mail-cat/config.toml e modifica i valori.
+
+# Indirizzo su cui il server gRPC ascolta.
+# Default: 127.0.0.1:50051
+grpc_addr = "127.0.0.1:50051"
+
+# Path del database sled.
+# Default: ~/.local/share/mail-cat/db
+# db_path = "/home/utente/.local/share/mail-cat/db"
+
+# Path dell'indice Tantivy (ricerca full-text).
+# Default: ~/.local/share/mail-cat/index
+# index_path = "/home/utente/.local/share/mail-cat/index"
+
+# ── Account email ────────────────────────────────────────────────────────────
+# Aggiungere un blocco [[accounts]] per ogni casella da sincronizzare.
+
+[[accounts]]
+name        = "Personal"
+email       = "tuo@indirizzo.it"
+provider_type = "imap"          # "imap" | "gmail_api" | "outlook_api"
+
+imap_host   = "imap.example.com"
+imap_port   = 993
+use_tls     = true
+
+smtp_host   = "smtp.example.com"
+smtp_port   = 587
+
+username    = "tuo@indirizzo.it"
+password    = "password_o_app_password"
+
+# [[accounts]]
+# name      = "Work"
+# email     = "work@company.com"
+# ...
