@@ -1,0 +1,22 @@
+[Unit]
+Description=Mail Cat – gRPC email server
+Documentation=https://github.com/agreco/mail-cat
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mail-cat-server
+Restart=on-failure
+RestartSec=5
+
+# Configurazione
+Environment=RUST_LOG=info
+Environment=MAIL_CAT_CONFIG=%h/.config/mail-cat/config.toml
+
+# Standard output → journald (accessibile con: journalctl --user -u mail-cat-server)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mail-cat-server
+
+[Install]
+WantedBy=default.target

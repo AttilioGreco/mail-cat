@@ -53,6 +53,10 @@ lint:
 cli *args:
     cargo run -p mc-cli -- {{args}}
 
+# watch live: mostra eventi INBOX in tempo reale (richiede il server in ascolto)
+watch:
+    cargo run -p mc-client --example watch
+
 # ── Frontend ─────────────────────────────────────────────────────────────────
 
 # installa dipendenze npm del frontend
@@ -69,3 +73,26 @@ ui-build:
 [working-directory: 'crates/mc-ui/src-ui']
 ui-dev:
     bun run dev
+
+# ── Install ───────────────────────────────────────────────────────────────────
+
+# compila release e installa server + UI in ~/.local (no root)
+install: build-release
+    @echo "→ binari..."
+    mkdir -p ~/.local/bin
+    cp target/release/mail-cat-server ~/.local/bin/
+    cp target/release/mail-cat-ui ~/.local/bin/
+
+    @echo "→ systemd user service..."
+    mkdir -p ~/.config/systemd/user
+    cp deploy/mail-cat-server.service ~/.config/systemd/user/
+    systemctl --user daemon-reload
+    systemctl --user enable mail-cat-server
+    systemctl --user restart mail-cat-server
+
+    @echo "→ desktop entry..."
+    mkdir -p ~/.local/share/applications
+    cp deploy/mail-cat.desktop ~/.local/share/applications/
+    update-desktop-database ~/.local/share/applications; or true
+
+    @echo "✓ mail-cat installato — server attivo via systemd user service"

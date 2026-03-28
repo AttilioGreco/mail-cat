@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Mail Cat
+GenericName=Email Client
+Comment=Fast email client built with Rust and Tauri
+Exec=mail-cat-ui
+Icon=mail-message
+Terminal=false
+Categories=Network;Email;
+Keywords=email;mail;imap;
+StartupWMClass=mail-cat-ui
+StartupNotify=true
