@@ -137,6 +137,7 @@ impl Message {
 
         DomainEvent::MessageFlagged {
             message_id: self.id.clone(),
+            mailbox_id: self.mailbox_id.clone(),
             flags_added: flags_to_add,
             flags_removed: flags_to_remove,
         }
@@ -504,6 +505,7 @@ mod tests {
             },
             DomainEvent::MessageFlagged {
                 message_id: msg_id.clone(),
+                mailbox_id: mailbox_id.clone(),
                 flags_added: vec![Flag::Seen, Flag::Flagged],
                 flags_removed: vec![],
             },

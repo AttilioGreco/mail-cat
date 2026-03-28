@@ -161,6 +161,7 @@ pub enum DomainEvent {
     /// Flags on a message were changed.
     MessageFlagged {
         message_id: MessageId,
+        mailbox_id: MailboxId,
         flags_added: Vec<Flag>,
         flags_removed: Vec<Flag>,
     },
@@ -294,6 +295,7 @@ mod tests {
     fn event_name() {
         let event = DomainEvent::MessageFlagged {
             message_id: MessageId::new(),
+            mailbox_id: MailboxId::new(),
             flags_added: vec![Flag::Seen],
             flags_removed: vec![],
         };

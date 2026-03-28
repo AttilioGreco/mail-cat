@@ -25,6 +25,7 @@ pub use value_objects::message_id::MessageId;
 pub use value_objects::uid::ProviderUid;
 
 // Trait re-exports
+pub use traits::account_event_source::AccountEventSource;
 pub use traits::email_provider::{
     EmailProvider, FetchRange, MailboxStatus, MessageEnvelopeSummary, ProviderNotification,
     UidFlagEntry,
