@@ -6,6 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/mail_cat/v1/mailboxes.proto",
         "../../proto/mail_cat/v1/messages.proto",
         "../../proto/mail_cat/v1/search.proto",
+        "../../proto/mail_cat/v1/contacts.proto",
     ];
 
     // Configure and compile

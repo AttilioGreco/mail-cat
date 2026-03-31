@@ -128,10 +128,11 @@ pub fn proto_connection_to_domain(
     Ok(DomainConnectionConfig {
         imap_host: config.imap_host.clone(),
         imap_port: config.imap_port.map(|p| p as u16),
-        smtp_host: config.smtp_host.clone(),
-        smtp_port: config.smtp_port.map(|p| p as u16),
         use_tls: config.use_tls,
         auth: proto_auth_to_domain(auth)?,
+        smtp: None, // SMTP config is managed via server config file, not proto
+        smtp_host: config.smtp_host.clone(),
+        smtp_port: config.smtp_port.map(|p| p as u16),
     })
 }
 
