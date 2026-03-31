@@ -32,7 +32,12 @@ async fn main() {
             commands::delete_message,
             commands::send_message,
             commands::search_messages,
+            commands::search_contacts,
+            commands::backfill_contacts_from_messages,
+            commands::rebuild_contact_index,
             commands::suggest_messages,
+            commands::list_conversations,
+            commands::get_thread,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

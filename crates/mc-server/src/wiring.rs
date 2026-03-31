@@ -16,12 +16,14 @@ use mc_domain::{
     AuthConfig, ConnectionConfig, EmailAddress, Identity, MailboxId, MailboxPath,
     ProviderNotification, ProviderRegistry, ProviderType, ProviderUid,
 };
+use mc_domain::model::account::{SmtpConnectionConfig, SmtpSecurity};
 use mc_infrastructure::{
+    email::smtp::SmtpSender,
     ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SledEventStore,
-    SledRepository, TantivySearchIndex,
+    SledRepository, TantivyContactIndex, TantivySearchIndex,
 };
 use mc_interfaces::grpc::services::{
-    AccountServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
+    AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
 };
 
 use crate::config::ServerConfig;
@@ -29,17 +31,21 @@ use crate::config::ServerConfig;
 // Type aliases for concrete implementations
 type ProviderRegistryImpl = InMemoryProviderRegistry<ImapEmailProvider>;
 type CommandBusImpl = InProcessCommandBus<
-    SledRepository<SledEventStore>,
-    SledEventStore,
-    ProviderRegistryImpl,
-    SledRepository<SledEventStore>,
-    InProcessEventBus,
+    SledRepository<SledEventStore>, // AW
+    SledRepository<SledEventStore>, // CW
+    TantivyContactIndex,            // CI
+    SledEventStore,                 // ES
+    ProviderRegistryImpl,           // PR
+    SledRepository<SledEventStore>, // MR
+    InProcessEventBus,              // B
 >;
 type QueryBusImpl = InProcessQueryBus<
-    SledRepository<SledEventStore>,
-    SledRepository<SledEventStore>,
-    SledRepository<SledEventStore>,
-    TantivySearchIndex,
+    SledRepository<SledEventStore>, // AR
+    SledRepository<SledEventStore>, // MBR
+    SledRepository<SledEventStore>, // MR
+    TantivySearchIndex,             // SI
+    TantivyContactIndex,            // CI
+    SledRepository<SledEventStore>, // CR
 >;
 type SyncServiceImpl =
     SyncService<ProviderRegistryImpl, SledEventStore, SledRepository<SledEventStore>, TantivySearchIndex>;
@@ -50,6 +56,7 @@ pub struct AppContext {
     pub mailbox_service: MailboxServiceImpl<QueryBusImpl>,
     pub message_service: MessageServiceImpl<CommandBusImpl, QueryBusImpl>,
     pub search_service: SearchServiceImpl<QueryBusImpl>,
+    pub contact_service: ContactServiceImpl<QueryBusImpl, CommandBusImpl>,
     #[allow(dead_code)]
     pub sync_service: Arc<SyncServiceImpl>,
     #[allow(dead_code)]
@@ -88,20 +95,73 @@ impl AppContext {
         );
         tracing::info!("Initialized search index at {}", config.index_path);
 
+        // Create contact index
+        let contact_index_path = format!("{}/contacts", config.index_path);
+        let contact_index = Arc::new(
+            TantivyContactIndex::new(&contact_index_path)
+                .context("failed to create contact index")?,
+        );
+        tracing::info!("Initialized contact index at {contact_index_path}");
+
         // Create provider registry and build providers from config
         let provider_registry = Arc::new(InMemoryProviderRegistry::new());
         let mut providers_by_email: HashMap<String, Arc<ImapEmailProvider>> = HashMap::new();
         for account_config in &config.accounts {
             tracing::info!("Creating IMAP provider for {}", account_config.email);
+
+            // ── Build SMTP sender (optional) ──────────────────────────────
+            let smtp_sender = if let Some(smtp_cfg) = &account_config.smtp {
+                let domain_smtp = SmtpConnectionConfig {
+                    host: smtp_cfg.host.clone(),
+                    port: smtp_cfg.port,
+                    security: match smtp_cfg.security {
+                        crate::config::SmtpSecurityConfig::Smtps => SmtpSecurity::Smtps,
+                        crate::config::SmtpSecurityConfig::StartTls => SmtpSecurity::StartTls,
+                    },
+                    username: smtp_cfg.username.clone(),
+                    password: smtp_cfg.password.clone(),
+                };
+                match SmtpSender::build(&domain_smtp, &account_config.username, &account_config.password) {
+                    Ok(sender) => {
+                        match sender.test_connection().await {
+                            Ok(true) => tracing::info!(
+                                "✓ SMTP {} ({}:{}) connessione OK",
+                                account_config.email, smtp_cfg.host, smtp_cfg.port
+                            ),
+                            Ok(false) => tracing::warn!(
+                                "⚠ SMTP {}: server raggiungibile ma NOOP fallito",
+                                account_config.email
+                            ),
+                            Err(e) => tracing::warn!(
+                                "⚠ SMTP {}: non raggiungibile — {e}",
+                                account_config.email
+                            ),
+                        }
+                        Some(sender)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠ SMTP {}: configurazione non valida — {e}",
+                            account_config.email
+                        );
+                        None
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "⚠ SMTP {}: nessun blocco [smtp] in config — invio disabilitato",
+                    account_config.email
+                );
+                None
+            };
+
             let provider = Arc::new(ImapEmailProvider::new(
                 account_config.imap_host.clone(),
                 account_config.imap_port,
                 account_config.username.clone(),
                 account_config.password.clone(),
                 account_config.use_tls,
-                account_config.smtp_host.clone(),
-                account_config.smtp_port,
-                account_config.use_tls, // Use same TLS setting for SMTP
+                smtp_sender,
             ));
             providers_by_email.insert(account_config.email.clone(), provider);
         }
@@ -118,20 +178,24 @@ impl AppContext {
 
         // Create command bus
         let command_bus = Arc::new(InProcessCommandBus::new(
-            repository_arc.clone(),
-            event_store.clone(),
-            provider_registry.clone(),
-            repository_arc.clone(),
-            event_bus.clone(),
+            repository_arc.clone(),    // AW
+            repository_arc.clone(),    // CW
+            contact_index.clone(),     // CI
+            event_store.clone(),       // ES
+            provider_registry.clone(), // PR
+            repository_arc.clone(),    // MR
+            event_bus.clone(),         // B
         ));
         tracing::info!("Initialized command bus");
 
         // Create query bus
         let query_bus = Arc::new(InProcessQueryBus::new(
-            repository_arc.clone(),
-            repository_arc.clone(),
-            repository_arc.clone(),
-            search_index.clone(),
+            repository_arc.clone(),    // AR
+            repository_arc.clone(),    // MBR
+            repository_arc.clone(),    // MR
+            search_index.clone(),      // SI
+            contact_index.clone(),     // CI
+            repository_arc.clone(),    // CR
         ));
         tracing::info!("Initialized query bus");
 
@@ -200,16 +264,27 @@ impl AppContext {
                 let email =
                     EmailAddress::new(&account_config.email).context("invalid email in config")?;
                 let provider_type: ProviderType = account_config.provider_type.into();
+                let smtp_domain_config = account_config.smtp.as_ref().map(|s| SmtpConnectionConfig {
+                    host: s.host.clone(),
+                    port: s.port,
+                    security: match s.security {
+                        crate::config::SmtpSecurityConfig::Smtps => SmtpSecurity::Smtps,
+                        crate::config::SmtpSecurityConfig::StartTls => SmtpSecurity::StartTls,
+                    },
+                    username: s.username.clone(),
+                    password: s.password.clone(),
+                });
                 let connection_config = ConnectionConfig {
                     imap_host: Some(account_config.imap_host.clone()),
                     imap_port: Some(account_config.imap_port),
-                    smtp_host: Some(account_config.smtp_host.clone()),
-                    smtp_port: Some(account_config.smtp_port),
                     use_tls: account_config.use_tls,
                     auth: AuthConfig::Plain {
                         username: account_config.username.clone(),
                         password: account_config.password.clone(),
                     },
+                    smtp: smtp_domain_config,
+                    smtp_host: None,
+                    smtp_port: None,
                 };
                 let identity = Identity {
                     display_name: account_config.name.clone(),
@@ -269,6 +344,46 @@ impl AppContext {
                 tracing::info!("Live projection subscriber exited");
             });
             tracing::info!("Live projection subscriber started");
+        }
+
+        // ── Auto-populate contacts from incoming messages ────────────────────
+        {
+            let mut sub = event_bus.subscribe();
+            let ensure_bus = command_bus.clone();
+            let sd = shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    let envelope = tokio::select! {
+                        _ = sd.cancelled() => break,
+                        e = sub.recv() => match e { Some(v) => v, None => break },
+                    };
+                    if let mc_domain::DomainEvent::MessageReceived {
+                        account_id,
+                        envelope: mail_envelope,
+                        ..
+                    } = envelope.payload
+                    {
+                        let addrs: Vec<(mc_domain::EmailAddress, Option<String>)> =
+                            mail_envelope.from.iter()
+                                .chain(mail_envelope.to.iter())
+                                .chain(mail_envelope.cc.iter())
+                                .map(|a| (a.email.clone(), a.name.clone()))
+                                .collect();
+                        for (email, name) in addrs {
+                            let cmd = mc_application::Command::EnsureContact {
+                                email,
+                                display_name: name.filter(|s| !s.is_empty()),
+                                account_id: account_id.clone(),
+                            };
+                            if let Err(e) = ensure_bus.dispatch(cmd).await {
+                                tracing::warn!("EnsureContact from message failed: {e}");
+                            }
+                        }
+                    }
+                }
+                tracing::info!("EnsureContact subscriber exited");
+            });
+            tracing::info!("EnsureContact (auto-populate) subscriber started");
         }
 
         // ── Desktop notification subscriber ──────────────────────────────────
@@ -697,6 +812,8 @@ impl AppContext {
 
         let search_service = SearchServiceImpl::new(query_bus.clone());
 
+        let contact_service = ContactServiceImpl::new(query_bus.clone(), command_bus.clone());
+
         tracing::info!("All services initialized successfully");
 
         Ok(Self {
@@ -704,6 +821,7 @@ impl AppContext {
             mailbox_service,
             message_service,
             search_service,
+            contact_service,
             sync_service,
             provider_registry,
             shutdown,

@@ -29,18 +29,52 @@ pub struct ServerConfig {
     pub ui_bin: String,
 }
 
+/// SMTP security mode in the config file.
+///
+/// ```toml
+/// [accounts.smtp]
+/// host     = "mail.example.com"
+/// port     = 587
+/// security = "start_tls"   # or "smtps"
+/// ```
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SmtpSecurityConfig {
+    Smtps,
+    #[default]
+    StartTls,
+}
+
+/// Optional SMTP sub-section inside an `[[accounts]]` block.
+///
+/// `username` and `password` are optional; when absent the account-level
+/// `username`/`password` are used as SMTP credentials.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmtpAccountConfig {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub security: SmtpSecurityConfig,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountConfig {
     pub name: String,
     pub email: String,
     pub provider_type: ProviderTypeConfig,
+    // ── IMAP ─────────────────────────────────────────────────────────────────
     pub imap_host: String,
     pub imap_port: u16,
-    pub smtp_host: String,
-    pub smtp_port: u16,
     pub use_tls: bool,
     pub username: String,
     pub password: String,
+    // ── SMTP ─────────────────────────────────────────────────────────────────
+    /// Dedicated SMTP configuration. Without this block the account cannot
+    /// send messages.
+    #[serde(default)]
+    pub smtp: Option<SmtpAccountConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -156,6 +190,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_smtp_sub_table() {
+        let toml = r#"
+[[accounts]]
+name = "Test"
+email = "test@example.com"
+provider_type = "imap"
+imap_host = "imap.example.com"
+imap_port = 993
+use_tls = true
+username = "test@example.com"
+password = "secret"
+
+[accounts.smtp]
+host = "smtp.example.com"
+port = 587
+security = "start_tls"
+"#;
+        let config: ServerConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.accounts.len(), 1);
+        let smtp = config.accounts[0].smtp.as_ref().expect("smtp should be Some");
+        assert_eq!(smtp.host, "smtp.example.com");
+        assert_eq!(smtp.port, 587);
+        assert!(matches!(smtp.security, SmtpSecurityConfig::StartTls));
+    }
+
+    #[test]
     fn serialize_deserialize() {
         let config = ServerConfig {
             grpc_addr: "0.0.0.0:9000".into(),
@@ -167,11 +227,16 @@ mod tests {
                 provider_type: ProviderTypeConfig::Imap,
                 imap_host: "imap.example.com".into(),
                 imap_port: 993,
-                smtp_host: "smtp.example.com".into(),
-                smtp_port: 587,
                 use_tls: true,
                 username: "test@example.com".into(),
                 password: "secret".into(),
+                smtp: Some(SmtpAccountConfig {
+                    host: "smtp.example.com".into(),
+                    port: 587,
+                    security: SmtpSecurityConfig::StartTls,
+                    username: None,
+                    password: None,
+                }),
             }],
             ui_bin: "/usr/local/bin/mail-cat-ui".into(),
         };

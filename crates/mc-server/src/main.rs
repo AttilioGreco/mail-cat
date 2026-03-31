@@ -14,8 +14,11 @@ use config::ServerConfig;
 use wiring::AppContext;
 
 use mc_interfaces::grpc::proto::{
-    account_service_server::AccountServiceServer, mailbox_service_server::MailboxServiceServer,
-    message_service_server::MessageServiceServer, search_service_server::SearchServiceServer,
+    account_service_server::AccountServiceServer,
+    contact_service_server::ContactServiceServer,
+    mailbox_service_server::MailboxServiceServer,
+    message_service_server::MessageServiceServer,
+    search_service_server::SearchServiceServer,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -77,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
     // Create gRPC server with all services
     Server::builder()
         .add_service(AccountServiceServer::new(app_ctx.account_service))
+        .add_service(ContactServiceServer::new(app_ctx.contact_service))
         .add_service(MailboxServiceServer::new(app_ctx.mailbox_service))
         .add_service(MessageServiceServer::new(app_ctx.message_service))
         .add_service(SearchServiceServer::new(app_ctx.search_service))
@@ -87,12 +91,16 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("🛑 gRPC server stopped, cancelling background tasks...");
     shutdown.cancel();
 
-    // Brief yield so spawned tasks can react to cancellation before the
-    // runtime is torn down.
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    // Give spawned tasks a brief window to react to the cancellation token
+    // before we force-exit. Background IMAP IDLE tasks and sled's internal
+    // flush threads would otherwise keep the process alive indefinitely.
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     tracing::info!("👋 Server shut down gracefully");
-    Ok(())
+    // Force-exit: sled is log-structured and crash-safe, so a hard exit here
+    // is safe and avoids waiting for long-lived background threads (IMAP IDLE,
+    // sled compaction) to complete on their own.
+    std::process::exit(0);
 }
 
 /// Wait for Ctrl+C signal for graceful shutdown.

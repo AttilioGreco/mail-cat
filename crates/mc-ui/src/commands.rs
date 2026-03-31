@@ -6,8 +6,9 @@ use tokio_util::sync::CancellationToken;
 use tokio_stream::StreamExt;
 
 use mc_client::{
-    Account, Mailbox, MailCatClient, MailboxNotificationKind, MessageBody, MessageFlag,
-    MessageSummary, SearchHit, SendMessageParams, Suggestion,
+    Account, ContactHit, ConversationSummary, Mailbox, MailCatClient, MailboxNotificationKind,
+    MessageBody, MessageFlag, MessageSummary, SearchHit, SendMessageParams, Suggestion,
+    ThreadMessage,
 };
 
 /// Tauri managed state — single shared client instance.
@@ -439,6 +440,78 @@ pub async fn search_messages(
         .map_err(|e| e.to_string())
 }
 
+// ── Contacts ─────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct ContactHitDto {
+    pub id: String,
+    pub display_name: String,
+    pub primary_email: String,
+    pub all_emails: Vec<String>,
+    pub organization: Option<String>,
+    pub account_scope: Option<String>,
+    pub is_cross_account: bool,
+}
+
+fn contact_hit_to_dto(h: ContactHit) -> ContactHitDto {
+    ContactHitDto {
+        id: h.id,
+        display_name: h.display_name,
+        primary_email: h.primary_email,
+        all_emails: h.all_emails,
+        organization: h.organization,
+        account_scope: h.account_scope,
+        is_cross_account: h.is_cross_account,
+    }
+}
+
+#[tauri::command]
+pub async fn search_contacts(
+    query: String,
+    limit: Option<u32>,
+    requesting_account_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ContactHitDto>, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .search_contacts(&query, limit.unwrap_or(10), requesting_account_id)
+        .await
+        .map(|v| v.into_iter().map(contact_hit_to_dto).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Backfill the address book by scanning all stored messages.
+///
+/// For each from/to/cc address found, idempotently creates a contact if one
+/// doesn't already exist. Returns `[new_contacts, already_existed]`.
+#[tauri::command]
+pub async fn backfill_contacts_from_messages(
+    account_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(u32, u32), String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .backfill_contacts_from_messages(account_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Rebuild the server-side contact search index from stored contact data.
+///
+/// Useful after a fresh install or when the Tantivy index is out of sync.
+/// Returns the number of contacts that were indexed.
+#[tauri::command]
+pub async fn rebuild_contact_index(
+    account_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<u32, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .rebuild_contact_index(account_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── Suggest ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -464,5 +537,88 @@ pub async fn suggest_messages(
         .suggest(&prefix, scope.as_deref(), max_per_field.unwrap_or(5))
         .await
         .map(|v| v.into_iter().map(suggestion_to_dto).collect())
+        .map_err(|e| e.to_string())
+}
+
+// ── Conversations ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct ConversationSummaryDto {
+    pub thread_id: String,
+    pub account_id: String,
+    pub subject: String,
+    pub message_count: u32,
+    pub unread_count: u32,
+    pub last_message_at: String, // ISO 8601
+    pub latest_sender: String,
+    /// Domain message UUID — pass this to `get_thread`, NOT thread_id.
+    pub sample_message_id: String,
+}
+
+fn conversation_to_dto(c: ConversationSummary) -> ConversationSummaryDto {
+    ConversationSummaryDto {
+        thread_id: c.thread_id,
+        account_id: c.account_id,
+        subject: c.subject,
+        message_count: c.message_count,
+        unread_count: c.unread_count,
+        last_message_at: c.last_message_at.to_rfc3339(),
+        latest_sender: c.latest_sender,
+        sample_message_id: c.sample_message_id,
+    }
+}
+
+#[tauri::command]
+pub async fn list_conversations(
+    account_id: String,
+    page: Option<u32>,
+    page_size: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ConversationSummaryDto>, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .list_conversations(&account_id, page.unwrap_or(1), page_size.unwrap_or(100))
+        .await
+        .map(|v| v.into_iter().map(conversation_to_dto).collect())
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct ThreadMessageDto {
+    pub id: String,
+    pub from_name: Option<String>,
+    pub from_email: String,
+    pub to: Vec<String>,
+    pub subject: String,
+    pub date: String, // ISO 8601
+    pub is_read: bool,
+    pub html_body: Option<String>,
+    pub text_body: Option<String>,
+}
+
+fn thread_message_to_dto(m: ThreadMessage) -> ThreadMessageDto {
+    ThreadMessageDto {
+        id: m.id,
+        from_name: m.from_name,
+        from_email: m.from_email,
+        to: m.to,
+        subject: m.subject,
+        date: m.date.to_rfc3339(),
+        is_read: m.is_read,
+        html_body: m.html_body,
+        text_body: m.text_body,
+    }
+}
+
+#[tauri::command]
+pub async fn get_thread(
+    message_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ThreadMessageDto>, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .get_thread(&message_id)
+        .await
+        .map(|v| v.into_iter().map(thread_message_to_dto).collect())
         .map_err(|e| e.to_string())
 }
