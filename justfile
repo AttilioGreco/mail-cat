@@ -82,6 +82,7 @@ install: build-release
     mkdir -p ~/.local/bin
     cp target/release/mail-cat-server ~/.local/bin/
     cp target/release/mail-cat-ui ~/.local/bin/
+    cp target/release/mc ~/.local/bin/
 
     @echo "→ config template (non sovrascrive se esiste già)..."
     mkdir -p ~/.config/mail-cat

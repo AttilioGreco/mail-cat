@@ -59,3 +59,46 @@
     background: hsl(var(--muted));
   }
 }
+
+/* ── CodeMirror dark theme overrides ─────────────────────────────────────── */
+/* Force CodeMirror to integrate with the app palette instead of bleeding
+   its own default light-mode styles through. */
+
+.cm-editor {
+  height: 100%;
+  background-color: transparent !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+.cm-editor .cm-scroller {
+  font-family: inherit;
+}
+
+.cm-editor .cm-content,
+.cm-editor .cm-line {
+  color: hsl(var(--foreground));
+}
+
+.cm-editor.cm-focused {
+  outline: none !important;
+}
+
+/* Selection */
+.cm-editor .cm-selectionBackground {
+  background-color: hsl(var(--accent) / 0.2) !important;
+}
+
+/* Hide gutter */
+.cm-editor .cm-gutters {
+  display: none !important;
+}
+
+/* Cursor */
+.cm-editor .cm-cursor {
+  border-left-color: hsl(var(--foreground)) !important;
+}
+
+/* Placeholder */
+.cm-editor .cm-placeholder {
+  color: hsl(var(--muted)) !important;
+}

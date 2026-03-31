@@ -3,13 +3,20 @@ db_path = "./data/mail-cat.db"
 index_path = "./data/search-index"
 
 [[accounts]]
-name = "Crazy Linux"
-email = "attilio.greco@crazylinux.it"
+name     = "Email Account"
+email    = "jhon.doe@example.com"
 provider_type = "imap"
-imap_host = "mail.crazylinux.it"
+# IMAP
+imap_host = "mail.example.com"
 imap_port = 993
-smtp_host = "mail.crazylinux.it"
-smtp_port = 587
-use_tls = true
-username = "attilio.greco@crazylinux.it"
-password = "3NtOERgtqxRdTRJ4"
+use_tls   = true
+username  = "jhon.doe@example.com"
+password  = "secret"
+
+# SMTP — omit this block to disable outbound sending for this account.
+[accounts.smtp]
+host     = "mail.example.com"
+port     = 587
+security = "start_tls"   # "start_tls" (porta 587)  |  "smtps" (porta 465)
+# username = "..."       # opzionale — usa accounts.username se assente
+# password = "..."       # opzionale — usa accounts.password se assente
