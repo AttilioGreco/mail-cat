@@ -1,26 +1,47 @@
 import { FixedSizeList, type ListChildComponentProps } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
-import { RefreshCw, Inbox } from 'lucide-react';
+import { RefreshCw, Inbox, MailOpen, MessageSquare, List } from 'lucide-react';
 import { useUIStore, mailboxKey } from '@/store/uiStore';
 import { useMessages } from '@/hooks/useMessages';
 import { useMailboxWatcher } from '@/hooks/useMailboxWatcher';
+import { useConversations } from '@/hooks/useConversations';
 import { MessageRow } from '@/components/messages/MessageRow';
+import { ConversationRow } from '@/components/messages/ConversationRow';
 import { SearchBar } from './SearchBar';
 import { SearchResults } from '@/components/messages/SearchResults';
-import type { MessageEnvelope } from '@/lib/types';
+import type { MessageEnvelope, ConversationSummary } from '@/lib/types';
 
-const ROW_HEIGHT = 76;
+const MESSAGE_ROW_HEIGHT = 76;
+const CONV_ROW_HEIGHT = 64;
 
 export function MessageList() {
-  const { selectedAccountId, selectedMailbox, selectedMessageId, selectMessage, searchQuery } = useUIStore();
+  const {
+    selectedAccountId, selectedMailbox,
+    selectedMessageId, selectMessage,
+    selectedThreadMessageId, selectThread,
+    conversationMode, setConversationMode,
+    searchQuery, showUnreadOnly, toggleUnreadOnly,
+  } = useUIStore();
+
   const key = mailboxKey(selectedAccountId, selectedMailbox?.id ?? null);
 
   // Real-time IMAP IDLE push → auto-invalidates query cache on new/changed messages
   useMailboxWatcher(selectedMailbox?.id ?? null, key, selectedAccountId);
-  const { data: messages = [], isLoading } = useMessages(key);
 
-  // Search mode: show search results instead of mailbox messages
+  const { data: rawMessages = [], isLoading: messagesLoading } = useMessages(conversationMode ? null : key);
+  const { data: conversations = [], isLoading: convsLoading } = useConversations(
+    conversationMode && selectedAccountId ? selectedAccountId : null
+  );
+
+  const messages = showUnreadOnly ? rawMessages.filter((m) => !m.isRead) : rawMessages;
+  const isLoading = conversationMode ? convsLoading : messagesLoading;
+
   const isSearching = searchQuery !== null && searchQuery.trim().length > 0;
+  const unreadCount = conversationMode
+    ? conversations.filter((c) => c.unreadCount > 0).length
+    : rawMessages.filter((m) => !m.isRead).length;
+
+  const hasContent = selectedAccountId || selectedMailbox;
 
   return (
     <div className="flex h-full flex-col">
@@ -28,25 +49,86 @@ export function MessageList() {
         <SearchBar />
       </div>
 
+      {/* Toolbar */}
+      {hasContent && !isSearching && (
+        <div className="flex items-center justify-between border-b border-border px-3 py-1.5 gap-2">
+          <span className="text-sm font-semibold text-foreground truncate">
+            {conversationMode
+              ? 'Conversations'
+              : (selectedMailbox?.name ?? selectedMailbox?.path ?? 'Messages')}
+          </span>
+          <div className="flex items-center gap-1 shrink-0">
+            {/* Conversation / Message toggle */}
+            <button
+              onClick={() => setConversationMode(!conversationMode)}
+              title={conversationMode ? 'Switch to message list' : 'Switch to conversation view'}
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-muted hover:text-foreground hover:bg-accent transition-colors"
+            >
+              {conversationMode ? <List size={12} /> : <MessageSquare size={12} />}
+              {conversationMode ? 'Msgs' : 'Threads'}
+            </button>
+
+            {!conversationMode && (
+              <button
+                onClick={toggleUnreadOnly}
+                title={showUnreadOnly ? 'Show all' : 'Show unread only'}
+                className={[
+                  'flex items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors',
+                  showUnreadOnly
+                    ? 'bg-primary text-primary-foreground'
+                    : unreadCount > 0
+                      ? 'text-foreground hover:bg-accent'
+                      : 'text-muted hover:text-foreground hover:bg-accent',
+                ].join(' ')}
+              >
+                <MailOpen size={12} />
+                {unreadCount > 0 ? `${unreadCount}` : '0'}
+              </button>
+            )}
+
+            <span className="text-xs text-muted">
+              {conversationMode ? conversations.length : messages.length}
+            </span>
+          </div>
+        </div>
+      )}
+
       {isSearching ? (
         <SearchResults />
-      ) : !key ? (
-        <EmptyState icon={<Inbox size={32} className="text-muted" />} text="Select a mailbox" />
+      ) : !hasContent ? (
+        <EmptyState icon={<Inbox size={32} className="text-muted" />} text="Select an account" />
       ) : isLoading ? (
         <EmptyState
           icon={<RefreshCw size={20} className="animate-spin text-muted" />}
-          text="Loading messages..."
+          text="Loading…"
         />
-      ) : messages.length === 0 ? (
-        <EmptyState icon={<Inbox size={32} className="text-muted" />} text="No messages" />
-      ) : (
-        <>
-          <div className="flex items-center justify-between border-b border-border px-4 py-2">
-            <span className="text-sm font-semibold text-foreground">
-              {selectedMailbox?.name ?? selectedMailbox?.path}
-            </span>
-            <span className="text-xs text-muted">{messages.length}</span>
+      ) : conversationMode ? (
+        conversations.length === 0 ? (
+          <EmptyState icon={<MessageSquare size={32} className="text-muted" />} text="No conversations" />
+        ) : (
+          <div className="flex-1 overflow-hidden">
+            <AutoSizer>
+              {({ height, width }) => (
+                <FixedSizeList
+                  height={height}
+                  width={width}
+                  itemCount={conversations.length}
+                  itemSize={CONV_ROW_HEIGHT}
+                  itemData={{ conversations, selectedThreadMessageId, selectThread }}
+                >
+                  {ConvRow}
+                </FixedSizeList>
+              )}
+            </AutoSizer>
           </div>
+        )
+      ) : (
+        messages.length === 0 ? (
+          <EmptyState
+            icon={<Inbox size={32} className="text-muted" />}
+            text={showUnreadOnly ? 'No unread messages' : 'No messages'}
+          />
+        ) : (
           <div className="flex-1 overflow-hidden">
             <AutoSizer>
               {({ height, width }) => (
@@ -54,27 +136,51 @@ export function MessageList() {
                   height={height}
                   width={width}
                   itemCount={messages.length}
-                  itemSize={ROW_HEIGHT}
+                  itemSize={MESSAGE_ROW_HEIGHT}
                   itemData={{ messages, selectedMessageId, selectMessage }}
                 >
-                  {Row}
+                  {MsgRow}
                 </FixedSizeList>
               )}
             </AutoSizer>
           </div>
-        </>
+        )
       )}
     </div>
   );
 }
 
-interface RowData {
+// ── Conversation virtual row ──────────────────────────────────────────────────
+
+interface ConvRowData {
+  conversations: ConversationSummary[];
+  selectedThreadMessageId: string | null;
+  selectThread: (id: string | null) => void;
+}
+
+function ConvRow({ index, style, data }: ListChildComponentProps<ConvRowData>) {
+  const { conversations, selectedThreadMessageId, selectThread } = data;
+  const conv = conversations[index];
+  return (
+    <div style={style}>
+      <ConversationRow
+        conversation={conv}
+        isSelected={selectedThreadMessageId === conv.sampleMessageId}
+        onClick={() => selectThread(conv.sampleMessageId)}
+      />
+    </div>
+  );
+}
+
+// ── Message virtual row ───────────────────────────────────────────────────────
+
+interface MsgRowData {
   messages: MessageEnvelope[];
   selectedMessageId: string | null;
   selectMessage: (id: string | null) => void;
 }
 
-function Row({ index, style, data }: ListChildComponentProps<RowData>) {
+function MsgRow({ index, style, data }: ListChildComponentProps<MsgRowData>) {
   const { messages, selectedMessageId, selectMessage } = data;
   const message = messages[index];
   return (

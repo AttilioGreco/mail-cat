@@ -1,4 +1,4 @@
-import { ChevronDown, RefreshCw, AlertCircle } from 'lucide-react';
+import { ChevronDown, RefreshCw, AlertCircle, Pencil } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/store/uiStore';
 import { useAccounts } from '@/hooks/useAccounts';
@@ -8,12 +8,19 @@ import { FolderItem } from '@/components/folders/FolderItem';
 import type { Account, Mailbox } from '@/lib/types';
 
 export function Sidebar() {
-  const { selectedAccountId, selectedMailbox, selectAccount, selectMailbox } = useUIStore();
+  const { selectedAccountId, selectedMailbox, selectAccount, selectMailbox, openCompose } = useUIStore();
   const { data: accounts = [], isLoading, error } = useAccounts();
 
   return (
     <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-border bg-surface">
       <div className="border-b border-border p-2">
+        <button
+          onClick={() => openCompose({ mode: 'new', identities: [] })}
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent/90 mb-2"
+        >
+          <Pencil size={14} />
+          Scrivi
+        </button>
         {isLoading && (
           <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted">
             <RefreshCw size={12} className="animate-spin" />

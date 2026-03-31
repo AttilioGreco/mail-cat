@@ -1,12 +1,16 @@
 import { Sidebar } from './Sidebar';
 import { MessageList } from './MessageList';
 import { MessagePane } from './MessagePane';
+import { ComposeWindow } from '@/components/compose/ComposeWindow';
+import { useUIStore } from '@/store/uiStore';
 
 /**
  * Root layout: 3-column email shell.
  *   [Sidebar 220px] | [MessageList 320px] | [MessagePane flex-1]
  */
 export function AppShell() {
+  const { composeOpen, composeData, closeCompose } = useUIStore();
+
   return (
     <div className="flex h-full overflow-hidden bg-background">
       <Sidebar />
@@ -18,6 +22,12 @@ export function AppShell() {
           <MessagePane />
         </main>
       </div>
+
+      <ComposeWindow
+        open={composeOpen}
+        onClose={closeCompose}
+        initialData={composeData}
+      />
     </div>
   );
 }
