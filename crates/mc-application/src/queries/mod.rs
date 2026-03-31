@@ -4,8 +4,8 @@
 //! [`QueryBus`](crate::bus::QueryBus) and return projected read models.
 
 use mc_domain::{
-    AccountId, AccountSummary, Mailbox, MailboxId, Message, MessageSummary, SearchResults,
-    SuggestScope, Suggestion,
+    AccountId, AccountSummary, ContactSearchHit, ConversationSummary, Mailbox, MailboxId, Message,
+    MessageSummary, SearchResults, SuggestScope, Suggestion, ThreadId,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -56,6 +56,35 @@ pub enum Query {
         scope: Option<SuggestScope>,
         max_per_field: usize,
     },
+
+    // ── Contact ────────────────────────────────────────────────────────
+    /// Autocomplete search for contacts by name or email prefix.
+    ///
+    /// `requesting_account_id` scopes the result: own-account contacts first,
+    /// cross-account contacts appended at the end (marked `is_cross_account = true`)
+    /// only when own-account results are insufficient.
+    SearchContacts {
+        query: String,
+        limit: usize,
+        requesting_account_id: Option<AccountId>,
+    },
+
+    /// Find pairs of contacts that share at least one email address.
+    /// Returns candidates for manual merge by the user.
+    FindContactDuplicates { account_id: Option<AccountId> },
+
+    // ── Conversation ────────────────────────────────────────────────────
+    /// List all conversations for an account, newest first.
+    ListConversations {
+        account_id: AccountId,
+        pagination: Pagination,
+    },
+
+    /// Get a single conversation by thread ID.
+    GetConversation {
+        thread_id: ThreadId,
+        account_id: AccountId,
+    },
 }
 
 use mc_domain::MessageId;
@@ -75,6 +104,10 @@ pub enum QueryResult {
     Thread(Box<Vec<Message>>),
     SearchResults(SearchResults),
     Suggestions(Vec<Suggestion>),
+    ContactHits(Vec<ContactSearchHit>),
+    ContactDuplicates(Vec<(ContactSearchHit, ContactSearchHit)>),
+    Conversations(PagedResult<ConversationSummary>),
+    ConversationDetail(Option<ConversationSummary>),
 }
 
 // ── Typed extraction helpers ───────────────────────────────────────────────
@@ -158,6 +191,46 @@ impl QueryResult {
     pub fn into_suggestions(self) -> Result<Vec<Suggestion>, ApplicationError> {
         match self {
             Self::Suggestions(v) => Ok(v),
+            _ => Err(ApplicationError::Internal(
+                "unexpected query result variant".into(),
+            )),
+        }
+    }
+
+    pub fn into_contact_hits(self) -> Result<Vec<ContactSearchHit>, ApplicationError> {
+        match self {
+            Self::ContactHits(v) => Ok(v),
+            _ => Err(ApplicationError::Internal(
+                "unexpected query result variant".into(),
+            )),
+        }
+    }
+
+    pub fn into_contact_duplicates(
+        self,
+    ) -> Result<Vec<(ContactSearchHit, ContactSearchHit)>, ApplicationError> {
+        match self {
+            Self::ContactDuplicates(v) => Ok(v),
+            _ => Err(ApplicationError::Internal(
+                "unexpected query result variant".into(),
+            )),
+        }
+    }
+
+    pub fn into_conversations(
+        self,
+    ) -> Result<PagedResult<ConversationSummary>, ApplicationError> {
+        match self {
+            Self::Conversations(v) => Ok(v),
+            _ => Err(ApplicationError::Internal(
+                "unexpected query result variant".into(),
+            )),
+        }
+    }
+
+    pub fn into_conversation(self) -> Result<Option<ConversationSummary>, ApplicationError> {
+        match self {
+            Self::ConversationDetail(v) => Ok(v),
             _ => Err(ApplicationError::Internal(
                 "unexpected query result variant".into(),
             )),

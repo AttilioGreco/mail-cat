@@ -4,8 +4,8 @@
 //! [`CommandBus`](crate::bus::CommandBus) and handled by command handlers.
 
 use mc_domain::{
-    AccountId, ConnectionConfig, EmailAddress, Flag, Identity, MailboxId, MailboxPath, MessageId,
-    OutgoingMessage, ProviderType,
+    AccountId, ConnectionConfig, ContactEmail, ContactId, ContactSource, EmailAddress, Flag,
+    Identity, MailboxId, MailboxPath, MessageId, OutgoingMessage, ProviderType,
 };
 pub use mc_domain::value_objects::uid::ProviderUid;
 
@@ -98,6 +98,64 @@ pub enum Command {
         mailbox_id: MailboxId,
         provider_uid: ProviderUid,
     },
+
+    // ── Contact ────────────────────────────────────────────────────────
+    /// Add a new contact to the address book (manual creation).
+    AddContact {
+        display_name: String,
+        emails: Vec<ContactEmail>,
+        phones: Vec<String>,
+        organization: Option<String>,
+        notes: Option<String>,
+        source: ContactSource,
+        external_id: Option<String>,
+        account_scope: Option<AccountId>,
+    },
+
+    /// Idempotent upsert: create a `LocalEmail` contact for this address/account
+    /// if one does not already exist. Used for auto-population from email activity.
+    EnsureContact {
+        email: EmailAddress,
+        /// Display name extracted from the email header (`From: Name <addr>`).
+        /// May be empty when the header contains only an address.
+        display_name: Option<String>,
+        account_id: AccountId,
+    },
+
+    /// Update an existing contact.
+    UpdateContact {
+        contact_id: ContactId,
+        display_name: Option<String>,
+        emails: Option<Vec<ContactEmail>>,
+        phones: Option<Vec<String>>,
+        /// `Some(Some(org))` = set, `Some(None)` = clear, `None` = no change
+        organization: Option<Option<String>>,
+        /// `Some(Some(note))` = set, `Some(None)` = clear, `None` = no change
+        notes: Option<Option<String>>,
+    },
+
+    /// Remove a contact from the address book.
+    RemoveContact { contact_id: ContactId },
+
+    /// Merge two contacts: absorb `discard_id` into `keep_id`.
+    /// After this command `discard_id` no longer exists.
+    MergeContacts {
+        keep_id: ContactId,
+        discard_id: ContactId,
+    },
+
+    /// Rebuild the contact search index from the stored contact read models.
+    /// Useful after a fresh install or when the Tantivy index is lost/corrupted.
+    /// If `account_id` is given, only contacts scoped to that account are indexed;
+    /// otherwise all contacts are processed.
+    RebuildContactIndex { account_id: Option<AccountId> },
+
+    /// Backfill the contact address book by scanning all stored messages and
+    /// calling `EnsureContact` for every from/to/cc address found.
+    ///
+    /// Idempotent: contacts that already exist are left unchanged.
+    /// Use this after a fresh install to populate contacts from historical mail.
+    BackfillContactsFromMessages { account_id: Option<AccountId> },
 }
 
 /// Result of a successfully dispatched command.
@@ -116,4 +174,17 @@ pub enum CommandResult {
     DraftDiscarded,
     RemoteFlagApplied,
     RemoteExpungeApplied,
+    ContactAdded { contact_id: ContactId },
+    /// EnsureContact result: `created = true` if a new contact was created,
+    /// `false` if it already existed (no-op).
+    ContactEnsured { created: bool, contact_id: ContactId },
+    ContactUpdated,
+    ContactRemoved,
+    ContactsMerged,
+    /// Number of contacts that were successfully (re-)indexed.
+    ContactIndexRebuilt { indexed_count: u32 },
+    /// Result of `BackfillContactsFromMessages`.
+    /// `new_contacts` = contacts created for the first time.
+    /// `already_existed` = addresses already in the address book (skipped).
+    ContactsBackfilled { new_contacts: u32, already_existed: u32 },
 }

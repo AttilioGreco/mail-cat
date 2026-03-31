@@ -7,13 +7,16 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountReadRepository, AccountWriteRepository, EventStore, MailboxReadRepository,
+    AccountReadRepository, AccountWriteRepository, ContactIndex, ContactReadRepository,
+    ContactWriteRepository, ConversationReadRepository, EventStore, MailboxReadRepository,
     MessageReadRepository, ProviderRegistry, ReadModelProjector, SearchIndex,
 };
+use std::collections::HashSet;
 
 use crate::commands::{Command, CommandResult};
 use crate::error::ApplicationError;
 use crate::handlers::account::AccountCommandHandler;
+use crate::handlers::contact::ContactCommandHandler;
 use crate::handlers::message::MessageCommandHandler;
 use crate::handlers::query::QueryHandler;
 use crate::queries::{Query, QueryResult};
@@ -22,22 +25,29 @@ use super::CommandBus;
 use super::QueryBus;
 use super::event_bus::EventPublisher;
 
-/// In-process command bus that dispatches to Account and Message handlers.
-pub struct InProcessCommandBus<AW, ES, PR, MR, B>
+/// In-process command bus that dispatches to Account, Message, and Contact handlers.
+pub struct InProcessCommandBus<AW, CW, CI, ES, PR, MR, B>
 where
     AW: AccountWriteRepository,
+    CW: ContactWriteRepository + ContactReadRepository,
+    CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
     MR: MessageReadRepository + ReadModelProjector,
     B: EventPublisher,
 {
     account_handler: AccountCommandHandler<AW, B>,
+    contact_handler: ContactCommandHandler<CW, CI, B>,
     message_handler: MessageCommandHandler<ES, PR, MR, B>,
+    /// Direct access to the message repo for contact backfill scanning.
+    message_repo: Arc<MR>,
 }
 
-impl<AW, ES, PR, MR, B> InProcessCommandBus<AW, ES, PR, MR, B>
+impl<AW, CW, CI, ES, PR, MR, B> InProcessCommandBus<AW, CW, CI, ES, PR, MR, B>
 where
     AW: AccountWriteRepository,
+    CW: ContactWriteRepository + ContactReadRepository,
+    CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
     MR: MessageReadRepository + ReadModelProjector,
@@ -45,6 +55,8 @@ where
 {
     pub fn new(
         account_write_repo: Arc<AW>,
+        contact_write_repo: Arc<CW>,
+        contact_index: Arc<CI>,
         event_store: Arc<ES>,
         provider_registry: Arc<PR>,
         message_read_repo: Arc<MR>,
@@ -52,20 +64,28 @@ where
     ) -> Self {
         Self {
             account_handler: AccountCommandHandler::new(account_write_repo, event_bus.clone()),
+            contact_handler: ContactCommandHandler::new(
+                contact_write_repo,
+                contact_index,
+                event_bus.clone(),
+            ),
             message_handler: MessageCommandHandler::new(
                 event_store,
                 provider_registry,
-                message_read_repo,
+                message_read_repo.clone(),
                 event_bus,
             ),
+            message_repo: message_read_repo,
         }
     }
 }
 
 #[async_trait]
-impl<AW, ES, PR, MR, B> CommandBus for InProcessCommandBus<AW, ES, PR, MR, B>
+impl<AW, CW, CI, ES, PR, MR, B> CommandBus for InProcessCommandBus<AW, CW, CI, ES, PR, MR, B>
 where
     AW: AccountWriteRepository,
+    CW: ContactWriteRepository + ContactReadRepository,
+    CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
     MR: MessageReadRepository + ReadModelProjector,
@@ -179,33 +199,140 @@ where
                     .handle_apply_remote_expunge(mailbox_id, provider_uid)
                     .await
             }
+            Command::AddContact {
+                display_name,
+                emails,
+                phones,
+                organization,
+                notes,
+                source,
+                external_id,
+                account_scope,
+            } => {
+                self.contact_handler
+                    .handle_add(
+                        display_name,
+                        emails,
+                        phones,
+                        organization,
+                        notes,
+                        source,
+                        external_id,
+                        account_scope,
+                    )
+                    .await
+            }
+            Command::EnsureContact { email, display_name, account_id } => {
+                self.contact_handler
+                    .handle_ensure(email, display_name, account_id)
+                    .await
+            }
+            Command::UpdateContact {
+                contact_id,
+                display_name,
+                emails,
+                phones,
+                organization,
+                notes,
+            } => {
+                self.contact_handler
+                    .handle_update(contact_id, display_name, emails, phones, organization, notes)
+                    .await
+            }
+            Command::RemoveContact { contact_id } => {
+                self.contact_handler.handle_remove(contact_id).await
+            }
+            Command::MergeContacts { keep_id, discard_id } => {
+                self.contact_handler.handle_merge(keep_id, discard_id).await
+            }
+            Command::RebuildContactIndex { account_id } => {
+                self.contact_handler.handle_rebuild_index(account_id).await
+            }
+            Command::BackfillContactsFromMessages { account_id } => {
+                // Scan all stored messages, deduplicate addresses in-memory,
+                // then call EnsureContact for each unique (email, account) pair.
+                let messages = self
+                    .message_repo
+                    .scan_all_messages(account_id.as_ref())
+                    .await?;
+
+                // Deduplicate: (account_id_str, email_str) → (email, name, account_id)
+                let mut seen: HashSet<(String, String)> = HashSet::new();
+                let mut to_ensure: Vec<(mc_domain::EmailAddress, Option<String>, mc_domain::AccountId)> =
+                    Vec::new();
+
+                for msg in messages {
+                    let aid = msg.account_id.clone();
+                    let all_addrs = msg
+                        .envelope
+                        .from
+                        .iter()
+                        .chain(msg.envelope.to.iter())
+                        .chain(msg.envelope.cc.iter());
+
+                    for addr in all_addrs {
+                        let key = (aid.to_string(), addr.email.to_string());
+                        if seen.insert(key) {
+                            to_ensure.push((addr.email.clone(), addr.name.clone(), aid.clone()));
+                        }
+                    }
+                }
+
+                let mut new_contacts = 0u32;
+                let mut already_existed = 0u32;
+
+                for (email, display_name, acct_id) in to_ensure {
+                    match self
+                        .contact_handler
+                        .handle_ensure(email, display_name, acct_id)
+                        .await?
+                    {
+                        CommandResult::ContactEnsured { created, .. } => {
+                            if created {
+                                new_contacts += 1;
+                            } else {
+                                already_existed += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                Ok(CommandResult::ContactsBackfilled { new_contacts, already_existed })
+            }
         }
     }
 }
 
 /// In-process query bus that dispatches to the query handler.
-pub struct InProcessQueryBus<AR, MBR, MR, SI>
+pub struct InProcessQueryBus<AR, MBR, MR, SI, CI, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
+    CI: ContactIndex,
+    CR: ConversationReadRepository,
 {
-    query_handler: QueryHandler<AR, MBR, MR, SI>,
+    query_handler: QueryHandler<AR, MBR, MR, SI, CI, CR>,
 }
 
-impl<AR, MBR, MR, SI> InProcessQueryBus<AR, MBR, MR, SI>
+impl<AR, MBR, MR, SI, CI, CR> InProcessQueryBus<AR, MBR, MR, SI, CI, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
+    CI: ContactIndex,
+    CR: ConversationReadRepository,
 {
     pub fn new(
         account_repo: Arc<AR>,
         mailbox_repo: Arc<MBR>,
         message_repo: Arc<MR>,
         search_index: Arc<SI>,
+        contact_index: Arc<CI>,
+        conversation_repo: Arc<CR>,
     ) -> Self {
         Self {
             query_handler: QueryHandler::new(
@@ -213,18 +340,22 @@ where
                 mailbox_repo,
                 message_repo,
                 search_index,
+                contact_index,
+                conversation_repo,
             ),
         }
     }
 }
 
 #[async_trait]
-impl<AR, MBR, MR, SI> QueryBus for InProcessQueryBus<AR, MBR, MR, SI>
+impl<AR, MBR, MR, SI, CI, CR> QueryBus for InProcessQueryBus<AR, MBR, MR, SI, CI, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
+    CI: ContactIndex,
+    CR: ConversationReadRepository,
 {
     async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError> {
         self.query_handler.dispatch(query).await
