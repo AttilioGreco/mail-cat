@@ -4,8 +4,10 @@ use uuid::Uuid;
 
 use crate::model::account::{AccountId, ConnectionConfig, ProviderType};
 use crate::model::attachment::Attachment;
+use crate::model::contact::{ContactEmail, ContactSource};
 use crate::model::mailbox::{MailboxId, MailboxType};
 use crate::model::message::Envelope;
+use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
 use crate::value_objects::mailbox_path::MailboxPath;
@@ -54,6 +56,7 @@ pub enum AggregateType {
     Account,
     Mailbox,
     Message,
+    Contact,
 }
 
 impl std::fmt::Display for AggregateType {
@@ -62,6 +65,7 @@ impl std::fmt::Display for AggregateType {
             Self::Account => write!(f, "account"),
             Self::Mailbox => write!(f, "mailbox"),
             Self::Message => write!(f, "message"),
+            Self::Contact => write!(f, "contact"),
         }
     }
 }
@@ -143,6 +147,12 @@ pub enum DomainEvent {
         account_id: AccountId,
         mailbox_id: MailboxId,
         provider_uid: ProviderUid,
+        /// RFC Message-ID header (e.g. `<abc@mail.example.com>`).
+        message_rfc_id: Option<String>,
+        /// RFC In-Reply-To header (Message-ID of the direct parent).
+        in_reply_to: Option<String>,
+        /// RFC References header (ordered ancestor Message-IDs, oldest first).
+        references: Vec<String>,
         envelope: Envelope,
         flags: Vec<Flag>,
         size_bytes: u64,
@@ -199,6 +209,42 @@ pub enum DomainEvent {
 
     /// A draft was discarded.
     DraftDiscarded { message_id: MessageId },
+
+    // ── Contact Events ──────────────────────────────────────────────
+    /// A new contact was added to the address book.
+    ContactAdded {
+        contact_id: ContactId,
+        display_name: String,
+        emails: Vec<ContactEmail>,
+        source: ContactSource,
+        external_id: Option<String>,
+        /// Account this contact is scoped to. `None` = shared across all accounts.
+        account_scope: Option<AccountId>,
+    },
+
+    /// An existing contact was updated.
+    ContactUpdated {
+        contact_id: ContactId,
+        display_name: Option<String>,
+        emails: Option<Vec<ContactEmail>>,
+        phones: Option<Vec<String>>,
+        /// `Some(Some(org))` = set, `Some(None)` = clear, `None` = no change
+        organization: Option<Option<String>>,
+        /// `Some(Some(note))` = set, `Some(None)` = clear, `None` = no change
+        notes: Option<Option<String>>,
+    },
+
+    /// A contact was removed from the address book.
+    ContactRemoved { contact_id: ContactId },
+
+    /// Two contacts were merged: `discarded_id` was absorbed into `kept_id`.
+    /// After this event `discarded_id` no longer exists.
+    ContactMerged {
+        kept_id: ContactId,
+        discarded_id: ContactId,
+        /// Union of emails from both contacts, stored on the surviving contact.
+        merged_emails: Vec<ContactEmail>,
+    },
 }
 
 impl DomainEvent {
@@ -225,6 +271,11 @@ impl DomainEvent {
             | Self::MessageSent { .. }
             | Self::DraftSaved { .. }
             | Self::DraftDiscarded { .. } => AggregateType::Message,
+
+            Self::ContactAdded { .. }
+            | Self::ContactUpdated { .. }
+            | Self::ContactRemoved { .. }
+            | Self::ContactMerged { .. } => AggregateType::Contact,
         }
     }
 
@@ -249,6 +300,10 @@ impl DomainEvent {
             Self::MessageSent { .. } => "MessageSent",
             Self::DraftSaved { .. } => "DraftSaved",
             Self::DraftDiscarded { .. } => "DraftDiscarded",
+            Self::ContactAdded { .. } => "ContactAdded",
+            Self::ContactUpdated { .. } => "ContactUpdated",
+            Self::ContactRemoved { .. } => "ContactRemoved",
+            Self::ContactMerged { .. } => "ContactMerged",
         }
     }
 }
@@ -342,6 +397,9 @@ mod tests {
             account_id: AccountId::new(),
             mailbox_id: MailboxId::new(),
             provider_uid: ProviderUid::new(1234),
+            message_rfc_id: None,
+            in_reply_to: None,
+            references: vec![],
             envelope: Envelope {
                 from: vec![],
                 to: vec![],

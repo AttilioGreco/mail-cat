@@ -3,6 +3,7 @@
 /// These traits are implemented by adapters in `mc-infrastructure`.
 /// The domain and application layers depend only on these abstractions.
 pub mod account_event_source;
+pub mod contact_index;
 pub mod email_provider;
 pub mod event_store;
 pub mod provider_registry;

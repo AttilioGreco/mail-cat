@@ -34,7 +34,13 @@ pub use traits::event_store::EventStore;
 pub use traits::provider_registry::ProviderRegistry;
 pub use traits::read_model_projector::ReadModelProjector;
 pub use traits::repository::{
-    AccountReadRepository, AccountSummary, AccountWriteRepository, MailboxReadRepository,
-    MessageReadRepository, MessageSummary, ProjectionCheckpoint,
+    AccountReadRepository, AccountSummary, AccountWriteRepository, ContactReadRepository,
+    ContactSummary, ContactWriteRepository, ConversationReadRepository, ConversationSummary,
+    MailboxReadRepository, MessageReadRepository, MessageSummary, ProjectionCheckpoint,
 };
+pub use model::conversation::Conversation;
+pub use value_objects::thread_id::ThreadId;
+pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource};
+pub use value_objects::contact_id::ContactId;
+pub use traits::contact_index::{ContactIndex, ContactSearchHit};
 pub use traits::search_index::{SearchHit, SearchIndex, SearchResults, SuggestScope, Suggestion};
