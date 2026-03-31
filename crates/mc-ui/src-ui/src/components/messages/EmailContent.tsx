@@ -16,6 +16,10 @@ function buildSrcDoc(cleanHtml: string, mode: 'auto' | 'light' | 'invert'): stri
       line-height: 1.5;
       word-break: break-word;
     }
+    body {
+      padding: 24px 28px;
+      box-sizing: border-box;
+    }
     img, video, table { max-width: 100%; }
     pre { white-space: pre-wrap; }
     a { color: #1d4ed8; }
@@ -60,7 +64,7 @@ export function EmailContent({ htmlBody, textBody, className }: EmailContentProp
   }
 
   return (
-    <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-foreground">
+    <pre className="whitespace-pre-wrap px-6 py-5 font-sans text-sm leading-relaxed text-foreground">
       {textBody ?? '(No content)'}
     </pre>
   );
