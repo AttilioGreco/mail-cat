@@ -2,6 +2,7 @@ import { Sidebar } from './Sidebar';
 import { MessageList } from './MessageList';
 import { MessagePane } from './MessagePane';
 import { ComposeWindow } from '@/components/compose/ComposeWindow';
+import { LocalSettingsPanel } from '@/components/settings/LocalSettingsPanel';
 import { useUIStore } from '@/store/uiStore';
 
 /**
@@ -9,7 +10,7 @@ import { useUIStore } from '@/store/uiStore';
  *   [Sidebar 220px] | [MessageList 320px] | [MessagePane flex-1]
  */
 export function AppShell() {
-  const { composeOpen, composeData, closeCompose } = useUIStore();
+  const { composeOpen, composeData, closeCompose, settingsOpen, closeSettings } = useUIStore();
 
   return (
     <div className="flex h-full overflow-hidden bg-background">
@@ -28,6 +29,8 @@ export function AppShell() {
         onClose={closeCompose}
         initialData={composeData}
       />
+
+      <LocalSettingsPanel open={settingsOpen} onClose={closeSettings} />
     </div>
   );
 }

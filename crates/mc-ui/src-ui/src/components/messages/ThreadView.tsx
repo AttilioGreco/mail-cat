@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useThread } from '@/hooks/useConversations';
 import { useUIStore } from '@/store/uiStore';
 import { formatDate } from '@/lib/utils';
+import { EmailContent } from '@/components/messages/EmailContent';
 import type { ThreadMessage } from '@/lib/types';
 
 export function ThreadView() {
@@ -63,6 +64,7 @@ function ThreadMessageCard({ message, defaultExpanded }: CardProps) {
     <div className="border border-border rounded-lg overflow-hidden bg-card shadow-sm">
       {/* Message header — always visible */}
       <button
+        type="button"
         className="w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-muted/30 transition-colors"
         onClick={() => setExpanded((v) => !v)}
       >
@@ -113,25 +115,13 @@ function SenderAvatar({ name }: { name: string }) {
 }
 
 function MessageBody({ message }: { message: ThreadMessage }) {
-  if (message.htmlBody) {
-    return (
-      <iframe
-        srcDoc={message.htmlBody}
-        sandbox="allow-same-origin"
-        className="w-full min-h-[200px] border-0"
-        style={{ height: '400px' }}
-        title="email body"
-      />
-    );
-  }
-  if (message.textBody) {
-    return (
-      <pre className="text-sm text-foreground whitespace-pre-wrap font-sans leading-relaxed">
-        {message.textBody}
-      </pre>
-    );
-  }
-  return <p className="text-sm text-muted-foreground italic">No body content.</p>;
+  return (
+    <EmailContent
+      htmlBody={message.htmlBody}
+      textBody={message.textBody}
+      className="w-full min-h-[260px] border border-border rounded-md bg-white"
+    />
+  );
 }
 
 function getPreview(message: ThreadMessage): string {

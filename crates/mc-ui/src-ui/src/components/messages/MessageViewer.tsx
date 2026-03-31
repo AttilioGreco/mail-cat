@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react';
-import DOMPurify from 'dompurify';
 import { RefreshCw, Paperclip, Reply, Forward, Trash2, Mail, MailOpen, MoreHorizontal } from 'lucide-react';
 import { cn, formatDate } from '@/lib/utils';
 import { useMessageBody } from '@/hooks/useMessages';
 import { useSetFlags, useDeleteMessage } from '@/hooks/useMutations';
 import { useUIStore, mailboxKey } from '@/store/uiStore';
 import { useAccounts } from '@/hooks/useAccounts';
+import { EmailContent } from '@/components/messages/EmailContent';
 import type { MessageEnvelope } from '@/lib/types';
 
 interface MessageViewerProps {
@@ -143,30 +143,11 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
             <RefreshCw size={14} className="animate-spin" />
             Loading message…
           </div>
-        ) : body?.htmlBody ? (
-          <HtmlBody html={body.htmlBody} />
         ) : (
-          <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-foreground">
-            {body?.textBody ?? '(No content)'}
-          </pre>
+          <EmailContent htmlBody={body?.htmlBody} textBody={body?.textBody} />
         )}
       </div>
     </div>
-  );
-}
-
-function HtmlBody({ html }: { html: string }) {
-  const clean = DOMPurify.sanitize(html, {
-    ALLOWED_TAGS: ['p', 'br', 'b', 'i', 'em', 'strong', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'blockquote', 'pre', 'code', 'div', 'span', 'table', 'tr', 'td', 'th', 'thead', 'tbody'],
-    ALLOWED_ATTR: ['href', 'target', 'rel', 'style', 'class'],
-    FORCE_BODY: true,
-  });
-  return (
-    <div
-      className="prose prose-sm max-w-none text-foreground [&_a]:text-accent [&_a]:underline"
-      // eslint-disable-next-line react/no-danger
-      dangerouslySetInnerHTML={{ __html: clean }}
-    />
   );
 }
 
@@ -196,6 +177,7 @@ function ToolbarButton({
 }) {
   return (
     <button
+      type="button"
       title={label}
       onClick={onClick}
       className={cn(

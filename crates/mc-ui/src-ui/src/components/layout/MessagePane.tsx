@@ -3,6 +3,7 @@ import { useUIStore, mailboxKey } from '@/store/uiStore';
 import { useMessages, useMessageBody } from '@/hooks/useMessages';
 import { MessageViewer } from '@/components/messages/MessageViewer';
 import { ThreadView } from '@/components/messages/ThreadView';
+import { EmailContent } from '@/components/messages/EmailContent';
 
 export function MessagePane() {
   const { selectedAccountId, selectedMailbox, selectedMessageId, selectedThreadMessageId, searchQuery, conversationMode } = useUIStore();
@@ -63,16 +64,7 @@ function SearchBodyViewer({ messageId }: { messageId: string }) {
         <span className="text-xs font-mono text-muted">{messageId.slice(0, 12)}...</span>
       </div>
       <div className="flex-1 overflow-y-auto px-6 py-5">
-        {body?.htmlBody ? (
-          <div
-            className="prose prose-sm max-w-none text-foreground"
-            dangerouslySetInnerHTML={{ __html: body.htmlBody }}
-          />
-        ) : (
-          <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-foreground">
-            {body?.textBody ?? '(No content)'}
-          </pre>
-        )}
+        <EmailContent htmlBody={body?.htmlBody} textBody={body?.textBody} />
       </div>
     </div>
   );

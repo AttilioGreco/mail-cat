@@ -28,6 +28,10 @@ interface UIState {
   composeData: ComposeInitialData | null;
   openCompose: (data: ComposeInitialData) => void;
   closeCompose: () => void;
+
+  settingsOpen: boolean;
+  openSettings: () => void;
+  closeSettings: () => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -61,6 +65,11 @@ export const useUIStore = create<UIState>((set) => ({
 
   openCompose: (data: ComposeInitialData) => set({ composeOpen: true, composeData: data }),
   closeCompose: () => set({ composeOpen: false, composeData: null }),
+
+  // ── Local Settings ─────────────────────────────────────────────────────
+  settingsOpen: false,
+  openSettings: () => set({ settingsOpen: true }),
+  closeSettings: () => set({ settingsOpen: false }),
 }));
 
 /** Query key for messages: "accountId::mailboxId" */

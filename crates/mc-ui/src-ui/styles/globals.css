@@ -4,6 +4,29 @@
 
 @layer base {
   :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 8%;
+
+    --surface: 0 0% 98%;
+    --surface-hover: 0 0% 95%;
+    --surface-active: 0 0% 92%;
+
+    --border: 240 6% 84%;
+    --border-subtle: 240 6% 90%;
+
+    --muted: 240 4% 42%;
+    --muted-foreground: 240 4% 35%;
+
+    --accent: 217 91% 50%;
+    --accent-foreground: 0 0% 100%;
+
+    --unread-dot: 217 91% 50%;
+    --badge: 217 91% 50%;
+
+    --destructive: 0 72% 51%;
+  }
+
+  html[data-theme='dark'] {
     --background: 240 6% 7%;
     --foreground: 240 5% 90%;
 

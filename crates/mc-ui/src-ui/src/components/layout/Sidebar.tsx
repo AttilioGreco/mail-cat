@@ -1,4 +1,4 @@
-import { ChevronDown, RefreshCw, AlertCircle, Pencil } from 'lucide-react';
+import { ChevronDown, RefreshCw, AlertCircle, Pencil, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/store/uiStore';
 import { useAccounts } from '@/hooks/useAccounts';
@@ -8,13 +8,14 @@ import { FolderItem } from '@/components/folders/FolderItem';
 import type { Account, Mailbox } from '@/lib/types';
 
 export function Sidebar() {
-  const { selectedAccountId, selectedMailbox, selectAccount, selectMailbox, openCompose } = useUIStore();
+  const { selectedAccountId, selectedMailbox, selectAccount, selectMailbox, openCompose, openSettings } = useUIStore();
   const { data: accounts = [], isLoading, error } = useAccounts();
 
   return (
     <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-border bg-surface">
       <div className="border-b border-border p-2">
         <button
+          type="button"
           onClick={() => openCompose({ mode: 'new', identities: [] })}
           className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent/90 mb-2"
         >
@@ -54,6 +55,17 @@ export function Sidebar() {
           <p className="px-2 py-4 text-center text-xs text-muted">Seleziona un account</p>
         )}
       </div>
+
+      <div className="border-t border-border p-2">
+        <button
+          type="button"
+          onClick={openSettings}
+          className="flex w-full items-center justify-center gap-2 rounded-md border border-border bg-background px-2.5 py-2 text-xs text-foreground transition-colors hover:bg-surface-hover"
+        >
+          <Settings size={13} />
+          Impostazioni Locali
+        </button>
+      </div>
     </aside>
   );
 }
@@ -69,6 +81,7 @@ function AccountRow({
 }) {
   return (
     <button
+      type="button"
       onClick={onSelect}
       className={cn(
         'flex w-full items-center gap-2 rounded-md px-2.5 py-2 transition-colors',
