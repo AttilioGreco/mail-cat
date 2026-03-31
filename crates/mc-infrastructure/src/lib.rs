@@ -11,4 +11,4 @@ pub mod search;
 pub use email::{ImapAccountEventSource, ImapEmailProvider, SmtpSender};
 pub use persistence::{SharedSledRepository, SledEventStore, SledRepository};
 pub use provider_registry::InMemoryProviderRegistry;
-pub use search::TantivySearchIndex;
+pub use search::{TantivyContactIndex, TantivySearchIndex};
