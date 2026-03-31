@@ -201,13 +201,14 @@ mod tests {
         ConnectionConfig {
             imap_host: Some("imap.example.com".into()),
             imap_port: Some(993),
-            smtp_host: Some("smtp.example.com".into()),
-            smtp_port: Some(587),
             use_tls: true,
             auth: AuthConfig::Plain {
                 username: "user@example.com".into(),
                 password: "secret".into(),
             },
+            smtp: None,
+            smtp_host: None,
+            smtp_port: None,
         }
     }
 

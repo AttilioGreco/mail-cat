@@ -3,12 +3,16 @@ use mc_shared::pagination::{PagedResult, Pagination};
 use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
+use crate::events::DomainEvent;
 use crate::model::account::{AccountId, AccountStatus, ProviderType};
+use crate::model::contact::{Contact, ContactEmail, ContactSource};
 use crate::model::mailbox::{Mailbox, MailboxId};
 use crate::model::message::Message;
+use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
 use crate::value_objects::message_id::MessageId;
+use crate::value_objects::thread_id::ThreadId;
 use crate::value_objects::uid::ProviderUid;
 
 // ── Write-side Repositories ─────────────────────────────────────────────
@@ -17,7 +21,6 @@ use crate::value_objects::uid::ProviderUid;
 // They are responsible for loading (rehydrating) aggregates from events and
 // appending new events.
 
-use crate::events::DomainEvent;
 use crate::model::account::Account;
 
 /// Write-side repository for Account aggregate.
@@ -62,7 +65,8 @@ pub struct MessageSummary {
     pub account_id: AccountId,
     pub mailbox_id: MailboxId,
     pub provider_uid: Option<ProviderUid>,
-    pub from_display: String,
+    pub from_name: Option<String>,
+    pub from_email: String,
     pub subject: String,
     pub flags: Vec<Flag>,
     pub size_bytes: u64,
@@ -96,6 +100,16 @@ pub trait MessageReadRepository: Send + Sync {
         mailbox_id: &MailboxId,
         provider_uid: u32,
     ) -> Result<Option<MessageSummary>, DomainError>;
+
+    /// Scan every stored message, optionally filtered by account.
+    ///
+    /// Used for contact backfill: extracts `from`/`to`/`cc` addresses from the
+    /// stored envelopes and feeds them into `EnsureContact`.  Returns full
+    /// `Message` objects so the caller can access envelope addresses.
+    async fn scan_all_messages(
+        &self,
+        account_id: Option<&AccountId>,
+    ) -> Result<Vec<Message>, DomainError>;
 }
 
 /// Checkpoint store for projections — tracks last processed global_position.
@@ -107,4 +121,108 @@ pub trait ProjectionCheckpoint: Send + Sync {
         projection_name: &str,
         global_position: u64,
     ) -> Result<(), DomainError>;
+}
+
+// ── Contact Repositories ─────────────────────────────────────────────────────
+
+/// Write-side repository for Contact aggregate.
+#[async_trait]
+pub trait ContactWriteRepository: Send + Sync {
+    /// Persist new events for the contact.
+    async fn save(&self, contact: &Contact, events: Vec<DomainEvent>) -> Result<(), DomainError>;
+
+    /// Load a contact by rehydrating from the event store.
+    async fn load(&self, id: &ContactId) -> Result<Option<Contact>, DomainError>;
+}
+
+/// Lightweight read model for contact list views.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContactSummary {
+    pub id: ContactId,
+    pub display_name: String,
+    /// Primary email address (or first available).
+    pub primary_email: EmailAddress,
+    pub emails: Vec<ContactEmail>,
+    pub organization: Option<String>,
+    pub source: ContactSource,
+    /// Account this contact is scoped to. `None` = shared across all accounts.
+    pub account_scope: Option<AccountId>,
+}
+
+/// Read-side repository for contacts.
+#[async_trait]
+pub trait ContactReadRepository: Send + Sync {
+    async fn get_contact(&self, id: &ContactId) -> Result<Option<ContactSummary>, DomainError>;
+
+    async fn list_contacts(
+        &self,
+        pagination: &Pagination,
+    ) -> Result<PagedResult<ContactSummary>, DomainError>;
+
+    /// Find contacts that have the given email address (any label).
+    async fn find_by_email(
+        &self,
+        email: &EmailAddress,
+    ) -> Result<Vec<ContactSummary>, DomainError>;
+
+    /// Find contacts scoped to a specific account that have the given email address.
+    async fn find_by_email_in_account(
+        &self,
+        email: &EmailAddress,
+        account_id: &AccountId,
+    ) -> Result<Vec<ContactSummary>, DomainError>;
+
+    /// Search contacts by display name or email prefix.
+    async fn search_contacts(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ContactSummary>, DomainError>;
+
+    /// Find pairs of contacts that share at least one email address.
+    /// Used to surface merge candidates to the user.
+    async fn find_duplicate_candidates(
+        &self,
+        account_id: Option<&AccountId>,
+    ) -> Result<Vec<(ContactSummary, ContactSummary)>, DomainError>;
+}
+
+// ── Conversation Read Repository ─────────────────────────────────────────────
+
+/// Read model for conversation (thread) list views.
+///
+/// Projected from `MessageReceived` and flag-change events.
+/// Never expose write methods — projection writes are internal to the infra layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationSummary {
+    pub thread_id: ThreadId,
+    pub account_id: AccountId,
+    /// Subject with Re:/Fwd: stripped.
+    pub subject: String,
+    pub message_count: u32,
+    pub unread_count: u32,
+    pub last_message_at: chrono::DateTime<chrono::Utc>,
+    /// Display name (or address) of the most recent sender.
+    pub latest_sender: String,
+    /// A representative domain message_id (UUID) usable to call get_thread.
+    #[serde(default)]
+    pub sample_message_id: MessageId,
+}
+
+/// Read-side repository for conversation (thread) summaries.
+#[async_trait]
+pub trait ConversationReadRepository: Send + Sync {
+    /// Get a single conversation by thread ID.
+    async fn get_conversation(
+        &self,
+        thread_id: &ThreadId,
+        account_id: &AccountId,
+    ) -> Result<Option<ConversationSummary>, DomainError>;
+
+    /// List conversations for an account, newest first.
+    async fn list_conversations(
+        &self,
+        account_id: &AccountId,
+        pagination: &Pagination,
+    ) -> Result<PagedResult<ConversationSummary>, DomainError>;
 }

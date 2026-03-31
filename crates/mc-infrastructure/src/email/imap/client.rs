@@ -30,53 +30,26 @@ pub struct ImapEmailProvider {
     username: String,
     password: String,
     use_tls: bool,
-    // SMTP configuration for sending
-    smtp_host: String,
-    smtp_port: u16,
-    smtp_use_tls: bool,
+    /// Pre-built SMTP sender. `None` when no SMTP config was provided for this
+    /// account — sending will be rejected with a clear error.
+    smtp_sender: Option<SmtpSender>,
 }
 
 impl ImapEmailProvider {
-    /// Create a new IMAP provider configuration.
-    ///
-    /// For SMTP, uses the same credentials but separate host/port.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: String,
         port: u16,
         username: String,
         password: String,
         use_tls: bool,
-        smtp_host: String,
-        smtp_port: u16,
-        smtp_use_tls: bool,
+        smtp_sender: Option<SmtpSender>,
     ) -> Self {
-        Self {
-            host,
-            port,
-            username,
-            password,
-            use_tls,
-            smtp_host,
-            smtp_port,
-            smtp_use_tls,
-        }
+        Self { host, port, username, password, use_tls, smtp_sender }
     }
 
-    /// Get configuration for display/debugging.
+    /// Get IMAP configuration for display/debugging.
     pub fn config(&self) -> (&str, u16, &str, bool) {
         (&self.host, self.port, &self.username, self.use_tls)
-    }
-
-    /// Create a SmtpSender from this provider's SMTP configuration.
-    fn create_smtp_sender(&self) -> SmtpSender {
-        SmtpSender::new(
-            self.smtp_host.clone(),
-            self.smtp_port,
-            self.username.clone(),
-            self.password.clone(),
-            self.smtp_use_tls,
-        )
     }
 
     async fn create_imap_session(
@@ -307,7 +280,7 @@ impl EmailProvider for ImapEmailProvider {
 
             use futures::TryStreamExt;
             let batch_results: Vec<async_imap::types::Fetch> = session
-                .uid_fetch(&query, "(ENVELOPE FLAGS INTERNALDATE)")
+                .uid_fetch(&query, "(ENVELOPE FLAGS INTERNALDATE BODY.PEEK[HEADER])")
                 .await
                 .map_err(|e| {
                     DomainError::Provider(format!("Fetch envelopes failed: {}", e))
@@ -368,9 +341,17 @@ impl EmailProvider for ImapEmailProvider {
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .unwrap_or(date);
 
+                    // Parse threading headers from raw RFC header block.
+                    let (message_rfc_id, in_reply_to, references) = fetch_data
+                        .header()
+                        .map(parse_threading_headers)
+                        .unwrap_or((None, None, Vec::new()));
+
                     let summary = MessageEnvelopeSummary {
                         provider_uid,
-                        message_rfc_id: None,
+                        message_rfc_id,
+                        in_reply_to,
+                        references,
                         envelope,
                         flags,
                         size_bytes: 0,
@@ -442,6 +423,9 @@ impl EmailProvider for ImapEmailProvider {
             mc_domain::AccountId::new(),
             mc_domain::MailboxId::new(),
             uid,
+            None,
+            None,
+            vec![],
             empty_envelope,
             vec![],
             0,
@@ -704,8 +688,12 @@ impl EmailProvider for ImapEmailProvider {
     }
 
     async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError> {
-        // Day 9: Send via SMTP using lettre
-        let sender = self.create_smtp_sender();
+        let sender = self.smtp_sender.as_ref().ok_or_else(|| {
+            DomainError::Provider(
+                "No SMTP configuration for this account — add an [smtp] block to config.toml"
+                    .to_owned(),
+            )
+        })?;
         sender.send(message).await
     }
 
@@ -996,6 +984,89 @@ fn parse_mime_body(raw: &[u8]) -> (Option<String>, Option<String>) {
     extract_body_parts(&parsed)
 }
 
+/// Parse RFC threading headers (Message-ID, In-Reply-To, References) from raw
+/// header bytes returned by `BODY.PEEK[HEADER]`.
+///
+/// Returns `(message_rfc_id, in_reply_to, references)`.
+fn parse_threading_headers(bytes: &[u8]) -> (Option<String>, Option<String>, Vec<String>) {
+    let text = String::from_utf8_lossy(bytes);
+    let mut message_id: Option<String> = None;
+    let mut in_reply_to: Option<String> = None;
+    let mut references: Vec<String> = Vec::new();
+
+    // Accumulate folded header lines then process each complete header.
+    let mut current_name = String::new();
+    let mut current_value = String::new();
+
+    let flush = |name: &str, value: &str,
+                 mid: &mut Option<String>,
+                 irt: &mut Option<String>,
+                 refs: &mut Vec<String>| {
+        match name.to_lowercase().as_str() {
+            "message-id" => *mid = extract_first_msgid(value),
+            "in-reply-to" => *irt = extract_first_msgid(value),
+            "references" => *refs = extract_all_msgids(value),
+            _ => {}
+        }
+    };
+
+    for line in text.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            // Folded continuation of previous header.
+            current_value.push(' ');
+            current_value.push_str(line.trim());
+        } else if let Some(colon) = line.find(':') {
+            // New header — flush the previous one first.
+            if !current_name.is_empty() {
+                flush(
+                    &current_name,
+                    &current_value,
+                    &mut message_id,
+                    &mut in_reply_to,
+                    &mut references,
+                );
+            }
+            current_name = line[..colon].trim().to_string();
+            current_value = line[colon + 1..].trim().to_string();
+        }
+    }
+    // Flush the last header.
+    if !current_name.is_empty() {
+        flush(
+            &current_name,
+            &current_value,
+            &mut message_id,
+            &mut in_reply_to,
+            &mut references,
+        );
+    }
+
+    (message_id, in_reply_to, references)
+}
+
+/// Extract the first `<…>` message-ID token from a header value.
+fn extract_first_msgid(value: &str) -> Option<String> {
+    let start = value.find('<')?;
+    let end = value[start..].find('>')? + start;
+    Some(value[start..=end].to_string())
+}
+
+/// Extract all `<…>` message-ID tokens from a References header value.
+fn extract_all_msgids(value: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start..];
+        if let Some(end) = rest.find('>') {
+            ids.push(rest[..=end].to_string());
+            rest = &rest[end + 1..];
+        } else {
+            break;
+        }
+    }
+    ids
+}
+
 fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<String>) {
     let mut text: Option<String> = None;
     let mut html: Option<String> = None;
@@ -1044,9 +1115,7 @@ mod tests {
             "user@example.com".to_string(),
             "password".to_string(),
             true,
-            "smtp.example.com".to_string(),
-            587,
-            true,
+            None, // no SMTP sender in unit test
         );
 
         let (host, port, username, use_tls) = provider.config();

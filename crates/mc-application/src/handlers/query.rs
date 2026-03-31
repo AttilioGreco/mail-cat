@@ -4,49 +4,65 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use mc_domain::{AccountReadRepository, MailboxReadRepository, MessageReadRepository, SearchIndex};
+use mc_domain::{
+    AccountReadRepository, ContactIndex, ConversationReadRepository, MailboxReadRepository,
+    MessageReadRepository, SearchIndex,
+};
 
 use crate::error::ApplicationError;
 use crate::queries::{Query, QueryResult};
 
 /// Handles all read-side queries by delegating to the appropriate read
 /// repositories and the search index.
-pub struct QueryHandler<AR, MBR, MR, SI>
+pub struct QueryHandler<AR, MBR, MR, SI, CI, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
+    CI: ContactIndex,
+    CR: ConversationReadRepository,
 {
     account_repo: Arc<AR>,
     mailbox_repo: Arc<MBR>,
     message_repo: Arc<MR>,
     search_index: Arc<SI>,
+    contact_index: Arc<CI>,
+    conversation_repo: Arc<CR>,
 }
 
-impl<AR, MBR, MR, SI> QueryHandler<AR, MBR, MR, SI>
+impl<AR, MBR, MR, SI, CI, CR> QueryHandler<AR, MBR, MR, SI, CI, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
+    CI: ContactIndex,
+    CR: ConversationReadRepository,
 {
     pub fn new(
         account_repo: Arc<AR>,
         mailbox_repo: Arc<MBR>,
         message_repo: Arc<MR>,
         search_index: Arc<SI>,
+        contact_index: Arc<CI>,
+        conversation_repo: Arc<CR>,
     ) -> Self {
         Self {
             account_repo,
             mailbox_repo,
             message_repo,
             search_index,
+            contact_index,
+            conversation_repo,
         }
     }
 
     /// Dispatch a query to the appropriate handler.
-    pub async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError> {
+    pub async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError>
+    where
+        CR: ConversationReadRepository,
+    {
         match query {
             Query::GetAccount { account_id } => {
                 let account = self.account_repo.get_account(&account_id).await?;
@@ -110,6 +126,34 @@ where
                     .await?;
                 Ok(QueryResult::Suggestions(suggestions))
             }
+            Query::SearchContacts { query, limit, requesting_account_id } => {
+                let hits = self
+                    .contact_index
+                    .search_contacts(&query, limit, requesting_account_id.as_ref())
+                    .await?;
+                Ok(QueryResult::ContactHits(hits))
+            }
+            Query::FindContactDuplicates { account_id } => {
+                let pairs = self
+                    .contact_index
+                    .find_duplicate_candidates(account_id.as_ref())
+                    .await?;
+                Ok(QueryResult::ContactDuplicates(pairs))
+            }
+            Query::ListConversations { account_id, pagination } => {
+                let convs = self
+                    .conversation_repo
+                    .list_conversations(&account_id, &pagination)
+                    .await?;
+                Ok(QueryResult::Conversations(convs))
+            }
+            Query::GetConversation { thread_id, account_id } => {
+                let conv = self
+                    .conversation_repo
+                    .get_conversation(&thread_id, &account_id)
+                    .await?;
+                Ok(QueryResult::ConversationDetail(conv))
+            }
         }
     }
 }
@@ -118,8 +162,8 @@ where
 mod tests {
     use super::*;
     use mc_domain::{
-        AccountId, AccountStatus, AccountSummary, DomainError, EmailAddress, Mailbox, MailboxId,
-        Message, MessageId, MessageSummary, ProviderType, SearchResults,
+        AccountId, AccountStatus, AccountSummary, ContactIndex, DomainError, EmailAddress, Mailbox,
+        MailboxId, Message, MessageId, MessageSummary, ProviderType, SearchResults,
     };
     use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -204,6 +248,47 @@ mod tests {
         ) -> Result<Option<MessageSummary>, DomainError> {
             Ok(None)
         }
+
+        async fn scan_all_messages(
+            &self,
+            _account_id: Option<&mc_domain::AccountId>,
+        ) -> Result<Vec<mc_domain::Message>, DomainError> {
+            Ok(vec![])
+        }
+    }
+
+    // ── Mock ContactIndex ─────────────────────────────────────────────
+
+    struct MockContactIndex;
+
+    #[async_trait]
+    impl ContactIndex for MockContactIndex {
+        async fn index_contact(
+            &self,
+            _summary: &mc_domain::ContactSummary,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        async fn remove_contact(&self, _id: &mc_domain::ContactId) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        async fn search_contacts(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _requesting_account_id: Option<&mc_domain::AccountId>,
+        ) -> Result<Vec<mc_domain::ContactSearchHit>, DomainError> {
+            Ok(vec![])
+        }
+
+        async fn find_duplicate_candidates(
+            &self,
+            _account_id: Option<&mc_domain::AccountId>,
+        ) -> Result<Vec<(mc_domain::ContactSearchHit, mc_domain::ContactSearchHit)>, DomainError> {
+            Ok(vec![])
+        }
     }
 
     // ── Mock SearchIndex ──────────────────────────────────────────────
@@ -247,16 +332,46 @@ mod tests {
         }
     }
 
+    // ── Mock ConversationReadRepository ───────────────────────────────
+
+    struct MockConversationRepo;
+
+    #[async_trait]
+    impl ConversationReadRepository for MockConversationRepo {
+        async fn get_conversation(
+            &self,
+            _thread_id: &mc_domain::ThreadId,
+            _account_id: &AccountId,
+        ) -> Result<Option<mc_domain::ConversationSummary>, DomainError> {
+            Ok(None)
+        }
+
+        async fn list_conversations(
+            &self,
+            _account_id: &AccountId,
+            _pagination: &Pagination,
+        ) -> Result<PagedResult<mc_domain::ConversationSummary>, DomainError> {
+            Ok(PagedResult { items: vec![], total_count: 0, page: 1, page_size: 50 })
+        }
+    }
+
     // ── Tests ──────────────────────────────────────────────────────────
 
-    fn make_handler()
-    -> QueryHandler<MockAccountReadRepo, MockMailboxReadRepo, MockMessageReadRepo, MockSearchIndex>
-    {
+    fn make_handler() -> QueryHandler<
+        MockAccountReadRepo,
+        MockMailboxReadRepo,
+        MockMessageReadRepo,
+        MockSearchIndex,
+        MockContactIndex,
+        MockConversationRepo,
+    > {
         QueryHandler::new(
             Arc::new(MockAccountReadRepo),
             Arc::new(MockMailboxReadRepo),
             Arc::new(MockMessageReadRepo),
             Arc::new(MockSearchIndex),
+            Arc::new(MockContactIndex),
+            Arc::new(MockConversationRepo),
         )
     }
 

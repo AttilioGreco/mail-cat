@@ -68,6 +68,29 @@ pub enum AccountStatus {
     Error,
 }
 
+/// SMTP security mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SmtpSecurity {
+    Smtps,     // implicit TLS on port 465
+    #[default]
+    StartTls,  // plain → STARTTLS upgrade on port 587
+}
+
+/// SMTP-specific connection configuration stored on the account.
+///
+/// `username` and `password` are optional; when absent the account's primary
+/// `AuthConfig` credentials are used as fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmtpConnectionConfig {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub security: SmtpSecurity,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
 /// Authentication configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuthConfig {
@@ -89,12 +112,20 @@ pub enum AuthConfig {
 /// Connection configuration for an email account.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionConfig {
+    // ── IMAP ─────────────────────────────────────────────────────────────────
     pub imap_host: Option<String>,
     pub imap_port: Option<u16>,
-    pub smtp_host: Option<String>,
-    pub smtp_port: Option<u16>,
     pub use_tls: bool,
     pub auth: AuthConfig,
+    // ── SMTP ─────────────────────────────────────────────────────────────────
+    /// When `None` outbound sending is disabled for this account.
+    #[serde(default)]
+    pub smtp: Option<SmtpConnectionConfig>,
+    // Legacy flat fields kept for backward compatibility with stored events.
+    #[serde(default)]
+    pub smtp_host: Option<String>,
+    #[serde(default)]
+    pub smtp_port: Option<u16>,
 }
 
 /// Account aggregate root.
@@ -242,13 +273,14 @@ impl Account {
             connection_config: ConnectionConfig {
                 imap_host: None,
                 imap_port: None,
-                smtp_host: None,
-                smtp_port: None,
                 use_tls: true,
                 auth: AuthConfig::Plain {
                     username: String::new(),
                     password: String::new(),
                 },
+                smtp: None,
+                smtp_host: None,
+                smtp_port: None,
             },
             identity: Identity {
                 display_name: name.clone(),
@@ -277,13 +309,14 @@ mod tests {
         ConnectionConfig {
             imap_host: Some("imap.example.com".into()),
             imap_port: Some(993),
-            smtp_host: Some("smtp.example.com".into()),
-            smtp_port: Some(587),
             use_tls: true,
             auth: AuthConfig::Plain {
                 username: "user@example.com".into(),
                 password: "secret".into(),
             },
+            smtp: None,
+            smtp_host: None,
+            smtp_port: None,
         }
     }
 

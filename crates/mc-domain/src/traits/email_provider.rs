@@ -132,7 +132,12 @@ pub enum FetchRange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageEnvelopeSummary {
     pub provider_uid: ProviderUid,
+    /// RFC Message-ID header (e.g. `<abc@mail.example.com>`).
     pub message_rfc_id: Option<String>,
+    /// RFC In-Reply-To header.
+    pub in_reply_to: Option<String>,
+    /// RFC References header (ordered, oldest first).
+    pub references: Vec<String>,
     pub envelope: Envelope,
     pub flags: Vec<Flag>,
     pub size_bytes: u64,

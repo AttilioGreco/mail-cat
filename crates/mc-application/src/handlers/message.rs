@@ -433,6 +433,9 @@ mod tests {
                 account_id: message.account_id.clone(),
                 mailbox_id: message.mailbox_id.clone(),
                 provider_uid: message.provider_uid.unwrap(),
+                message_rfc_id: message.message_rfc_id.clone(),
+                in_reply_to: message.in_reply_to.clone(),
+                references: message.references.clone(),
                 envelope: message.envelope.clone(),
                 flags: message.flags.clone(),
                 size_bytes: message.size_bytes,
@@ -662,6 +665,13 @@ mod tests {
         ) -> Result<Option<mc_domain::MessageSummary>, DomainError> {
             Ok(None)
         }
+
+        async fn scan_all_messages(
+            &self,
+            _account_id: Option<&mc_domain::AccountId>,
+        ) -> Result<Vec<mc_domain::Message>, DomainError> {
+            Ok(vec![])
+        }
     }
 
     #[async_trait]
@@ -726,6 +736,9 @@ mod tests {
             AccountId::new(),
             MailboxId::new(),
             ProviderUid::new(42),
+            None,
+            None,
+            vec![],
             test_envelope(),
             vec![],
             2048,

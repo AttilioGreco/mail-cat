@@ -20,9 +20,10 @@ use tracing::debug;
 
 use mc_domain::{
     Account, AccountId, AccountReadRepository, AccountStatus, AccountSummary,
-    AccountWriteRepository, DomainError, DomainEvent, EventEnvelope, EventStore, Flag, Mailbox,
-    MailboxId, MailboxReadRepository, Message, MessageId, MessageReadRepository, MessageSummary,
-    ProjectionCheckpoint, ProviderUid, ReadModelProjector,
+    AccountWriteRepository, AggregateType, Contact, ContactId, ContactReadRepository,
+    ContactSummary, ContactWriteRepository, DomainError, DomainEvent, EmailAddress, EventEnvelope,
+    EventStore, Flag, Mailbox, MailboxId, MailboxReadRepository, Message, MessageId,
+    MessageReadRepository, MessageSummary, ProjectionCheckpoint, ProviderUid, ReadModelProjector,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -32,6 +33,18 @@ const MAILBOXES_BY_ACCOUNT_TREE: &str = "mailboxes_by_account";
 const MESSAGES_TREE: &str = "messages";
 const MESSAGE_SUMMARIES_TREE: &str = "message_summaries";
 const PROJECTION_CHECKPOINTS_TREE: &str = "projection_checkpoints";
+/// `"{contact_id}"` → JSON(ContactSummary)
+const CONTACTS_TREE: &str = "contacts";
+/// `"{email_address}:{contact_id}"` → `""` — secondary index for fast email lookup
+const CONTACTS_BY_EMAIL_TREE: &str = "contacts_by_email";
+/// `"{account_id}:{thread_id}"` → JSON(ConversationSummary)
+const CONVERSATIONS_TREE: &str = "conversations";
+/// `"{message_id}"` → `"{account_id}\x1f{thread_id}"` — index for flag-change updates
+const MESSAGE_TO_THREAD_TREE: &str = "message_to_thread";
+/// `"{account_id}:{rfc_message_id}"` → `""` — deduplication index: skip conversation count for cross-mailbox copies
+const RFC_ID_SEEN_TREE: &str = "rfc_id_seen";
+/// `"{account_id}:{thread_id}:{message_id}"` → `""` — reverse index: thread → all domain message_ids
+const THREAD_MESSAGES_TREE: &str = "thread_messages";
 
 /// Sled-backed read/write repository.
 ///
@@ -252,10 +265,41 @@ impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
     }
 
     async fn get_thread(&self, message_id: &MessageId) -> Result<Vec<Message>, DomainError> {
-        // Simple implementation: return just the single message for now.
-        // Full threading (by References/In-Reply-To) is a future enhancement.
-        let msg = self.get_message(message_id).await?;
-        Ok(msg.into_iter().collect())
+        // 1. Resolve account_id + thread_id from the message-to-thread index.
+        let msg_thread_tree = self.tree(MESSAGE_TO_THREAD_TREE)?;
+        let Some(val_bytes) = msg_thread_tree
+            .get(message_id.to_string().as_bytes())
+            .map_err(|e| DomainError::Repository(e.to_string()))?
+        else {
+            // Not indexed yet — fall back to single-message view.
+            return Ok(self.get_message(message_id).await?.into_iter().collect());
+        };
+        let val = String::from_utf8_lossy(&val_bytes);
+        let mut parts = val.splitn(2, '\x1f');
+        let account_id = parts.next().unwrap_or_default();
+        let thread_id = parts.next().unwrap_or_default();
+
+        // 2. Scan THREAD_MESSAGES_TREE for all message IDs in this thread.
+        let thread_tree = self.tree(THREAD_MESSAGES_TREE)?;
+        let prefix = format!("{}:{}:", account_id, thread_id);
+        let mut messages: Vec<Message> = Vec::new();
+        for item in thread_tree.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let key_str = String::from_utf8_lossy(&key);
+            // Key format: "{account_id}:{thread_id}:{msg_id}"
+            if let Some(msg_id_str) = key_str.splitn(3, ':').nth(2) {
+                let mid = uuid::Uuid::parse_str(msg_id_str)
+                    .map(MessageId::from_uuid)
+                    .map_err(|e| DomainError::Repository(format!("bad message id in thread index: {e}")))?;
+                if let Some(msg) = self.get_message(&mid).await? {
+                    messages.push(msg);
+                }
+            }
+        }
+
+        // 3. Sort by received_at ascending (oldest first, newest last — Gmail style).
+        messages.sort_by_key(|m| m.received_at);
+        Ok(messages)
     }
 
     async fn find_by_provider_uid(
@@ -274,6 +318,78 @@ impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
             }
         }
         Ok(None)
+    }
+
+    async fn scan_all_messages(
+        &self,
+        account_id: Option<&AccountId>,
+    ) -> Result<Vec<mc_domain::Message>, DomainError> {
+        let tree = self.tree(MESSAGES_TREE)?;
+        let mut messages = Vec::new();
+        for item in tree.iter() {
+            let (_key, value) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let msg: mc_domain::Message = serde_json::from_slice(&value)
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            if let Some(aid) = account_id {
+                if &msg.account_id != aid {
+                    continue;
+                }
+            }
+            messages.push(msg);
+        }
+        Ok(messages)
+    }
+}
+
+// ── ConversationReadRepository ────────────────────────────────────────
+
+#[async_trait]
+impl<ES: EventStore> mc_domain::traits::repository::ConversationReadRepository
+    for SledRepository<ES>
+{
+    async fn get_conversation(
+        &self,
+        thread_id: &mc_domain::value_objects::thread_id::ThreadId,
+        account_id: &mc_domain::AccountId,
+    ) -> Result<Option<mc_domain::traits::repository::ConversationSummary>, DomainError> {
+        let key = format!("{}:{}", account_id, thread_id);
+        let tree = self.tree(CONVERSATIONS_TREE)?;
+        match tree.get(key.as_bytes()).map_err(|e| DomainError::Repository(e.to_string()))? {
+            Some(bytes) => {
+                let conv = serde_json::from_slice(&bytes)
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                Ok(Some(conv))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn list_conversations(
+        &self,
+        account_id: &mc_domain::AccountId,
+        pagination: &mc_shared::pagination::Pagination,
+    ) -> Result<
+        mc_shared::pagination::PagedResult<mc_domain::traits::repository::ConversationSummary>,
+        DomainError,
+    > {
+        let tree = self.tree(CONVERSATIONS_TREE)?;
+        let prefix = format!("{}:", account_id);
+
+        let mut all: Vec<mc_domain::traits::repository::ConversationSummary> = tree
+            .scan_prefix(prefix.as_bytes())
+            .filter_map(|r| r.ok())
+            .filter_map(|(_, v)| serde_json::from_slice::<mc_domain::traits::repository::ConversationSummary>(&v).ok())
+            .collect();
+
+        // Newest first.
+        all.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
+
+        let total_count = all.len() as u64;
+        let page = pagination.page.saturating_sub(1) as usize;
+        let size = pagination.page_size as usize;
+        let items = all.into_iter().skip(page * size).take(size).collect();
+
+        Ok(mc_shared::pagination::PagedResult { items, total_count, page: pagination.page, page_size: pagination.page_size })
     }
 }
 
@@ -449,6 +565,9 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 account_id,
                 mailbox_id,
                 provider_uid,
+                message_rfc_id,
+                in_reply_to,
+                references,
                 envelope,
                 flags,
                 size_bytes,
@@ -461,9 +580,9 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     account_id: account_id.clone(),
                     mailbox_id: mailbox_id.clone(),
                     provider_uid: Some(*provider_uid),
-                    message_rfc_id: None,
-                    in_reply_to: None,
-                    references: Vec::new(),
+                    message_rfc_id: message_rfc_id.clone(),
+                    in_reply_to: in_reply_to.clone(),
+                    references: references.clone(),
                     envelope: envelope.clone(),
                     flags: flags.clone(),
                     size_bytes: *size_bytes,
@@ -483,17 +602,18 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     .map_err(|e| DomainError::Repository(e.to_string()))?;
 
                 // Summary in message_summaries tree.
-                let from_display = envelope
-                    .from
-                    .first()
-                    .map(|a| a.name.clone().unwrap_or_else(|| a.email.to_string()))
+                let from_addr = envelope.from.first();
+                let from_name = from_addr.and_then(|a| a.name.clone());
+                let from_email = from_addr
+                    .map(|a| a.email.to_string())
                     .unwrap_or_default();
                 let summary = MessageSummary {
                     id: message_id.clone(),
                     account_id: account_id.clone(),
                     mailbox_id: mailbox_id.clone(),
                     provider_uid: Some(*provider_uid),
-                    from_display,
+                    from_name,
+                    from_email,
                     subject: envelope.subject.clone(),
                     flags: flags.clone(),
                     size_bytes: *size_bytes,
@@ -509,6 +629,109 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     .map_err(|e| DomainError::Repository(e.to_string()))?;
 
                 debug!(message_id = %message_id, "projected MessageReceived");
+
+                // ── Conversation (thread) projection ──────────────────
+
+                // Idempotency: if this domain message_id is already indexed, skip entirely.
+                let msg_thread_tree = self.tree(MESSAGE_TO_THREAD_TREE)?;
+                if msg_thread_tree
+                    .contains_key(message_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    debug!(message_id = %message_id, "conversation projection: already projected, skipping");
+                } else {
+                    let thread_id = mc_domain::model::conversation::Conversation::resolve_thread_id(
+                        message_rfc_id.as_deref(),
+                        in_reply_to.as_deref(),
+                        references,
+                        &message_id.to_string(),
+                    );
+                    let subject = mc_domain::model::conversation::Conversation::normalize_subject(
+                        &envelope.subject,
+                    );
+                    let latest_sender = envelope
+                        .from
+                        .first()
+                        .map(|a| a.name.clone().unwrap_or_else(|| a.email.to_string()))
+                        .unwrap_or_default();
+                    let is_unread = !flags.contains(&Flag::Seen);
+
+                    // Cross-mailbox dedup: same RFC Message-ID = same canonical message.
+                    // Don't count it again if we've already seen this RFC ID for this account.
+                    let rfc_seen_tree = self.tree(RFC_ID_SEEN_TREE)?;
+                    let is_rfc_duplicate = if let Some(rfc_id) = message_rfc_id.as_deref() {
+                        let rfc_key = format!("{}:{}", account_id, rfc_id);
+                        let already = rfc_seen_tree
+                            .contains_key(rfc_key.as_bytes())
+                            .map_err(|e| DomainError::Repository(e.to_string()))?;
+                        if !already {
+                            rfc_seen_tree
+                                .insert(rfc_key.as_bytes(), b"")
+                                .map_err(|e| DomainError::Repository(e.to_string()))?;
+                        }
+                        already
+                    } else {
+                        false
+                    };
+
+                    let conv_key = format!("{}:{}", account_id, thread_id);
+                    let conv_tree = self.tree(CONVERSATIONS_TREE)?;
+
+                    let mut conv: mc_domain::traits::repository::ConversationSummary =
+                        if let Some(bytes) = conv_tree
+                            .get(conv_key.as_bytes())
+                            .map_err(|e| DomainError::Repository(e.to_string()))?
+                        {
+                            serde_json::from_slice(&bytes)
+                                .map_err(|e| DomainError::Serialization(e.to_string()))?
+                        } else {
+                            mc_domain::traits::repository::ConversationSummary {
+                                thread_id: thread_id.clone(),
+                                account_id: account_id.clone(),
+                                subject,
+                                message_count: 0,
+                                unread_count: 0,
+                                last_message_at: *received_at,
+                                latest_sender: latest_sender.clone(),
+                                sample_message_id: message_id.clone(),
+                            }
+                        };
+
+                    if !is_rfc_duplicate {
+                        conv.message_count += 1;
+                        if is_unread {
+                            conv.unread_count += 1;
+                        }
+                    }
+                    if *received_at > conv.last_message_at {
+                        conv.last_message_at = *received_at;
+                        conv.latest_sender = latest_sender;
+                        // Keep sample_message_id pointing to the newest message so
+                        // get_thread lookups work even after the thread root is gone.
+                        conv.sample_message_id = message_id.clone();
+                    }
+
+                    // Index: domain message_id → "{account_id}\x1f{thread_id}"
+                    let msg_thread_val = format!("{}\x1f{}", account_id, thread_id);
+                    msg_thread_tree
+                        .insert(message_id.to_string().as_bytes(), msg_thread_val.as_bytes())
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    // Reverse index: "{account_id}:{thread_id}:{message_id}" → ""
+                    let thread_messages_tree = self.tree(THREAD_MESSAGES_TREE)?;
+                    let thread_msg_key = format!("{}:{}:{}", account_id, thread_id, message_id);
+                    thread_messages_tree
+                        .insert(thread_msg_key.as_bytes(), b"")
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    let conv_json = serde_json::to_vec(&conv)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    conv_tree
+                        .insert(conv_key.as_bytes(), conv_json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    debug!(thread_id = %thread_id, rfc_duplicate = is_rfc_duplicate, "projected conversation upsert");
+                }
             }
 
             DomainEvent::MessageBodyFetched {
@@ -560,6 +783,41 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     // Update summary flags too (scan for matching summary).
                     self.update_summary_flags(message_id, flags_added, flags_removed)?;
                     debug!(message_id = %message_id, "projected MessageFlagged");
+
+                    // Update conversation unread_count if Seen flag changed.
+                    let added_seen = flags_added.contains(&Flag::Seen);
+                    let removed_seen = flags_removed.contains(&Flag::Seen);
+                    if added_seen || removed_seen {
+                        let msg_thread_tree = self.tree(MESSAGE_TO_THREAD_TREE)?;
+                        if let Some(val_bytes) = msg_thread_tree
+                            .get(message_id.to_string().as_bytes())
+                            .map_err(|e| DomainError::Repository(e.to_string()))?
+                        {
+                            let val = String::from_utf8_lossy(&val_bytes);
+                            if let Some((account_str, thread_str)) = val.split_once('\x1f') {
+                                let conv_key = format!("{}:{}", account_str, thread_str);
+                                let conv_tree = self.tree(CONVERSATIONS_TREE)?;
+                                if let Some(bytes) = conv_tree
+                                    .get(conv_key.as_bytes())
+                                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                                {
+                                    let mut conv: mc_domain::traits::repository::ConversationSummary =
+                                        serde_json::from_slice(&bytes)
+                                            .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                                    if added_seen && conv.unread_count > 0 {
+                                        conv.unread_count -= 1;
+                                    } else if removed_seen {
+                                        conv.unread_count += 1;
+                                    }
+                                    let json = serde_json::to_vec(&conv)
+                                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                                    conv_tree
+                                        .insert(conv_key.as_bytes(), json)
+                                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -695,6 +953,188 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     .map_err(|e| DomainError::Repository(e.to_string()))?;
                 debug!(message_id = %message_id, "projected DraftDiscarded");
             }
+
+            // ── Contact events ──────────────────────────────────────
+            DomainEvent::ContactAdded {
+                contact_id,
+                display_name,
+                emails,
+                source,
+                external_id,
+                account_scope,
+            } => {
+                let primary_email = emails
+                    .iter()
+                    .find(|e| e.is_primary)
+                    .or_else(|| emails.first())
+                    .map(|e| e.address.clone())
+                    .unwrap_or_else(|| EmailAddress::new("unknown@unknown").unwrap());
+
+                let summary = ContactSummary {
+                    id: contact_id.clone(),
+                    display_name: display_name.clone(),
+                    primary_email: primary_email.clone(),
+                    emails: emails.clone(),
+                    organization: None,
+                    source: source.clone(),
+                    account_scope: account_scope.clone(),
+                };
+                let tree = self.tree(CONTACTS_TREE)?;
+                let json = serde_json::to_vec(&summary)
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                tree.insert(contact_id.to_string().as_bytes(), json)
+                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                // Index: email → contact
+                let index_tree = self.tree(CONTACTS_BY_EMAIL_TREE)?;
+                for ce in emails {
+                    let key = format!("{}:{}", ce.address.as_str(), contact_id);
+                    index_tree
+                        .insert(key.as_bytes(), b"")
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+                }
+
+                // Suppress unused warning — external_id not stored in summary but consumed
+                let _ = external_id;
+                debug!(contact_id = %contact_id, "projected ContactAdded");
+            }
+
+            DomainEvent::ContactUpdated {
+                contact_id,
+                display_name,
+                emails,
+                organization,
+                ..
+            } => {
+                let tree = self.tree(CONTACTS_TREE)?;
+                if let Some(bytes) = tree
+                    .get(contact_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let mut summary: ContactSummary = serde_json::from_slice(&bytes)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+
+                    if let Some(name) = display_name {
+                        summary.display_name = name.clone();
+                    }
+                    if let Some(new_emails) = emails {
+                        // Re-index: remove old email index entries, add new
+                        let index_tree = self.tree(CONTACTS_BY_EMAIL_TREE)?;
+                        for ce in &summary.emails {
+                            let key = format!("{}:{}", ce.address.as_str(), contact_id);
+                            index_tree
+                                .remove(key.as_bytes())
+                                .map_err(|e| DomainError::Repository(e.to_string()))?;
+                        }
+                        for ce in new_emails {
+                            let key = format!("{}:{}", ce.address.as_str(), contact_id);
+                            index_tree
+                                .insert(key.as_bytes(), b"")
+                                .map_err(|e| DomainError::Repository(e.to_string()))?;
+                        }
+                        summary.primary_email = new_emails
+                            .iter()
+                            .find(|e| e.is_primary)
+                            .or_else(|| new_emails.first())
+                            .map(|e| e.address.clone())
+                            .unwrap_or(summary.primary_email.clone());
+                        summary.emails = new_emails.clone();
+                    }
+                    if let Some(org) = organization {
+                        summary.organization = org.clone();
+                    }
+
+                    let json = serde_json::to_vec(&summary)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    tree.insert(contact_id.to_string().as_bytes(), json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    debug!(contact_id = %contact_id, "projected ContactUpdated");
+                }
+            }
+
+            DomainEvent::ContactRemoved { contact_id } => {
+                let tree = self.tree(CONTACTS_TREE)?;
+                // Remove email index entries before deleting the summary
+                if let Some(bytes) = tree
+                    .get(contact_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let summary: ContactSummary = serde_json::from_slice(&bytes)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    let index_tree = self.tree(CONTACTS_BY_EMAIL_TREE)?;
+                    for ce in &summary.emails {
+                        let key = format!("{}:{}", ce.address.as_str(), contact_id);
+                        index_tree
+                            .remove(key.as_bytes())
+                            .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    }
+                }
+                tree.remove(contact_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+                debug!(contact_id = %contact_id, "projected ContactRemoved");
+            }
+
+            DomainEvent::ContactMerged { kept_id, discarded_id, merged_emails } => {
+                let tree = self.tree(CONTACTS_TREE)?;
+                // Update the kept contact's emails in the read model
+                if let Some(bytes) = tree
+                    .get(kept_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let mut summary: ContactSummary = serde_json::from_slice(&bytes)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+
+                    // Re-index: remove old email entries for kept contact
+                    let index_tree = self.tree(CONTACTS_BY_EMAIL_TREE)?;
+                    for ce in &summary.emails {
+                        let key = format!("{}:{}", ce.address.as_str(), kept_id);
+                        index_tree
+                            .remove(key.as_bytes())
+                            .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    }
+
+                    summary.emails = merged_emails.clone();
+                    summary.primary_email = merged_emails
+                        .iter()
+                        .find(|e| e.is_primary)
+                        .or_else(|| merged_emails.first())
+                        .map(|e| e.address.clone())
+                        .unwrap_or(summary.primary_email);
+
+                    // Add new email index entries
+                    for ce in merged_emails.iter() {
+                        let key = format!("{}:{}", ce.address.as_str(), kept_id);
+                        index_tree
+                            .insert(key.as_bytes(), b"")
+                            .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    }
+
+                    let json = serde_json::to_vec(&summary)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    tree.insert(kept_id.to_string().as_bytes(), json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+                }
+
+                // Remove the discarded contact's email index entries and record
+                if let Some(bytes) = tree
+                    .get(discarded_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let summary: ContactSummary = serde_json::from_slice(&bytes)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    let index_tree = self.tree(CONTACTS_BY_EMAIL_TREE)?;
+                    for ce in &summary.emails {
+                        let key = format!("{}:{}", ce.address.as_str(), discarded_id);
+                        index_tree
+                            .remove(key.as_bytes())
+                            .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    }
+                }
+                tree.remove(discarded_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                debug!(kept_id = %kept_id, discarded_id = %discarded_id, "projected ContactMerged");
+            }
         }
 
         Ok(())
@@ -820,6 +1260,213 @@ impl<ES: EventStore> ProjectionCheckpoint for SledRepository<ES> {
     }
 }
 
+// ── ContactWriteRepository ────────────────────────────────────────────
+
+#[async_trait]
+impl<ES: EventStore> ContactWriteRepository for SledRepository<ES> {
+    async fn save(&self, contact: &Contact, events: Vec<DomainEvent>) -> Result<(), DomainError> {
+        let current_events = self
+            .event_store
+            .load_events(&contact.id.to_string(), 0)
+            .await?;
+        let expected_seq = current_events.len() as u64;
+
+        self.event_store
+            .append(
+                &contact.id.to_string(),
+                AggregateType::Contact,
+                expected_seq,
+                events,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn load(&self, id: &ContactId) -> Result<Option<Contact>, DomainError> {
+        let events = self.event_store.load_events(&id.to_string(), 0).await?;
+        if events.is_empty() {
+            return Ok(None);
+        }
+        let domain_events: Vec<DomainEvent> = events.into_iter().map(|e| e.payload).collect();
+        Ok(Contact::rehydrate(&domain_events))
+    }
+}
+
+// ── ContactReadRepository ────────────────────────────────────────────
+
+#[async_trait]
+impl<ES: EventStore> ContactReadRepository for SledRepository<ES> {
+    async fn get_contact(&self, id: &ContactId) -> Result<Option<ContactSummary>, DomainError> {
+        let tree = self.tree(CONTACTS_TREE)?;
+        let val = tree
+            .get(id.to_string().as_bytes())
+            .map_err(|e| DomainError::Repository(e.to_string()))?;
+        match val {
+            Some(bytes) => {
+                let summary: ContactSummary = serde_json::from_slice(&bytes)
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                Ok(Some(summary))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn list_contacts(
+        &self,
+        pagination: &Pagination,
+    ) -> Result<PagedResult<ContactSummary>, DomainError> {
+        let tree = self.tree(CONTACTS_TREE)?;
+        let mut all: Vec<ContactSummary> = Vec::new();
+        for item in tree.iter() {
+            let (_k, v) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let s: ContactSummary = serde_json::from_slice(&v)
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            all.push(s);
+        }
+        let total_count = all.len() as u64;
+        let offset = pagination.offset() as usize;
+        let page_size = pagination.page_size as usize;
+        let items = all.into_iter().skip(offset).take(page_size).collect();
+        Ok(PagedResult { items, total_count, page: pagination.page, page_size: pagination.page_size })
+    }
+
+    async fn find_by_email(
+        &self,
+        email: &EmailAddress,
+    ) -> Result<Vec<ContactSummary>, DomainError> {
+        let index_tree = self.tree(CONTACTS_BY_EMAIL_TREE)?;
+        let contact_tree = self.tree(CONTACTS_TREE)?;
+        let prefix = format!("{}:", email.as_str());
+
+        let mut results = Vec::new();
+        for item in index_tree.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let key_str = std::str::from_utf8(&key)
+                .map_err(|e| DomainError::Repository(e.to_string()))?;
+            // Key format: "{email}:{contact_id}"
+            if let Some(contact_id_str) = key_str.strip_prefix(&prefix) {
+                if let Some(bytes) = contact_tree
+                    .get(contact_id_str.as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let s: ContactSummary = serde_json::from_slice(&bytes)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    results.push(s);
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    async fn search_contacts(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ContactSummary>, DomainError> {
+        let tree = self.tree(CONTACTS_TREE)?;
+        let query_lower = query.to_lowercase();
+        let mut results = Vec::new();
+
+        for item in tree.iter() {
+            if results.len() >= limit {
+                break;
+            }
+            let (_k, v) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let s: ContactSummary = serde_json::from_slice(&v)
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            let name_match = s.display_name.to_lowercase().contains(&query_lower);
+            let email_match = s.primary_email.as_str().to_lowercase().contains(&query_lower);
+            if name_match || email_match {
+                results.push(s);
+            }
+        }
+        Ok(results)
+    }
+
+    async fn find_by_email_in_account(
+        &self,
+        email: &EmailAddress,
+        account_id: &AccountId,
+    ) -> Result<Vec<ContactSummary>, DomainError> {
+        let index_tree = self.tree(CONTACTS_BY_EMAIL_TREE)?;
+        let contact_tree = self.tree(CONTACTS_TREE)?;
+        let prefix = format!("{}:", email.as_str());
+
+        let mut results = Vec::new();
+        for item in index_tree.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let key_str = std::str::from_utf8(&key)
+                .map_err(|e| DomainError::Repository(e.to_string()))?;
+            if let Some(contact_id_str) = key_str.strip_prefix(&prefix) {
+                if let Some(bytes) = contact_tree
+                    .get(contact_id_str.as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let s: ContactSummary = serde_json::from_slice(&bytes)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    if s.account_scope.as_ref() == Some(account_id) {
+                        results.push(s);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    async fn find_duplicate_candidates(
+        &self,
+        account_id: Option<&AccountId>,
+    ) -> Result<Vec<(ContactSummary, ContactSummary)>, DomainError> {
+        let tree = self.tree(CONTACTS_TREE)?;
+        let mut all: Vec<ContactSummary> = Vec::new();
+        for item in tree.iter() {
+            let (_k, v) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let s: ContactSummary = serde_json::from_slice(&v)
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            if let Some(aid) = account_id {
+                if s.account_scope.as_ref() != Some(aid) {
+                    continue;
+                }
+            }
+            all.push(s);
+        }
+
+        // Build email → Vec<index> map
+        use std::collections::HashMap;
+        let mut email_map: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, s) in all.iter().enumerate() {
+            for ce in &s.emails {
+                email_map.entry(ce.address.as_str().to_owned()).or_default().push(i);
+            }
+        }
+
+        use std::collections::BTreeSet;
+        let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut pairs: Vec<(ContactSummary, ContactSummary)> = Vec::new();
+
+        for indices in email_map.values() {
+            if indices.len() < 2 {
+                continue;
+            }
+            for i in 0..indices.len() {
+                for j in (i + 1)..indices.len() {
+                    let a = &all[indices[i]];
+                    let b = &all[indices[j]];
+                    let key = if a.id.to_string() < b.id.to_string() {
+                        (a.id.to_string(), b.id.to_string())
+                    } else {
+                        (b.id.to_string(), a.id.to_string())
+                    };
+                    if seen.insert(key) {
+                        pairs.push((a.clone(), b.clone()));
+                    }
+                }
+            }
+        }
+        Ok(pairs)
+    }
+}
+
 // ── Shared repository wrapper ──────────────────────────────────────────
 // Newtype wrapper to enable implementing domain traits for Arc<SledRepository>
 
@@ -829,11 +1476,11 @@ pub struct SharedSledRepository<ES: EventStore>(pub Arc<SledRepository<ES>>);
 #[async_trait]
 impl<ES: EventStore> AccountWriteRepository for SharedSledRepository<ES> {
     async fn save(&self, account: &Account, events: Vec<DomainEvent>) -> Result<(), DomainError> {
-        self.0.save(account, events).await
+        AccountWriteRepository::save(&*self.0, account, events).await
     }
 
     async fn load(&self, id: &AccountId) -> Result<Option<Account>, DomainError> {
-        self.0.load(id).await
+        AccountWriteRepository::load(&*self.0, id).await
     }
 }
 
@@ -890,6 +1537,61 @@ impl<ES: EventStore> MailboxReadRepository for SharedSledRepository<ES> {
 }
 
 #[async_trait]
+impl<ES: EventStore> ContactWriteRepository for SharedSledRepository<ES> {
+    async fn save(&self, contact: &Contact, events: Vec<DomainEvent>) -> Result<(), DomainError> {
+        ContactWriteRepository::save(&*self.0, contact, events).await
+    }
+
+    async fn load(&self, id: &ContactId) -> Result<Option<Contact>, DomainError> {
+        ContactWriteRepository::load(&*self.0, id).await
+    }
+}
+
+#[async_trait]
+impl<ES: EventStore> ContactReadRepository for SharedSledRepository<ES> {
+    async fn get_contact(&self, id: &ContactId) -> Result<Option<ContactSummary>, DomainError> {
+        self.0.get_contact(id).await
+    }
+
+    async fn list_contacts(
+        &self,
+        pagination: &Pagination,
+    ) -> Result<PagedResult<ContactSummary>, DomainError> {
+        self.0.list_contacts(pagination).await
+    }
+
+    async fn find_by_email(
+        &self,
+        email: &EmailAddress,
+    ) -> Result<Vec<ContactSummary>, DomainError> {
+        self.0.find_by_email(email).await
+    }
+
+    async fn search_contacts(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ContactSummary>, DomainError> {
+        self.0.search_contacts(query, limit).await
+    }
+
+    async fn find_by_email_in_account(
+        &self,
+        email: &EmailAddress,
+        account_id: &AccountId,
+    ) -> Result<Vec<ContactSummary>, DomainError> {
+        self.0.find_by_email_in_account(email, account_id).await
+    }
+
+    async fn find_duplicate_candidates(
+        &self,
+        account_id: Option<&AccountId>,
+    ) -> Result<Vec<(ContactSummary, ContactSummary)>, DomainError> {
+        self.0.find_duplicate_candidates(account_id).await
+    }
+}
+
+#[async_trait]
 impl<ES: EventStore> MessageReadRepository for SharedSledRepository<ES> {
     async fn get_message(&self, id: &MessageId) -> Result<Option<Message>, DomainError> {
         self.0.get_message(id).await
@@ -913,6 +1615,13 @@ impl<ES: EventStore> MessageReadRepository for SharedSledRepository<ES> {
         provider_uid: u32,
     ) -> Result<Option<MessageSummary>, DomainError> {
         self.0.find_by_provider_uid(mailbox_id, provider_uid).await
+    }
+
+    async fn scan_all_messages(
+        &self,
+        account_id: Option<&AccountId>,
+    ) -> Result<Vec<Message>, DomainError> {
+        self.0.scan_all_messages(account_id).await
     }
 }
 
@@ -938,13 +1647,14 @@ mod tests {
         ConnectionConfig {
             imap_host: Some("imap.example.com".into()),
             imap_port: Some(993),
-            smtp_host: Some("smtp.example.com".into()),
-            smtp_port: Some(587),
             use_tls: true,
             auth: AuthConfig::Plain {
                 username: "user@example.com".into(),
                 password: "secret".into(),
             },
+            smtp: None,
+            smtp_host: None,
+            smtp_port: None,
         }
     }
 
@@ -971,10 +1681,10 @@ mod tests {
         let account_id = account.id.clone();
 
         // Save through write repo.
-        repo.save(&account, vec![event]).await.unwrap();
+        AccountWriteRepository::save(&repo, &account, vec![event]).await.unwrap();
 
         // Load through write repo (rehydrate from event store).
-        let loaded = repo.load(&account_id).await.unwrap().unwrap();
+        let loaded = AccountWriteRepository::load(&repo, &account_id).await.unwrap().unwrap();
         assert_eq!(loaded.name, "Work");
 
         // Read through read repo (projected summary).
@@ -998,7 +1708,7 @@ mod tests {
                 test_config(),
                 test_identity(),
             );
-            repo.save(&account, vec![event]).await.unwrap();
+            AccountWriteRepository::save(&repo, &account, vec![event]).await.unwrap();
         }
 
         let accounts = AccountReadRepository::list_accounts(&repo).await.unwrap();
@@ -1008,7 +1718,7 @@ mod tests {
     #[tokio::test]
     async fn load_nonexistent_account_returns_none() {
         let (_es, repo) = make_store_and_repo();
-        let result = repo.load(&AccountId::new()).await.unwrap();
+        let result = AccountWriteRepository::load(&repo, &AccountId::new()).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -1227,6 +1937,9 @@ mod tests {
                 flags: vec![Flag::Recent],
                 size_bytes: 2048,
                 has_attachments: false,
+                message_rfc_id: None,
+                in_reply_to: None,
+                references: vec![],
                 received_at,
             },
         );
@@ -1254,7 +1967,8 @@ mod tests {
         .unwrap();
         assert_eq!(page.total_count, 1);
         assert_eq!(page.items[0].subject, "Hello World");
-        assert_eq!(page.items[0].from_display, "Sender");
+        assert_eq!(page.items[0].from_name, Some("Sender".to_string()));
+        assert_eq!(page.items[0].from_email, "sender@example.com");
 
         // Project MessageBodyFetched.
         let env = make_event_envelope(
@@ -1368,6 +2082,9 @@ mod tests {
                 flags: vec![],
                 size_bytes: 1024,
                 has_attachments: false,
+                message_rfc_id: None,
+                in_reply_to: None,
+                references: vec![],
                 received_at,
             },
         );

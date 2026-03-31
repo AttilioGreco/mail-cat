@@ -11,6 +11,7 @@ use crate::grpc::mappers::{
 use crate::grpc::proto::{
     CountsChangedEvent, DeleteMessageRequest, DeleteMessageResponse, FlagsChangedEvent,
     GetMessageRequest, GetMessageResponse, GetThreadRequest, GetThreadResponse,
+    ListConversationsRequest, ListConversationsResponse,
     ListMessagesRequest, ListMessagesResponse, MailboxEvent, MessageExpungedEvent,
     MoveMessageRequest, MoveMessageResponse, NewMessageEvent, SaveDraftRequest, SaveDraftResponse,
     SendMessageRequest, SendMessageResponse, SetFlagsRequest, SetFlagsResponse,
@@ -121,8 +122,8 @@ where
             .map(|summary| {
                 let envelope = crate::grpc::proto::MessageEnvelope {
                     from: vec![crate::grpc::proto::EmailAddress {
-                        email: summary.from_display.clone(),
-                        name: None,
+                        email: summary.from_email.clone(),
+                        name: summary.from_name.clone(),
                     }],
                     subject: summary.subject.clone(),
                     date: Some(crate::grpc::mappers::datetime_to_timestamp(&summary.received_at)),
@@ -178,6 +179,52 @@ where
 
         Ok(Response::new(GetMessageResponse {
             message: Some(domain_message_to_detail(&message)),
+        }))
+    }
+
+    async fn list_conversations(
+        &self,
+        request: Request<ListConversationsRequest>,
+    ) -> Result<Response<ListConversationsResponse>, Status> {
+        let req = request.into_inner();
+
+        let account_id = AccountId::from_uuid(
+            uuid::Uuid::parse_str(&req.account_id)
+                .map_err(|e| Status::invalid_argument(format!("invalid account_id: {e}")))?,
+        );
+        let pagination = proto_to_domain_pagination(req.pagination);
+
+        let query = Query::ListConversations { account_id, pagination };
+        let result = self
+            .query_bus
+            .dispatch(query)
+            .await
+            .map_err(application_error_to_status)?;
+
+        let paged = result
+            .into_conversations()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let conversations = paged
+            .items
+            .iter()
+            .map(|c| crate::grpc::proto::ConversationSummary {
+                thread_id: c.thread_id.value().to_string(),
+                account_id: c.account_id.to_string(),
+                subject: c.subject.clone(),
+                message_count: c.message_count,
+                unread_count: c.unread_count,
+                last_message_at: Some(crate::grpc::mappers::datetime_to_timestamp(
+                    &c.last_message_at,
+                )),
+                latest_sender: c.latest_sender.clone(),
+                sample_message_id: c.sample_message_id.to_string(),
+            })
+            .collect();
+
+        Ok(Response::new(ListConversationsResponse {
+            conversations,
+            page_info: Some(paged_result_to_page_info(&paged)),
         }))
     }
 
@@ -602,6 +649,9 @@ mod tests {
             flags: vec![],
             size_bytes: 0,
             has_attachments: false,
+            message_rfc_id: None,
+            in_reply_to: None,
+            references: vec![],
             received_at: chrono::Utc::now(),
         }));
 
@@ -637,7 +687,7 @@ mod tests {
             mailbox_id: mailbox_id.clone(),
             provider_uid: ProviderUid::new(1),
             envelope: mc_domain::Envelope { from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![], subject: "".into(), date: chrono::Utc::now() },
-            flags: vec![], size_bytes: 0, has_attachments: false, received_at: chrono::Utc::now(),
+            flags: vec![], size_bytes: 0, has_attachments: false, message_rfc_id: None, in_reply_to: None, references: vec![], received_at: chrono::Utc::now(),
         }));
         // Correct account → arrives
         bus.publish(envelope(DomainEvent::MessageReceived {
@@ -646,7 +696,7 @@ mod tests {
             mailbox_id: mailbox_id.clone(),
             provider_uid: ProviderUid::new(2),
             envelope: mc_domain::Envelope { from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![], subject: "".into(), date: chrono::Utc::now() },
-            flags: vec![], size_bytes: 0, has_attachments: false, received_at: chrono::Utc::now(),
+            flags: vec![], size_bytes: 0, has_attachments: false, message_rfc_id: None, in_reply_to: None, references: vec![], received_at: chrono::Utc::now(),
         }));
 
         let event = timeout(Duration::from_secs(1), stream.next())

@@ -353,6 +353,9 @@ impl<
                     account_id.clone(),
                     local.id.clone(),
                     envelope_summary.provider_uid,
+                    envelope_summary.message_rfc_id.clone(),
+                    envelope_summary.in_reply_to.clone(),
+                    envelope_summary.references.clone(),
                     envelope_summary.envelope.clone(),
                     envelope_summary.flags.clone(),
                     envelope_summary.size_bytes,
@@ -630,14 +633,17 @@ impl<
 
         for envelope_summary in &envelopes {
             let (_message, event) = Message::receive(
-                account_id.clone(),
-                local.id.clone(),
-                envelope_summary.provider_uid,
-                envelope_summary.envelope.clone(),
-                envelope_summary.flags.clone(),
-                envelope_summary.size_bytes,
-                envelope_summary.has_attachments,
-            );
+                    account_id.clone(),
+                    local.id.clone(),
+                    envelope_summary.provider_uid,
+                    envelope_summary.message_rfc_id.clone(),
+                    envelope_summary.in_reply_to.clone(),
+                    envelope_summary.references.clone(),
+                    envelope_summary.envelope.clone(),
+                    envelope_summary.flags.clone(),
+                    envelope_summary.size_bytes,
+                    envelope_summary.has_attachments,
+                );
             if let DomainEvent::MessageReceived { ref message_id, .. } = event {
                 new_messages.push((message_id.clone(), envelope_summary.provider_uid));
                 self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
@@ -1266,6 +1272,13 @@ mod tests {
         ) -> Result<Option<MessageSummary>, DomainError> {
             Ok(None)
         }
+
+        async fn scan_all_messages(
+            &self,
+            _account_id: Option<&AccountId>,
+        ) -> Result<Vec<Message>, DomainError> {
+            Ok(vec![])
+        }
     }
 
     #[async_trait]
@@ -1313,6 +1326,8 @@ mod tests {
         MessageEnvelopeSummary {
             provider_uid: ProviderUid::new(uid),
             message_rfc_id: None,
+            in_reply_to: None,
+            references: vec![],
             envelope: test_envelope(),
             flags: vec![],
             size_bytes: 1024,
