@@ -114,11 +114,65 @@ pub fn search_hit_from_proto(h: pb::SearchHit) -> SearchHit {
     }
 }
 
+pub fn thread_message_from_proto(m: pb::MessageDetail) -> ThreadMessage {
+    let envelope = m.envelope.unwrap_or_default();
+    let from = envelope.from.into_iter().next();
+    let date = proto_ts_to_datetime(envelope.date);
+    let is_read = m.flags.contains(&(pb::Flag::Seen as i32));
+    let to: Vec<String> = envelope.to.into_iter().map(|a| a.email).collect();
+
+    ThreadMessage {
+        id: m.id,
+        from_name: from.as_ref().and_then(|f| f.name.clone()),
+        from_email: from.map(|f| f.email).unwrap_or_default(),
+        to,
+        subject: envelope.subject,
+        date,
+        is_read,
+        html_body: m.body_html,
+        text_body: m.body_text,
+    }
+}
+
+pub fn conversation_summary_from_proto(c: pb::ConversationSummary) -> ConversationSummary {
+    let last_message_at = c
+        .last_message_at
+        .map(|ts| {
+            Utc.timestamp_opt(ts.seconds, ts.nanos as u32)
+                .single()
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+
+    ConversationSummary {
+        thread_id: c.thread_id,
+        account_id: c.account_id,
+        subject: c.subject,
+        message_count: c.message_count,
+        unread_count: c.unread_count,
+        last_message_at,
+        latest_sender: c.latest_sender,
+        sample_message_id: c.sample_message_id,
+    }
+}
+
 pub fn suggestion_from_proto(s: pb::Suggestion) -> Suggestion {
     Suggestion {
         field: s.field,
         value: s.value,
         doc_count: s.doc_count,
+    }
+}
+
+pub fn contact_hit_from_proto(h: pb::ContactSearchHit) -> ContactHit {
+    ContactHit {
+        id: h.id,
+        display_name: h.display_name,
+        primary_email: h.primary_email,
+        all_emails: h.all_emails,
+        organization: h.organization,
+        account_scope: if h.account_scope.is_empty() { None } else { Some(h.account_scope) },
+        is_cross_account: h.is_cross_account,
     }
 }
 

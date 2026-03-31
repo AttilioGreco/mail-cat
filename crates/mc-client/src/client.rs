@@ -7,12 +7,28 @@ use crate::{
     proto::mail_cat::v1::{
         self as pb,
         account_service_client::AccountServiceClient,
+        contact_service_client::ContactServiceClient,
         mailbox_service_client::MailboxServiceClient,
         message_service_client::MessageServiceClient,
         search_service_client::SearchServiceClient,
     },
     types::*,
 };
+
+/// Parse an address string that may be in RFC 5322 "Display Name <email>" format.
+/// Returns a `pb::EmailAddress` with `name` and `email` split correctly.
+fn parse_address_string(s: String) -> pb::EmailAddress {
+    if let (Some(start), Some(end)) = (s.find('<'), s.rfind('>')) {
+        let name = s[..start].trim().trim_matches('"').to_string();
+        let email = s[start + 1..end].trim().to_string();
+        pb::EmailAddress {
+            email,
+            name: if name.is_empty() { None } else { Some(name) },
+        }
+    } else {
+        pb::EmailAddress { email: s, name: None }
+    }
+}
 
 /// The main entry point for frontends. Wraps tonic clients and exposes clean async methods.
 #[derive(Clone)]
@@ -85,6 +101,42 @@ impl MailCatClient {
             .into_inner();
 
         Ok(resp.messages.into_iter().map(message_summary_from_proto).collect())
+    }
+
+    /// List conversation summaries for an account (newest first).
+    pub async fn list_conversations(
+        &self,
+        account_id: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<crate::types::ConversationSummary>> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let resp = client
+            .list_conversations(pb::ListConversationsRequest {
+                account_id: account_id.to_owned(),
+                pagination: Some(pb::Pagination { page, page_size }),
+            })
+            .await?
+            .into_inner();
+
+        Ok(resp
+            .conversations
+            .into_iter()
+            .map(crate::convert::conversation_summary_from_proto)
+            .collect())
+    }
+
+    /// Get all messages in a thread by any message id within it.
+    pub async fn get_thread(&self, message_id: &str) -> Result<Vec<crate::types::ThreadMessage>> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let resp = client
+            .get_thread(pb::GetThreadRequest {
+                message_id: message_id.to_owned(),
+            })
+            .await?
+            .into_inner();
+
+        Ok(resp.messages.into_iter().map(crate::convert::thread_message_from_proto).collect())
     }
 
     pub async fn get_message(&self, message_id: &str) -> Result<MessageBody> {
@@ -178,21 +230,9 @@ impl MailCatClient {
                     email: params.from_email,
                     name: params.from_name,
                 }),
-                to: params
-                    .to
-                    .into_iter()
-                    .map(|e| pb::EmailAddress { email: e, name: None })
-                    .collect(),
-                cc: params
-                    .cc
-                    .into_iter()
-                    .map(|e| pb::EmailAddress { email: e, name: None })
-                    .collect(),
-                bcc: params
-                    .bcc
-                    .into_iter()
-                    .map(|e| pb::EmailAddress { email: e, name: None })
-                    .collect(),
+                to: params.to.into_iter().map(parse_address_string).collect(),
+                cc: params.cc.into_iter().map(parse_address_string).collect(),
+                bcc: params.bcc.into_iter().map(parse_address_string).collect(),
                 subject: params.subject,
                 body_text: params.body_text,
                 body_html: params.body_html,
@@ -203,6 +243,57 @@ impl MailCatClient {
             .into_inner();
 
         Ok(resp.message_id)
+    }
+
+    // ── Contacts ─────────────────────────────────────────────────────────────
+
+    /// Prefix-match contact search for autocomplete in the compose window.
+    pub async fn search_contacts(
+        &self,
+        query: &str,
+        limit: u32,
+        requesting_account_id: Option<String>,
+    ) -> Result<Vec<ContactHit>> {
+        let mut client = ContactServiceClient::new(self.channel.clone());
+        let resp = client
+            .search_contacts(pb::SearchContactsRequest {
+                query: query.to_owned(),
+                limit,
+                requesting_account_id,
+            })
+            .await?
+            .into_inner();
+
+        Ok(resp.hits.into_iter().map(contact_hit_from_proto).collect())
+    }
+
+    /// Backfill the address book by scanning all stored messages and calling
+    /// EnsureContact for every from/to/cc address.  Idempotent.
+    /// Returns `(new_contacts, already_existed)`.
+    pub async fn backfill_contacts_from_messages(
+        &self,
+        account_id: Option<String>,
+    ) -> Result<(u32, u32)> {
+        let mut client = ContactServiceClient::new(self.channel.clone());
+        let resp = client
+            .backfill_contacts_from_messages(pb::BackfillContactsRequest { account_id })
+            .await?
+            .into_inner();
+        Ok((resp.new_contacts, resp.already_existed))
+    }
+
+    /// Rebuild the server-side contact search index from stored contact data.
+    /// Returns the number of contacts that were indexed.
+    pub async fn rebuild_contact_index(
+        &self,
+        account_id: Option<String>,
+    ) -> Result<u32> {
+        let mut client = ContactServiceClient::new(self.channel.clone());
+        let resp = client
+            .rebuild_contact_index(pb::RebuildContactIndexRequest { account_id })
+            .await?
+            .into_inner();
+        Ok(resp.indexed_count)
     }
 
     // ── Search ──────────────────────────────────────────────────────────────

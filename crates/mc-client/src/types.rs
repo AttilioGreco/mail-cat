@@ -101,6 +101,48 @@ pub struct SearchHit {
     pub date: i64,
 }
 
+/// A contact autocomplete result.
+#[derive(Debug, Clone)]
+pub struct ContactHit {
+    pub id: String,
+    pub display_name: String,
+    pub primary_email: String,
+    pub all_emails: Vec<String>,
+    pub organization: Option<String>,
+    /// Account this contact is scoped to. `None` = shared across all accounts.
+    pub account_scope: Option<String>,
+    /// True when this hit comes from a different account than the requester.
+    pub is_cross_account: bool,
+}
+
+/// A single message within a thread, with full envelope + body for thread view.
+#[derive(Debug, Clone)]
+pub struct ThreadMessage {
+    pub id: String,
+    pub from_name: Option<String>,
+    pub from_email: String,
+    pub to: Vec<String>,
+    pub subject: String,
+    pub date: DateTime<Utc>,
+    pub is_read: bool,
+    pub html_body: Option<String>,
+    pub text_body: Option<String>,
+}
+
+/// A conversation (thread) summary for the inbox list view.
+#[derive(Debug, Clone)]
+pub struct ConversationSummary {
+    pub thread_id: String,
+    pub account_id: String,
+    pub subject: String,
+    pub message_count: u32,
+    pub unread_count: u32,
+    pub last_message_at: DateTime<Utc>,
+    pub latest_sender: String,
+    /// A domain message UUID (not an RFC Message-ID) suitable for passing to `get_thread`.
+    pub sample_message_id: String,
+}
+
 /// A search suggestion (autocomplete).
 #[derive(Debug, Clone)]
 pub struct Suggestion {

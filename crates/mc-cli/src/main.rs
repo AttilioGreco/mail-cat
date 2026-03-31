@@ -31,6 +31,10 @@ enum Command {
     #[command(subcommand)]
     Accounts(commands::accounts::AccountsCmd),
 
+    /// Manage contacts and the contact search index
+    #[command(subcommand)]
+    Contacts(commands::contacts::ContactsCmd),
+
     /// List mailboxes for an account
     #[command(subcommand)]
     Mailboxes(commands::mailboxes::MailboxesCmd),
@@ -38,6 +42,10 @@ enum Command {
     /// List and read messages
     #[command(subcommand)]
     Messages(commands::messages::MessagesCmd),
+
+    /// List and explore email conversations (threads)
+    #[command(subcommand)]
+    Conversations(commands::conversations::ConversationsCmd),
 
     /// Sync an account with the mail server
     Sync {
@@ -69,8 +77,10 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Accounts(cmd) => commands::accounts::run(cmd, client).await,
+        Command::Contacts(cmd) => commands::contacts::run(cmd, client).await,
         Command::Mailboxes(cmd) => commands::mailboxes::run(cmd, client).await,
         Command::Messages(cmd) => commands::messages::run(cmd, client).await,
+        Command::Conversations(cmd) => commands::conversations::run(cmd, client).await,
         Command::Sync { account_id, full } => commands::sync::run(account_id, full, client).await,
         Command::Watch { mailbox_id } => commands::watch::run(mailbox_id, client).await,
     }
