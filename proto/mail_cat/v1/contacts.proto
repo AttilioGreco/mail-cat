@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package mail_cat.v1;
+
+// Contact service — address book search, autocomplete, and merge.
+service ContactService {
+  // Prefix-match search across display names and email addresses.
+  // Designed for low-latency autocomplete in the compose window.
+  rpc SearchContacts(SearchContactsRequest) returns (SearchContactsResponse);
+
+  // Find pairs of contacts sharing at least one email address (merge candidates).
+  rpc FindContactDuplicates(FindContactDuplicatesRequest) returns (FindContactDuplicatesResponse);
+
+  // Absorb `discard_id` into `keep_id` — emails are merged and the discarded
+  // contact is deleted.
+  rpc MergeContacts(MergeContactsRequest) returns (MergeContactsResponse);
+
+  // Rebuild the Tantivy contact search index from the stored contact read models.
+  // Useful after a fresh install or when the index is lost/corrupted.
+  rpc RebuildContactIndex(RebuildContactIndexRequest) returns (RebuildContactIndexResponse);
+
+  // Scan all stored messages and call EnsureContact for every from/to/cc address.
+  // Idempotent: existing contacts are left unchanged.
+  // Use this after a fresh install to populate the address book from historical mail.
+  rpc BackfillContactsFromMessages(BackfillContactsRequest) returns (BackfillContactsResponse);
+}
+
+// A single result from contact autocomplete.
+message ContactSearchHit {
+  string id            = 1;
+  string display_name  = 2;
+  string primary_email = 3;
+  repeated string all_emails  = 4;
+  optional string organization = 5;
+  // Account this contact is scoped to. Empty string = shared across all accounts.
+  string account_scope   = 6;
+  // True when this hit comes from a different account than the requester.
+  bool   is_cross_account = 7;
+}
+
+message SearchContactsRequest {
+  string query = 1;
+  uint32 limit = 2;  // 0 → server default (10)
+  // Account making the request — used to sort own-account results first.
+  optional string requesting_account_id = 3;
+}
+
+message SearchContactsResponse {
+  repeated ContactSearchHit hits = 1;
+}
+
+message FindContactDuplicatesRequest {
+  // Scope to a specific account. Empty = check across all contacts.
+  optional string account_id = 1;
+}
+
+// A pair of contacts that are candidates for merging.
+message ContactDuplicatePair {
+  ContactSearchHit keep    = 1;
+  ContactSearchHit discard = 2;
+}
+
+message FindContactDuplicatesResponse {
+  repeated ContactDuplicatePair pairs = 1;
+}
+
+message MergeContactsRequest {
+  string keep_id    = 1;
+  string discard_id = 2;
+}
+
+message MergeContactsResponse {}
+
+message RebuildContactIndexRequest {
+  // Scope to a specific account. Empty = rebuild all contacts.
+  optional string account_id = 1;
+}
+
+message RebuildContactIndexResponse {
+  // Number of contacts that were successfully (re-)indexed.
+  uint32 indexed_count = 1;
+}
+
+message BackfillContactsRequest {
+  // Scope to a specific account. Empty = process all accounts.
+  optional string account_id = 1;
+}
+
+message BackfillContactsResponse {
+  // Contacts newly created during the backfill.
+  uint32 new_contacts = 1;
+  // Addresses that already had a contact entry (no-op).
+  uint32 already_existed = 2;
+}

@@ -12,6 +12,9 @@ service MessageService {
   // Get full message details.
   rpc GetMessage(GetMessageRequest) returns (GetMessageResponse);
 
+  // List conversation summaries for an account (inbox threading view).
+  rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
+
   // Get email thread (conversation).
   rpc GetThread(GetThreadRequest) returns (GetThreadResponse);
 
@@ -105,6 +108,29 @@ message GetMessageRequest {
 
 message GetMessageResponse {
   MessageDetail message = 1;
+}
+
+// Conversation summary (thread list view).
+message ConversationSummary {
+  string thread_id = 1;
+  string account_id = 2;
+  string subject = 3;
+  uint32 message_count = 4;
+  uint32 unread_count = 5;
+  Timestamp last_message_at = 6;
+  string latest_sender = 7;
+  // A representative domain message UUID — use this to call GetThread.
+  string sample_message_id = 8;
+}
+
+message ListConversationsRequest {
+  string account_id = 1;
+  Pagination pagination = 2;
+}
+
+message ListConversationsResponse {
+  repeated ConversationSummary conversations = 1;
+  PageInfo page_info = 2;
 }
 
 message GetThreadRequest {
