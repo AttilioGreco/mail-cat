@@ -4,7 +4,8 @@ import { RefreshCw, Paperclip, Reply, Forward, Trash2, Mail, MailOpen, MoreHoriz
 import { cn, formatDate } from '@/lib/utils';
 import { useMessageBody } from '@/hooks/useMessages';
 import { useSetFlags, useDeleteMessage } from '@/hooks/useMutations';
-import { useUIStore } from '@/store/uiStore';
+import { useUIStore, mailboxKey } from '@/store/uiStore';
+import { useAccounts } from '@/hooks/useAccounts';
 import type { MessageEnvelope } from '@/lib/types';
 
 interface MessageViewerProps {
@@ -15,14 +16,24 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
   const { data: body, isLoading } = useMessageBody(envelope.uid);
   const setFlags = useSetFlags();
   const deleteMsg = useDeleteMessage();
-  const selectMessage = useUIStore((s) => s.selectMessage);
+  const { selectMessage, selectedAccountId, selectedMailbox, openCompose } = useUIStore();
+  const { data: accounts = [] } = useAccounts();
+  const mbKey = mailboxKey(selectedAccountId, selectedMailbox?.id ?? null);
+
+  // The account that received this message — drives identity pre-selection and chip search scope.
+  const currentAccount = accounts.find((a) => a.id === selectedAccountId);
 
   // Auto-mark as read when opening an unread message
   const markedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!envelope.isRead && markedRef.current !== envelope.uid) {
       markedRef.current = envelope.uid;
-      setFlags.mutate({ messageId: envelope.uid, flagsToAdd: ['seen'] });
+      setFlags.mutate({
+        messageId: envelope.uid,
+        flagsToAdd: ['seen'],
+        currentIsRead: false,
+        mailboxKey: mbKey ?? undefined,
+      });
     }
   }, [envelope.uid, envelope.isRead]);
 
@@ -35,17 +46,51 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
 
   const handleToggleRead = () => {
     if (envelope.isRead) {
-      setFlags.mutate({ messageId: envelope.uid, flagsToRemove: ['seen'] });
+      setFlags.mutate({
+        messageId: envelope.uid,
+        flagsToRemove: ['seen'],
+        currentIsRead: true,
+        mailboxKey: mbKey ?? undefined,
+      });
     } else {
-      setFlags.mutate({ messageId: envelope.uid, flagsToAdd: ['seen'] });
+      setFlags.mutate({
+        messageId: envelope.uid,
+        flagsToAdd: ['seen'],
+        currentIsRead: false,
+        mailboxKey: mbKey ?? undefined,
+      });
     }
   };
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex items-center gap-1 border-b border-border px-4 py-2">
-        <ToolbarButton icon={<Reply size={15} />} label="Reply" />
-        <ToolbarButton icon={<Forward size={15} />} label="Forward" />
+        <ToolbarButton
+          icon={<Reply size={15} />}
+          label="Reply"
+          onClick={() => openCompose({
+            mode: 'reply',
+            from: currentAccount?.email,
+            accountId: selectedAccountId ?? undefined,
+            // Use fromName + fromEmail so the chip shows the display name immediately
+            to: [envelope.fromName
+              ? `${envelope.fromName} <${envelope.fromEmail}>`
+              : envelope.fromEmail],
+            subject: envelope.subject.startsWith('Re:') ? envelope.subject : `Re: ${envelope.subject}`,
+            identities: [],
+          })}
+        />
+        <ToolbarButton
+          icon={<Forward size={15} />}
+          label="Forward"
+          onClick={() => openCompose({
+            mode: 'forward',
+            from: currentAccount?.email,
+            accountId: selectedAccountId ?? undefined,
+            subject: envelope.subject.startsWith('Fwd:') ? envelope.subject : `Fwd: ${envelope.subject}`,
+            identities: [],
+          })}
+        />
         <div className="mx-2 h-4 w-px bg-border" />
         <ToolbarButton
           icon={envelope.isRead ? <Mail size={15} /> : <MailOpen size={15} />}
