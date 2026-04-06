@@ -59,6 +59,9 @@ export function useSetFlags() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['messages'] });
       qc.invalidateQueries({ queryKey: ['mailboxes'] });
+      // Thread and conversation caches must also refresh so read indicators update
+      qc.invalidateQueries({ queryKey: ['thread'] });
+      qc.invalidateQueries({ queryKey: ['conversations'] });
     },
   });
 }
@@ -149,6 +152,7 @@ interface SendParams {
 }
 
 export function useSendMessage() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (params: SendParams) =>
       invoke<string>('send_message', {
@@ -163,6 +167,10 @@ export function useSendMessage() {
         inReplyTo: params.inReplyTo ?? null,
         references: params.references ?? [],
       }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['thread'] });
+      qc.invalidateQueries({ queryKey: ['conversations'] });
+    },
   });
 }
 

@@ -324,6 +324,8 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
             message_id: message_id.clone(),
             account_id,
             envelope,
+            in_reply_to: outgoing.in_reply_to.clone(),
+            references: outgoing.references.clone(),
             sent_at: chrono::Utc::now(),
         };
 

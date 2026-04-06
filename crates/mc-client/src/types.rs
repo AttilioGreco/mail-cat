@@ -119,9 +119,11 @@ pub struct ContactHit {
 #[derive(Debug, Clone)]
 pub struct ThreadMessage {
     pub id: String,
+    pub rfc_message_id: Option<String>,
     pub from_name: Option<String>,
     pub from_email: String,
     pub to: Vec<String>,
+    pub cc: Vec<String>,
     pub subject: String,
     pub date: DateTime<Utc>,
     pub is_read: bool,

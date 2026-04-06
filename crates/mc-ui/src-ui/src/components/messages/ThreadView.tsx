@@ -1,270 +1,561 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Forward, Mail, MailOpen, Reply, ReplyAll, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronDown, Forward, MailOpen, Reply, ReplyAll, Send, X } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useThread } from '@/hooks/useConversations';
-import { useUIStore } from '@/store/uiStore';
+import { useUIStore, mailboxKey } from '@/store/uiStore';
 import { formatDate } from '@/lib/utils';
-import { EmailContent } from '@/components/messages/EmailContent';
 import { useAccounts } from '@/hooks/useAccounts';
-import { mailboxKey } from '@/store/uiStore';
-import { useSetFlags } from '@/hooks/useMutations';
+import { useSetFlags, useSendMessage } from '@/hooks/useMutations';
 import type { ThreadMessage } from '@/lib/types';
-import type { AddressEntry } from '@/lib/composeTypes';
+
+// ── Main component ─────────────────────────────────────────────────────────
 
 export function ThreadView() {
   const {
     selectedThreadMessageId,
     selectedAccountId,
     selectedMailbox,
-    openCompose,
-    selectThread,
   } = useUIStore();
+
   const { data: messages, isLoading, error } = useThread(selectedThreadMessageId);
   const { data: accounts = [] } = useAccounts();
   const setFlags = useSetFlags();
-  const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
+  const qc = useQueryClient();
+
+  const currentAccount = accounts.find((a) => a.id === selectedAccountId) ?? null;
+  const mailboxCacheKey = mailboxKey(selectedAccountId, selectedMailbox?.id ?? null) ?? undefined;
+
+  // Which messages are expanded
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  // Which message has the inline reply open, and in which mode
+  const [replyingTo, setReplyingTo] = useState<{ id: string; mode: 'reply' | 'replyAll' | 'forward' } | null>(null);
+
+  // Ref to scroll the expanded message into view on load
+  const expandedRef = useRef<HTMLDivElement>(null);
+  // Guard: fire mark-as-read at most once per thread selection
+  const markedThreadRef = useRef<string | null>(null);
 
   useEffect(() => {
-    setActiveMessageId(messages?.[messages.length - 1]?.id ?? null);
+    if (!messages?.length) return;
+    const lastId = messages[messages.length - 1].id;
+    setExpandedIds(new Set([lastId]));
+    setReplyingTo(null);
   }, [selectedThreadMessageId, messages]);
+
+  // Auto-mark-as-read the newest (auto-expanded) message when the thread opens.
+  // Uses the same ref-guard pattern as MessageViewer to avoid re-firing on
+  // optimistic-update flips of isRead.
+  useEffect(() => {
+    if (!messages?.length || !selectedThreadMessageId) return;
+    if (markedThreadRef.current === selectedThreadMessageId) return;
+    markedThreadRef.current = selectedThreadMessageId;
+
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg.isRead) {
+      setFlags.mutate({
+        messageId: lastMsg.id,
+        flagsToAdd: ['seen'],
+        currentIsRead: false,
+        mailboxKey: mailboxCacheKey,
+      });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedThreadMessageId, messages]); // only when the selected thread changes
+
+  // Scroll expanded message near the top when thread loads
+  useEffect(() => {
+    if (!expandedRef.current) return;
+    const t = setTimeout(() => {
+      expandedRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 80);
+    return () => clearTimeout(t);
+  }, [selectedThreadMessageId]);
 
   if (!selectedThreadMessageId) return null;
 
   if (isLoading) {
     return (
-      <ModalShell onClose={() => selectThread(null)}>
-        <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-          Loading thread…
-        </div>
-      </ModalShell>
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        Caricamento conversazione…
+      </div>
     );
   }
 
-  if (error || !messages) {
+  if (error || !messages?.length) {
     return (
-      <ModalShell onClose={() => selectThread(null)}>
-        <div className="flex h-full items-center justify-center text-sm text-destructive">
-          Failed to load thread.
-        </div>
-      </ModalShell>
+      <div className="flex h-full items-center justify-center text-sm text-destructive">
+        Impossibile caricare la conversazione.
+      </div>
     );
   }
 
-  const subject = messages[0]?.subject ?? '(no subject)';
-  const activeMessage = messages.find((message) => message.id === activeMessageId) ?? messages[messages.length - 1];
-  const currentAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
-  const mailboxCacheKey = mailboxKey(selectedAccountId, selectedMailbox?.id ?? null) ?? undefined;
-  const hasUnread = messages.some((message) => !message.isRead);
+  const subject = messages[0].subject ?? '(senza oggetto)';
+  const hasUnread = messages.some((m) => !m.isRead);
 
-  const replyTo = (message: ThreadMessage) => {
-    openCompose({
-      mode: 'reply',
-      from: currentAccount?.email,
-      accountId: selectedAccountId ?? undefined,
-      to: [toAddressEntry(message.fromName, message.fromEmail)],
-      subject: message.subject.startsWith('Re:') ? message.subject : `Re: ${message.subject}`,
-      identities: [],
+  function toggleExpanded(id: string) {
+    const isExpanded = expandedIds.has(id);
+
+    // Pure state update — no side effects inside the updater
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (isExpanded) next.delete(id);
+      else next.add(id);
+      return next;
     });
-  };
 
-  const replyAllTo = (message: ThreadMessage) => {
-    const ownEmail = currentAccount?.email?.toLowerCase();
-    const recipients = dedupeAddresses([
-      message.fromName ? `${message.fromName} <${message.fromEmail}>` : message.fromEmail,
-      ...message.to,
-    ]).filter((entry) => extractEmail(entry).toLowerCase() !== ownEmail);
-
-    openCompose({
-      mode: 'reply',
-      from: currentAccount?.email,
-      accountId: selectedAccountId ?? undefined,
-      to: recipients.map((entry) => addressEntryFromString(entry)),
-      subject: message.subject.startsWith('Re:') ? message.subject : `Re: ${message.subject}`,
-      identities: [],
-    });
-  };
-
-  const forwardMessage = (message: ThreadMessage) => {
-    openCompose({
-      mode: 'forward',
-      from: currentAccount?.email,
-      accountId: selectedAccountId ?? undefined,
-      subject: message.subject.startsWith('Fwd:') ? message.subject : `Fwd: ${message.subject}`,
-      identities: [],
-    });
-  };
-
-  const markConversation = async (markAsRead: boolean) => {
-    for (const message of messages) {
-      if (markAsRead === message.isRead) continue;
-      await setFlags.mutateAsync({
-        messageId: message.id,
-        flagsToAdd: markAsRead ? ['seen'] : [],
-        flagsToRemove: markAsRead ? [] : ['seen'],
-        currentIsRead: message.isRead,
-        mailboxKey: mailboxCacheKey,
-      });
+    if (isExpanded) {
+      if (replyingTo?.id === id) setReplyingTo(null);
+    } else {
+      // Auto-mark-as-read when expanding an unread message, like Gmail
+      const msg = messages!.find((m) => m.id === id);
+      if (msg && !msg.isRead) {
+        void setFlags.mutateAsync({
+          messageId: id,
+          flagsToAdd: ['seen'],
+          currentIsRead: false,
+          mailboxKey: mailboxCacheKey,
+        });
+      }
     }
-  };
+  }
+
+  async function markConversation(markAsRead: boolean) {
+    const toMark = messages!.filter((m) => m.isRead !== markAsRead);
+    if (!toMark.length) return;
+    await Promise.all(
+      toMark.map((m) =>
+        setFlags.mutateAsync({
+          messageId: m.id,
+          flagsToAdd: markAsRead ? ['seen'] : [],
+          flagsToRemove: markAsRead ? [] : ['seen'],
+          currentIsRead: m.isRead,
+          mailboxKey: mailboxCacheKey,
+        })
+      )
+    );
+    void qc.invalidateQueries({ queryKey: ['thread', selectedThreadMessageId] });
+  }
 
   return (
-    <ModalShell onClose={() => selectThread(null)}>
-      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
-        <div className="flex items-start justify-between border-b border-border px-5 py-4 shrink-0">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
+
+      {/* ── Sticky subject header ──────────────────────────────────── */}
+      <div className="shrink-0 border-b border-border bg-background px-6 py-4">
+        <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h2 className="truncate text-lg font-semibold leading-tight text-foreground">{subject}</h2>
+            <h2 className="truncate text-lg font-semibold text-foreground">{subject}</h2>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              {messages.length} messagg{messages.length === 1 ? 'io' : 'i'} nella conversazione
+              {messages.length} messagg{messages.length === 1 ? 'io' : 'i'}
             </p>
           </div>
           <button
             type="button"
-            onClick={() => selectThread(null)}
-            className="rounded-md p-1.5 text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
-            title="Chiudi"
+            title={hasUnread ? 'Segna tutto come letto' : 'Segna tutto come non letto'}
+            onClick={() => void markConversation(hasUnread)}
+            className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
           >
-            <X size={16} />
+            <MailOpen size={15} />
           </button>
         </div>
+      </div>
 
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          <aside className="flex w-[300px] shrink-0 flex-col border-r border-border bg-surface">
-            <div className="border-b border-border px-4 py-3 text-xs font-medium uppercase tracking-wide text-muted">
-              Conversazione
-            </div>
-            <div className="flex-1 overflow-y-auto p-2">
-              <div className="space-y-2">
-                {messages.map((message) => (
-                  <ThreadListItem
-                    key={message.id}
+      {/* ── Scrollable feed ───────────────────────────────────────── */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="py-2">
+          {messages.map((message, idx) => {
+            const isExpanded = expandedIds.has(message.id);
+            const isLast = idx === messages.length - 1;
+
+            // Compute reply-all recipients: sender + To (minus self) → To; CC (minus self) → CC
+            const ownEmail = currentAccount?.email?.toLowerCase() ?? '';
+            const replyAllTo = [
+              message.fromEmail,
+              ...message.to.filter((addr) => addr.toLowerCase() !== ownEmail),
+            ];
+            const replyAllCc = message.cc.filter((addr) => addr.toLowerCase() !== ownEmail);
+
+            return (
+              <div key={message.id} ref={isLast ? expandedRef : undefined}>
+                {/* Separator between messages (not before first) */}
+                {idx > 0 && (
+                  <div className="mx-6 border-t border-border/60" />
+                )}
+
+                {isExpanded ? (
+                  <ExpandedMessage
                     message={message}
-                    isActive={message.id === activeMessage?.id}
-                    onClick={() => setActiveMessageId(message.id)}
+                    isReplying={replyingTo?.id === message.id}
+                    accountId={selectedAccountId}
+                    fromEmail={currentAccount?.email ?? ''}
+                    onCollapse={() => toggleExpanded(message.id)}
+                    onReply={() => setReplyingTo({ id: message.id, mode: 'reply' })}
+                    onReplyAll={() => setReplyingTo({ id: message.id, mode: 'replyAll' })}
+                    onForward={() => setReplyingTo({ id: message.id, mode: 'forward' })}
+                    onCloseReply={() => setReplyingTo(null)}
+                    replyMode={replyingTo?.id === message.id ? replyingTo.mode : null}
+                    replyAllTo={replyAllTo}
+                    replyAllCc={replyAllCc}
+                    inReplyToRfcId={message.rfcMessageId}
                   />
-                ))}
-              </div>
-            </div>
-          </aside>
+                ) : (
+                  <CollapsedMessage
+                    message={message}
+                    onExpand={() => toggleExpanded(message.id)}
+                  />
+                )}
 
-          <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <div className="flex flex-wrap items-center gap-1.5 border-b border-border px-5 py-3 shrink-0">
-              <ToolbarAction icon={<Reply size={14} />} label="Rispondi" onClick={() => replyTo(activeMessage)} />
-              <ToolbarAction icon={<ReplyAll size={14} />} label="Rispondi a tutti" onClick={() => replyAllTo(activeMessage)} />
-              <ToolbarAction icon={<Forward size={14} />} label="Inoltra" onClick={() => forwardMessage(activeMessage)} />
-              <ToolbarAction
-                icon={hasUnread ? <MailOpen size={14} /> : <Mail size={14} />}
-                label={hasUnread ? 'Segna come letta' : 'Segna come non letta'}
-                onClick={() => void markConversation(hasUnread)}
-              />
-            </div>
-
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-5 py-4">
-              <div className="mb-4 shrink-0">
-                <div className="flex items-start gap-3">
-                  <SenderAvatar name={activeMessage.fromName || activeMessage.fromEmail} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline gap-2">
-                      <span className="truncate text-sm font-semibold text-foreground">
-                        {activeMessage.fromName || activeMessage.fromEmail}
-                      </span>
-                      <span className="truncate text-xs text-muted">&lt;{activeMessage.fromEmail}&gt;</span>
-                      {!activeMessage.isRead && <span className="h-2 w-2 shrink-0 rounded-full bg-primary" />}
-                      <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                        {formatDate(activeMessage.date)}
-                      </span>
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground">A:</span>{' '}
-                      {activeMessage.to.length > 0 ? activeMessage.to.join(', ') : '—'}
-                    </div>
-                  </div>
-                </div>
               </div>
+            );
+          })}
 
-              <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-white shadow-sm">
-                <EmailContent
-                  htmlBody={activeMessage.htmlBody}
-                  textBody={activeMessage.textBody}
-                  className="h-full w-full border-0 bg-white"
-                />
-              </div>
-            </div>
-          </section>
+          {/* Bottom padding so content never hides under fixed UI */}
+          <div className="h-12" />
         </div>
       </div>
-    </ModalShell>
+    </div>
   );
 }
 
-function ModalShell({
-  children,
-  onClose,
+// ── Collapsed strip ────────────────────────────────────────────────────────
+
+function CollapsedMessage({
+  message,
+  onExpand,
 }: {
-  children: React.ReactNode;
-  onClose: () => void;
-}) {
-  return (
-    <>
-      <div className="fixed inset-0 z-40 bg-black/45 backdrop-blur-[1px]" onClick={onClose} aria-hidden />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 pointer-events-none sm:p-4">
-        <div className="pointer-events-auto h-[94vh] w-[96vw] max-w-[1520px] overflow-hidden rounded-xl border border-border bg-background shadow-2xl">
-          {children}
-        </div>
-      </div>
-    </>
-  );
-}
-
-interface ThreadListItemProps {
   message: ThreadMessage;
-  isActive: boolean;
-  onClick: () => void;
-}
-
-function ThreadListItem({ message, isActive, onClick }: ThreadListItemProps) {
-  const preview = useMemo(() => getPreview(message), [message]);
+  onExpand: () => void;
+}) {
+  const preview =
+    (message.textBody ?? message.htmlBody?.replace(/<[^>]+>/g, ' ') ?? '')
+      .trim()
+      .slice(0, 100)
+      .replace(/\s+/g, ' ');
 
   return (
     <button
       type="button"
-      onClick={onClick}
-      className={[
-        'w-full rounded-lg border px-3 py-3 text-left transition-colors',
-        isActive
-          ? 'border-accent bg-background shadow-sm'
-          : 'border-border bg-surface text-foreground hover:bg-surface-hover',
-      ].join(' ')}
+      onClick={onExpand}
+      className="flex w-full items-center gap-3 px-6 py-3 text-left transition-colors hover:bg-surface-hover"
     >
-      <div className="flex items-start gap-3">
-        <SenderAvatar name={message.fromName || message.fromEmail} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-baseline gap-2">
-            <span className={message.isRead ? 'truncate text-sm font-medium text-foreground' : 'truncate text-sm font-semibold text-foreground'}>
-              {message.fromName || message.fromEmail}
-            </span>
-            {!message.isRead && <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-primary" />}
-          </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            {formatDate(message.date)}
-          </div>
-          <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-            {preview || 'Apri messaggio'}
-          </p>
-        </div>
+      <SenderAvatar name={message.fromName || message.fromEmail} size="sm" />
+
+      <span className={[
+        'w-36 shrink-0 truncate text-sm',
+        message.isRead ? 'font-normal text-foreground' : 'font-semibold text-foreground',
+      ].join(' ')}>
+        {message.fromName || message.fromEmail}
+      </span>
+
+      <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+        {preview || '—'}
+      </span>
+
+      <div className="flex shrink-0 items-center gap-2">
+        {!message.isRead && (
+          <span className="h-2 w-2 rounded-full bg-primary" />
+        )}
+        <span className="text-xs text-muted-foreground">{formatDate(message.date)}</span>
+        <ChevronDown size={13} className="text-muted-foreground" />
       </div>
     </button>
   );
 }
 
-function SenderAvatar({ name }: { name: string }) {
-  const letter = name.trim()[0]?.toUpperCase() ?? '?';
+// ── Expanded message ───────────────────────────────────────────────────────
+
+interface ExpandedProps {
+  message: ThreadMessage;
+  isReplying: boolean;
+  accountId: string | null;
+  fromEmail: string;
+  replyMode: 'reply' | 'replyAll' | 'forward' | null;
+  replyAllTo: string[];
+  replyAllCc: string[];
+  inReplyToRfcId: string | null;
+  onCollapse: () => void;
+  onReply: () => void;
+  onReplyAll: () => void;
+  onForward: () => void;
+  onCloseReply: () => void;
+}
+
+function ExpandedMessage({
+  message,
+  isReplying,
+  accountId,
+  fromEmail,
+  replyMode,
+  replyAllTo,
+  replyAllCc,
+  inReplyToRfcId,
+  onCollapse,
+  onReply,
+  onReplyAll,
+  onForward,
+  onCloseReply,
+}: ExpandedProps) {
   return (
-    <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center text-sm font-semibold shrink-0">
+    <div className="px-6 py-3">
+      {/* Message header — click collapses */}
+      <button
+        type="button"
+        onClick={onCollapse}
+        className="flex w-full items-start gap-3 text-left"
+      >
+        <SenderAvatar name={message.fromName || message.fromEmail} size="md" />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <span className="text-sm font-semibold text-foreground">
+              {message.fromName || message.fromEmail}
+            </span>
+            {message.fromName && (
+              <span className="text-xs text-muted-foreground">&lt;{message.fromEmail}&gt;</span>
+            )}
+            {!message.isRead && (
+              <span className="h-2 w-2 shrink-0 rounded-full bg-primary" />
+            )}
+            <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+              {formatDate(message.date)}
+            </span>
+            <ChevronDown size={13} className="shrink-0 rotate-180 text-muted-foreground" />
+          </div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">A:</span>{' '}
+            {message.to.length > 0 ? message.to.join(', ') : '—'}
+          </div>
+        </div>
+      </button>
+
+      {/* Email body */}
+      <div className="ml-11 mt-4">
+        <AutoSizedFrame html={message.htmlBody} text={message.textBody} />
+      </div>
+
+      {/* Action bar */}
+      <div className="ml-11 mt-4 flex items-center gap-2">
+        <ActionBtn icon={<Reply size={13} />} label="Rispondi" onClick={onReply} />
+        <ActionBtn icon={<ReplyAll size={13} />} label="Rispondi a tutti" onClick={onReplyAll} />
+        <ActionBtn icon={<Forward size={13} />} label="Inoltra" onClick={onForward} />
+      </div>
+
+      {/* Inline reply box */}
+      {isReplying && replyMode !== null && (
+        <div className="ml-11 mt-3">
+          <InlineReply
+            to={replyMode === 'replyAll' ? replyAllTo : replyMode === 'forward' ? [] : [message.fromEmail]}
+            cc={replyMode === 'replyAll' ? replyAllCc : []}
+            subject={message.subject}
+            mode={replyMode}
+            accountId={accountId}
+            fromEmail={fromEmail}
+            inReplyToRfcId={replyMode !== 'forward' ? inReplyToRfcId : null}
+            onClose={onCloseReply}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Auto-sized iframe (isolates email CSS) ─────────────────────────────────
+
+function AutoSizedFrame({ html, text }: { html: string | null; text: string | null }) {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [height, setHeight] = useState(200);
+
+  // Build a sandboxed document with CSS reset to neutralize custom styles
+  const srcdoc = html
+    ? `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+             font-size:14px;line-height:1.6;color:#1a1a1a;word-break:break-word;overflow:hidden;
+             padding:12px 16px}
+        img{max-width:100%;height:auto;display:block}
+        a{color:#1a73e8}
+        blockquote{border-left:3px solid #dadce0;margin:8px 0;padding-left:12px;color:#555}
+        pre,code{font-family:monospace;font-size:13px;background:#f5f5f5;border-radius:3px;padding:2px 4px}
+        pre{padding:10px;overflow-x:auto;white-space:pre-wrap}
+        table{border-collapse:collapse;max-width:100%}
+        td,th{padding:4px 8px}
+      </style></head><body>${html}</body></html>`
+    : null;
+
+  const measure = useCallback(() => {
+    const doc = iframeRef.current?.contentDocument;
+    if (!doc) return;
+    const h = doc.documentElement.scrollHeight;
+    if (h > 0) setHeight(h);
+  }, []);
+
+  const onLoad = useCallback(() => {
+    measure();
+    // Watch for images and lazy content finishing
+    const doc = iframeRef.current?.contentDocument;
+    if (!doc) return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(doc.body);
+    // Images
+    doc.querySelectorAll('img').forEach((img) => img.addEventListener('load', measure));
+  }, [measure]);
+
+  if (!srcdoc && !text) {
+    return <p className="text-sm text-muted-foreground italic">(nessun contenuto)</p>;
+  }
+
+  if (!srcdoc) {
+    // Plain text fallback — no iframe needed
+    return (
+      <pre className="whitespace-pre-wrap break-words font-sans text-sm text-foreground leading-relaxed">
+        {text}
+      </pre>
+    );
+  }
+
+  return (
+    <iframe
+      ref={iframeRef}
+      srcDoc={srcdoc}
+      sandbox="allow-same-origin"
+      onLoad={onLoad}
+      style={{ height: `${height}px` }}
+      className="w-full border-0 bg-white"
+      title="email body"
+    />
+  );
+}
+
+// ── Inline reply compose ───────────────────────────────────────────────────
+
+interface InlineReplyProps {
+  to: string[];
+  cc: string[];
+  subject: string;
+  mode: 'reply' | 'replyAll' | 'forward';
+  accountId: string | null;
+  fromEmail: string;
+  inReplyToRfcId: string | null;
+  onClose: () => void;
+}
+
+function InlineReply({ to, cc, subject, mode, accountId, fromEmail, inReplyToRfcId, onClose }: InlineReplyProps) {
+  const [body, setBody] = useState('');
+  const [toInput, setToInput] = useState(to.join(', '));
+  const [ccInput, setCcInput] = useState(cc.join(', '));
+  const send = useSendMessage();
+
+  const isForward = mode === 'forward';
+  const subjectPrefix = isForward ? 'Fwd: ' : 'Re: ';
+  const replySubject = subject.startsWith(subjectPrefix) ? subject : `${subjectPrefix}${subject}`;
+  const hasCc = ccInput.trim().length > 0;
+
+  async function handleSend() {
+    if (!body.trim() || !accountId) return;
+    const recipients = toInput.split(',').map((s) => s.trim()).filter(Boolean);
+    if (!recipients.length) return;
+    const ccRecipients = ccInput.split(',').map((s) => s.trim()).filter(Boolean);
+    await send.mutateAsync({
+      accountId,
+      fromEmail,
+      to: recipients,
+      cc: ccRecipients,
+      subject: replySubject,
+      bodyText: body,
+      inReplyTo: inReplyToRfcId ?? undefined,
+      references: inReplyToRfcId ? [inReplyToRfcId] : [],
+    });
+    onClose();
+  }
+
+  return (
+    <div className="rounded-xl border border-border bg-background shadow-[0_2px_12px_0_rgba(0,0,0,0.10)] dark:shadow-[0_2px_12px_0_rgba(0,0,0,0.30)]">
+      {/* Mini header — editable To field */}
+      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="shrink-0 text-xs font-medium text-foreground">A:</span>
+          <input
+            type="text"
+            value={toInput}
+            onChange={(e) => setToInput(e.target.value)}
+            className="min-w-0 flex-1 bg-transparent text-xs text-muted-foreground focus:outline-none focus:text-foreground"
+            placeholder="destinatario@example.com"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="ml-2 shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <X size={13} />
+        </button>
+      </div>
+
+      {/* CC row — shown when there are CC recipients or in replyAll mode */}
+      {(hasCc || mode === 'replyAll') && (
+        <div className="flex items-center gap-1.5 border-b border-border px-4 py-2.5">
+          <span className="shrink-0 text-xs font-medium text-foreground">CC:</span>
+          <input
+            type="text"
+            value={ccInput}
+            onChange={(e) => setCcInput(e.target.value)}
+            className="min-w-0 flex-1 bg-transparent text-xs text-muted-foreground focus:outline-none focus:text-foreground"
+            placeholder="cc@example.com"
+          />
+        </div>
+      )}
+
+      {/* Subject */}
+      <div className="border-b border-border px-4 py-2">
+        <span className="text-xs text-muted-foreground">{replySubject}</span>
+      </div>
+
+      {/* Textarea */}
+      <textarea
+        autoFocus
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        placeholder="Scrivi una risposta…"
+        rows={5}
+        className="w-full resize-none bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+      />
+
+      {/* Footer actions */}
+      <div className="flex items-center justify-between border-t border-border px-4 py-2.5">
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          Annulla
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSend()}
+          disabled={!body.trim() || !toInput.trim() || send.isPending}
+          className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground transition-opacity disabled:opacity-50"
+        >
+          <Send size={12} />
+          {send.isPending ? 'Invio…' : 'Invia'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Shared sub-components ──────────────────────────────────────────────────
+
+function SenderAvatar({ name, size }: { name: string; size: 'sm' | 'md' }) {
+  const letter = name.trim()[0]?.toUpperCase() ?? '?';
+  const cls = size === 'md'
+    ? 'h-9 w-9 text-sm'
+    : 'h-7 w-7 text-xs';
+  return (
+    <div className={`${cls} flex shrink-0 items-center justify-center rounded-full bg-primary/15 font-semibold text-primary`}>
       {letter}
     </div>
   );
 }
 
-function ToolbarAction({
+function ActionBtn({
   icon,
   label,
   onClick,
@@ -277,47 +568,10 @@ function ToolbarAction({
     <button
       type="button"
       onClick={onClick}
-      className="flex items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground transition-colors hover:bg-surface-hover"
+      className="flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-surface-hover"
     >
       {icon}
       <span>{label}</span>
     </button>
   );
-}
-
-function getPreview(message: ThreadMessage): string {
-  const text = message.textBody ?? message.htmlBody?.replace(/<[^>]+>/g, ' ') ?? '';
-  return text.trim().slice(0, 120).replace(/\s+/g, ' ');
-}
-
-function toAddressEntry(name: string | null, email: string): AddressEntry {
-  return name ? { name, email } : { email };
-}
-
-function addressEntryFromString(entry: string): AddressEntry {
-  const match = entry.match(/^(.*?)\s*<([^>]+)>\s*$/);
-  if (match) {
-    const name = match[1].trim().replace(/^"|"$/g, '');
-    return name ? { name, email: match[2].trim() } : { email: match[2].trim() };
-  }
-  return { email: entry.trim() };
-}
-
-function dedupeAddresses(entries: string[]): string[] {
-  const seen = new Set<string>();
-  const deduped: string[] = [];
-
-  for (const entry of entries) {
-    const email = extractEmail(entry).toLowerCase();
-    if (seen.has(email)) continue;
-    seen.add(email);
-    deduped.push(entry);
-  }
-
-  return deduped;
-}
-
-function extractEmail(entry: string): string {
-  const match = entry.match(/<([^>]+)>/);
-  return match?.[1] ?? entry.trim();
 }

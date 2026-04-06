@@ -225,4 +225,8 @@ pub trait ConversationReadRepository: Send + Sync {
         account_id: &AccountId,
         pagination: &Pagination,
     ) -> Result<PagedResult<ConversationSummary>, DomainError>;
+
+    /// Wipe and rebuild the conversation + thread index by replaying all stored events.
+    /// Returns the number of events replayed.
+    async fn rebuild_index(&self) -> Result<u64, DomainError>;
 }

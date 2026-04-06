@@ -63,9 +63,11 @@ export interface ConversationSummary {
 
 export interface ThreadMessage {
   id: string;
+  rfcMessageId: string | null;
   fromName: string | null;
   fromEmail: string;
   to: string[];
+  cc: string[];
   subject: string;
   date: string; // ISO 8601
   isRead: boolean;

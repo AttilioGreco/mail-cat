@@ -85,6 +85,9 @@ pub enum Query {
         thread_id: ThreadId,
         account_id: AccountId,
     },
+
+    /// Wipe and rebuild the conversation + thread index from the event store.
+    RebuildConversationIndex,
 }
 
 use mc_domain::MessageId;
@@ -108,6 +111,8 @@ pub enum QueryResult {
     ContactDuplicates(Vec<(ContactSearchHit, ContactSearchHit)>),
     Conversations(PagedResult<ConversationSummary>),
     ConversationDetail(Option<ConversationSummary>),
+    /// Number of events replayed during rebuild.
+    IndexRebuilt(u64),
 }
 
 // ── Typed extraction helpers ───────────────────────────────────────────────
@@ -231,6 +236,15 @@ impl QueryResult {
     pub fn into_conversation(self) -> Result<Option<ConversationSummary>, ApplicationError> {
         match self {
             Self::ConversationDetail(v) => Ok(v),
+            _ => Err(ApplicationError::Internal(
+                "unexpected query result variant".into(),
+            )),
+        }
+    }
+
+    pub fn into_index_rebuilt(self) -> Result<u64, ApplicationError> {
+        match self {
+            Self::IndexRebuilt(n) => Ok(n),
             _ => Err(ApplicationError::Internal(
                 "unexpected query result variant".into(),
             )),

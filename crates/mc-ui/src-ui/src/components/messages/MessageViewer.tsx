@@ -23,19 +23,22 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
   // The account that received this message — drives identity pre-selection and chip search scope.
   const currentAccount = accounts.find((a) => a.id === selectedAccountId);
 
-  // Auto-mark as read when opening an unread message
+  // Auto-mark as read when opening an unread message.
+  // Guard with a ref so switching between unread messages doesn't cause loops.
   const markedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!envelope.isRead && markedRef.current !== envelope.uid) {
-      markedRef.current = envelope.uid;
-      setFlags.mutate({
-        messageId: envelope.uid,
-        flagsToAdd: ['seen'],
-        currentIsRead: false,
-        mailboxKey: mbKey ?? undefined,
-      });
-    }
-  }, [envelope.uid, envelope.isRead]);
+    if (envelope.isRead) return; // already read — nothing to do
+    if (markedRef.current === envelope.uid) return; // already fired for this message
+    markedRef.current = envelope.uid;
+
+    setFlags.mutate({
+      messageId: envelope.uid,
+      flagsToAdd: ['seen'],
+      currentIsRead: false,
+      mailboxKey: mbKey ?? undefined,
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [envelope.uid]); // only fire when the selected message changes, not on isRead flip
 
   const handleDelete = () => {
     deleteMsg.mutate(

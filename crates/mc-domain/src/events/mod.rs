@@ -195,6 +195,10 @@ pub enum DomainEvent {
         message_id: MessageId,
         account_id: AccountId,
         envelope: Envelope,
+        #[serde(default)]
+        in_reply_to: Option<String>,
+        #[serde(default)]
+        references: Vec<String>,
         sent_at: DateTime<Utc>,
     },
 

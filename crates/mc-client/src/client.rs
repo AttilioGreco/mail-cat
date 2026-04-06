@@ -139,6 +139,17 @@ impl MailCatClient {
         Ok(resp.messages.into_iter().map(crate::convert::thread_message_from_proto).collect())
     }
 
+    /// Wipe and rebuild the conversation/thread index by replaying all stored events.
+    /// Returns the number of events replayed.
+    pub async fn rebuild_conversation_index(&self) -> Result<u64> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let resp = client
+            .rebuild_conversation_index(pb::RebuildConversationIndexRequest {})
+            .await?
+            .into_inner();
+        Ok(resp.events_replayed)
+    }
+
     pub async fn get_message(&self, message_id: &str) -> Result<MessageBody> {
         let mut client = MessageServiceClient::new(self.channel.clone());
         let resp = client

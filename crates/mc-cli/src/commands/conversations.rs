@@ -18,6 +18,9 @@ pub enum ConversationsCmd {
         /// Any message ID in the thread
         message_id: String,
     },
+
+    /// Wipe and rebuild the conversation/thread index from the event store
+    RebuildIndex,
 }
 
 pub async fn run(cmd: ConversationsCmd, client: MailCatClient) -> Result<()> {
@@ -50,6 +53,12 @@ pub async fn run(cmd: ConversationsCmd, client: MailCatClient) -> Result<()> {
             }
 
             println!("\n{} conversations", convs.len());
+        }
+
+        ConversationsCmd::RebuildIndex => {
+            println!("Rebuilding conversation index...");
+            let events = client.rebuild_conversation_index().await?;
+            println!("Done. Replayed {events} events.");
         }
 
         ConversationsCmd::Thread { message_id } => {

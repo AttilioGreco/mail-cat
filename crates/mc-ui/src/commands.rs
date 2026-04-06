@@ -586,9 +586,11 @@ pub async fn list_conversations(
 #[derive(Serialize)]
 pub struct ThreadMessageDto {
     pub id: String,
+    pub rfc_message_id: Option<String>,
     pub from_name: Option<String>,
     pub from_email: String,
     pub to: Vec<String>,
+    pub cc: Vec<String>,
     pub subject: String,
     pub date: String, // ISO 8601
     pub is_read: bool,
@@ -599,9 +601,11 @@ pub struct ThreadMessageDto {
 fn thread_message_to_dto(m: ThreadMessage) -> ThreadMessageDto {
     ThreadMessageDto {
         id: m.id,
+        rfc_message_id: m.rfc_message_id,
         from_name: m.from_name,
         from_email: m.from_email,
         to: m.to,
+        cc: m.cc,
         subject: m.subject,
         date: m.date.to_rfc3339(),
         is_read: m.is_read,

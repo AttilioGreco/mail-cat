@@ -154,6 +154,10 @@ where
                     .await?;
                 Ok(QueryResult::ConversationDetail(conv))
             }
+            Query::RebuildConversationIndex => {
+                let count = self.conversation_repo.rebuild_index().await?;
+                Ok(QueryResult::IndexRebuilt(count))
+            }
         }
     }
 }
@@ -352,6 +356,10 @@ mod tests {
             _pagination: &Pagination,
         ) -> Result<PagedResult<mc_domain::ConversationSummary>, DomainError> {
             Ok(PagedResult { items: vec![], total_count: 0, page: 1, page_size: 50 })
+        }
+
+        async fn rebuild_index(&self) -> Result<u64, DomainError> {
+            Ok(0)
         }
     }
 

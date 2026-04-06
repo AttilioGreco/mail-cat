@@ -18,9 +18,11 @@ function toConversation(raw: Record<string, unknown>): ConversationSummary {
 function toThreadMessage(raw: Record<string, unknown>): ThreadMessage {
   return {
     id: raw.id as string,
+    rfcMessageId: (raw.rfc_message_id as string | null) ?? null,
     fromName: (raw.from_name as string | null) ?? null,
     fromEmail: raw.from_email as string,
     to: raw.to as string[],
+    cc: (raw.cc as string[] | null) ?? [],
     subject: raw.subject as string,
     date: raw.date as string,
     isRead: raw.is_read as boolean,

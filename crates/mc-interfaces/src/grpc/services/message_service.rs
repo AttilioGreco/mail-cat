@@ -13,7 +13,9 @@ use crate::grpc::proto::{
     GetMessageRequest, GetMessageResponse, GetThreadRequest, GetThreadResponse,
     ListConversationsRequest, ListConversationsResponse,
     ListMessagesRequest, ListMessagesResponse, MailboxEvent, MessageExpungedEvent,
-    MoveMessageRequest, MoveMessageResponse, NewMessageEvent, SaveDraftRequest, SaveDraftResponse,
+    MoveMessageRequest, MoveMessageResponse, NewMessageEvent,
+    RebuildConversationIndexRequest, RebuildConversationIndexResponse,
+    SaveDraftRequest, SaveDraftResponse,
     SendMessageRequest, SendMessageResponse, SetFlagsRequest, SetFlagsResponse,
     WatchMailboxRequest, mailbox_event, message_service_server::MessageService,
 };
@@ -253,6 +255,23 @@ where
         let details = messages.iter().map(domain_message_to_detail).collect();
 
         Ok(Response::new(GetThreadResponse { messages: details }))
+    }
+
+    async fn rebuild_conversation_index(
+        &self,
+        _request: Request<RebuildConversationIndexRequest>,
+    ) -> Result<Response<RebuildConversationIndexResponse>, Status> {
+        let result = self
+            .query_bus
+            .dispatch(Query::RebuildConversationIndex)
+            .await
+            .map_err(application_error_to_status)?;
+
+        let events_replayed = result
+            .into_index_rebuilt()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(RebuildConversationIndexResponse { events_replayed }))
     }
 
     async fn set_flags(

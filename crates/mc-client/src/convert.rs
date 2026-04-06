@@ -120,12 +120,15 @@ pub fn thread_message_from_proto(m: pb::MessageDetail) -> ThreadMessage {
     let date = proto_ts_to_datetime(envelope.date);
     let is_read = m.flags.contains(&(pb::Flag::Seen as i32));
     let to: Vec<String> = envelope.to.into_iter().map(|a| a.email).collect();
+    let cc: Vec<String> = envelope.cc.into_iter().map(|a| a.email).collect();
 
     ThreadMessage {
         id: m.id,
+        rfc_message_id: m.message_rfc_id,
         from_name: from.as_ref().and_then(|f| f.name.clone()),
         from_email: from.map(|f| f.email).unwrap_or_default(),
         to,
+        cc,
         subject: envelope.subject,
         date,
         is_read,

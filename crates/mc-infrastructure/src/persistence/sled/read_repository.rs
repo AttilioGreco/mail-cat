@@ -391,6 +391,32 @@ impl<ES: EventStore> mc_domain::traits::repository::ConversationReadRepository
 
         Ok(mc_shared::pagination::PagedResult { items, total_count, page: pagination.page, page_size: pagination.page_size })
     }
+
+    async fn rebuild_index(&self) -> Result<u64, DomainError> {
+        // 1. Wipe the four conversation/thread trees.
+        for tree_name in &[
+            CONVERSATIONS_TREE,
+            MESSAGE_TO_THREAD_TREE,
+            RFC_ID_SEEN_TREE,
+            THREAD_MESSAGES_TREE,
+        ] {
+            let tree = self.tree(tree_name)?;
+            tree.clear().map_err(|e| DomainError::Repository(e.to_string()))?;
+        }
+
+        // 2. Replay all events from the event store (projection is idempotent).
+        let events = self
+            .event_store
+            .load_all_events(None, 0)
+            .await?;
+
+        let total = events.len() as u64;
+        for envelope in &events {
+            self.project(envelope).await?;
+        }
+
+        Ok(total)
+    }
 }
 
 // ── ReadModelProjector ────────────────────────────────────────────────
@@ -884,6 +910,8 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 message_id,
                 account_id,
                 envelope,
+                in_reply_to,
+                references,
                 sent_at,
             } => {
                 let message = Message {
@@ -892,8 +920,8 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     mailbox_id: MailboxId::new(), // Sent folder assigned during sync
                     provider_uid: None,
                     message_rfc_id: None,
-                    in_reply_to: None,
-                    references: Vec::new(),
+                    in_reply_to: in_reply_to.clone(),
+                    references: references.clone(),
                     envelope: envelope.clone(),
                     flags: vec![Flag::Seen],
                     size_bytes: 0,
@@ -910,6 +938,77 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     .map_err(|e| DomainError::Serialization(e.to_string()))?;
                 tree.insert(message_id.to_string().as_bytes(), json)
                     .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                // ── Thread the sent message (idempotent) ──────────────────────
+                let msg_thread_tree = self.tree(MESSAGE_TO_THREAD_TREE)?;
+                if !msg_thread_tree
+                    .contains_key(message_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let thread_id =
+                        mc_domain::model::conversation::Conversation::resolve_thread_id(
+                            None, // RFC ID assigned by SMTP server, unknown at send time
+                            in_reply_to.as_deref(),
+                            &references,
+                            &message_id.to_string(),
+                        );
+                    let subject = mc_domain::model::conversation::Conversation::normalize_subject(
+                        &envelope.subject,
+                    );
+                    let latest_sender = envelope
+                        .from
+                        .first()
+                        .map(|a| a.name.clone().unwrap_or_else(|| a.email.to_string()))
+                        .unwrap_or_default();
+
+                    let conv_key = format!("{}:{}", account_id, thread_id);
+                    let conv_tree = self.tree(CONVERSATIONS_TREE)?;
+                    let mut conv: mc_domain::traits::repository::ConversationSummary =
+                        if let Some(bytes) = conv_tree
+                            .get(conv_key.as_bytes())
+                            .map_err(|e| DomainError::Repository(e.to_string()))?
+                        {
+                            serde_json::from_slice(&bytes)
+                                .map_err(|e| DomainError::Serialization(e.to_string()))?
+                        } else {
+                            mc_domain::traits::repository::ConversationSummary {
+                                thread_id: thread_id.clone(),
+                                account_id: account_id.clone(),
+                                subject,
+                                message_count: 0,
+                                unread_count: 0,
+                                last_message_at: *sent_at,
+                                latest_sender: latest_sender.clone(),
+                                sample_message_id: message_id.clone(),
+                            }
+                        };
+
+                    conv.message_count += 1;
+                    // Sent messages are always Seen — unread_count unchanged
+                    if *sent_at >= conv.last_message_at {
+                        conv.last_message_at = *sent_at;
+                        conv.latest_sender = latest_sender;
+                        conv.sample_message_id = message_id.clone();
+                    }
+
+                    let msg_thread_val = format!("{}\x1f{}", account_id, thread_id);
+                    msg_thread_tree
+                        .insert(message_id.to_string().as_bytes(), msg_thread_val.as_bytes())
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    let thread_messages_tree = self.tree(THREAD_MESSAGES_TREE)?;
+                    let thread_msg_key =
+                        format!("{}:{}:{}", account_id, thread_id, message_id);
+                    thread_messages_tree
+                        .insert(thread_msg_key.as_bytes(), b"")
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    let conv_json = serde_json::to_vec(&conv)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    conv_tree
+                        .insert(conv_key.as_bytes(), conv_json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+                }
                 debug!(message_id = %message_id, "projected MessageSent");
             }
 
@@ -1622,6 +1721,34 @@ impl<ES: EventStore> MessageReadRepository for SharedSledRepository<ES> {
         account_id: Option<&AccountId>,
     ) -> Result<Vec<Message>, DomainError> {
         self.0.scan_all_messages(account_id).await
+    }
+}
+
+#[async_trait]
+impl<ES: EventStore> mc_domain::traits::repository::ConversationReadRepository
+    for SharedSledRepository<ES>
+{
+    async fn get_conversation(
+        &self,
+        thread_id: &mc_domain::value_objects::thread_id::ThreadId,
+        account_id: &mc_domain::AccountId,
+    ) -> Result<Option<mc_domain::traits::repository::ConversationSummary>, DomainError> {
+        self.0.get_conversation(thread_id, account_id).await
+    }
+
+    async fn list_conversations(
+        &self,
+        account_id: &mc_domain::AccountId,
+        pagination: &mc_shared::pagination::Pagination,
+    ) -> Result<
+        mc_shared::pagination::PagedResult<mc_domain::traits::repository::ConversationSummary>,
+        DomainError,
+    > {
+        self.0.list_conversations(account_id, pagination).await
+    }
+
+    async fn rebuild_index(&self) -> Result<u64, DomainError> {
+        self.0.rebuild_index().await
     }
 }
 
