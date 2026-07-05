@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/mail_cat/v1/contacts.proto",
     ];
 
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(false) // client-only
         .build_client(true)
         .compile_protos(&proto_files, &["../../proto"])?;

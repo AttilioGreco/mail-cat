@@ -179,7 +179,7 @@ mod tests {
     impl AccountReadRepository for MockAccountReadRepo {
         async fn get_account(&self, id: &AccountId) -> Result<Option<AccountSummary>, DomainError> {
             Ok(Some(AccountSummary {
-                id: id.clone(),
+                id: *id,
                 name: "Test Account".into(),
                 email: EmailAddress::new("test@example.com").unwrap(),
                 provider_type: ProviderType::Imap,

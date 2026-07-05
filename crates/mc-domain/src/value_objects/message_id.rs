@@ -3,7 +3,7 @@ use std::fmt;
 use uuid::Uuid;
 
 /// Domain-level unique message identifier (UUID v7, time-ordered).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MessageId(Uuid);
 
 impl MessageId {

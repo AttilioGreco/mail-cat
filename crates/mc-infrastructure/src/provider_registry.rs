@@ -152,7 +152,7 @@ mod tests {
         let account_id = AccountId::new();
         let provider = Arc::new(StubProvider);
 
-        registry.register_provider(account_id.clone(), provider);
+        registry.register_provider(account_id, provider);
         let result = registry.get_provider(&account_id);
         assert!(result.is_ok());
     }
@@ -178,7 +178,7 @@ mod tests {
         let account_id = AccountId::new();
         let provider = Arc::new(StubProvider);
 
-        registry.register_provider(account_id.clone(), provider);
+        registry.register_provider(account_id, provider);
         registry.remove_provider(&account_id);
 
         let result = registry.get_provider(&account_id);

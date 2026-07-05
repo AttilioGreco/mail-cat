@@ -97,7 +97,7 @@ pub fn domain_message_to_detail(message: &Message) -> MessageDetail {
             .collect(),
         body_text: message.body_text.clone(),
         body_html: message.body_html.clone(),
-        raw_headers: message.raw_headers.clone(),
+        raw_headers: None,
         received_at: Some(datetime_to_timestamp(&message.received_at)),
         internal_date: Some(datetime_to_timestamp(&message.internal_date)),
     }

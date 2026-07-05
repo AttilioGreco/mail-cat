@@ -188,7 +188,7 @@ impl TantivyContactIndex {
     ) -> Option<ContactSearchHit> {
         let id_str = doc.get_first(self.fields.contact_id).and_then(|v| v.as_str())?;
         let id = uuid::Uuid::parse_str(id_str)
-            .map(|u| mc_domain::ContactId::from_uuid(u))
+            .map(mc_domain::ContactId::from_uuid)
             .ok()?;
 
         let display_name = doc
@@ -227,7 +227,7 @@ impl TantivyContactIndex {
             None
         } else {
             uuid::Uuid::parse_str(scope_str)
-                .map(|u| AccountId::from_uuid(u))
+                .map(AccountId::from_uuid)
                 .ok()
         };
 
@@ -323,7 +323,7 @@ impl ContactIndex for TantivyContactIndex {
         // Fetch more candidates than needed so we can do account-scoped partitioning
         let fetch_limit = limit * 4;
         let top_docs = searcher
-            .search(&bool_query, &TopDocs::with_limit(fetch_limit))
+            .search(&bool_query, &TopDocs::with_limit(fetch_limit).order_by_score())
             .map_err(|e| DomainError::SearchIndex(format!("contact search failed: {e}")))?;
 
         let requesting_scope = requesting_account_id.map(|a| a.to_string());
@@ -370,7 +370,7 @@ impl ContactIndex for TantivyContactIndex {
 
         let searcher = self.reader.searcher();
         let top_docs = searcher
-            .search(&AllQuery, &TopDocs::with_limit(10_000))
+            .search(&AllQuery, &TopDocs::with_limit(10_000).order_by_score())
             .map_err(|e| DomainError::SearchIndex(format!("contact dup scan failed: {e}")))?;
 
         let scope_filter = account_id.map(|a| a.to_string());

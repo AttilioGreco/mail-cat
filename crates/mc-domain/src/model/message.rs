@@ -46,7 +46,6 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
-    pub raw_headers: Option<String>,
     pub received_at: DateTime<Utc>,
     pub internal_date: DateTime<Utc>,
 }
@@ -64,14 +63,15 @@ impl Message {
         flags: Vec<Flag>,
         size_bytes: u64,
         has_attachments: bool,
+        internal_date: DateTime<Utc>,
     ) -> (Self, DomainEvent) {
         let id = MessageId::new();
-        let received_at = Utc::now();
+        let received_at = internal_date;
 
         let event = DomainEvent::MessageReceived {
-            message_id: id.clone(),
-            account_id: account_id.clone(),
-            mailbox_id: mailbox_id.clone(),
+            message_id: id,
+            account_id,
+            mailbox_id,
             provider_uid,
             message_rfc_id: message_rfc_id.clone(),
             in_reply_to: in_reply_to.clone(),
@@ -98,7 +98,6 @@ impl Message {
             attachments: Vec::new(),
             body_text: None,
             body_html: None,
-            raw_headers: None,
             received_at,
             internal_date: received_at,
         };
@@ -119,7 +118,7 @@ impl Message {
         self.has_attachments = !self.attachments.is_empty();
 
         DomainEvent::MessageBodyFetched {
-            message_id: self.id.clone(),
+            message_id: self.id,
             body_text,
             body_html,
             attachments,
@@ -142,8 +141,8 @@ impl Message {
         }
 
         DomainEvent::MessageFlagged {
-            message_id: self.id.clone(),
-            mailbox_id: self.mailbox_id.clone(),
+            message_id: self.id,
+            mailbox_id: self.mailbox_id,
             flags_added: flags_to_add,
             flags_removed: flags_to_remove,
         }
@@ -170,11 +169,11 @@ impl Message {
 
     /// Move the message to another mailbox and produce the event.
     pub fn move_to(&mut self, to_mailbox_id: MailboxId) -> DomainEvent {
-        let from = self.mailbox_id.clone();
-        self.mailbox_id = to_mailbox_id.clone();
+        let from = self.mailbox_id;
+        self.mailbox_id = to_mailbox_id;
 
         DomainEvent::MessageMoved {
-            message_id: self.id.clone(),
+            message_id: self.id,
             from_mailbox_id: from,
             to_mailbox_id,
         }
@@ -183,8 +182,8 @@ impl Message {
     /// Produce a deletion event.
     pub fn delete(&self, permanently: bool) -> DomainEvent {
         DomainEvent::MessageDeleted {
-            message_id: self.id.clone(),
-            mailbox_id: self.mailbox_id.clone(),
+            message_id: self.id,
+            mailbox_id: self.mailbox_id,
             permanently,
         }
     }
@@ -233,7 +232,7 @@ impl Message {
                 }
             }
             DomainEvent::MessageMoved { to_mailbox_id, .. } => {
-                self.mailbox_id = to_mailbox_id.clone();
+                self.mailbox_id = *to_mailbox_id;
             }
             DomainEvent::MessageDeleted { .. }
             | DomainEvent::MessageSent { .. }
@@ -270,9 +269,9 @@ impl Message {
         };
 
         let mut message = Self {
-            id: message_id.clone(),
-            account_id: account_id.clone(),
-            mailbox_id: mailbox_id.clone(),
+            id: *message_id,
+            account_id: *account_id,
+            mailbox_id: *mailbox_id,
             provider_uid: Some(*provider_uid),
             message_rfc_id: message_rfc_id.clone(),
             in_reply_to: in_reply_to.clone(),
@@ -284,7 +283,6 @@ impl Message {
             attachments: Vec::new(),
             body_text: None,
             body_html: None,
-            raw_headers: None,
             received_at: *received_at,
             internal_date: *received_at,
         };
@@ -355,6 +353,7 @@ mod tests {
             vec![Flag::Recent],
             2048,
             false,
+            Utc::now(),
         );
 
         assert_eq!(msg.envelope.subject, "Test subject");
@@ -376,6 +375,7 @@ mod tests {
             vec![],
             1024,
             false,
+            Utc::now(),
         );
 
         let event = msg.set_body(
@@ -402,6 +402,7 @@ mod tests {
             vec![],
             512,
             false,
+            Utc::now(),
         );
 
         assert!(!msg.is_read());
@@ -428,6 +429,7 @@ mod tests {
             vec![],
             512,
             false,
+            Utc::now(),
         );
 
         assert!(!msg.is_flagged());
@@ -444,7 +446,7 @@ mod tests {
 
         let (mut msg, _) = Message::receive(
             AccountId::new(),
-            original_mailbox.clone(),
+            original_mailbox,
             ProviderUid::new(1),
             None,
             None,
@@ -453,9 +455,10 @@ mod tests {
             vec![],
             512,
             false,
+            Utc::now(),
         );
 
-        let event = msg.move_to(target_mailbox.clone());
+        let event = msg.move_to(target_mailbox);
 
         assert_eq!(msg.mailbox_id, target_mailbox);
         assert_eq!(event.event_name(), "MessageMoved");
@@ -474,6 +477,7 @@ mod tests {
             vec![],
             512,
             false,
+            Utc::now(),
         );
 
         let soft_delete = msg.delete(false);
@@ -496,6 +500,7 @@ mod tests {
             vec![Flag::Seen, Flag::Flagged],
             4096,
             true,
+            Utc::now(),
         );
 
         let json = serde_json::to_string(&msg).unwrap();
@@ -517,9 +522,9 @@ mod tests {
 
         let events = vec![
             DomainEvent::MessageReceived {
-                message_id: msg_id.clone(),
-                account_id: account_id.clone(),
-                mailbox_id: mailbox_id.clone(),
+                message_id: msg_id,
+                account_id,
+                mailbox_id,
                 provider_uid: ProviderUid::new(100),
                 message_rfc_id: None,
                 in_reply_to: None,
@@ -531,21 +536,21 @@ mod tests {
                 received_at,
             },
             DomainEvent::MessageBodyFetched {
-                message_id: msg_id.clone(),
+                message_id: msg_id,
                 body_text: Some("Hello world".into()),
                 body_html: Some("<p>Hello world</p>".into()),
                 attachments: vec![],
             },
             DomainEvent::MessageFlagged {
-                message_id: msg_id.clone(),
-                mailbox_id: mailbox_id.clone(),
+                message_id: msg_id,
+                mailbox_id,
                 flags_added: vec![Flag::Seen, Flag::Flagged],
                 flags_removed: vec![],
             },
             DomainEvent::MessageMoved {
-                message_id: msg_id.clone(),
-                from_mailbox_id: mailbox_id.clone(),
-                to_mailbox_id: target_mailbox.clone(),
+                message_id: msg_id,
+                from_mailbox_id: mailbox_id,
+                to_mailbox_id: target_mailbox,
             },
         ];
 
@@ -575,6 +580,7 @@ mod tests {
             vec![Flag::Seen],
             512,
             false,
+            Utc::now(),
         );
 
         // Adding Seen again should not duplicate

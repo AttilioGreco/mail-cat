@@ -72,7 +72,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageServiceImpl<C, Q> {
         let mailbox = self
             .query_bus
             .dispatch(Query::GetMailbox {
-                mailbox_id: message.mailbox_id.clone(),
+                mailbox_id: message.mailbox_id,
             })
             .await
             .map_err(application_error_to_status)?
@@ -285,7 +285,7 @@ where
         let flags_to_add = proto_flags_to_domain(&req.flags_to_add);
         let flags_to_remove = proto_flags_to_domain(&req.flags_to_remove);
 
-        let message_id = message.id.clone();
+        let message_id = message.id;
 
         let command = Command::SetMessageFlags {
             message_id: message.id,
@@ -338,7 +338,7 @@ where
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("target mailbox not found"))?;
 
-        let message_id = message.id.clone();
+        let message_id = message.id;
 
         let command = Command::MoveMessage {
             message_id: message.id,
@@ -449,7 +449,7 @@ where
         let mailbox = self
             .query_bus
             .dispatch(Query::GetMailbox {
-                mailbox_id: mailbox_id.clone(),
+                mailbox_id,
             })
             .await
             .map_err(application_error_to_status)?
@@ -457,7 +457,7 @@ where
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("mailbox not found"))?;
 
-        let account_id = mailbox.account_id.clone();
+        let account_id = mailbox.account_id;
         let mailbox_id_str = req.mailbox_id.clone();
 
         // Subscribe to the domain event bus. Filter events that belong to the
@@ -473,11 +473,10 @@ where
                     &mailbox_id,
                     &mailbox_id_str,
                 );
-                if let Some(event) = event_opt {
-                    if tx.send(Ok(event)).await.is_err() {
+                if let Some(event) = event_opt
+                    && tx.send(Ok(event)).await.is_err() {
                         break; // Client disconnected
                     }
-                }
             }
         });
 
@@ -646,7 +645,7 @@ mod tests {
         let mailbox_id = MailboxId::new();
         let message_id = MessageId::new();
 
-        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id.clone(), mailbox_id.clone()));
+        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id, mailbox_id));
         let mut stream = svc
             .watch_mailbox(Request::new(WatchMailboxRequest {
                 mailbox_id: mailbox_id.as_uuid().to_string(),
@@ -656,9 +655,9 @@ mod tests {
             .into_inner();
 
         bus.publish(envelope(DomainEvent::MessageReceived {
-            message_id: message_id.clone(),
-            account_id: account_id.clone(),
-            mailbox_id: mailbox_id.clone(),
+            message_id,
+            account_id,
+            mailbox_id,
             provider_uid: ProviderUid::new(42),
             envelope: mc_domain::Envelope {
                 from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![],
@@ -692,7 +691,7 @@ mod tests {
         let other_account = AccountId::new();
         let mailbox_id = MailboxId::new();
 
-        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id.clone(), mailbox_id.clone()));
+        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id, mailbox_id));
         let mut stream = svc
             .watch_mailbox(Request::new(WatchMailboxRequest {
                 mailbox_id: mailbox_id.as_uuid().to_string(),
@@ -703,7 +702,7 @@ mod tests {
         bus.publish(envelope(DomainEvent::MessageReceived {
             message_id: MessageId::new(),
             account_id: other_account,
-            mailbox_id: mailbox_id.clone(),
+            mailbox_id,
             provider_uid: ProviderUid::new(1),
             envelope: mc_domain::Envelope { from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![], subject: "".into(), date: chrono::Utc::now() },
             flags: vec![], size_bytes: 0, has_attachments: false, message_rfc_id: None, in_reply_to: None, references: vec![], received_at: chrono::Utc::now(),
@@ -711,8 +710,8 @@ mod tests {
         // Correct account → arrives
         bus.publish(envelope(DomainEvent::MessageReceived {
             message_id: MessageId::new(),
-            account_id: account_id.clone(),
-            mailbox_id: mailbox_id.clone(),
+            account_id,
+            mailbox_id,
             provider_uid: ProviderUid::new(2),
             envelope: mc_domain::Envelope { from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![], subject: "".into(), date: chrono::Utc::now() },
             flags: vec![], size_bytes: 0, has_attachments: false, message_rfc_id: None, in_reply_to: None, references: vec![], received_at: chrono::Utc::now(),
@@ -733,7 +732,7 @@ mod tests {
         let account_id = AccountId::new();
         let mailbox_id = MailboxId::new();
 
-        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id.clone(), mailbox_id.clone()));
+        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id, mailbox_id));
         let mut stream = svc
             .watch_mailbox(Request::new(WatchMailboxRequest {
                 mailbox_id: mailbox_id.as_uuid().to_string(),
@@ -743,7 +742,7 @@ mod tests {
         bus.publish(EventEnvelope::new(
             "mbx".into(), AggregateType::Mailbox, 1,
             DomainEvent::MailboxCountsUpdated {
-                mailbox_id: mailbox_id.clone(),
+                mailbox_id,
                 total_messages: 100,
                 unread_messages: 5,
             },
@@ -764,7 +763,7 @@ mod tests {
         let account_id = AccountId::new();
         let mailbox_id = MailboxId::new();
 
-        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id.clone(), mailbox_id.clone()));
+        let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id, mailbox_id));
         let mut stream = svc
             .watch_mailbox(Request::new(WatchMailboxRequest {
                 mailbox_id: mailbox_id.as_uuid().to_string(),
@@ -773,7 +772,7 @@ mod tests {
 
         bus.publish(envelope(DomainEvent::MessageFlagged {
             message_id: MessageId::new(),
-            mailbox_id: mailbox_id.clone(),
+            mailbox_id,
             flags_added: vec![Flag::Seen],
             flags_removed: vec![],
         }));

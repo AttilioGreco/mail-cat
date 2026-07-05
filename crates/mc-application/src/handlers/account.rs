@@ -41,7 +41,7 @@ impl<W: AccountWriteRepository, B: EventPublisher> AccountCommandHandler<W, B> {
     ) -> Result<CommandResult, ApplicationError> {
         let (account, event) =
             Account::create(name, email, provider_type, connection_config, identity);
-        let account_id = account.id.clone();
+        let account_id = account.id;
 
         self.write_repo.save(&account, vec![event.clone()]).await?;
 
@@ -280,7 +280,7 @@ mod tests {
         };
 
         handler
-            .handle_update(account_id.clone(), Some("New Name".into()), None)
+            .handle_update(account_id, Some("New Name".into()), None)
             .await
             .unwrap();
 
@@ -309,7 +309,7 @@ mod tests {
             panic!("expected AccountAdded");
         };
 
-        handler.handle_remove(account_id.clone()).await.unwrap();
+        handler.handle_remove(account_id).await.unwrap();
 
         let events = repo.get_events(&account_id);
         assert_eq!(events.len(), 2); // AccountAdded + AccountRemoved

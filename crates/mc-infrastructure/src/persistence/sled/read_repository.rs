@@ -100,7 +100,7 @@ impl<ES: EventStore> AccountWriteRepository for SledRepository<ES> {
 
         // Also update the read model (AccountSummary).
         let summary = AccountSummary {
-            id: account.id.clone(),
+            id: account.id,
             name: account.name.clone(),
             email: account.email.clone(),
             provider_type: account.provider_type,
@@ -330,11 +330,10 @@ impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
             let (_key, value) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
             let msg: mc_domain::Message = serde_json::from_slice(&value)
                 .map_err(|e| DomainError::Serialization(e.to_string()))?;
-            if let Some(aid) = account_id {
-                if &msg.account_id != aid {
+            if let Some(aid) = account_id
+                && &msg.account_id != aid {
                     continue;
                 }
-            }
             messages.push(msg);
         }
         Ok(messages)
@@ -436,7 +435,7 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 provider_type,
             } => {
                 let summary = AccountSummary {
-                    id: account_id.clone(),
+                    id: *account_id,
                     name: name.clone(),
                     email: email.clone(),
                     provider_type: *provider_type,
@@ -495,8 +494,8 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 mailbox_type,
             } => {
                 let mailbox = Mailbox {
-                    id: mailbox_id.clone(),
-                    account_id: account_id.clone(),
+                    id: *mailbox_id,
+                    account_id: *account_id,
                     path: path.clone(),
                     display_name: path.name().to_string(),
                     mailbox_type: *mailbox_type,
@@ -602,9 +601,9 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
             } => {
                 // Full message in messages tree.
                 let message = Message {
-                    id: message_id.clone(),
-                    account_id: account_id.clone(),
-                    mailbox_id: mailbox_id.clone(),
+                    id: *message_id,
+                    account_id: *account_id,
+                    mailbox_id: *mailbox_id,
                     provider_uid: Some(*provider_uid),
                     message_rfc_id: message_rfc_id.clone(),
                     in_reply_to: in_reply_to.clone(),
@@ -616,7 +615,6 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     attachments: Vec::new(),
                     body_text: None,
                     body_html: None,
-                    raw_headers: None,
                     received_at: *received_at,
                     internal_date: *received_at,
                 };
@@ -634,9 +632,9 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     .map(|a| a.email.to_string())
                     .unwrap_or_default();
                 let summary = MessageSummary {
-                    id: message_id.clone(),
-                    account_id: account_id.clone(),
-                    mailbox_id: mailbox_id.clone(),
+                    id: *message_id,
+                    account_id: *account_id,
+                    mailbox_id: *mailbox_id,
                     provider_uid: Some(*provider_uid),
                     from_name,
                     from_email,
@@ -713,13 +711,13 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                         } else {
                             mc_domain::traits::repository::ConversationSummary {
                                 thread_id: thread_id.clone(),
-                                account_id: account_id.clone(),
+                                account_id: *account_id,
                                 subject,
                                 message_count: 0,
                                 unread_count: 0,
                                 last_message_at: *received_at,
                                 latest_sender: latest_sender.clone(),
-                                sample_message_id: message_id.clone(),
+                                sample_message_id: *message_id,
                             }
                         };
 
@@ -734,7 +732,7 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                         conv.latest_sender = latest_sender;
                         // Keep sample_message_id pointing to the newest message so
                         // get_thread lookups work even after the thread root is gone.
-                        conv.sample_message_id = message_id.clone();
+                        conv.sample_message_id = *message_id;
                     }
 
                     // Index: domain message_id → "{account_id}\x1f{thread_id}"
@@ -859,8 +857,8 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 {
                     let mut message: Message = serde_json::from_slice(&bytes)
                         .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                    let old_mailbox_id = message.mailbox_id.clone();
-                    message.mailbox_id = to_mailbox_id.clone();
+                    let old_mailbox_id = message.mailbox_id;
+                    message.mailbox_id = *to_mailbox_id;
                     let json = serde_json::to_vec(&message)
                         .map_err(|e| DomainError::Serialization(e.to_string()))?;
                     msg_tree
@@ -915,8 +913,8 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 sent_at,
             } => {
                 let message = Message {
-                    id: message_id.clone(),
-                    account_id: account_id.clone(),
+                    id: *message_id,
+                    account_id: *account_id,
                     mailbox_id: MailboxId::new(), // Sent folder assigned during sync
                     provider_uid: None,
                     message_rfc_id: None,
@@ -929,7 +927,6 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     attachments: Vec::new(),
                     body_text: None,
                     body_html: None,
-                    raw_headers: None,
                     received_at: *sent_at,
                     internal_date: *sent_at,
                 };
@@ -1020,8 +1017,8 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 body_html,
             } => {
                 let message = Message {
-                    id: message_id.clone(),
-                    account_id: account_id.clone(),
+                    id: *message_id,
+                    account_id: *account_id,
                     mailbox_id: MailboxId::new(), // Drafts folder assigned during sync
                     provider_uid: None,
                     message_rfc_id: None,
@@ -1034,7 +1031,6 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     attachments: Vec::new(),
                     body_text: body_text.clone(),
                     body_html: body_html.clone(),
-                    raw_headers: None,
                     received_at: chrono::Utc::now(),
                     internal_date: chrono::Utc::now(),
                 };
@@ -1070,13 +1066,13 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     .unwrap_or_else(|| EmailAddress::new("unknown@unknown").unwrap());
 
                 let summary = ContactSummary {
-                    id: contact_id.clone(),
+                    id: *contact_id,
                     display_name: display_name.clone(),
                     primary_email: primary_email.clone(),
                     emails: emails.clone(),
                     organization: None,
                     source: source.clone(),
-                    account_scope: account_scope.clone(),
+                    account_scope: *account_scope,
                 };
                 let tree = self.tree(CONTACTS_TREE)?;
                 let json = serde_json::to_vec(&summary)
@@ -1311,7 +1307,7 @@ impl<ES: EventStore> SledRepository<ES> {
         {
             let mut summary: MessageSummary = serde_json::from_slice(&bytes)
                 .map_err(|e| DomainError::Serialization(e.to_string()))?;
-            summary.mailbox_id = new_mailbox_id.clone();
+            summary.mailbox_id = *new_mailbox_id;
             let new_key = Self::message_summary_key(new_mailbox_id, received_at, message_id);
             let json = serde_json::to_vec(&summary)
                 .map_err(|e| DomainError::Serialization(e.to_string()))?;
@@ -1443,8 +1439,8 @@ impl<ES: EventStore> ContactReadRepository for SledRepository<ES> {
             let key_str = std::str::from_utf8(&key)
                 .map_err(|e| DomainError::Repository(e.to_string()))?;
             // Key format: "{email}:{contact_id}"
-            if let Some(contact_id_str) = key_str.strip_prefix(&prefix) {
-                if let Some(bytes) = contact_tree
+            if let Some(contact_id_str) = key_str.strip_prefix(&prefix)
+                && let Some(bytes) = contact_tree
                     .get(contact_id_str.as_bytes())
                     .map_err(|e| DomainError::Repository(e.to_string()))?
                 {
@@ -1452,7 +1448,6 @@ impl<ES: EventStore> ContactReadRepository for SledRepository<ES> {
                         .map_err(|e| DomainError::Serialization(e.to_string()))?;
                     results.push(s);
                 }
-            }
         }
         Ok(results)
     }
@@ -1496,8 +1491,8 @@ impl<ES: EventStore> ContactReadRepository for SledRepository<ES> {
             let (key, _) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
             let key_str = std::str::from_utf8(&key)
                 .map_err(|e| DomainError::Repository(e.to_string()))?;
-            if let Some(contact_id_str) = key_str.strip_prefix(&prefix) {
-                if let Some(bytes) = contact_tree
+            if let Some(contact_id_str) = key_str.strip_prefix(&prefix)
+                && let Some(bytes) = contact_tree
                     .get(contact_id_str.as_bytes())
                     .map_err(|e| DomainError::Repository(e.to_string()))?
                 {
@@ -1507,7 +1502,6 @@ impl<ES: EventStore> ContactReadRepository for SledRepository<ES> {
                         results.push(s);
                     }
                 }
-            }
         }
         Ok(results)
     }
@@ -1522,11 +1516,10 @@ impl<ES: EventStore> ContactReadRepository for SledRepository<ES> {
             let (_k, v) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
             let s: ContactSummary = serde_json::from_slice(&v)
                 .map_err(|e| DomainError::Serialization(e.to_string()))?;
-            if let Some(aid) = account_id {
-                if s.account_scope.as_ref() != Some(aid) {
+            if let Some(aid) = account_id
+                && s.account_scope.as_ref() != Some(aid) {
                     continue;
                 }
-            }
             all.push(s);
         }
 
@@ -1805,7 +1798,7 @@ mod tests {
             test_config(),
             test_identity(),
         );
-        let account_id = account.id.clone();
+        let account_id = account.id;
 
         // Save through write repo.
         AccountWriteRepository::save(&repo, &account, vec![event]).await.unwrap();
@@ -1910,7 +1903,7 @@ mod tests {
             AggregateType::Account,
             1,
             DomainEvent::AccountAdded {
-                account_id: account_id.clone(),
+                account_id,
                 name: "Work".into(),
                 email: EmailAddress::new("work@example.com").unwrap(),
                 provider_type: ProviderType::Imap,
@@ -1932,7 +1925,7 @@ mod tests {
             AggregateType::Account,
             2,
             DomainEvent::AccountUpdated {
-                account_id: account_id.clone(),
+                account_id,
                 name: Some("Personal".into()),
                 connection_config: None,
             },
@@ -1952,7 +1945,7 @@ mod tests {
             AggregateType::Account,
             3,
             DomainEvent::AccountRemoved {
-                account_id: account_id.clone(),
+                account_id,
             },
         );
         repo.project(&env).await.unwrap();
@@ -1976,8 +1969,8 @@ mod tests {
             AggregateType::Mailbox,
             1,
             DomainEvent::MailboxDiscovered {
-                mailbox_id: mailbox_id.clone(),
-                account_id: account_id.clone(),
+                mailbox_id,
+                account_id,
                 path: MailboxPath::inbox(),
                 mailbox_type: MailboxType::Inbox,
             },
@@ -1998,7 +1991,7 @@ mod tests {
             AggregateType::Mailbox,
             2,
             DomainEvent::MailboxCountsUpdated {
-                mailbox_id: mailbox_id.clone(),
+                mailbox_id,
                 total_messages: 42,
                 unread_messages: 5,
             },
@@ -2025,8 +2018,8 @@ mod tests {
             AggregateType::Mailbox,
             3,
             DomainEvent::MailboxDeleted {
-                mailbox_id: mailbox_id.clone(),
-                account_id: account_id.clone(),
+                mailbox_id,
+                account_id,
             },
         );
         repo.project(&env).await.unwrap();
@@ -2056,9 +2049,9 @@ mod tests {
             AggregateType::Message,
             1,
             DomainEvent::MessageReceived {
-                message_id: message_id.clone(),
-                account_id: account_id.clone(),
-                mailbox_id: mailbox_id.clone(),
+                message_id,
+                account_id,
+                mailbox_id,
                 provider_uid: ProviderUid::new(42),
                 envelope: test_envelope(),
                 flags: vec![Flag::Recent],
@@ -2104,7 +2097,7 @@ mod tests {
             AggregateType::Message,
             2,
             DomainEvent::MessageBodyFetched {
-                message_id: message_id.clone(),
+                message_id,
                 body_text: Some("Hello plain".into()),
                 body_html: Some("<p>Hello</p>".into()),
                 attachments: vec![],
@@ -2125,7 +2118,7 @@ mod tests {
             AggregateType::Message,
             3,
             DomainEvent::MessageFlagged {
-                message_id: message_id.clone(),
+                message_id,
                 mailbox_id: MailboxId::new(),
                 flags_added: vec![Flag::Seen],
                 flags_removed: vec![Flag::Recent],
@@ -2160,8 +2153,8 @@ mod tests {
             AggregateType::Message,
             4,
             DomainEvent::MessageDeleted {
-                message_id: message_id.clone(),
-                mailbox_id: mailbox_id.clone(),
+                message_id,
+                mailbox_id,
                 permanently: false,
             },
         );
@@ -2201,9 +2194,9 @@ mod tests {
             AggregateType::Message,
             1,
             DomainEvent::MessageReceived {
-                message_id: message_id.clone(),
-                account_id: account_id.clone(),
-                mailbox_id: inbox_id.clone(),
+                message_id,
+                account_id,
+                mailbox_id: inbox_id,
                 provider_uid: ProviderUid::new(1),
                 envelope: test_envelope(),
                 flags: vec![],
@@ -2224,9 +2217,9 @@ mod tests {
             AggregateType::Message,
             2,
             DomainEvent::MessageMoved {
-                message_id: message_id.clone(),
-                from_mailbox_id: inbox_id.clone(),
-                to_mailbox_id: archive_id.clone(),
+                message_id,
+                from_mailbox_id: inbox_id,
+                to_mailbox_id: archive_id,
             },
         );
         repo.project(&env).await.unwrap();

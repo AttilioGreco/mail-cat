@@ -62,7 +62,7 @@ where
         )
         .map_err(ApplicationError::Domain)?;
 
-        let contact_id = contact.id.clone();
+        let contact_id = contact.id;
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
 
@@ -111,7 +111,7 @@ where
         )
         .map_err(ApplicationError::Domain)?;
 
-        let contact_id = contact.id.clone();
+        let contact_id = contact.id;
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
 
@@ -221,11 +221,10 @@ where
 
             for summary in &paged.items {
                 // Apply account filter when requested
-                if let Some(ref aid) = account_id {
-                    if summary.account_scope.as_ref() != Some(aid) {
+                if let Some(ref aid) = account_id
+                    && summary.account_scope.as_ref() != Some(aid) {
                         continue;
                     }
-                }
                 if let Err(e) = self.contact_index.index_contact(summary).await {
                     tracing::warn!(contact_id = %summary.id, "rebuild index: failed to index contact: {e}");
                 } else {
@@ -266,12 +265,12 @@ fn contact_to_summary(c: &Contact) -> ContactSummary {
         .unwrap_or_else(|| c.emails.first().map(|e| e.address.clone()).unwrap());
 
     ContactSummary {
-        id: c.id.clone(),
+        id: c.id,
         display_name: c.display_name.clone(),
         primary_email,
         emails: c.emails.clone(),
         organization: c.organization.clone(),
         source: c.source.clone(),
-        account_scope: c.account_scope.clone(),
+        account_scope: c.account_scope,
     }
 }

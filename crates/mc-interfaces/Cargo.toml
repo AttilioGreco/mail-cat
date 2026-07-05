@@ -9,6 +9,7 @@ mc-domain = { workspace = true }
 mc-application = { workspace = true }
 mc-shared = { workspace = true }
 tonic = { workspace = true }
+tonic-prost = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 async-graphql = { workspace = true }
@@ -27,4 +28,4 @@ tokio-stream = { workspace = true }
 async-trait = { workspace = true }
 
 [build-dependencies]
-tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }

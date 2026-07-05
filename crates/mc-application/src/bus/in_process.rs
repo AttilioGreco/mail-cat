@@ -262,7 +262,7 @@ where
                     Vec::new();
 
                 for msg in messages {
-                    let aid = msg.account_id.clone();
+                    let aid = msg.account_id;
                     let all_addrs = msg
                         .envelope
                         .from
@@ -273,7 +273,7 @@ where
                     for addr in all_addrs {
                         let key = (aid.to_string(), addr.email.to_string());
                         if seen.insert(key) {
-                            to_ensure.push((addr.email.clone(), addr.name.clone(), aid.clone()));
+                            to_ensure.push((addr.email.clone(), addr.name.clone(), aid));
                         }
                     }
                 }
@@ -282,19 +282,15 @@ where
                 let mut already_existed = 0u32;
 
                 for (email, display_name, acct_id) in to_ensure {
-                    match self
+                    if let CommandResult::ContactEnsured { created, .. } = self
                         .contact_handler
                         .handle_ensure(email, display_name, acct_id)
-                        .await?
-                    {
-                        CommandResult::ContactEnsured { created, .. } => {
-                            if created {
-                                new_contacts += 1;
-                            } else {
-                                already_existed += 1;
-                            }
+                        .await? {
+                        if created {
+                            new_contacts += 1;
+                        } else {
+                            already_existed += 1;
                         }
-                        _ => {}
                     }
                 }
 

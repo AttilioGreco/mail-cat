@@ -143,7 +143,7 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
                 )
             })?;
 
-        let message_id = summary.id.clone();
+        let message_id = summary.id;
         info!(%message_id, uid = provider_uid.value(), "message found, loading aggregate");
 
         let (mut message, seq) = self.load_message(&message_id).await?;
@@ -200,7 +200,7 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
                 )
             })?;
 
-        let message_id = summary.id.clone();
+        let message_id = summary.id;
         let (message, seq) = self.load_message(&message_id).await?;
 
         let event = message.delete(true);
@@ -321,7 +321,7 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         };
 
         let event = DomainEvent::MessageSent {
-            message_id: message_id.clone(),
+            message_id,
             account_id,
             envelope,
             in_reply_to: outgoing.in_reply_to.clone(),
@@ -345,7 +345,7 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         let (_message, seq) = self.load_message(&message_id).await?;
 
         let event = DomainEvent::DraftDiscarded {
-            message_id: message_id.clone(),
+            message_id,
         };
 
         self.append_and_publish(&message_id, AggregateType::Message, seq, event)
@@ -431,9 +431,9 @@ mod tests {
             let store = Self::new();
             // Seed with a MessageReceived event.
             let event = DomainEvent::MessageReceived {
-                message_id: message.id.clone(),
-                account_id: message.account_id.clone(),
-                mailbox_id: message.mailbox_id.clone(),
+                message_id: message.id,
+                account_id: message.account_id,
+                mailbox_id: message.mailbox_id,
                 provider_uid: message.provider_uid.unwrap(),
                 message_rfc_id: message.message_rfc_id.clone(),
                 in_reply_to: message.in_reply_to.clone(),
@@ -745,6 +745,7 @@ mod tests {
             vec![],
             2048,
             false,
+            chrono::Utc::now(),
         );
         msg
     }
@@ -754,7 +755,7 @@ mod tests {
     #[tokio::test]
     async fn handle_set_flags_marks_as_read() {
         let msg = make_test_message();
-        let msg_id = msg.id.clone();
+        let msg_id = msg.id;
 
         let es = Arc::new(MockEventStore::with_message(&msg));
         let registry = Arc::new(MockProviderRegistry::new(
@@ -776,7 +777,7 @@ mod tests {
     #[tokio::test]
     async fn handle_move_produces_event() {
         let msg = make_test_message();
-        let msg_id = msg.id.clone();
+        let msg_id = msg.id;
 
         let es = Arc::new(MockEventStore::with_message(&msg));
         let registry = Arc::new(MockProviderRegistry::new(
@@ -804,8 +805,8 @@ mod tests {
     #[tokio::test]
     async fn handle_delete_produces_event() {
         let msg = make_test_message();
-        let msg_id = msg.id.clone();
-        let mbx_id = msg.mailbox_id.clone();
+        let msg_id = msg.id;
+        let mbx_id = msg.mailbox_id;
 
         let es = Arc::new(MockEventStore::with_message(&msg));
         let registry = Arc::new(MockProviderRegistry::new(

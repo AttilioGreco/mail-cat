@@ -7,7 +7,7 @@ use crate::value_objects::flag::Flag;
 use crate::value_objects::mailbox_path::MailboxPath;
 
 /// Unique mailbox identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MailboxId(Uuid);
 
 impl MailboxId {
@@ -80,8 +80,8 @@ impl Mailbox {
         let display_name = path.name().to_string();
 
         let event = DomainEvent::MailboxDiscovered {
-            mailbox_id: id.clone(),
-            account_id: account_id.clone(),
+            mailbox_id: id,
+            account_id,
             path: path.clone(),
             mailbox_type,
         };
@@ -108,7 +108,7 @@ impl Mailbox {
         self.unread_messages = unread;
 
         DomainEvent::MailboxCountsUpdated {
-            mailbox_id: self.id.clone(),
+            mailbox_id: self.id,
             total_messages: total,
             unread_messages: unread,
         }
@@ -121,7 +121,7 @@ impl Mailbox {
         self.path = new_path.clone();
 
         DomainEvent::MailboxRenamed {
-            mailbox_id: self.id.clone(),
+            mailbox_id: self.id,
             old_path,
             new_path,
         }
@@ -130,8 +130,8 @@ impl Mailbox {
     /// Produce a deletion event.
     pub fn delete(&self) -> DomainEvent {
         DomainEvent::MailboxDeleted {
-            mailbox_id: self.id.clone(),
-            account_id: self.account_id.clone(),
+            mailbox_id: self.id,
+            account_id: self.account_id,
         }
     }
 
@@ -180,8 +180,8 @@ impl Mailbox {
 
         let display_name = path.name().to_string();
         let mut mailbox = Self {
-            id: mailbox_id.clone(),
-            account_id: account_id.clone(),
+            id: *mailbox_id,
+            account_id: *account_id,
             path: path.clone(),
             display_name,
             mailbox_type: *mailbox_type,
@@ -248,18 +248,18 @@ mod tests {
         let account_id = AccountId::new();
         let events = vec![
             DomainEvent::MailboxDiscovered {
-                mailbox_id: id.clone(),
-                account_id: account_id.clone(),
+                mailbox_id: id,
+                account_id,
                 path: MailboxPath::inbox(),
                 mailbox_type: MailboxType::Inbox,
             },
             DomainEvent::MailboxCountsUpdated {
-                mailbox_id: id.clone(),
+                mailbox_id: id,
                 total_messages: 42,
                 unread_messages: 5,
             },
             DomainEvent::MailboxRenamed {
-                mailbox_id: id.clone(),
+                mailbox_id: id,
                 old_path: MailboxPath::inbox(),
                 new_path: MailboxPath::parse("Primary", '/').unwrap(),
             },

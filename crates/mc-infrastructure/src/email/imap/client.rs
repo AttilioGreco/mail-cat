@@ -430,6 +430,7 @@ impl EmailProvider for ImapEmailProvider {
             vec![],
             0,
             false,
+            now,
         );
         Ok(Message { body_text, body_html, ..msg })
     }

@@ -16,18 +16,15 @@ use crate::value_objects::email_address::EmailAddress;
 
 /// Label for a contact email address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ContactEmailLabel {
     Work,
     Home,
+    #[default]
     Other,
     Custom(String),
 }
 
-impl Default for ContactEmailLabel {
-    fn default() -> Self {
-        Self::Other
-    }
-}
 
 // ── ContactEmail ─────────────────────────────────────────────────────────────
 
@@ -120,12 +117,12 @@ impl Contact {
         let id = ContactId::new();
 
         let event = DomainEvent::ContactAdded {
-            contact_id: id.clone(),
+            contact_id: id,
             display_name: display_name.clone(),
             emails: emails.clone(),
             source: source.clone(),
             external_id: external_id.clone(),
-            account_scope: account_scope.clone(),
+            account_scope,
         };
 
         let contact = Self {
@@ -180,7 +177,7 @@ impl Contact {
         self.updated_at = Utc::now();
 
         Ok(DomainEvent::ContactUpdated {
-            contact_id: self.id.clone(),
+            contact_id: self.id,
             display_name,
             emails,
             phones,
@@ -192,7 +189,7 @@ impl Contact {
     /// Mark the contact as removed and produce the event.
     pub fn remove(&self) -> DomainEvent {
         DomainEvent::ContactRemoved {
-            contact_id: self.id.clone(),
+            contact_id: self.id,
         }
     }
 
@@ -221,8 +218,8 @@ impl Contact {
         self.updated_at = Utc::now();
 
         DomainEvent::ContactMerged {
-            kept_id: self.id.clone(),
-            discarded_id: other.id.clone(),
+            kept_id: self.id,
+            discarded_id: other.id,
             merged_emails: self.emails.clone(),
         }
     }
@@ -291,7 +288,7 @@ impl Contact {
 
         let now = Utc::now();
         let mut contact = Self {
-            id: contact_id.clone(),
+            id: *contact_id,
             display_name: display_name.clone(),
             emails: emails.clone(),
             phones: Vec::new(),
@@ -299,7 +296,7 @@ impl Contact {
             notes: None,
             source: source.clone(),
             external_id: external_id.clone(),
-            account_scope: account_scope.clone(),
+            account_scope: *account_scope,
             created_at: now,
             updated_at: now,
         };

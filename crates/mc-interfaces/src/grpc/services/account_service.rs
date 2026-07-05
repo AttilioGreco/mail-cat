@@ -187,7 +187,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         };
 
         let command = Command::UpdateAccount {
-            account_id: account_id.clone(),
+            account_id,
             name: req.name,
             connection_config,
         };

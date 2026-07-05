@@ -252,13 +252,13 @@ impl AppContext {
                     .iter()
                     .find(|a| a.email.as_str() == account_config.email)
                     .unwrap();
-                provider_registry.register_provider(summary.id.clone(), provider);
+                provider_registry.register_provider(summary.id, provider);
                 tracing::info!(
                     "Registered provider for existing account '{}' ({})",
                     summary.name,
                     summary.email
                 );
-                registered_ids.push((summary.id.clone(), summary.name.clone()));
+                registered_ids.push((summary.id, summary.name.clone()));
             } else {
                 // Not in DB — create via aggregate + save
                 let email =
@@ -300,14 +300,14 @@ impl AppContext {
                     connection_config,
                     identity,
                 );
-                let account_id = account.id.clone();
+                let account_id = account.id;
 
                 repository_arc
                     .save(&account, vec![event])
                     .await
                     .context("failed to auto-create account")?;
 
-                provider_registry.register_provider(account_id.clone(), provider);
+                provider_registry.register_provider(account_id, provider);
                 tracing::info!(
                     "Auto-created account '{}' ({}) and registered provider",
                     account_config.name,
@@ -373,7 +373,7 @@ impl AppContext {
                             let cmd = mc_application::Command::EnsureContact {
                                 email,
                                 display_name: name.filter(|s| !s.is_empty()),
-                                account_id: account_id.clone(),
+                                account_id,
                             };
                             if let Err(e) = ensure_bus.dispatch(cmd).await {
                                 tracing::warn!("EnsureContact from message failed: {e}");
@@ -434,15 +434,19 @@ impl AppContext {
                             // synchronous wait_for_action callback.
                             let rt = tokio::runtime::Handle::current();
                             tokio::task::spawn_blocking(move || {
-                                let Ok(handle) = notify_rust::Notification::new()
+                                let handle = match notify_rust::Notification::new()
                                     .summary(&format!("New message from {from}"))
                                     .body(&subject)
                                     .icon(&app_icon_path())
                                     .action("archive", "Archivia")
                                     .action("open", "Apri Mail Cat")
                                     .show()
-                                else {
-                                    return;
+                                {
+                                    Ok(h) => h,
+                                    Err(e) => {
+                                        tracing::warn!("Desktop notification failed: {e}");
+                                        return;
+                                    }
                                 };
                                 handle.wait_for_action(move |action| match action {
                                     "archive" => {
@@ -451,7 +455,7 @@ impl AppContext {
                                             // resolve both the source path and the Archive target.
                                             let mailboxes = match q
                                                 .dispatch(mc_application::Query::ListMailboxes {
-                                                    account_id: account_id.clone(),
+                                                    account_id,
                                                 })
                                                 .await
                                             {
@@ -468,9 +472,9 @@ impl AppContext {
                                                     if let Err(e) = cmd
                                                         .dispatch(
                                                             mc_application::Command::MoveMessage {
-                                                                message_id: message_id.clone(),
-                                                                from_mailbox_id: src.id.clone(),
-                                                                to_mailbox_id: dst.id.clone(),
+                                                                message_id,
+                                                                from_mailbox_id: src.id,
+                                                                to_mailbox_id: dst.id,
                                                                 from_mailbox_path: src.path.clone(),
                                                                 to_mailbox_path: dst.path.clone(),
                                                             },
@@ -535,7 +539,7 @@ impl AppContext {
         // ── Auto-sync registered accounts in background ─────────────────
         for (account_id, name) in &registered_ids {
             let sync = sync_service.clone();
-            let id = account_id.clone();
+            let id = *account_id;
             let account_name = name.clone();
             tokio::spawn(async move {
                 match sync.start_sync(&id).await {
@@ -618,7 +622,7 @@ impl AppContext {
             // to get the server-correct INBOX MailboxPath (with the real delimiter).
             let local_mailboxes = match query_bus
                 .dispatch(mc_application::Query::ListMailboxes {
-                    account_id: account_id.clone(),
+                    account_id: *account_id,
                 })
                 .await
             {
@@ -647,7 +651,7 @@ impl AppContext {
 
                 let sync = Arc::clone(&sync_service);
                 let cmd_bus = command_bus.clone();
-                let id = account_id.clone();
+                let id = *account_id;
                 let account_name = name.clone();
                 let sd = shutdown.clone();
 
@@ -677,7 +681,7 @@ impl AppContext {
                                 } => {
                                     if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
                                         let sync_clone = Arc::clone(&sync);
-                                        let id_clone = id.clone();
+                                        let id_clone = id;
                                         let mailbox_clone = mailbox.clone();
                                         let from_uid = *uid;
                                         tokio::spawn(async move {
@@ -702,7 +706,7 @@ impl AppContext {
                                 } => {
                                     if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
                                         let sync_clone = Arc::clone(&sync);
-                                        let id_clone = id.clone();
+                                        let id_clone = id;
                                         let mailbox_clone = mailbox.clone();
                                         tokio::spawn(async move {
                                             let _permit = permit;
@@ -733,7 +737,7 @@ impl AppContext {
                                 } if uid.value() > 0 => {
                                     if let Some(mb_id) = path_to_id.get(&mailbox.full_path()) {
                                         let cmd = mc_application::Command::ApplyRemoteFlagChange {
-                                            mailbox_id: mb_id.clone(),
+                                            mailbox_id: *mb_id,
                                             provider_uid: mc_application::commands::ProviderUid::new(
                                                 uid.value(),
                                             ),
@@ -758,7 +762,7 @@ impl AppContext {
                                 } => {
                                     if let Some(mb_id) = path_to_id.get(&mailbox.full_path()) {
                                         let cmd = mc_application::Command::ApplyRemoteExpunge {
-                                            mailbox_id: mb_id.clone(),
+                                            mailbox_id: *mb_id,
                                             provider_uid: mc_application::commands::ProviderUid::new(
                                                 uid.value(),
                                             ),

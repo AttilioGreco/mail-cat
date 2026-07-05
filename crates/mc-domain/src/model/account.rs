@@ -7,7 +7,7 @@ use crate::events::DomainEvent;
 use crate::value_objects::email_address::EmailAddress;
 
 /// Unique account identifier (UUID v7).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AccountId(Uuid);
 
 impl AccountId {
@@ -155,7 +155,7 @@ impl Account {
         let id = AccountId::new();
 
         let event = DomainEvent::AccountAdded {
-            account_id: id.clone(),
+            account_id: id,
             name: name.clone(),
             email: email.clone(),
             provider_type,
@@ -191,7 +191,7 @@ impl Account {
         self.updated_at = Utc::now();
 
         DomainEvent::AccountUpdated {
-            account_id: self.id.clone(),
+            account_id: self.id,
             name,
             connection_config,
         }
@@ -200,14 +200,14 @@ impl Account {
     /// Mark the account as removed and produce the event.
     pub fn remove(&self) -> DomainEvent {
         DomainEvent::AccountRemoved {
-            account_id: self.id.clone(),
+            account_id: self.id,
         }
     }
 
     /// Mark sync as started.
     pub fn start_sync(&self) -> DomainEvent {
         DomainEvent::AccountSyncStarted {
-            account_id: self.id.clone(),
+            account_id: self.id,
         }
     }
 
@@ -266,7 +266,7 @@ impl Account {
 
         let now = Utc::now();
         let mut account = Self {
-            id: account_id.clone(),
+            id: *account_id,
             name: name.clone(),
             email: email.clone(),
             provider_type: *provider_type,
@@ -399,13 +399,13 @@ mod tests {
         let id = AccountId::new();
         let events = vec![
             DomainEvent::AccountAdded {
-                account_id: id.clone(),
+                account_id: id,
                 name: "Test".into(),
                 email: EmailAddress::new("test@example.com").unwrap(),
                 provider_type: ProviderType::Imap,
             },
             DomainEvent::AccountRemoved {
-                account_id: id.clone(),
+                account_id: id,
             },
         ];
 

@@ -30,10 +30,12 @@ mc-client = { path = "crates/mc-client" }
 tokio = { version = "1", features = ["full"] }
 
 # gRPC
-tonic = "0.13"
-tonic-build = "0.13"
-prost = "0.13"
-prost-types = "0.13"
+tonic = "0.14"
+tonic-build = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+prost-types = "0.14"
 
 # GraphQL
 async-graphql = "7"
@@ -42,9 +44,9 @@ axum = "0.8"
 
 # Email
 async-imap = "0.11"
-async-native-tls = "0.5"
+async-native-tls = "0.6"
 lettre = { version = "0.11", features = ["tokio1-native-tls"] }
-mailparse = "0.15"
+mailparse = "0.16"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 
@@ -52,7 +54,7 @@ tokio-native-tls = "0.3"
 sled = "0.34"
 
 # Search
-tantivy = "0.22"
+tantivy = "0.26"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -73,7 +75,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 
 # Config
-toml = "0.8"
+toml = "1.1"
 dirs = "6"
 
 # Utilities

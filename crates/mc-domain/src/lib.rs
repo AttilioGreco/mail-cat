@@ -1,7 +1,3 @@
-// Our traits are consumed via generics (`<P: EmailProvider>`), not dyn dispatch.
-// `async fn` in traits is safe and correct in this context.
-#![allow(async_fn_in_trait)]
-
 pub mod error;
 pub mod events;
 pub mod model;

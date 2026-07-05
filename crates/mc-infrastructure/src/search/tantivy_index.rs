@@ -356,7 +356,7 @@ impl SearchIndex for TantivySearchIndex {
 
         // Search with TopDocs collector
         let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(offset + limit))
+            .search(&parsed_query, &TopDocs::with_limit(offset + limit).order_by_score())
             .map_err(|e| DomainError::SearchIndex(format!("Search failed: {}", e)))?;
 
         // Count total hits
@@ -490,7 +490,7 @@ impl SearchIndex for TantivySearchIndex {
 
         // Fetch top N docs matching the prefix
         let top_docs = searcher
-            .search(&bool_query, &TopDocs::with_limit(200))
+            .search(&bool_query, &TopDocs::with_limit(200).order_by_score())
             .map_err(|e| DomainError::SearchIndex(format!("Suggest search failed: {}", e)))?;
 
         // Aggregate individual values (not full stored text) from matching docs.
@@ -593,7 +593,7 @@ impl SearchIndex for TantivySearchIndex {
             count += 1;
 
             // Commit every 1000 documents
-            if count % 1000 == 0 {
+            if count.is_multiple_of(1000) {
                 writer
                     .commit()
                     .map_err(|e| DomainError::SearchIndex(format!("Commit failed: {}", e)))?;
@@ -722,7 +722,6 @@ mod tests {
             size_bytes: 1024,
             has_attachments: false,
             attachments: vec![],
-            raw_headers: None,
             received_at: Utc::now(),
             internal_date: Utc::now(),
         }
@@ -896,7 +895,6 @@ mod tests {
             size_bytes: 1024,
             has_attachments: false,
             attachments: vec![],
-            raw_headers: None,
             received_at: Utc::now(),
             internal_date: Utc::now(),
         }

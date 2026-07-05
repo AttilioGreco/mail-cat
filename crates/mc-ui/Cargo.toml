@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Tauri
-tauri = { version = "2.2", features = ["devtools"] }
+tauri = { version = "2.11", features = ["devtools"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
@@ -29,4 +29,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [build-dependencies]
-tauri-build = { version = "2.2", features = [] }
+tauri-build = { version = "2.6", features = [] }

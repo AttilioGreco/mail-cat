@@ -153,7 +153,7 @@ impl<
         // 1. Emit AccountSyncStarted
         info!("Starting sync for account");
         let sync_started = DomainEvent::AccountSyncStarted {
-            account_id: account_id.clone(),
+            account_id: *account_id,
         };
         self.append_and_project(
             &account_id.to_string(),
@@ -164,7 +164,7 @@ impl<
 
         // 2. List remote mailboxes
         progress.push(SyncProgressEvent {
-            account_id: account_id.clone(),
+            account_id: *account_id,
             state: SyncState::ListingMailboxes,
             processed: 0,
             total: 0,
@@ -194,7 +194,7 @@ impl<
             if !local_by_path.contains_key(&remote.path) {
                 info!(path = %remote.path, "Discovering new mailbox");
                 let (mailbox, event) =
-                    Mailbox::discover(account_id.clone(), remote.path.clone(), remote.mailbox_type);
+                    Mailbox::discover(*account_id, remote.path.clone(), remote.mailbox_type);
                 self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
                     .await?;
             }
@@ -228,9 +228,9 @@ impl<
             };
 
             progress.push(SyncProgressEvent {
-                account_id: account_id.clone(),
+                account_id: *account_id,
                 state: SyncState::FetchingEnvelopes {
-                    mailbox_id: local.id.clone(),
+                    mailbox_id: local.id,
                 },
                 processed: mailboxes_synced,
                 total: total_mailboxes,
@@ -350,8 +350,8 @@ impl<
                 }
 
                 let (_message, event) = Message::receive(
-                    account_id.clone(),
-                    local.id.clone(),
+                    *account_id,
+                    local.id,
                     envelope_summary.provider_uid,
                     envelope_summary.message_rfc_id.clone(),
                     envelope_summary.in_reply_to.clone(),
@@ -360,10 +360,11 @@ impl<
                     envelope_summary.flags.clone(),
                     envelope_summary.size_bytes,
                     envelope_summary.has_attachments,
+                    envelope_summary.internal_date,
                 );
 
                 if let DomainEvent::MessageReceived { ref message_id, .. } = event {
-                    new_messages.push((message_id.clone(), envelope_summary.provider_uid));
+                    new_messages.push((*message_id, envelope_summary.provider_uid));
                     self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
                         .await?;
                     messages_synced += 1;
@@ -388,7 +389,7 @@ impl<
                         for result in body_results {
                             if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
                                 let event = DomainEvent::MessageBodyFetched {
-                                    message_id: (*message_id).clone(),
+                                    message_id: *(*message_id),
                                     body_text: result.body_text,
                                     body_html: result.body_html,
                                     // TODO: download and index attachments
@@ -476,7 +477,7 @@ impl<
 
         // 7. Emit AccountSyncCompleted
         let sync_completed = DomainEvent::AccountSyncCompleted {
-            account_id: account_id.clone(),
+            account_id: *account_id,
             mailboxes_synced,
             messages_synced,
         };
@@ -494,7 +495,7 @@ impl<
         );
 
         progress.push(SyncProgressEvent {
-            account_id: account_id.clone(),
+            account_id: *account_id,
             state: SyncState::Completed,
             processed: mailboxes_synced,
             total: total_mailboxes,
@@ -539,7 +540,7 @@ impl<
             .map_err(|e| ApplicationError::SyncFailed(format!("Failed to fetch body: {e}")))?;
 
         let event = DomainEvent::MessageBodyFetched {
-            message_id: message_id.clone(),
+            message_id: *message_id,
             body_text: fetched.body_text.clone(),
             body_html: fetched.body_html.clone(),
             attachments: fetched.attachments.clone(),
@@ -633,8 +634,8 @@ impl<
 
         for envelope_summary in &envelopes {
             let (_message, event) = Message::receive(
-                    account_id.clone(),
-                    local.id.clone(),
+                    *account_id,
+                    local.id,
                     envelope_summary.provider_uid,
                     envelope_summary.message_rfc_id.clone(),
                     envelope_summary.in_reply_to.clone(),
@@ -643,9 +644,10 @@ impl<
                     envelope_summary.flags.clone(),
                     envelope_summary.size_bytes,
                     envelope_summary.has_attachments,
+                    envelope_summary.internal_date,
                 );
             if let DomainEvent::MessageReceived { ref message_id, .. } = event {
-                new_messages.push((message_id.clone(), envelope_summary.provider_uid));
+                new_messages.push((*message_id, envelope_summary.provider_uid));
                 self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
                     .await?;
                 new_count += 1;
@@ -663,7 +665,7 @@ impl<
                     for result in body_results {
                         if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
                             let body_event = DomainEvent::MessageBodyFetched {
-                                message_id: (*message_id).clone(),
+                                message_id: *(*message_id),
                                 body_text: result.body_text,
                                 body_html: result.body_html,
                                 attachments: vec![],
@@ -681,11 +683,9 @@ impl<
                             }
                             if let Ok(Some(full_msg)) =
                                 self.projector.get_message(message_id).await
-                            {
-                                if let Err(e) = self.search_index.index_message(&full_msg).await {
+                                && let Err(e) = self.search_index.index_message(&full_msg).await {
                                     warn!(%message_id, error = %e, "sync_mailbox: search index failed");
                                 }
-                            }
                         }
                     }
                 }
@@ -844,8 +844,8 @@ impl<
                         "Reconciling flag diff"
                     );
                     let event = DomainEvent::MessageFlagged {
-                        message_id: summary.id.clone(),
-                        mailbox_id: local.id.clone(),
+                        message_id: summary.id,
+                        mailbox_id: local.id,
                         flags_added: flags_to_add,
                         flags_removed: flags_to_remove,
                     };
@@ -865,8 +865,8 @@ impl<
                     "Message expunged remotely, deleting locally"
                 );
                 let event = DomainEvent::MessageDeleted {
-                    message_id: summary.id.clone(),
-                    mailbox_id: local.id.clone(),
+                    message_id: summary.id,
+                    mailbox_id: local.id,
                     permanently: false,
                 };
                 self.append_and_project(
@@ -898,7 +898,7 @@ impl<
         unread_messages: u32,
     ) -> Result<(), ApplicationError> {
         let event = DomainEvent::MailboxCountsUpdated {
-            mailbox_id: mailbox.id.clone(),
+            mailbox_id: mailbox.id,
             total_messages,
             unread_messages,
         };
@@ -1201,8 +1201,8 @@ mod tests {
             } = &envelope.payload
             {
                 self.mailboxes.lock().unwrap().push(Mailbox {
-                    id: mailbox_id.clone(),
-                    account_id: account_id.clone(),
+                    id: *mailbox_id,
+                    account_id: *account_id,
                     path: path.clone(),
                     display_name: path.name().to_string(),
                     mailbox_type: *mailbox_type,
@@ -1389,12 +1389,12 @@ mod tests {
     async fn sync_discovers_new_mailboxes() {
         let account_id = AccountId::new();
         let (inbox, _) = Mailbox::discover(
-            account_id.clone(),
+            account_id,
             MailboxPath::new(vec!["INBOX".to_string()], '/').unwrap(),
             MailboxType::Inbox,
         );
         let (sent, _) = Mailbox::discover(
-            account_id.clone(),
+            account_id,
             MailboxPath::new(vec!["Sent".to_string()], '/').unwrap(),
             MailboxType::Sent,
         );
@@ -1422,7 +1422,7 @@ mod tests {
     async fn sync_fetches_envelopes_and_emits_message_received() {
         let account_id = AccountId::new();
         let (inbox, _) = Mailbox::discover(
-            account_id.clone(),
+            account_id,
             MailboxPath::new(vec!["INBOX".to_string()], '/').unwrap(),
             MailboxType::Inbox,
         );
@@ -1460,7 +1460,7 @@ mod tests {
     async fn incremental_sync_uses_checkpoint() {
         let account_id = AccountId::new();
         let (inbox, _) = Mailbox::discover(
-            account_id.clone(),
+            account_id,
             MailboxPath::new(vec!["INBOX".to_string()], '/').unwrap(),
             MailboxType::Inbox,
         );
@@ -1507,7 +1507,7 @@ mod tests {
     async fn cancel_sync_stops_early() {
         let account_id = AccountId::new();
         let (inbox, _) = Mailbox::discover(
-            account_id.clone(),
+            account_id,
             MailboxPath::new(vec!["INBOX".to_string()], '/').unwrap(),
             MailboxType::Inbox,
         );
@@ -1579,7 +1579,7 @@ mod tests {
     async fn sync_updates_mailbox_counts() {
         let account_id = AccountId::new();
         let (inbox, _) = Mailbox::discover(
-            account_id.clone(),
+            account_id,
             MailboxPath::new(vec!["INBOX".to_string()], '/').unwrap(),
             MailboxType::Inbox,
         );
@@ -1622,7 +1622,7 @@ mod tests {
     async fn sync_saves_checkpoint_after_mailbox() {
         let account_id = AccountId::new();
         let (inbox, _) = Mailbox::discover(
-            account_id.clone(),
+            account_id,
             MailboxPath::new(vec!["INBOX".to_string()], '/').unwrap(),
             MailboxType::Inbox,
         );
