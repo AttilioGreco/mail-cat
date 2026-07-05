@@ -90,3 +90,26 @@ src/
 
 - Aggiornamento versioni pacchetti (React RC→stable, Tailwind 3→4, TanStack Query, Zustand, ecc.) — progetto separato successivo.
 - Qualunque nuova feature o modifica comportamentale: è una migrazione puramente strutturale, il comportamento dell'app deve restare identico.
+
+## Correzioni emerse durante l'implementazione (enforcement Steiger)
+
+L'attivazione di Steiger con `fsd.configs.recommended` ha trovato 3 violazioni reali di boundary non previste dalla progettazione iniziale. Corrette così:
+
+1. **Store di sessione non può vivere in `app/`.** I widget (Sidebar, MessageList, ecc.) devono leggerlo/scriverlo, ma per la regola di dipendenza FSD i widget non possono importare da `app/` (layer superiore). Spostato in **`entities/session`** (layer basso, importabile da tutti sopra) — pattern standard FSD per stato di sessione condiviso. Inoltre `selectedMailbox: Mailbox | null` è stato ridotto a **`selectedMailboxId: string | null`**, perché tenere l'oggetto intero avrebbe richiesto importare l'entity `mailbox` da dentro `entities/session` (cross-import vietato tra slice dello stesso layer). L'unico consumer che aveva bisogno dell'oggetto completo (`MessageList`, per `name`/`path`) ora lo deriva da `useMailboxes(selectedAccountId).find(...)`.
+
+2. **`entities/identity` era usata solo da `features/compose-message`** (violazione `insignificant-slice`) e importava `entities/account` (cross-import vietato tra entity). Risolto fondendo `useIdentities.ts` e il tipo `Identity` dentro `features/compose-message/model` — non è mai stata una vera entity a sé stante.
+
+3. **`features/toggle-theme` era importata da `features/manage-settings`** (cross-import vietato tra feature dello stesso layer). Il tema è letto sia da un widget (`EmailContent`, per `mailContentMode`) sia da una feature (`LocalSettingsPanel`) — esattamente il profilo di uno stato condiviso di basso livello. Spostato in **`entities/theme`**.
+
+**Regola disattivata con motivazione:** `fsd/insignignificant-slice` è disattivata in `steiger.config.ts` per l'intero progetto. mail-cat ha una sola pagina (`pages/main`), quindi ogni widget top-level (sidebar, message-list, message-pane) è per definizione referenziato da un solo posto — l'euristica non si applica a un'app desktop a finestra singola e seguirla alla lettera avrebbe richiesto fondere widget concettualmente distinti solo per silenziare l'avviso.
+
+**Bonus non pianificato:** rimossi `useSearch`/`SearchHitResult` (dead code in `useMutations.ts`, mai referenziati altrove) invece di trascinarli nella nuova struttura, e ripulite 3 righe `// eslint-disable-next-line react/no-danger` residue in `ComposeEditor.tsx` che puntavano a una regola di un plugin (`eslint-plugin-react`) mai installato in questo progetto.
+
+## Verifica effettivamente eseguita
+
+- `npx tsc --noEmit`: pulito.
+- `npx steiger ./src`: nessun problema.
+- `bun run build` (tsc + vite build): pulito.
+- `bun run lint`: 0 errori, 3 warning preesistenti su `react-hooks/exhaustive-deps` (in `ComposeHeader.tsx`, `ComposeWindow.tsx`, `useInboxWatcher.ts`) — mai stati controllati prima perché ESLint non era mai stato configurato in questo progetto. Lasciati invariati: sono comportamento preesistente, non introdotto da questa migrazione, e correggerli rischierebbe di cambiare comportamento a runtime.
+- **`just build-release` (gate finale) NON eseguito con successo**: bloccato da un aggiornamento delle dipendenze Rust (`tonic` 0.13→0.14, `tantivy` 0.22→0.26, `toml` 0.8→1.1, ecc.) in corso in parallelo da parte dell'utente in un altro editor, non ancora completato/adattato — non correlato a questa migrazione frontend. Da rieseguire quando quel lavoro sarà concluso.
+- Smoke test manuale nell'app Tauri: **non eseguito**, bloccato dallo stesso problema di build Rust (impossibile lanciare `cargo tauri build`/`just dev` finché il workspace Rust non torna a compilare).
