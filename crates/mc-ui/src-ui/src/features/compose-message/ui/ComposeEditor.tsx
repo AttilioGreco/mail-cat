@@ -223,11 +223,16 @@ function CommandPalette({ onClose, onSelect }: {
 }) {
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
+  const [prevQuery, setPrevQuery] = useState(query);
   const inputRef = useRef<HTMLInputElement>(null);
   const filtered = PALETTE_ITEMS.filter((i) => i.toLowerCase().includes(query.toLowerCase()));
 
+  if (query !== prevQuery) {
+    setPrevQuery(query);
+    setCursor(0);
+  }
+
   useEffect(() => { inputRef.current?.focus(); }, []);
-  useEffect(() => { setCursor(0); }, [query]);
 
   return (
     <div className="absolute inset-x-0 top-0 z-10 mx-4 mt-2 overflow-hidden rounded-lg border border-border bg-background shadow-xl">
@@ -298,12 +303,16 @@ export function ComposeEditor({
 }: ComposeEditorProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('write');
   const [showSignature, setShowSignature] = useState(!!signatureHtml);
+  const [prevSignatureHtml, setPrevSignatureHtml] = useState(signatureHtml);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [currentMd, setCurrentMd] = useState(initialMd);
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const imagesRef = useRef<Map<string, InlineImage>>(new Map());
 
-  useEffect(() => { setShowSignature(!!signatureHtml); }, [signatureHtml]);
+  if (signatureHtml !== prevSignatureHtml) {
+    setPrevSignatureHtml(signatureHtml);
+    setShowSignature(!!signatureHtml);
+  }
 
   // ── Helper: insert/wrap text at cursor via CodeMirror API ─────────────────
 

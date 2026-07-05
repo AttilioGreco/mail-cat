@@ -61,6 +61,7 @@ pub struct MessageSummaryDto {
     pub from_name: Option<String>,
     pub from_email: String,
     pub to: Vec<String>,
+    pub cc: Vec<String>,
     pub date: String, // ISO 8601
     pub is_read: bool,
     pub has_attachments: bool,
@@ -71,6 +72,9 @@ pub struct MessageBodyDto {
     pub id: String,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
+    pub rfc_message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
 }
 
 /// Payload emitted on "mailbox:event" Tauri event.
@@ -108,6 +112,7 @@ fn message_to_dto(m: MessageSummary) -> MessageSummaryDto {
         from_name: m.from_name,
         from_email: m.from_email,
         to: m.to,
+        cc: m.cc,
         date: m.date.to_rfc3339(),
         is_read: m.is_read,
         has_attachments: m.has_attachments,
@@ -115,7 +120,14 @@ fn message_to_dto(m: MessageSummary) -> MessageSummaryDto {
 }
 
 fn body_to_dto(b: MessageBody) -> MessageBodyDto {
-    MessageBodyDto { id: b.id, html_body: b.html_body, text_body: b.text_body }
+    MessageBodyDto {
+        id: b.id,
+        html_body: b.html_body,
+        text_body: b.text_body,
+        rfc_message_id: b.rfc_message_id,
+        in_reply_to: b.in_reply_to,
+        references: b.references,
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -571,13 +583,19 @@ fn conversation_to_dto(c: ConversationSummary) -> ConversationSummaryDto {
 #[tauri::command]
 pub async fn list_conversations(
     account_id: String,
+    mailbox_id: Option<String>,
     page: Option<u32>,
     page_size: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<Vec<ConversationSummaryDto>, String> {
     let client = get_or_connect(&state).await?;
     client
-        .list_conversations(&account_id, page.unwrap_or(1), page_size.unwrap_or(100))
+        .list_conversations(
+            &account_id,
+            mailbox_id.as_deref(),
+            page.unwrap_or(1),
+            page_size.unwrap_or(100),
+        )
         .await
         .map(|v| v.into_iter().map(conversation_to_dto).collect())
         .map_err(|e| e.to_string())
@@ -596,6 +614,8 @@ pub struct ThreadMessageDto {
     pub is_read: bool,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
 }
 
 fn thread_message_to_dto(m: ThreadMessage) -> ThreadMessageDto {
@@ -611,6 +631,8 @@ fn thread_message_to_dto(m: ThreadMessage) -> ThreadMessageDto {
         is_read: m.is_read,
         html_body: m.html_body,
         text_body: m.text_body,
+        in_reply_to: m.in_reply_to,
+        references: m.references,
     }
 }
 

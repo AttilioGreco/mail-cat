@@ -24,7 +24,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   selectedMailboxId: null,
   selectedMessageId: null,
   selectedThreadMessageId: null,
-  conversationMode: true,
+  conversationMode: false,
   showUnreadOnly: false,
 
   selectAccount: (id) =>

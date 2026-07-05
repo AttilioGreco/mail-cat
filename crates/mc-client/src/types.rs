@@ -42,6 +42,7 @@ pub struct MessageSummary {
     pub from_name: Option<String>,
     pub from_email: String,
     pub to: Vec<String>,
+    pub cc: Vec<String>,
     pub date: DateTime<Utc>,
     pub is_read: bool,
     pub has_attachments: bool,
@@ -52,6 +53,9 @@ pub struct MessageBody {
     pub id: String,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
+    pub rfc_message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +133,8 @@ pub struct ThreadMessage {
     pub is_read: bool,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
 }
 
 /// A conversation (thread) summary for the inbox list view.

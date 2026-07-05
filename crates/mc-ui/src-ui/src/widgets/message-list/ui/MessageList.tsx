@@ -1,6 +1,5 @@
-import { FixedSizeList, type ListChildComponentProps } from 'react-window';
-import AutoSizer from 'react-virtualized-auto-sizer';
-import { RefreshCw, Inbox, MailOpen, MessageSquare, List } from 'lucide-react';
+import { List, type RowComponentProps } from 'react-window';
+import { RefreshCw, Inbox, MailOpen, MessageSquare, List as ListIcon } from 'lucide-react';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useMessages, MessageRow, type MessageEnvelope } from '@/entities/message';
 import { useMailboxes } from '@/entities/mailbox';
@@ -31,7 +30,8 @@ export function MessageList() {
 
   const { data: rawMessages = [], isLoading: messagesLoading } = useMessages(conversationMode ? null : key);
   const { data: conversations = [], isLoading: convsLoading } = useConversations(
-    conversationMode && selectedAccountId ? selectedAccountId : null
+    conversationMode && selectedAccountId ? selectedAccountId : null,
+    selectedMailboxId
   );
 
   const messages = showUnreadOnly ? rawMessages.filter((m) => !m.isRead) : rawMessages;
@@ -54,9 +54,7 @@ export function MessageList() {
       {hasContent && !isSearching && (
         <div className="flex items-center justify-between border-b border-border px-3 py-1.5 gap-2">
           <span className="text-sm font-semibold text-foreground truncate">
-            {conversationMode
-              ? 'Conversations'
-              : (selectedMailbox?.name ?? selectedMailbox?.path ?? 'Messages')}
+            {selectedMailbox?.name ?? selectedMailbox?.path ?? (conversationMode ? 'Conversations' : 'Messages')}
           </span>
           <div className="flex items-center gap-1 shrink-0">
             {/* Conversation / Message toggle */}
@@ -65,7 +63,7 @@ export function MessageList() {
               title={conversationMode ? 'Switch to message list' : 'Switch to conversation view'}
               className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-muted hover:text-foreground hover:bg-accent transition-colors"
             >
-              {conversationMode ? <List size={12} /> : <MessageSquare size={12} />}
+              {conversationMode ? <ListIcon size={12} /> : <MessageSquare size={12} />}
               {conversationMode ? 'Msgs' : 'Threads'}
             </button>
 
@@ -108,19 +106,13 @@ export function MessageList() {
           <EmptyState icon={<MessageSquare size={32} className="text-muted" />} text="No conversations" />
         ) : (
           <div className="flex-1 overflow-hidden">
-            <AutoSizer>
-              {({ height, width }) => (
-                <FixedSizeList
-                  height={height}
-                  width={width}
-                  itemCount={conversations.length}
-                  itemSize={CONV_ROW_HEIGHT}
-                  itemData={{ conversations, selectedThreadMessageId, selectThread }}
-                >
-                  {ConvRow}
-                </FixedSizeList>
-              )}
-            </AutoSizer>
+            <List
+              style={{ height: '100%', width: '100%' }}
+              rowComponent={ConvRow}
+              rowCount={conversations.length}
+              rowHeight={CONV_ROW_HEIGHT}
+              rowProps={{ conversations, selectedThreadMessageId, selectThread }}
+            />
           </div>
         )
       ) : (
@@ -131,19 +123,13 @@ export function MessageList() {
           />
         ) : (
           <div className="flex-1 overflow-hidden">
-            <AutoSizer>
-              {({ height, width }) => (
-                <FixedSizeList
-                  height={height}
-                  width={width}
-                  itemCount={messages.length}
-                  itemSize={MESSAGE_ROW_HEIGHT}
-                  itemData={{ messages, selectedMessageId, selectMessage }}
-                >
-                  {MsgRow}
-                </FixedSizeList>
-              )}
-            </AutoSizer>
+            <List
+              style={{ height: '100%', width: '100%' }}
+              rowComponent={MsgRow}
+              rowCount={messages.length}
+              rowHeight={MESSAGE_ROW_HEIGHT}
+              rowProps={{ messages, selectedMessageId, selectMessage }}
+            />
           </div>
         )
       )}
@@ -159,8 +145,7 @@ interface ConvRowData {
   selectThread: (id: string | null) => void;
 }
 
-function ConvRow({ index, style, data }: ListChildComponentProps<ConvRowData>) {
-  const { conversations, selectedThreadMessageId, selectThread } = data;
+function ConvRow({ index, style, conversations, selectedThreadMessageId, selectThread }: RowComponentProps<ConvRowData>) {
   const conv = conversations[index];
   return (
     <div style={style}>
@@ -181,8 +166,7 @@ interface MsgRowData {
   selectMessage: (id: string | null) => void;
 }
 
-function MsgRow({ index, style, data }: ListChildComponentProps<MsgRowData>) {
-  const { messages, selectedMessageId, selectMessage } = data;
+function MsgRow({ index, style, messages, selectedMessageId, selectMessage }: RowComponentProps<MsgRowData>) {
   const message = messages[index];
   return (
     <MessageRow

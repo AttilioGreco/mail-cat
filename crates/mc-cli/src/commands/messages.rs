@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use mc_client::{MailCatClient, MessageFlag};
+use mc_client::{MailCatClient, MessageFlag, SendMessageParams};
 use tabled::{Table, Tabled};
 
 #[derive(Subcommand)]
@@ -68,6 +68,22 @@ pub enum MessagesCmd {
         #[arg(long)]
         mailbox_id: Option<String>,
     },
+    /// Send a real test email and verify it round-trips correctly: body
+    /// persisted, visible in the mailbox list with sender/recipient, and
+    /// (if --reply-to is given) threaded with the message it replies to.
+    SendTest {
+        /// Account ID to send from (see `mc accounts list`)
+        account_id: String,
+        /// Sender identity email address
+        #[arg(long)]
+        from: String,
+        /// Recipient address
+        #[arg(long, default_value = "attilio.greco@4sigma.it")]
+        to: String,
+        /// Reply to an existing message (verifies threading)
+        #[arg(long)]
+        reply_to: Option<String>,
+    },
     /// Autocomplete suggestions for search-as-you-type
     Suggest {
         /// Prefix to search for
@@ -115,6 +131,12 @@ pub async fn run(cmd: MessagesCmd, client: MailCatClient) -> Result<()> {
             scope,
             max,
         } => suggest(prefix, scope, max, client).await,
+        MessagesCmd::SendTest {
+            account_id,
+            from,
+            to,
+            reply_to,
+        } => send_test(account_id, from, to, reply_to, client).await,
     }
 }
 
@@ -379,6 +401,108 @@ async fn suggest(
         .collect();
 
     println!("{}", Table::new(rows));
+    Ok(())
+}
+
+async fn send_test(
+    account_id: String,
+    from: String,
+    to: String,
+    reply_to: Option<String>,
+    client: MailCatClient,
+) -> Result<()> {
+    let (in_reply_to, references) = if let Some(parent_id) = &reply_to {
+        let parent = client.get_message(parent_id).await?;
+        if parent.rfc_message_id.is_none() {
+            println!(
+                "{}",
+                "  ⚠ parent message has no RFC Message-ID yet (e.g. a locally-sent \
+                 message not yet re-synced from IMAP) — this reply will start a new thread"
+                    .yellow()
+            );
+        }
+        let mut refs = parent.references.clone();
+        refs.extend(parent.rfc_message_id.clone());
+        (parent.rfc_message_id, refs)
+    } else {
+        (None, vec![])
+    };
+
+    let stamp = chrono::Utc::now().to_rfc3339();
+    let subject = format!("[mail-cat test] {stamp}");
+    let body_text = format!(
+        "Messaggio di test inviato da mail-cat CLI alle {stamp}.\n\
+         Verifica: invio SMTP, persistenza del corpo, visibilità in lista, threading."
+    );
+
+    println!("{} Sending test message to {}...", "→".blue(), to.bold());
+
+    let message_id = client
+        .send_message(SendMessageParams {
+            account_id: account_id.clone(),
+            from_email: from,
+            from_name: None,
+            to: vec![to],
+            cc: vec![],
+            bcc: vec![],
+            subject,
+            body_text: Some(body_text.clone()),
+            body_html: None,
+            in_reply_to,
+            references,
+        })
+        .await?;
+
+    println!("  {} sent, message_id={}", "✓".green(), message_id.bold());
+
+    // Verify (1): body round-trips instead of coming back empty.
+    let fetched = client.get_message(&message_id).await?;
+    let body_ok = fetched.text_body.as_deref() == Some(body_text.as_str());
+    println!(
+        "  {} body persisted correctly",
+        if body_ok { "✓".green() } else { "✗".red() }
+    );
+
+    // Verify (2): message is visible in some mailbox's list right away
+    // (should be the Sent folder), with sender/recipient populated.
+    let mailboxes = client.list_mailboxes(&account_id).await?;
+    let mut found = None;
+    for mbx in mailboxes {
+        let msgs = client.list_messages(&account_id, &mbx.id).await?;
+        if let Some(summary) = msgs.into_iter().find(|m| m.id == message_id) {
+            found = Some((mbx, summary));
+            break;
+        }
+    }
+    match found {
+        Some((mbx, summary)) => {
+            println!(
+                "  {} visible in mailbox list ({})",
+                "✓".green(),
+                mbx.display_name
+            );
+            println!(
+                "      from={} to={:?}",
+                summary.from_email, summary.to
+            );
+        }
+        None => println!(
+            "  {} not visible in any mailbox list yet (should appear immediately after send)",
+            "✗".red()
+        ),
+    }
+
+    // Verify (3): if replying, the new message threads with its parent.
+    if let Some(parent_id) = &reply_to {
+        let thread = client.get_thread(&message_id).await?;
+        let in_thread = thread.iter().any(|m| &m.id == parent_id);
+        println!(
+            "  {} threaded with parent message ({} message(s) in thread)",
+            if in_thread { "✓".green() } else { "✗".red() },
+            thread.len()
+        );
+    }
+
     Ok(())
 }
 

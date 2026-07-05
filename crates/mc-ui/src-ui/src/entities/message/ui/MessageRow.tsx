@@ -52,7 +52,12 @@ export function MessageRow({ message, isSelected, onSelect, style }: MessageRowP
         )}
       </div>
 
-      {/* Row 3: preview */}
+      {/* Row 3: recipient */}
+      <p className="truncate text-xs text-muted">
+        A: {message.toAddresses.length > 0 ? message.toAddresses.join(', ') : '—'}
+      </p>
+
+      {/* Row 4: preview */}
       <p className="truncate text-xs text-muted">
         {truncate(message.preview, 90)}
       </p>

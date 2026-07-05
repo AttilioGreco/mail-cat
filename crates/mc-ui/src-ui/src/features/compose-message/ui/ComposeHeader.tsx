@@ -26,6 +26,9 @@ export function ComposeHeader({ initialData, onChange }: ComposeHeaderProps) {
     if (identities.length === 0) return;
     const match =
       identities.find((i) => i.email === initialData.from) ?? identities[0] ?? null;
+    // ponytail: identities load asynchronously after mount, this isn't a pure
+    // prop->state derivation the render-time-adjustment pattern would fit.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelectedIdentity(match);
   }, [initialData.from, identities]);
 

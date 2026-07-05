@@ -129,6 +129,9 @@ message ConversationSummary {
 message ListConversationsRequest {
   string account_id = 1;
   Pagination pagination = 2;
+  // When set, scope conversations to this mailbox only (like Thunderbird's
+  // per-folder threading) instead of the whole account.
+  optional string mailbox_id = 3;
 }
 
 message ListConversationsResponse {

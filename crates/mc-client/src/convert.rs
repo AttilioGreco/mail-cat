@@ -36,6 +36,7 @@ pub fn message_summary_from_proto(m: pb::MessageSummary) -> MessageSummary {
         from_name: from.as_ref().and_then(|f| f.name.clone()),
         from_email: from.map(|f| f.email).unwrap_or_default(),
         to: envelope.to.into_iter().map(|a| a.email).collect(),
+        cc: envelope.cc.into_iter().map(|a| a.email).collect(),
         date,
         is_read: m.flags.contains(&(pb::Flag::Seen as i32)),
         has_attachments: m.has_attachments,
@@ -47,6 +48,9 @@ pub fn message_body_from_proto(m: pb::MessageDetail) -> MessageBody {
         id: m.id,
         html_body: m.body_html,
         text_body: m.body_text,
+        rfc_message_id: m.message_rfc_id,
+        in_reply_to: m.in_reply_to,
+        references: m.references,
     }
 }
 
@@ -134,6 +138,8 @@ pub fn thread_message_from_proto(m: pb::MessageDetail) -> ThreadMessage {
         is_read,
         html_body: m.body_html,
         text_body: m.body_text,
+        in_reply_to: m.in_reply_to,
+        references: m.references,
     }
 }
 

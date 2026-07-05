@@ -33,7 +33,7 @@ where
     CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository,
     B: EventPublisher,
 {
     account_handler: AccountCommandHandler<AW, B>,
@@ -50,7 +50,7 @@ where
     CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository,
     B: EventPublisher,
 {
     pub fn new(
@@ -88,7 +88,7 @@ where
     CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository,
     B: EventPublisher,
 {
     async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {
@@ -189,14 +189,6 @@ where
             } => {
                 self.message_handler
                     .handle_apply_remote_flag_change(mailbox_id, provider_uid, new_flags)
-                    .await
-            }
-            Command::ApplyRemoteExpunge {
-                mailbox_id,
-                provider_uid,
-            } => {
-                self.message_handler
-                    .handle_apply_remote_expunge(mailbox_id, provider_uid)
                     .await
             }
             Command::AddContact {

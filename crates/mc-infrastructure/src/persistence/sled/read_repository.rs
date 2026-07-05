@@ -366,19 +366,23 @@ impl<ES: EventStore> mc_domain::traits::repository::ConversationReadRepository
     async fn list_conversations(
         &self,
         account_id: &mc_domain::AccountId,
+        mailbox_id: Option<&mc_domain::MailboxId>,
         pagination: &mc_shared::pagination::Pagination,
     ) -> Result<
         mc_shared::pagination::PagedResult<mc_domain::traits::repository::ConversationSummary>,
         DomainError,
     > {
-        let tree = self.tree(CONVERSATIONS_TREE)?;
-        let prefix = format!("{}:", account_id);
-
-        let mut all: Vec<mc_domain::traits::repository::ConversationSummary> = tree
-            .scan_prefix(prefix.as_bytes())
-            .filter_map(|r| r.ok())
-            .filter_map(|(_, v)| serde_json::from_slice::<mc_domain::traits::repository::ConversationSummary>(&v).ok())
-            .collect();
+        let mut all: Vec<mc_domain::traits::repository::ConversationSummary> = match mailbox_id {
+            None => {
+                let tree = self.tree(CONVERSATIONS_TREE)?;
+                let prefix = format!("{}:", account_id);
+                tree.scan_prefix(prefix.as_bytes())
+                    .filter_map(|r| r.ok())
+                    .filter_map(|(_, v)| serde_json::from_slice::<mc_domain::traits::repository::ConversationSummary>(&v).ok())
+                    .collect()
+            }
+            Some(mailbox_id) => self.list_conversations_for_mailbox(account_id, mailbox_id)?,
+        };
 
         // Newest first.
         all.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
@@ -638,6 +642,8 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     provider_uid: Some(*provider_uid),
                     from_name,
                     from_email,
+                    to: envelope.to.iter().map(|a| a.email.to_string()).collect(),
+                    cc: envelope.cc.iter().map(|a| a.email.to_string()).collect(),
                     subject: envelope.subject.clone(),
                     flags: flags.clone(),
                     size_bytes: *size_bytes,
@@ -673,11 +679,7 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     let subject = mc_domain::model::conversation::Conversation::normalize_subject(
                         &envelope.subject,
                     );
-                    let latest_sender = envelope
-                        .from
-                        .first()
-                        .map(|a| a.name.clone().unwrap_or_else(|| a.email.to_string()))
-                        .unwrap_or_default();
+                    let latest_sender = envelope.from.first().map(sender_display).unwrap_or_default();
                     let is_unread = !flags.contains(&Flag::Seen);
 
                     // Cross-mailbox dedup: same RFC Message-ID = same canonical message.
@@ -878,7 +880,7 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
 
             DomainEvent::MessageDeleted {
                 message_id,
-                mailbox_id,
+                mailbox_id: _,
                 permanently: _,
             } => {
                 // Remove full message.
@@ -895,11 +897,31 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     let message: Message = serde_json::from_slice(&bytes)
                         .map_err(|e| DomainError::Serialization(e.to_string()))?;
                     let summary_tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
-                    let key =
-                        Self::message_summary_key(mailbox_id, &message.received_at, message_id);
+                    let key = Self::message_summary_key(
+                        &message.mailbox_id,
+                        &message.received_at,
+                        message_id,
+                    );
                     summary_tree
                         .remove(key.as_bytes())
                         .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    // Clean the conversation/thread read model too — otherwise the
+                    // message lingers in ThreadView (get_thread), in the account-wide
+                    // conversation list, and skews unread/message counts.
+                    let was_unread = !message.flags.contains(&Flag::Seen);
+                    self.remove_message_from_conversation(message_id, was_unread)?;
+
+                    // Drop the cross-mailbox dedup marker so that if this same RFC
+                    // message reappears elsewhere (e.g. moved into Trash) it is
+                    // counted again instead of being silently ignored.
+                    if let Some(rfc_id) = &message.message_rfc_id {
+                        let rfc_seen_tree = self.tree(RFC_ID_SEEN_TREE)?;
+                        let rfc_key = format!("{}:{}", message.account_id, rfc_id);
+                        rfc_seen_tree
+                            .remove(rfc_key.as_bytes())
+                            .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    }
                 }
                 debug!(message_id = %message_id, "projected MessageDeleted");
             }
@@ -907,15 +929,18 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
             DomainEvent::MessageSent {
                 message_id,
                 account_id,
+                mailbox_id,
                 envelope,
                 in_reply_to,
                 references,
+                body_text,
+                body_html,
                 sent_at,
             } => {
                 let message = Message {
                     id: *message_id,
                     account_id: *account_id,
-                    mailbox_id: MailboxId::new(), // Sent folder assigned during sync
+                    mailbox_id: *mailbox_id,
                     provider_uid: None,
                     message_rfc_id: None,
                     in_reply_to: in_reply_to.clone(),
@@ -925,8 +950,8 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     size_bytes: 0,
                     has_attachments: false,
                     attachments: Vec::new(),
-                    body_text: None,
-                    body_html: None,
+                    body_text: body_text.clone(),
+                    body_html: body_html.clone(),
                     received_at: *sent_at,
                     internal_date: *sent_at,
                 };
@@ -934,6 +959,35 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 let json = serde_json::to_vec(&message)
                     .map_err(|e| DomainError::Serialization(e.to_string()))?;
                 tree.insert(message_id.to_string().as_bytes(), json)
+                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                // Summary in message_summaries tree — without this, a just-sent
+                // message is invisible in the plain (non-conversation) message
+                // list until the next IMAP sync rediscovers it.
+                let from_addr = envelope.from.first();
+                let from_name = from_addr.and_then(|a| a.name.clone());
+                let from_email = from_addr.map(|a| a.email.to_string()).unwrap_or_default();
+                let summary = MessageSummary {
+                    id: *message_id,
+                    account_id: *account_id,
+                    mailbox_id: *mailbox_id,
+                    provider_uid: None,
+                    from_name,
+                    from_email,
+                    to: envelope.to.iter().map(|a| a.email.to_string()).collect(),
+                    cc: envelope.cc.iter().map(|a| a.email.to_string()).collect(),
+                    subject: envelope.subject.clone(),
+                    flags: vec![Flag::Seen],
+                    size_bytes: 0,
+                    has_attachments: false,
+                    received_at: *sent_at,
+                };
+                let summary_tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
+                let summary_key = Self::message_summary_key(mailbox_id, sent_at, message_id);
+                let summary_json = serde_json::to_vec(&summary)
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                summary_tree
+                    .insert(summary_key.as_bytes(), summary_json)
                     .map_err(|e| DomainError::Repository(e.to_string()))?;
 
                 // ── Thread the sent message (idempotent) ──────────────────────
@@ -952,11 +1006,7 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     let subject = mc_domain::model::conversation::Conversation::normalize_subject(
                         &envelope.subject,
                     );
-                    let latest_sender = envelope
-                        .from
-                        .first()
-                        .map(|a| a.name.clone().unwrap_or_else(|| a.email.to_string()))
-                        .unwrap_or_default();
+                    let latest_sender = envelope.from.first().map(sender_display).unwrap_or_default();
 
                     let conv_key = format!("{}:{}", account_id, thread_id);
                     let conv_tree = self.tree(CONVERSATIONS_TREE)?;
@@ -1237,6 +1287,16 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
 }
 
 /// Helper: apply flag additions and removals to a flag vec.
+/// Display name for a sender, falling back to the email address when the
+/// name is absent OR blank (some providers/clients send an empty-string name
+/// rather than omitting it, which would otherwise show as a blank sender).
+fn sender_display(addr: &mc_domain::Address) -> String {
+    match &addr.name {
+        Some(name) if !name.trim().is_empty() => name.clone(),
+        _ => addr.email.to_string(),
+    }
+}
+
 fn apply_flag_changes(flags: &mut Vec<Flag>, added: &[Flag], removed: &[Flag]) {
     for flag in removed {
         flags.retain(|f| f != flag);
@@ -1260,6 +1320,158 @@ impl<ES: EventStore> SledRepository<ES> {
         let millis = received_at.timestamp_millis() as u64;
         let inverted = u64::MAX - millis;
         format!("{}:{:016}:{}", mailbox_id, inverted, message_id)
+    }
+
+    /// Build conversation summaries scoped to a single mailbox (Thunderbird-style
+    /// per-folder threading): groups this mailbox's message summaries by thread,
+    /// with stats (count, unread, latest sender/date) computed only from the
+    /// messages that live in this mailbox — not the whole thread across mailboxes.
+    fn list_conversations_for_mailbox(
+        &self,
+        account_id: &AccountId,
+        mailbox_id: &MailboxId,
+    ) -> Result<Vec<mc_domain::traits::repository::ConversationSummary>, DomainError> {
+        let summary_tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
+        let msg_thread_tree = self.tree(MESSAGE_TO_THREAD_TREE)?;
+        let prefix = format!("{}:", mailbox_id);
+
+        let mut groups: std::collections::HashMap<String, Vec<MessageSummary>> =
+            std::collections::HashMap::new();
+
+        for item in summary_tree.scan_prefix(prefix.as_bytes()) {
+            let (_key, value) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let summary: MessageSummary = serde_json::from_slice(&value)
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+
+            let thread_id = match msg_thread_tree
+                .get(summary.id.to_string().as_bytes())
+                .map_err(|e| DomainError::Repository(e.to_string()))?
+            {
+                Some(bytes) => {
+                    let val = String::from_utf8_lossy(&bytes);
+                    val.splitn(2, '\x1f')
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string()
+                }
+                // Not indexed yet (e.g. just received, projection race) — treat
+                // as its own single-message thread rather than dropping it.
+                None => summary.id.to_string(),
+            };
+
+            groups.entry(thread_id).or_default().push(summary);
+        }
+
+        let conversations = groups
+            .into_iter()
+            .filter_map(|(thread_id, msgs)| {
+                let latest = msgs.iter().max_by_key(|m| m.received_at)?;
+                let unread_count =
+                    msgs.iter().filter(|m| !m.flags.contains(&Flag::Seen)).count() as u32;
+                let subject = mc_domain::model::conversation::Conversation::normalize_subject(
+                    &latest.subject,
+                );
+                let latest_sender = match &latest.from_name {
+                    Some(name) if !name.trim().is_empty() => name.clone(),
+                    _ => latest.from_email.clone(),
+                };
+
+                Some(mc_domain::traits::repository::ConversationSummary {
+                    thread_id: mc_domain::value_objects::thread_id::ThreadId::new(thread_id),
+                    account_id: *account_id,
+                    subject,
+                    message_count: msgs.len() as u32,
+                    unread_count,
+                    last_message_at: latest.received_at,
+                    latest_sender,
+                    sample_message_id: latest.id,
+                })
+            })
+            .collect();
+
+        Ok(conversations)
+    }
+
+    /// Remove a message from the conversation/thread read model: drops its
+    /// forward and reverse thread-index entries and decrements the conversation
+    /// summary counters, deleting the conversation when it becomes empty.
+    ///
+    /// If the removed message was the conversation's `sample_message_id` (the id
+    /// used to open the thread), the sample is repointed to any surviving message
+    /// so `get_thread` keeps working.
+    fn remove_message_from_conversation(
+        &self,
+        message_id: &MessageId,
+        was_unread: bool,
+    ) -> Result<(), DomainError> {
+        let msg_thread_tree = self.tree(MESSAGE_TO_THREAD_TREE)?;
+        let Some(val_bytes) = msg_thread_tree
+            .get(message_id.to_string().as_bytes())
+            .map_err(|e| DomainError::Repository(e.to_string()))?
+        else {
+            return Ok(()); // not threaded (e.g. never projected into a conversation)
+        };
+        let val = String::from_utf8_lossy(&val_bytes);
+        let Some((account_str, thread_str)) = val.split_once('\x1f') else {
+            return Ok(());
+        };
+        let account_str = account_str.to_string();
+        let thread_str = thread_str.to_string();
+
+        // Reverse index: "{account}:{thread}:{message_id}" → ""
+        let thread_messages_tree = self.tree(THREAD_MESSAGES_TREE)?;
+        let thread_msg_key = format!("{}:{}:{}", account_str, thread_str, message_id);
+        thread_messages_tree
+            .remove(thread_msg_key.as_bytes())
+            .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+        // Forward index: message_id → "{account}\x1f{thread}"
+        msg_thread_tree
+            .remove(message_id.to_string().as_bytes())
+            .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+        // Conversation summary counters.
+        let conv_key = format!("{}:{}", account_str, thread_str);
+        let conv_tree = self.tree(CONVERSATIONS_TREE)?;
+        if let Some(bytes) = conv_tree
+            .get(conv_key.as_bytes())
+            .map_err(|e| DomainError::Repository(e.to_string()))?
+        {
+            let mut conv: mc_domain::traits::repository::ConversationSummary =
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            conv.message_count = conv.message_count.saturating_sub(1);
+            if was_unread {
+                conv.unread_count = conv.unread_count.saturating_sub(1);
+            }
+
+            if conv.message_count == 0 {
+                conv_tree
+                    .remove(conv_key.as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+            } else {
+                // Repoint the sample to a surviving message so get_thread works.
+                if conv.sample_message_id == *message_id {
+                    let prefix = format!("{}:{}:", account_str, thread_str);
+                    if let Some(item) = thread_messages_tree.scan_prefix(prefix.as_bytes()).next() {
+                        let (key, _) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+                        let key_str = String::from_utf8_lossy(&key);
+                        if let Some(mid_str) = key_str.rsplit(':').next()
+                            && let Ok(mid) = uuid::Uuid::parse_str(mid_str)
+                        {
+                            conv.sample_message_id = MessageId::from_uuid(mid);
+                        }
+                    }
+                }
+                let json = serde_json::to_vec(&conv)
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                conv_tree
+                    .insert(conv_key.as_bytes(), json)
+                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Update flag fields in the message summary matching the given message_id.
@@ -1732,12 +1944,13 @@ impl<ES: EventStore> mc_domain::traits::repository::ConversationReadRepository
     async fn list_conversations(
         &self,
         account_id: &mc_domain::AccountId,
+        mailbox_id: Option<&mc_domain::MailboxId>,
         pagination: &mc_shared::pagination::Pagination,
     ) -> Result<
         mc_shared::pagination::PagedResult<mc_domain::traits::repository::ConversationSummary>,
         DomainError,
     > {
-        self.0.list_conversations(account_id, pagination).await
+        self.0.list_conversations(account_id, mailbox_id, pagination).await
     }
 
     async fn rebuild_index(&self) -> Result<u64, DomainError> {
@@ -2179,6 +2392,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_message_deleted_cleans_conversation_and_thread() {
+        let (_es, repo) = make_store_and_repo();
+        let account_id = AccountId::new();
+        let mailbox_id = MailboxId::new();
+        let root_id = MessageId::new();
+        let reply_id = MessageId::new();
+        let now = chrono::Utc::now();
+
+        let received = |mid: MessageId, pos: u64, rfc: &str, irt: Option<&str>| {
+            make_event_envelope(
+                pos,
+                &mid.to_string(),
+                AggregateType::Message,
+                1,
+                DomainEvent::MessageReceived {
+                    message_id: mid,
+                    account_id,
+                    mailbox_id,
+                    provider_uid: ProviderUid::new(pos as u32),
+                    envelope: test_envelope(),
+                    flags: vec![], // unread
+                    size_bytes: 10,
+                    has_attachments: false,
+                    message_rfc_id: Some(rfc.to_string()),
+                    in_reply_to: irt.map(|s| s.to_string()),
+                    references: vec![],
+                    received_at: now,
+                },
+            )
+        };
+
+        // Two messages in the same thread (a reply to the root).
+        repo.project(&received(root_id, 1, "<a@x>", None)).await.unwrap();
+        repo.project(&received(reply_id, 2, "<b@x>", Some("<a@x>"))).await.unwrap();
+
+        let page = Pagination { page: 1, page_size: 10 };
+
+        // One conversation, two messages, both unread.
+        let convs = mc_domain::traits::repository::ConversationReadRepository::list_conversations(
+            &repo, &account_id, None, &page,
+        )
+        .await
+        .unwrap();
+        assert_eq!(convs.items.len(), 1);
+        assert_eq!(convs.items[0].message_count, 2);
+        assert_eq!(convs.items[0].unread_count, 2);
+        assert_eq!(
+            MessageReadRepository::get_thread(&repo, &root_id).await.unwrap().len(),
+            2
+        );
+
+        // Delete the reply → conversation shrinks, thread drops it.
+        repo.project(&make_event_envelope(
+            3,
+            &reply_id.to_string(),
+            AggregateType::Message,
+            2,
+            DomainEvent::MessageDeleted { message_id: reply_id, mailbox_id, permanently: false },
+        ))
+        .await
+        .unwrap();
+
+        let convs = mc_domain::traits::repository::ConversationReadRepository::list_conversations(
+            &repo, &account_id, None, &page,
+        )
+        .await
+        .unwrap();
+        assert_eq!(convs.items.len(), 1, "conversation still present with 1 message");
+        assert_eq!(convs.items[0].message_count, 1);
+        assert_eq!(convs.items[0].unread_count, 1);
+        let thread = MessageReadRepository::get_thread(&repo, &root_id).await.unwrap();
+        assert_eq!(thread.len(), 1, "deleted reply no longer in thread");
+        assert_eq!(thread[0].id, root_id);
+
+        // Delete the root → conversation removed entirely.
+        repo.project(&make_event_envelope(
+            4,
+            &root_id.to_string(),
+            AggregateType::Message,
+            2,
+            DomainEvent::MessageDeleted { message_id: root_id, mailbox_id, permanently: false },
+        ))
+        .await
+        .unwrap();
+
+        let convs = mc_domain::traits::repository::ConversationReadRepository::list_conversations(
+            &repo, &account_id, None, &page,
+        )
+        .await
+        .unwrap();
+        assert!(convs.items.is_empty(), "empty conversation removed");
+        assert!(
+            MessageReadRepository::get_thread(&repo, &root_id).await.unwrap().is_empty(),
+            "thread fully cleaned"
+        );
+    }
+
+    #[tokio::test]
     async fn project_message_move_reindexes_summary() {
         let (_es, repo) = make_store_and_repo();
         let account_id = AccountId::new();
@@ -2255,5 +2566,95 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(archive_msgs.total_count, 1);
+    }
+
+    /// Regression test for the "reply shows no content / doesn't attach to
+    /// the conversation" bug: sending a message must (1) persist its body so
+    /// a refetch doesn't come back empty, (2) land in the Sent mailbox's
+    /// message list immediately instead of waiting for the next IMAP sync,
+    /// with sender AND recipient populated, and (3) thread correctly with
+    /// the message it replies to.
+    #[tokio::test]
+    async fn project_message_sent_persists_body_appears_in_list_and_threads() {
+        let (_es, repo) = make_store_and_repo();
+        let account_id = AccountId::new();
+        let sent_mailbox_id = MailboxId::new();
+
+        // A message received earlier — the thread root, with a real RFC id
+        // (as IMAP-sourced messages always have).
+        let root_id = MessageId::new();
+        let root_rfc_id = "<root@example.com>".to_string();
+        let env = make_event_envelope(
+            1,
+            &root_id.to_string(),
+            AggregateType::Message,
+            1,
+            DomainEvent::MessageReceived {
+                message_id: root_id,
+                account_id,
+                mailbox_id: MailboxId::new(),
+                provider_uid: ProviderUid::new(1),
+                envelope: test_envelope(),
+                flags: vec![Flag::Seen],
+                size_bytes: 1024,
+                has_attachments: false,
+                message_rfc_id: Some(root_rfc_id.clone()),
+                in_reply_to: None,
+                references: vec![],
+                received_at: chrono::Utc::now(),
+            },
+        );
+        repo.project(&env).await.unwrap();
+
+        // Now send a reply to it.
+        let reply_id = MessageId::new();
+        let sent_at = chrono::Utc::now();
+        let env = make_event_envelope(
+            1,
+            &reply_id.to_string(),
+            AggregateType::Message,
+            1,
+            DomainEvent::MessageSent {
+                message_id: reply_id,
+                account_id,
+                mailbox_id: sent_mailbox_id,
+                envelope: test_envelope(),
+                in_reply_to: Some(root_rfc_id.clone()),
+                references: vec![root_rfc_id.clone()],
+                body_text: Some("Hello plain reply".into()),
+                body_html: Some("<p>Hello reply</p>".into()),
+                sent_at,
+            },
+        );
+        repo.project(&env).await.unwrap();
+
+        // (1) Body must round-trip, not come back empty.
+        let sent_msg = MessageReadRepository::get_message(&repo, &reply_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sent_msg.body_text.as_deref(), Some("Hello plain reply"));
+        assert_eq!(sent_msg.body_html.as_deref(), Some("<p>Hello reply</p>"));
+        assert_eq!(sent_msg.mailbox_id, sent_mailbox_id);
+
+        // (2) Must appear in the Sent mailbox's list immediately, with
+        // sender and recipient populated (not blank).
+        let sent_list = MessageReadRepository::list_messages(
+            &repo,
+            &sent_mailbox_id,
+            &Pagination { page: 1, page_size: 10 },
+        )
+        .await
+        .unwrap();
+        assert_eq!(sent_list.total_count, 1);
+        assert_eq!(sent_list.items[0].from_email, "sender@example.com");
+        assert_eq!(sent_list.items[0].to, vec!["recipient@example.com".to_string()]);
+
+        // (3) Reply must thread with the root message, not fork into a new
+        // conversation.
+        let thread = MessageReadRepository::get_thread(&repo, &root_id).await.unwrap();
+        let thread_ids: Vec<_> = thread.iter().map(|m| m.id).collect();
+        assert!(thread_ids.contains(&root_id));
+        assert!(thread_ids.contains(&reply_id));
     }
 }

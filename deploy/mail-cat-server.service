@@ -5,6 +5,9 @@ After=network.target
 
 [Service]
 Type=simple
+# Path relativi in config.toml (db_path, index_path) si risolvono contro questa
+# directory, non contro il repo. Usare sempre path assoluti in config.toml.
+WorkingDirectory=%h
 ExecStart=%h/.local/bin/mail-cat-server
 Restart=on-failure
 RestartSec=5

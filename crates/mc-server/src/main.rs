@@ -74,6 +74,16 @@ async fn main() -> anyhow::Result<()> {
     // Parse gRPC address
     let addr = config.grpc_addr.parse().context("invalid gRPC address")?;
 
+    // Fail fast with a clear message instead of a raw transport error chain
+    // if another process (e.g. a previous server instance) already holds the port.
+    if let Err(e) = std::net::TcpListener::bind(addr) {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            tracing::error!("⚠ Port {addr} is already in use by another process, shutting down.");
+            return Ok(());
+        }
+        return Err(e).context("failed to bind gRPC address");
+    }
+
     tracing::info!("✨ All components initialized successfully");
     tracing::info!("📡 Starting gRPC server on {}...", addr);
 
@@ -96,6 +106,14 @@ async fn main() -> anyhow::Result<()> {
     // flush threads would otherwise keep the process alive indefinitely.
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
+    // Explicit flush: std::process::exit below skips Drop, so we can't rely on
+    // sled's background flush thread happening to have run recently. Without
+    // this, a shutdown landing between flush cycles can lose the last writes
+    // (observed as accounts/mailboxes reappearing "reset" on the next boot).
+    if let Err(e) = app_ctx.db.flush_async().await {
+        tracing::warn!(%e, "sled flush on shutdown failed");
+    }
+
     tracing::info!("👋 Server shut down gracefully");
     // Force-exit: sled is log-structured and crash-safe, so a hard exit here
     // is safe and avoids waiting for long-lived background threads (IMAP IDLE,
@@ -103,10 +121,22 @@ async fn main() -> anyhow::Result<()> {
     std::process::exit(0);
 }
 
-/// Wait for Ctrl+C signal for graceful shutdown.
+/// Wait for a shutdown signal: Ctrl+C (SIGINT) when run interactively, or
+/// SIGTERM (what `systemctl stop`/`restart` actually sends). Without a SIGTERM
+/// handler, systemd stopping the service bypasses this entire graceful path —
+/// the process is killed outright, with no chance to flush sled or cancel
+/// background tasks.
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install CTRL+C signal handler");
-    tracing::info!("🛑 Received shutdown signal, stopping server...");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result.expect("failed to install CTRL+C signal handler");
+            tracing::info!("🛑 Received SIGINT, stopping server...");
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("🛑 Received SIGTERM, stopping server...");
+        }
+    }
 }

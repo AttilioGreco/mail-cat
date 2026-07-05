@@ -22,4 +22,6 @@ export interface ThreadMessage {
   isRead: boolean;
   htmlBody: string | null;
   textBody: string | null;
+  inReplyTo: string | null;
+  references: string[];
 }

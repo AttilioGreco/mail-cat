@@ -91,14 +91,6 @@ pub enum Command {
         new_flags: Vec<Flag>,
     },
 
-    /// Apply a remote expunge: a message was deleted on the server (e.g. IMAP EXPUNGE in IDLE).
-    /// Does NOT call the provider — message is already gone on the server.
-    /// Only marks the message as deleted in the local projection.
-    ApplyRemoteExpunge {
-        mailbox_id: MailboxId,
-        provider_uid: ProviderUid,
-    },
-
     // ── Contact ────────────────────────────────────────────────────────
     /// Add a new contact to the address book (manual creation).
     AddContact {
@@ -173,7 +165,6 @@ pub enum CommandResult {
     DraftSaved { message_id: MessageId },
     DraftDiscarded,
     RemoteFlagApplied,
-    RemoteExpungeApplied,
     ContactAdded { contact_id: ContactId },
     /// EnsureContact result: `created = true` if a new contact was created,
     /// `false` if it already existed (no-op).

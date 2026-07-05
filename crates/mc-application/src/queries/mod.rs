@@ -77,6 +77,8 @@ pub enum Query {
     /// List all conversations for an account, newest first.
     ListConversations {
         account_id: AccountId,
+        /// Scope conversations (and their stats) to this mailbox only, Thunderbird-style.
+        mailbox_id: Option<MailboxId>,
         pagination: Pagination,
     },
 

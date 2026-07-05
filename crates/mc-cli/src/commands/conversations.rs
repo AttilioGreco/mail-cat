@@ -11,6 +11,9 @@ pub enum ConversationsCmd {
         /// Max conversations to show
         #[arg(long, default_value = "50")]
         limit: u32,
+        /// Scope to a single mailbox (Thunderbird-style per-folder threading)
+        #[arg(long)]
+        mailbox: Option<String>,
     },
 
     /// Show all messages in a thread containing the given message
@@ -25,8 +28,10 @@ pub enum ConversationsCmd {
 
 pub async fn run(cmd: ConversationsCmd, client: MailCatClient) -> Result<()> {
     match cmd {
-        ConversationsCmd::List { account_id, limit } => {
-            let convs = client.list_conversations(&account_id, 1, limit).await?;
+        ConversationsCmd::List { account_id, limit, mailbox } => {
+            let convs = client
+                .list_conversations(&account_id, mailbox.as_deref(), 1, limit)
+                .await?;
 
             if convs.is_empty() {
                 println!("No conversations found for account {account_id}");

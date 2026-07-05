@@ -19,6 +19,9 @@ interface MessageBodyDto {
   id: string;
   html_body: string | null;
   text_body: string | null;
+  rfc_message_id: string | null;
+  in_reply_to: string | null;
+  references: string[];
 }
 
 async function fetchEnvelopes(accountId: string, mailboxId: string): Promise<MessageEnvelope[]> {
@@ -42,6 +45,9 @@ async function fetchBody(messageId: string): Promise<MessageBody> {
     uid: dto.id,
     htmlBody: dto.html_body,
     textBody: dto.text_body,
+    rfcMessageId: dto.rfc_message_id,
+    inReplyTo: dto.in_reply_to,
+    references: dto.references,
   };
 }
 

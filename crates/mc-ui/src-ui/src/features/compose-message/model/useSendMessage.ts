@@ -33,6 +33,7 @@ export function useSendMessage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['thread'] });
       qc.invalidateQueries({ queryKey: ['conversations'] });
+      qc.invalidateQueries({ queryKey: ['messages'] });
     },
   });
 }

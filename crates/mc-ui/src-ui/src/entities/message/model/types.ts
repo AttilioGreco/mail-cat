@@ -14,4 +14,7 @@ export interface MessageBody {
   uid: string;
   htmlBody: string | null;
   textBody: string | null;
+  rfcMessageId: string | null;
+  inReplyTo: string | null;
+  references: string[];
 }

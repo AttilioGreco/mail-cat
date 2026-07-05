@@ -91,6 +91,9 @@ export function SearchBar() {
   // Sync external clear (e.g. selecting a mailbox clears query)
   useEffect(() => {
     if (searchQuery === null) {
+      // ponytail: reacting to an external zustand store change, not a
+      // prop->state derivation within this component's own render.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setInput('');
       setDebouncedInput('');
     }
@@ -159,7 +162,7 @@ export function SearchBar() {
     return null;
   }, [groups]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (highlightIndex >= 0) {
       const s = getSuggestionByIndex(highlightIndex);

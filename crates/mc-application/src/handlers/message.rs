@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use mc_domain::{
     AccountId, AggregateType, DomainEvent, EmailProvider, Envelope, EventEnvelope, EventStore,
-    Flag, MailboxId, MailboxPath, Message, MessageId, MessageReadRepository, OutgoingMessage,
-    ProviderRegistry, ReadModelProjector, value_objects::uid::ProviderUid,
+    Flag, MailboxId, MailboxPath, MailboxReadRepository, MailboxType, Message, MessageId,
+    MessageReadRepository, OutgoingMessage, ProviderRegistry, ReadModelProjector,
+    value_objects::uid::ProviderUid,
 };
 use tracing::info;
 
@@ -25,14 +26,14 @@ use crate::error::ApplicationError;
 /// Works directly with the EventStore for message aggregate persistence
 /// (pure ES pattern). Uses ProviderRegistry to resolve the correct
 /// EmailProvider per account for remote operations.
-pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector, B: EventPublisher> {
+pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository, B: EventPublisher> {
     event_store: Arc<ES>,
     provider_registry: Arc<PR>,
     message_read_repo: Arc<MR>,
     event_bus: Arc<B>,
 }
 
-impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector, B: EventPublisher>
+impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository, B: EventPublisher>
     MessageCommandHandler<ES, PR, MR, B>
 {
     pub fn new(
@@ -176,41 +177,6 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         Ok(CommandResult::RemoteFlagApplied)
     }
 
-    /// Apply a remote expunge: a message was deleted on the server (e.g. IMAP EXPUNGE in IDLE).
-    ///
-    /// Unlike `handle_delete`, this does NOT call the provider (message is already
-    /// gone on the server). It only records the deletion locally by emitting a
-    /// `MessageDeleted` domain event.
-    pub async fn handle_apply_remote_expunge(
-        &self,
-        mailbox_id: MailboxId,
-        provider_uid: ProviderUid,
-    ) -> Result<CommandResult, ApplicationError> {
-        info!(mailbox_id = %mailbox_id, uid = provider_uid.value(),
-            "handle_apply_remote_expunge: looking up message");
-
-        let summary = self
-            .message_read_repo
-            .find_by_provider_uid(&mailbox_id, provider_uid.value())
-            .await?
-            .ok_or_else(|| {
-                ApplicationError::NotFound(
-                    "Message",
-                    format!("provider_uid={} mailbox_id={}", provider_uid.value(), mailbox_id),
-                )
-            })?;
-
-        let message_id = summary.id;
-        let (message, seq) = self.load_message(&message_id).await?;
-
-        let event = message.delete(true);
-        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
-            .await?;
-
-        info!(%message_id, uid = provider_uid.value(), "remote expunge applied");
-        Ok(CommandResult::RemoteExpungeApplied)
-    }
-
     pub async fn handle_move(
         &self,
         message_id: MessageId,
@@ -254,7 +220,7 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         mailbox_path: MailboxPath,
         permanently: bool,
     ) -> Result<CommandResult, ApplicationError> {
-        let (message, seq) = self.load_message(&message_id).await?;
+        let (mut message, seq) = self.load_message(&message_id).await?;
 
         let provider_uid = message.provider_uid.ok_or_else(|| {
             ApplicationError::PreconditionFailed("message has no provider UID".into())
@@ -262,17 +228,56 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
 
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
-        // Optimistic: update locally first, sync to IMAP in background.
-        let event = message.delete(permanently);
+        // Standard client behaviour: a plain delete moves the message to the
+        // Trash folder (Thunderbird-style). Only a permanent delete, a delete of
+        // a message already in Trash, or the absence of a Trash folder actually
+        // expunges it.
+        let mailboxes = self.message_read_repo.list_mailboxes(&message.account_id).await?;
+        let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
+        let source_is_trash = mailboxes
+            .iter()
+            .find(|m| m.id == message.mailbox_id)
+            .map(|m| m.mailbox_type == MailboxType::Trash)
+            .unwrap_or(false);
 
+        if !permanently
+            && !source_is_trash
+            && let Some(trash) = trash
+        {
+            let to_mailbox_id = trash.id;
+            let to_path = trash.path.clone();
+            let from_path = mailbox_path.clone();
+
+            // Optimistic: move locally first, sync to IMAP in background.
+            let event = message.move_to(to_mailbox_id);
+            self.append_and_publish(&message_id, AggregateType::Message, seq, event)
+                .await?;
+
+            info!(%message_id, "message moved to Trash, syncing to IMAP in background");
+
+            tokio::spawn(async move {
+                if let Err(e) = provider
+                    .move_message(provider_uid, &from_path, &to_path)
+                    .await
+                {
+                    tracing::warn!(%e, "Background IMAP move-to-Trash failed — next sync will reconcile");
+                }
+            });
+
+            return Ok(CommandResult::MessageDeleted);
+        }
+
+        // Permanent delete (or already in Trash / no Trash folder): expunge on the
+        // server and drop from the local read model.
+        let event = message.delete(true);
         self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
-        info!(%message_id, permanently, "message deleted locally, syncing to IMAP in background");
+        info!(%message_id, "message permanently deleted, syncing to IMAP in background");
 
         tokio::spawn(async move {
             if let Err(e) = provider
-                .delete_message(&mailbox_path, provider_uid, permanently)
+                .delete_message(&mailbox_path, provider_uid, true)
                 .await
             {
                 tracing::warn!(%e, "Background IMAP delete failed — next sync will reconcile");
@@ -292,10 +297,63 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         // Send via the provider (SMTP or API).
         provider.send_message(&outgoing).await?;
 
+        // Standard client behaviour: replying marks the original message as
+        // \Answered. Best-effort — resolve the original by its RFC Message-ID and
+        // flag it on the server; the next sync/IDLE reconciles the local flag.
+        // ponytail: O(n) scan over stored messages; add an rfc_id→message index if
+        // this ever shows up in profiles.
+        if let Some(in_reply_to) = outgoing.in_reply_to.clone() {
+            let original = self
+                .message_read_repo
+                .scan_all_messages(Some(&account_id))
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .find(|m| m.message_rfc_id.as_deref() == Some(in_reply_to.as_str()));
+
+            if let Some(orig) = original
+                && let Some(uid) = orig.provider_uid
+            {
+                let mailboxes = self
+                    .message_read_repo
+                    .list_mailboxes(&account_id)
+                    .await
+                    .unwrap_or_default();
+                if let Some(path) = mailboxes
+                    .into_iter()
+                    .find(|m| m.id == orig.mailbox_id)
+                    .map(|m| m.path)
+                {
+                    let provider = Arc::clone(&provider);
+                    tokio::spawn(async move {
+                        if let Err(e) = provider
+                            .set_flags(&path, uid, &[Flag::Answered], &[])
+                            .await
+                        {
+                            tracing::warn!(%e, "Failed to set \\Answered on replied-to message");
+                        }
+                    });
+                }
+            }
+        }
+
+        // Resolve the account's real Sent mailbox so the message lands in the
+        // right folder immediately, instead of waiting for the next IMAP sync
+        // to reconcile it. Falls back to a placeholder id if the Sent mailbox
+        // hasn't been discovered yet (e.g. before the first sync).
+        let mailbox_id = self
+            .message_read_repo
+            .list_mailboxes(&account_id)
+            .await?
+            .into_iter()
+            .find(|m| m.mailbox_type == MailboxType::Sent)
+            .map(|m| m.id)
+            .unwrap_or_else(MailboxId::new);
+
         let message_id = MessageId::new();
         let envelope = Envelope {
             from: vec![mc_domain::Address {
-                name: Some(outgoing.from.name.clone().unwrap_or_default()),
+                name: outgoing.from.name.clone(),
                 email: outgoing.from.email.clone(),
             }],
             to: outgoing
@@ -323,9 +381,12 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         let event = DomainEvent::MessageSent {
             message_id,
             account_id,
+            mailbox_id,
             envelope,
             in_reply_to: outgoing.in_reply_to.clone(),
             references: outgoing.references.clone(),
+            body_text: outgoing.body_text.clone(),
+            body_html: outgoing.body_html.clone(),
             sent_at: chrono::Utc::now(),
         };
 
@@ -637,7 +698,40 @@ mod tests {
 
     // ── Mock MessageReadRepository ─────────────────────────────────────
 
-    struct MockMessageReadRepo;
+    struct MockMessageReadRepo {
+        mailboxes: Vec<mc_domain::Mailbox>,
+    }
+
+    impl MockMessageReadRepo {
+        fn new() -> Self {
+            Self { mailboxes: vec![] }
+        }
+
+        fn with_mailboxes(mailboxes: Vec<mc_domain::Mailbox>) -> Self {
+            Self { mailboxes }
+        }
+    }
+
+    #[async_trait]
+    impl mc_domain::MailboxReadRepository for MockMessageReadRepo {
+        async fn get_mailbox(
+            &self,
+            id: &MailboxId,
+        ) -> Result<Option<mc_domain::Mailbox>, DomainError> {
+            Ok(self.mailboxes.iter().find(|m| m.id == *id).cloned())
+        }
+        async fn list_mailboxes(
+            &self,
+            account_id: &AccountId,
+        ) -> Result<Vec<mc_domain::Mailbox>, DomainError> {
+            Ok(self
+                .mailboxes
+                .iter()
+                .filter(|m| m.account_id == *account_id)
+                .cloned()
+                .collect())
+        }
+    }
 
     #[async_trait]
     impl MessageReadRepository for MockMessageReadRepo {
@@ -762,7 +856,7 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let read_repo = Arc::new(MockMessageReadRepo);
+        let read_repo = Arc::new(MockMessageReadRepo::new());
         let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
         let result = handler
@@ -784,7 +878,7 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let read_repo = Arc::new(MockMessageReadRepo);
+        let read_repo = Arc::new(MockMessageReadRepo::new());
         let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
         let result = handler
@@ -813,11 +907,82 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let read_repo = Arc::new(MockMessageReadRepo);
+        let read_repo = Arc::new(MockMessageReadRepo::new());
         let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
         let result = handler
             .handle_delete(msg_id, mbx_id, MailboxPath::inbox(), false)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, CommandResult::MessageDeleted));
+        assert_eq!(bus.last_event_name().unwrap(), "MessageDeleted");
+    }
+
+    #[tokio::test]
+    async fn handle_delete_moves_to_trash_when_trash_exists() {
+        let msg = make_test_message();
+        let msg_id = msg.id;
+        let mbx_id = msg.mailbox_id;
+
+        // A Trash folder exists for this account and the message is not in it,
+        // so a plain delete must move-to-Trash (MessageMoved), not expunge.
+        let trash = mc_domain::Mailbox {
+            id: MailboxId::new(),
+            account_id: msg.account_id,
+            path: MailboxPath::parse("Trash", '/').unwrap(),
+            display_name: "Trash".into(),
+            mailbox_type: MailboxType::Trash,
+            flags: vec![],
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        };
+
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let registry = Arc::new(MockProviderRegistry::new(Arc::new(MockEmailProvider::new())));
+        let bus = Arc::new(MockEventBus::new());
+        let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![trash]));
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
+
+        let result = handler
+            .handle_delete(msg_id, mbx_id, MailboxPath::inbox(), false)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, CommandResult::MessageDeleted));
+        assert_eq!(bus.last_event_name().unwrap(), "MessageMoved");
+    }
+
+    #[tokio::test]
+    async fn handle_delete_permanent_expunges_even_with_trash() {
+        let msg = make_test_message();
+        let msg_id = msg.id;
+        let mbx_id = msg.mailbox_id;
+
+        let trash = mc_domain::Mailbox {
+            id: MailboxId::new(),
+            account_id: msg.account_id,
+            path: MailboxPath::parse("Trash", '/').unwrap(),
+            display_name: "Trash".into(),
+            mailbox_type: MailboxType::Trash,
+            flags: vec![],
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        };
+
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let registry = Arc::new(MockProviderRegistry::new(Arc::new(MockEmailProvider::new())));
+        let bus = Arc::new(MockEventBus::new());
+        let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![trash]));
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
+
+        // permanently = true → expunge, MessageDeleted, even though Trash exists.
+        let result = handler
+            .handle_delete(msg_id, mbx_id, MailboxPath::inbox(), true)
             .await
             .unwrap();
 
@@ -832,7 +997,7 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let read_repo = Arc::new(MockMessageReadRepo);
+        let read_repo = Arc::new(MockMessageReadRepo::new());
         let handler = MessageCommandHandler::new(es, registry, read_repo, bus);
 
         let err = handler
@@ -856,7 +1021,7 @@ mod tests {
             Arc::new(MockEmailProvider::new()),
         ));
         let bus = Arc::new(MockEventBus::new());
-        let read_repo = Arc::new(MockMessageReadRepo);
+        let read_repo = Arc::new(MockMessageReadRepo::new());
         let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
         let outgoing = OutgoingMessage {
@@ -882,5 +1047,82 @@ mod tests {
 
         assert!(matches!(result, CommandResult::MessageSent { .. }));
         assert_eq!(bus.last_event_name().unwrap(), "MessageSent");
+
+        // Regression: the sent event must carry the body, not drop it —
+        // otherwise a refetch of the sent message comes back empty.
+        let published = bus.published.read().unwrap();
+        let DomainEvent::MessageSent { body_text, mailbox_id, .. } = &published.last().unwrap().payload
+        else {
+            panic!("expected MessageSent event");
+        };
+        assert_eq!(body_text.as_deref(), Some("Hi"));
+        // No Sent mailbox discovered yet — falls back to a placeholder id
+        // rather than erroring out.
+        assert_ne!(*mailbox_id, MailboxId::default());
+    }
+
+    #[tokio::test]
+    async fn handle_send_resolves_real_sent_mailbox() {
+        let account_id = AccountId::new();
+        let sent_mailbox = mc_domain::Mailbox {
+            id: MailboxId::new(),
+            account_id,
+            path: mc_domain::value_objects::mailbox_path::MailboxPath::parse("Sent", '/').unwrap(),
+            display_name: "Sent".into(),
+            mailbox_type: mc_domain::MailboxType::Sent,
+            flags: vec![],
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        };
+        let inbox = mc_domain::Mailbox {
+            id: MailboxId::new(),
+            account_id,
+            path: mc_domain::value_objects::mailbox_path::MailboxPath::inbox(),
+            display_name: "INBOX".into(),
+            mailbox_type: mc_domain::MailboxType::Inbox,
+            flags: vec![],
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        };
+
+        let es = Arc::new(MockEventStore::new());
+        let registry = Arc::new(MockProviderRegistry::new(Arc::new(MockEmailProvider::new())));
+        let bus = Arc::new(MockEventBus::new());
+        let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![
+            inbox,
+            sent_mailbox.clone(),
+        ]));
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
+
+        let outgoing = OutgoingMessage {
+            from: Address {
+                name: None,
+                email: EmailAddress::new("me@example.com").unwrap(),
+            },
+            to: vec![Address {
+                name: None,
+                email: EmailAddress::new("you@example.com").unwrap(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Hello".into(),
+            body_text: Some("Hi".into()),
+            body_html: None,
+            in_reply_to: None,
+            references: vec![],
+            attachments: vec![],
+        };
+
+        handler.handle_send(account_id, outgoing).await.unwrap();
+
+        let published = bus.published.read().unwrap();
+        let DomainEvent::MessageSent { mailbox_id, .. } = &published.last().unwrap().payload else {
+            panic!("expected MessageSent event");
+        };
+        assert_eq!(*mailbox_id, sent_mailbox.id);
     }
 }

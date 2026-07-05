@@ -349,6 +349,12 @@ impl<
                     break;
                 }
 
+                // Soft-deleted remotely (\Deleted set, not yet expunged): skip so it
+                // doesn't resurface as "new" on a mailbox with no local history of it.
+                if envelope_summary.flags.contains(&Flag::Deleted) {
+                    continue;
+                }
+
                 let (_message, event) = Message::receive(
                     *account_id,
                     local.id,
@@ -612,6 +618,23 @@ impl<
             // Still update counts in case they changed
             self.update_mailbox_counts(&local, status.total_messages, status.unseen_messages)
                 .await?;
+
+            // Reconcile even with no new messages: an IDLE-triggered sync can also
+            // fire for expunges/moves-out, which don't advance uid_next.
+            let (expunged, flags_changed) =
+                self.reconcile_mailbox(&provider, &local, mailbox_path).await?;
+            if expunged > 0 || flags_changed > 0 {
+                let updated_status = match provider.mailbox_status(mailbox_path).await {
+                    Ok(s) => s,
+                    Err(_) => status,
+                };
+                self.update_mailbox_counts(
+                    &local,
+                    updated_status.total_messages,
+                    updated_status.unseen_messages,
+                )
+                .await?;
+            }
             return Ok(0);
         }
 
@@ -633,6 +656,10 @@ impl<
         let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
 
         for envelope_summary in &envelopes {
+            if envelope_summary.flags.contains(&Flag::Deleted) {
+                continue;
+            }
+
             let (_message, event) = Message::receive(
                     *account_id,
                     local.id,
@@ -708,6 +735,22 @@ impl<
             .save_checkpoint(&validity_key, status.uid_validity as u64)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("checkpoint save failed: {e}")))?;
+
+        // Reconcile: detect expunged/moved-out messages and flag changes.
+        let (expunged, flags_changed) =
+            self.reconcile_mailbox(&provider, &local, mailbox_path).await?;
+        if expunged > 0 || flags_changed > 0 {
+            let updated_status = match provider.mailbox_status(mailbox_path).await {
+                Ok(s) => s,
+                Err(_) => status,
+            };
+            self.update_mailbox_counts(
+                &local,
+                updated_status.total_messages,
+                updated_status.unseen_messages,
+            )
+            .await?;
+        }
 
         info!(%mailbox_path, new_count, "sync_mailbox: done");
         Ok(new_count)
@@ -821,17 +864,43 @@ impl<
                 None => continue,
             };
 
-            if let Some(remote_flags) = remote_by_uid.get(&local_uid) {
-                // Message exists remotely — check for flag differences
+            if remote_by_uid
+                .get(&local_uid)
+                .is_some_and(|flags| flags.contains(&Flag::Deleted))
+            {
+                // Remotely soft-deleted (\Deleted set, not yet expunged): treat like
+                // an expunge rather than just reconciling the flag, so it disappears
+                // from the mailbox listing instead of lingering with \Deleted set.
+                info!(
+                    message_id = %summary.id,
+                    uid = local_uid,
+                    "Message marked \\Deleted remotely, deleting locally"
+                );
+                let event = DomainEvent::MessageDeleted {
+                    message_id: summary.id,
+                    mailbox_id: local.id,
+                    permanently: false,
+                };
+                self.append_and_project(&summary.id.to_string(), AggregateType::Message, event)
+                    .await?;
+                if let Err(e) = self.search_index.remove_message(&summary.id).await {
+                    warn!(message_id = %summary.id, error = %e, "Failed to remove message from search index");
+                }
+                expunged += 1;
+            } else if let Some(remote_flags) = remote_by_uid.get(&local_uid) {
+                // Message exists remotely — check for flag differences.
+                // \Recent is server-managed and volatile (present on first fetch,
+                // gone after the mailbox is selected) — never diff it, or every
+                // reconcile emits spurious flag churn.
                 let flags_to_add: Vec<Flag> = remote_flags
                     .iter()
-                    .filter(|f| !summary.flags.contains(f))
+                    .filter(|f| **f != Flag::Recent && !summary.flags.contains(f))
                     .cloned()
                     .collect();
                 let flags_to_remove: Vec<Flag> = summary
                     .flags
                     .iter()
-                    .filter(|f| !remote_flags.contains(f))
+                    .filter(|f| **f != Flag::Recent && !remote_flags.contains(f))
                     .cloned()
                     .collect();
 
@@ -875,6 +944,9 @@ impl<
                     event,
                 )
                 .await?;
+                if let Err(e) = self.search_index.remove_message(&summary.id).await {
+                    warn!(message_id = %summary.id, error = %e, "Failed to remove message from search index");
+                }
                 expunged += 1;
             }
         }

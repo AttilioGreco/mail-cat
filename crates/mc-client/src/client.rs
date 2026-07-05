@@ -107,6 +107,7 @@ impl MailCatClient {
     pub async fn list_conversations(
         &self,
         account_id: &str,
+        mailbox_id: Option<&str>,
         page: u32,
         page_size: u32,
     ) -> Result<Vec<crate::types::ConversationSummary>> {
@@ -115,6 +116,7 @@ impl MailCatClient {
             .list_conversations(pb::ListConversationsRequest {
                 account_id: account_id.to_owned(),
                 pagination: Some(pb::Pagination { page, page_size }),
+                mailbox_id: mailbox_id.map(|s| s.to_owned()),
             })
             .await?
             .into_inner();

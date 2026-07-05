@@ -81,6 +81,12 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
               ? `${envelope.fromName} <${envelope.fromEmail}>`
               : envelope.fromEmail],
             subject: envelope.subject.startsWith('Re:') ? envelope.subject : `Re: ${envelope.subject}`,
+            // References = this message's own ancestor chain + its own id, so the
+            // backend can thread the reply past just the immediate parent.
+            inReplyTo: body?.rfcMessageId ?? undefined,
+            references: body
+              ? [...body.references, ...(body.rfcMessageId ? [body.rfcMessageId] : [])]
+              : undefined,
             identities: [],
           })}
         />

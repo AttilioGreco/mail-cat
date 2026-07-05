@@ -67,6 +67,10 @@ pub struct MessageSummary {
     pub provider_uid: Option<ProviderUid>,
     pub from_name: Option<String>,
     pub from_email: String,
+    #[serde(default)]
+    pub to: Vec<String>,
+    #[serde(default)]
+    pub cc: Vec<String>,
     pub subject: String,
     pub flags: Vec<Flag>,
     pub size_bytes: u64,
@@ -220,9 +224,15 @@ pub trait ConversationReadRepository: Send + Sync {
     ) -> Result<Option<ConversationSummary>, DomainError>;
 
     /// List conversations for an account, newest first.
+    ///
+    /// When `mailbox_id` is set, conversations (and their stats: message count,
+    /// unread count, latest sender/date) are scoped to that mailbox only —
+    /// matching how Thunderbird threads messages within the selected folder,
+    /// rather than merging a thread's messages across every mailbox.
     async fn list_conversations(
         &self,
         account_id: &AccountId,
+        mailbox_id: Option<&MailboxId>,
         pagination: &Pagination,
     ) -> Result<PagedResult<ConversationSummary>, DomainError>;
 

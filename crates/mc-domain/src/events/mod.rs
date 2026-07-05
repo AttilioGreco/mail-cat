@@ -194,11 +194,21 @@ pub enum DomainEvent {
     MessageSent {
         message_id: MessageId,
         account_id: AccountId,
+        /// The account's Sent mailbox, resolved at send time.
+        /// `#[serde(default)]` so events persisted before this field existed
+        /// still deserialize (falling back to a fresh placeholder id, same
+        /// as the old behavior).
+        #[serde(default)]
+        mailbox_id: MailboxId,
         envelope: Envelope,
         #[serde(default)]
         in_reply_to: Option<String>,
         #[serde(default)]
         references: Vec<String>,
+        #[serde(default)]
+        body_text: Option<String>,
+        #[serde(default)]
+        body_html: Option<String>,
         sent_at: DateTime<Utc>,
     },
 

@@ -127,6 +127,22 @@ where
                         email: summary.from_email.clone(),
                         name: summary.from_name.clone(),
                     }],
+                    to: summary
+                        .to
+                        .iter()
+                        .map(|email| crate::grpc::proto::EmailAddress {
+                            email: email.clone(),
+                            name: None,
+                        })
+                        .collect(),
+                    cc: summary
+                        .cc
+                        .iter()
+                        .map(|email| crate::grpc::proto::EmailAddress {
+                            email: email.clone(),
+                            name: None,
+                        })
+                        .collect(),
                     subject: summary.subject.clone(),
                     date: Some(crate::grpc::mappers::datetime_to_timestamp(&summary.received_at)),
                     ..Default::default()
@@ -195,8 +211,16 @@ where
                 .map_err(|e| Status::invalid_argument(format!("invalid account_id: {e}")))?,
         );
         let pagination = proto_to_domain_pagination(req.pagination);
+        let mailbox_id = req
+            .mailbox_id
+            .map(|id| {
+                uuid::Uuid::parse_str(&id)
+                    .map(MailboxId::from_uuid)
+                    .map_err(|e| Status::invalid_argument(format!("invalid mailbox_id: {e}")))
+            })
+            .transpose()?;
 
-        let query = Query::ListConversations { account_id, pagination };
+        let query = Query::ListConversations { account_id, mailbox_id, pagination };
         let result = self
             .query_bus
             .dispatch(query)

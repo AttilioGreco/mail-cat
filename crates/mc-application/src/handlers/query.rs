@@ -140,10 +140,10 @@ where
                     .await?;
                 Ok(QueryResult::ContactDuplicates(pairs))
             }
-            Query::ListConversations { account_id, pagination } => {
+            Query::ListConversations { account_id, mailbox_id, pagination } => {
                 let convs = self
                     .conversation_repo
-                    .list_conversations(&account_id, &pagination)
+                    .list_conversations(&account_id, mailbox_id.as_ref(), &pagination)
                     .await?;
                 Ok(QueryResult::Conversations(convs))
             }
@@ -353,6 +353,7 @@ mod tests {
         async fn list_conversations(
             &self,
             _account_id: &AccountId,
+            _mailbox_id: Option<&mc_domain::MailboxId>,
             _pagination: &Pagination,
         ) -> Result<PagedResult<mc_domain::ConversationSummary>, DomainError> {
             Ok(PagedResult { items: vec![], total_count: 0, page: 1, page_size: 50 })

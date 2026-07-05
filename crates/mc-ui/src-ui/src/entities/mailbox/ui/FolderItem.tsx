@@ -29,11 +29,12 @@ const NAME_ICONS: Record<string, LucideIcon> = {
   Spam: AlertOctagon,
 };
 
-function getIcon(mailbox: Mailbox): LucideIcon {
+function renderIcon(mailbox: Mailbox) {
   for (const [attr, Icon] of ATTR_ICONS) {
-    if (mailbox.attributes.includes(attr)) return Icon;
+    if (mailbox.attributes.includes(attr)) return <Icon size={15} className="shrink-0" />;
   }
-  return NAME_ICONS[mailbox.name] ?? NAME_ICONS[mailbox.path] ?? Folder;
+  const Icon = NAME_ICONS[mailbox.name] ?? NAME_ICONS[mailbox.path] ?? Folder;
+  return <Icon size={15} className="shrink-0" />;
 }
 
 interface FolderItemProps {
@@ -43,8 +44,6 @@ interface FolderItemProps {
 }
 
 export function FolderItem({ mailbox, isSelected, onSelect }: FolderItemProps) {
-  const Icon = getIcon(mailbox);
-
   return (
     <button
       onClick={onSelect}
@@ -55,7 +54,7 @@ export function FolderItem({ mailbox, isSelected, onSelect }: FolderItemProps) {
           : 'text-muted-foreground hover:bg-surface-hover hover:text-foreground',
       )}
     >
-      <Icon size={15} className="shrink-0" />
+      {renderIcon(mailbox)}
       <span className="flex-1 truncate text-left">{mailbox.name}</span>
       {mailbox.unreadMessages > 0 && (
         <span

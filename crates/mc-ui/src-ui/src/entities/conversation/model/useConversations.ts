@@ -28,15 +28,18 @@ function toThreadMessage(raw: Record<string, unknown>): ThreadMessage {
     isRead: raw.is_read as boolean,
     htmlBody: (raw.html_body as string | null) ?? null,
     textBody: (raw.text_body as string | null) ?? null,
+    inReplyTo: (raw.in_reply_to as string | null) ?? null,
+    references: (raw.references as string[] | null) ?? [],
   };
 }
 
-export function useConversations(accountId: string | null) {
+export function useConversations(accountId: string | null, mailboxId: string | null = null) {
   return useQuery({
-    queryKey: ['conversations', accountId],
+    queryKey: ['conversations', accountId, mailboxId],
     queryFn: async () => {
       const raw = await invoke<Record<string, unknown>[]>('list_conversations', {
         accountId,
+        mailboxId,
         pageSize: 200,
       });
       return raw.map(toConversation);

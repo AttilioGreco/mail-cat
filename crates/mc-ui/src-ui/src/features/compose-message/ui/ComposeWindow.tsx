@@ -1,9 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { X, Send, Loader2 } from 'lucide-react';
 import { cn } from '@/shared/lib/utils';
 import { ComposeHeader } from './ComposeHeader';
-import { ComposeEditor } from './ComposeEditor';
 import { ConfirmIdentityDialog } from './ConfirmIdentityDialog';
+
+// ponytail: split out, pulls in CodeMirror + remark (~5.7MB source) that's
+// dead weight until the user actually opens compose.
+const ComposeEditor = lazy(() =>
+  import('./ComposeEditor').then((m) => ({ default: m.ComposeEditor })),
+);
 import { useIdentities, bestIdentityForReply } from '../model/useIdentities';
 import { useSendMessage } from '../model/useSendMessage';
 import { markdownToPreviewHtml } from '@/shared/lib/markdownPreview';
@@ -39,6 +44,9 @@ export function ComposeWindow({ open, onClose, initialData }: ComposeWindowProps
       ? (identities.find((i) => i.email === initialData.from) ?? bestIdentityForReply(identities, initialData.from))
       : identities[0];
 
+    // ponytail: identities load asynchronously and this effect also opens a
+    // dialog conditionally, not a pure prop->state derivation.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setResolvedIdentity(best ?? null);
 
     const exactMatch = initialData.from
@@ -207,19 +215,21 @@ export function ComposeWindow({ open, onClose, initialData }: ComposeWindowProps
             initialData={enrichedData}
             onChange={setHeader}
           />
-          <ComposeEditor
-            initialMd=""
-            onMdChange={setBodyMd}
-            onImagesChange={() => {/* TASK-10: CID images for MIME */}}
-            onSend={handleSend}
-            onSaveDraft={() => {/* TASK-09 */}}
-            onAttach={handleAttach}
-            signatureHtml={signatureHtml}
-            quotedHtml={initialData.quotedHtml}
-            attachments={attachments}
-            onAttachmentRemove={(idx) => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
-            onToast={(msg, type) => setToast({ msg, type: type ?? 'info' })}
-          />
+          <Suspense fallback={<div className="flex flex-1 items-center justify-center text-sm text-muted">Caricamento editor…</div>}>
+            <ComposeEditor
+              initialMd=""
+              onMdChange={setBodyMd}
+              onImagesChange={() => {/* TASK-10: CID images for MIME */}}
+              onSend={handleSend}
+              onSaveDraft={() => {/* TASK-09 */}}
+              onAttach={handleAttach}
+              signatureHtml={signatureHtml}
+              quotedHtml={initialData.quotedHtml}
+              attachments={attachments}
+              onAttachmentRemove={(idx) => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+              onToast={(msg, type) => setToast({ msg, type: type ?? 'info' })}
+            />
+          </Suspense>
         </div>
 
         {/* Footer */}

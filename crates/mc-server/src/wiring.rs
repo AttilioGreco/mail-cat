@@ -63,6 +63,10 @@ pub struct AppContext {
     pub provider_registry: Arc<ProviderRegistryImpl>,
     /// Cancel this to trigger graceful shutdown of all background tasks.
     pub shutdown: CancellationToken,
+    /// Sled handle for an explicit flush on shutdown — `std::process::exit`
+    /// skips `Drop`, so without this, sled's background flush thread can
+    /// lose its most recent writes to a SIGTERM landing mid-cycle.
+    pub db: sled::Db,
 }
 
 impl AppContext {
@@ -232,7 +236,13 @@ impl AppContext {
         tracing::info!("Projections caught up successfully");
 
         // ── Auto-create accounts from config ─────────────────────────────
-        let existing_accounts = repository_arc.list_accounts().await.unwrap_or_default();
+        // Do NOT swallow this error: if listing fails we must not fall through to
+        // "no accounts exist" and mint duplicate accounts (with fresh IDs, forcing
+        // a full IMAP re-sync) on top of whatever is already in the read model.
+        let existing_accounts = repository_arc
+            .list_accounts()
+            .await
+            .context("failed to list existing accounts during startup")?;
         let existing_emails: HashSet<String> = existing_accounts
             .iter()
             .map(|a| a.email.as_str().to_string())
@@ -612,8 +622,9 @@ impl AppContext {
         //   FlagsChanged  → Command::ApplyRemoteFlagChange
         //       └→ emits MessageFlagged on the bus
         //
-        //   MessageExpunged → Command::ApplyRemoteExpunge
-        //       └→ emits MessageDeleted on the bus
+        //   (Expunges arrive as MailboxCountChanged → sync → reconcile detects the
+        //    missing UID and emits MessageDeleted; plain IMAP IDLE gives no reliable
+        //    UID for an EXPUNGE.)
         //
         // Subscribers on the bus (LiveProjector, DesktopNotifier, watch_mailbox
         // gRPC stream) react to domain events only — no parallel raw-event bus.
@@ -639,7 +650,7 @@ impl AppContext {
                 .map(|mb| mb.path.clone())
                 .unwrap_or_else(MailboxPath::inbox);
 
-            // path→MailboxId map for FlagsChanged / MessageExpunged routing.
+            // path→MailboxId map for FlagsChanged routing.
             let path_to_id: HashMap<String, MailboxId> = local_mailboxes
                 .into_iter()
                 .map(|mb| (mb.path.full_path().to_string(), mb.id))
@@ -752,30 +763,6 @@ impl AppContext {
                                     }
                                 }
 
-                                // ── Remote expunge ───────────────────────────
-                                // Map immediately to a domain command so the UI
-                                // gets a MessageDeleted event without waiting
-                                // for the next full sync.
-                                ProviderNotification::MessageExpunged {
-                                    ref mailbox,
-                                    ref uid,
-                                } => {
-                                    if let Some(mb_id) = path_to_id.get(&mailbox.full_path()) {
-                                        let cmd = mc_application::Command::ApplyRemoteExpunge {
-                                            mailbox_id: *mb_id,
-                                            provider_uid: mc_application::commands::ProviderUid::new(
-                                                uid.value(),
-                                            ),
-                                        };
-                                        if let Err(e) = cmd_bus.dispatch(cmd).await {
-                                            tracing::warn!(
-                                                "[Watcher] ApplyRemoteExpunge uid={}: {e}",
-                                                uid.value()
-                                            );
-                                        }
-                                    }
-                                }
-
                                 // uid=0 FlagsChanged are spurious IMAP EXISTS echoes — ignore.
                                 ProviderNotification::FlagsChanged { .. } => {}
                             },
@@ -829,6 +816,7 @@ impl AppContext {
             sync_service,
             provider_registry,
             shutdown,
+            db,
         })
     }
 }

@@ -174,10 +174,10 @@ pub enum ProviderNotification {
         uid: ProviderUid,
         flags: Vec<Flag>,
     },
-    MessageExpunged {
-        mailbox: MailboxPath,
-        uid: ProviderUid,
-    },
+    // Note: expunges are NOT delivered as a dedicated notification. Plain IMAP
+    // IDLE reports EXPUNGE only by sequence number, which can't be reliably
+    // resolved back to a UID after the message is gone. Instead the watcher emits
+    // MailboxCountChanged, and reconcile_mailbox (UID diff) detects the deletion.
     MailboxCountChanged {
         mailbox: MailboxPath,
         total: u32,

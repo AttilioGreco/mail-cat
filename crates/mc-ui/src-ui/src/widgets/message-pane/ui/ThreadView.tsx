@@ -196,6 +196,10 @@ export function ThreadView() {
                     replyAllTo={replyAllTo}
                     replyAllCc={replyAllCc}
                     inReplyToRfcId={message.rfcMessageId}
+                    referencesChain={[
+                      ...message.references,
+                      ...(message.rfcMessageId ? [message.rfcMessageId] : []),
+                    ]}
                   />
                 ) : (
                   <CollapsedMessage
@@ -272,6 +276,7 @@ interface ExpandedProps {
   replyAllTo: string[];
   replyAllCc: string[];
   inReplyToRfcId: string | null;
+  referencesChain: string[];
   onCollapse: () => void;
   onReply: () => void;
   onReplyAll: () => void;
@@ -288,6 +293,7 @@ function ExpandedMessage({
   replyAllTo,
   replyAllCc,
   inReplyToRfcId,
+  referencesChain,
   onCollapse,
   onReply,
   onReplyAll,
@@ -349,6 +355,7 @@ function ExpandedMessage({
             accountId={accountId}
             fromEmail={fromEmail}
             inReplyToRfcId={replyMode !== 'forward' ? inReplyToRfcId : null}
+            referencesChain={replyMode !== 'forward' ? referencesChain : []}
             onClose={onCloseReply}
           />
         </div>
@@ -434,10 +441,11 @@ interface InlineReplyProps {
   accountId: string | null;
   fromEmail: string;
   inReplyToRfcId: string | null;
+  referencesChain: string[];
   onClose: () => void;
 }
 
-function InlineReply({ to, cc, subject, mode, accountId, fromEmail, inReplyToRfcId, onClose }: InlineReplyProps) {
+function InlineReply({ to, cc, subject, mode, accountId, fromEmail, inReplyToRfcId, referencesChain, onClose }: InlineReplyProps) {
   const [body, setBody] = useState('');
   const [toInput, setToInput] = useState(to.join(', '));
   const [ccInput, setCcInput] = useState(cc.join(', '));
@@ -461,7 +469,7 @@ function InlineReply({ to, cc, subject, mode, accountId, fromEmail, inReplyToRfc
       subject: replySubject,
       bodyText: body,
       inReplyTo: inReplyToRfcId ?? undefined,
-      references: inReplyToRfcId ? [inReplyToRfcId] : [],
+      references: referencesChain,
     });
     onClose();
   }

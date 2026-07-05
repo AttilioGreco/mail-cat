@@ -117,23 +117,6 @@ pub fn parse_message_body(
     Ok((text_body, html_body, attachments))
 }
 
-/// Convert IMAP flag string to domain Flag enum.
-///
-/// Day 8: Helper for Day 9 IMAP integration.
-#[allow(dead_code)] // Day 9: Will be used in IMAP integration
-pub fn parse_imap_flag(flag_str: &str) -> Option<Flag> {
-    match flag_str {
-        "\\Seen" => Some(Flag::Seen),
-        "\\Answered" => Some(Flag::Answered),
-        "\\Flagged" => Some(Flag::Flagged),
-        "\\Deleted" => Some(Flag::Deleted),
-        "\\Draft" => Some(Flag::Draft),
-        "\\Recent" => Some(Flag::Recent),
-        s if s.starts_with('\\') => Some(Flag::Custom(s[1..].to_string())),
-        s => Some(Flag::Custom(s.to_string())),
-    }
-}
-
 /// Convert domain Flag to IMAP flag string.
 ///
 /// Day 8: Helper for Day 9 IMAP set_flags implementation.
@@ -196,24 +179,6 @@ mod tests {
         assert_eq!(infer_mailbox_type("Spam"), MailboxType::Spam);
         assert_eq!(infer_mailbox_type("Archive"), MailboxType::Archive);
         assert_eq!(infer_mailbox_type("Custom"), MailboxType::Custom);
-    }
-
-    #[test]
-    fn test_parse_imap_flag() {
-        assert_eq!(parse_imap_flag("\\Seen"), Some(Flag::Seen));
-        assert_eq!(parse_imap_flag("\\Answered"), Some(Flag::Answered));
-        assert_eq!(parse_imap_flag("\\Flagged"), Some(Flag::Flagged));
-        assert_eq!(parse_imap_flag("\\Deleted"), Some(Flag::Deleted));
-        assert_eq!(parse_imap_flag("\\Draft"), Some(Flag::Draft));
-        assert_eq!(parse_imap_flag("\\Recent"), Some(Flag::Recent));
-        assert_eq!(
-            parse_imap_flag("\\Custom"),
-            Some(Flag::Custom("Custom".to_string()))
-        );
-        assert_eq!(
-            parse_imap_flag("MyFlag"),
-            Some(Flag::Custom("MyFlag".to_string()))
-        );
     }
 
     #[test]

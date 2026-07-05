@@ -87,6 +87,7 @@ install: build-release
     @echo "→ config template (non sovrascrive se esiste già)..."
     mkdir -p ~/.config/mail-cat
     test -f ~/.config/mail-cat/config.toml; or cp deploy/config.toml.example ~/.config/mail-cat/config.toml
+    grep -Eq '^(db_path|index_path)\s*=\s*"\./' ~/.config/mail-cat/config.toml; and echo "⚠ config.toml usa un path relativo per db_path/index_path: con systemd si risolve contro \$HOME, non contro il repo. Usa un path assoluto (es. ~/.local/share/mail-cat/db)." ; or true
 
     @echo "→ systemd user service..."
     mkdir -p ~/.config/systemd/user
