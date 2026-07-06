@@ -50,6 +50,10 @@ mailparse = "0.16"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 
+# OAuth2 (Google/Microsoft login for XOAUTH2 IMAP/SMTP)
+oauth2 = { version = "4", features = ["reqwest"] }
+url = "2"
+
 # Storage
 sled = "0.34"
 

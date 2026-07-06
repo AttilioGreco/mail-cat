@@ -7,6 +7,7 @@ pub mod persistence;
 pub mod provider_registry;
 pub mod search;
 pub mod secret;
+pub mod oauth;
 
 // Re-exports for ergonomics
 pub use email::{ImapAccountEventSource, ImapEmailProvider, SmtpSender};
