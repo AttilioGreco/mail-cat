@@ -127,6 +127,30 @@ pub trait ProjectionCheckpoint: Send + Sync {
     ) -> Result<(), DomainError>;
 }
 
+/// A message whose body still needs downloading, drained by the background
+/// backfill worker.
+#[derive(Debug, Clone)]
+pub struct BackfillEntry {
+    pub message_id: MessageId,
+    pub mailbox_id: MailboxId,
+    pub provider_uid: u32,
+}
+
+/// Queue of message bodies still to be downloaded, drained newest-first.
+///
+/// Populated by the `MessageReceived` projection and drained by
+/// `MessageBodyFetched` — so it is event-sourced: it rebuilds correctly on
+/// replay and holds exactly "received but body not yet fetched".
+#[async_trait]
+pub trait BodyBackfillQueue: Send + Sync {
+    /// Pending entries for an account, newest received first, up to `limit`.
+    async fn list_pending_backfill(
+        &self,
+        account_id: &AccountId,
+        limit: usize,
+    ) -> Result<Vec<BackfillEntry>, DomainError>;
+}
+
 // ── Contact Repositories ─────────────────────────────────────────────────────
 
 /// Write-side repository for Contact aggregate.

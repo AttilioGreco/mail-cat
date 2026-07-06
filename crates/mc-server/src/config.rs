@@ -27,6 +27,17 @@ pub struct ServerConfig {
     /// Defaults to `~/.local/bin/mail-cat-ui` (the `just install` location).
     #[serde(default = "default_ui_bin")]
     pub ui_bin: String,
+
+    /// Max message bodies the background backfill worker downloads per minute,
+    /// per account. `0` disables backfill (bodies load lazily on open). Keep it
+    /// low for Gmail — the initial sync only pulls envelopes, then bodies trickle
+    /// in newest-first at this rate to avoid the daily bandwidth cap.
+    #[serde(default = "default_body_backfill_per_minute")]
+    pub body_backfill_per_minute: u32,
+}
+
+fn default_body_backfill_per_minute() -> u32 {
+    30
 }
 
 /// SMTP security mode in the config file.
@@ -128,6 +139,7 @@ impl Default for ServerConfig {
             index_path: default_index_path(),
             accounts: vec![],
             ui_bin: default_ui_bin(),
+            body_backfill_per_minute: default_body_backfill_per_minute(),
         }
     }
 }
@@ -265,6 +277,7 @@ security = "start_tls"
                 oauth_provider: None,
             }],
             ui_bin: "/usr/local/bin/mail-cat-ui".into(),
+            body_backfill_per_minute: 30,
         };
 
         let toml = toml::to_string_pretty(&config).unwrap();

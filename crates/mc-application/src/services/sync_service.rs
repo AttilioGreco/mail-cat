@@ -12,11 +12,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mc_domain::{
-    AccountId, AggregateType, DomainEvent, EmailProvider, EventEnvelope, EventStore, FetchRange,
-    Flag, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message, MessageId,
-    MessageReadRepository, ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
-    SearchIndex,
+    AccountId, AggregateType, BodyBackfillQueue, DomainEvent, EmailProvider, EventEnvelope,
+    EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message,
+    MessageId, MessageReadRepository, ProjectionCheckpoint, ProviderRegistry, ProviderUid,
+    ReadModelProjector, SearchIndex,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::bus::EventPublisher;
@@ -59,6 +60,10 @@ pub struct SyncConfig {
     pub max_concurrent_bodies: usize,
     /// Whether to eagerly fetch all message bodies or lazy-load on demand.
     pub eager_body_fetch: bool,
+    /// Max message bodies the background backfill worker downloads per minute.
+    /// `0` disables backfill (pure lazy-on-open). Throttles to avoid bursting
+    /// the IMAP server / hitting Gmail's daily bandwidth cap.
+    pub body_backfill_per_minute: u32,
 }
 
 impl Default for SyncConfig {
@@ -67,6 +72,7 @@ impl Default for SyncConfig {
             batch_size: 50,
             max_concurrent_bodies: 4,
             eager_body_fetch: false,
+            body_backfill_per_minute: 30,
         }
     }
 }
@@ -78,7 +84,7 @@ impl Default for SyncConfig {
 pub struct SyncService<
     PR: ProviderRegistry,
     ES: EventStore,
-    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint,
+    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue,
     SI: SearchIndex,
 > {
     provider_registry: Arc<PR>,
@@ -97,7 +103,7 @@ pub struct SyncService<
 impl<
     PR: ProviderRegistry,
     ES: EventStore,
-    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint,
+    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue,
     SI: SearchIndex,
 > SyncService<PR, ES, P, SI>
 {
@@ -555,7 +561,96 @@ impl<
         self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
             .await?;
 
+        // Index the full message (envelope + body) for search. Both the
+        // on-demand open and the background backfill route through here, so this
+        // is the single place body text becomes searchable.
+        if let Ok(Some(full_msg)) = self.projector.get_message(message_id).await
+            && let Err(e) = self.search_index.index_message(&full_msg).await
+        {
+            warn!(%message_id, error = %e, "fetch_message_body: search index failed");
+        }
+
         Ok(Some(fetched))
+    }
+
+    /// Background body-backfill loop for one account.
+    ///
+    /// Drains the backfill queue newest-first, downloading one body every
+    /// `60/per_minute` seconds so we never burst the IMAP server (or trip
+    /// Gmail's daily bandwidth cap). Each fetch emits `MessageBodyFetched`,
+    /// which both indexes the body and dequeues the entry. Failed fetches stay
+    /// queued and are retried on the next pass. Runs until `shutdown` fires.
+    pub async fn run_backfill(
+        &self,
+        account_id: AccountId,
+        per_minute: u32,
+        shutdown: CancellationToken,
+    ) {
+        if per_minute == 0 {
+            return;
+        }
+        let delay = std::time::Duration::from_millis(60_000 / per_minute as u64);
+        let idle_poll = std::time::Duration::from_secs(60);
+
+        loop {
+            if shutdown.is_cancelled() {
+                return;
+            }
+
+            // Resolve mailbox_id → path once per drain pass.
+            let path_by_id: HashMap<MailboxId, MailboxPath> =
+                match self.projector.list_mailboxes(&account_id).await {
+                    Ok(mbs) => mbs.into_iter().map(|m| (m.id, m.path)).collect(),
+                    Err(e) => {
+                        warn!(%account_id, error = %e, "backfill: list_mailboxes failed");
+                        tokio::select! {
+                            _ = shutdown.cancelled() => return,
+                            _ = tokio::time::sleep(idle_poll) => continue,
+                        }
+                    }
+                };
+
+            let pending = self
+                .projector
+                .list_pending_backfill(&account_id, 500)
+                .await
+                .unwrap_or_default();
+
+            if pending.is_empty() {
+                // Nothing queued — wait for new arrivals (or shutdown).
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(idle_poll) => continue,
+                }
+            }
+
+            for entry in pending {
+                if shutdown.is_cancelled() {
+                    return;
+                }
+                let Some(path) = path_by_id.get(&entry.mailbox_id) else {
+                    // Mailbox not yet known locally — skip this pass.
+                    continue;
+                };
+                if let Err(e) = self
+                    .fetch_message_body(
+                        &account_id,
+                        path,
+                        &entry.message_id,
+                        ProviderUid::new(entry.provider_uid),
+                    )
+                    .await
+                {
+                    // Leave it queued; retried next pass.
+                    warn!(%account_id, error = %e, "backfill: body fetch failed");
+                }
+                // Rate limit (interruptible).
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            }
+        }
     }
 
     /// Lightweight sync for a single mailbox starting from a given UID.
@@ -983,7 +1078,7 @@ impl<
 impl<
     PR: ProviderRegistry,
     ES: EventStore,
-    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint,
+    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue,
     SI: SearchIndex,
 > SyncTrigger for SyncService<PR, ES, P, SI>
 {
@@ -1371,6 +1466,17 @@ mod tests {
                 .unwrap()
                 .insert(name.to_string(), value);
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl BodyBackfillQueue for MockProjector {
+        async fn list_pending_backfill(
+            &self,
+            _account_id: &AccountId,
+            _limit: usize,
+        ) -> Result<Vec<mc_domain::BackfillEntry>, DomainError> {
+            Ok(vec![])
         }
     }
 

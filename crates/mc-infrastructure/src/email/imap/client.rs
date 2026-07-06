@@ -108,8 +108,18 @@ impl ImapEmailProvider {
             .await
             .map_err(|e| DomainError::Provider(format!("TLS connection failed: {}", e)))?;
 
-        // Create IMAP client and authenticate
-        let client = async_imap::Client::new(tls_stream);
+        // Create IMAP client and authenticate.
+        // Client::new does NOT read the server greeting — the caller must.
+        // login() tolerates the leftover greeting (it skips untagged lines
+        // until its tagged reply), but authenticate()'s SASL handshake mistakes
+        // the greeting for its first reply, then blocks forever on the `+ `
+        // continuation it never answers. Consume the greeting first.
+        let mut client = async_imap::Client::new(tls_stream);
+        client
+            .read_response()
+            .await
+            .map_err(|e| DomainError::Provider(format!("IMAP greeting read failed: {e}")))?
+            .ok_or_else(|| DomainError::Provider("IMAP connection closed before greeting".into()))?;
         let session = match &self.credential {
             ImapCredential::Password(password) => client
                 .login(&self.username, password)

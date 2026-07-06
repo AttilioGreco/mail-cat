@@ -273,7 +273,11 @@ impl AppContext {
         let sync_config = SyncConfig {
             batch_size: 50,
             max_concurrent_bodies: 4,
-            eager_body_fetch: true,
+            // Bodies are pulled by the throttled background backfill worker
+            // (newest-first), not inline during the initial envelope sync — so
+            // a 30k-message account doesn't burst Gmail's daily bandwidth cap.
+            eager_body_fetch: false,
+            body_backfill_per_minute: config.body_backfill_per_minute,
         };
         let sync_service = Arc::new(
             SyncService::new(
@@ -729,6 +733,21 @@ impl AppContext {
         // ── Periodic OAuth token refresh (piggybacks the same 5-minute cadence) ──
         oauth_refresh::spawn_refresh_loop(oauth_states, secret_store.clone(), shutdown.clone());
 
+        // ── Background body backfill ─────────────────────────────────────────
+        // The initial sync only pulls envelopes; message bodies are downloaded
+        // here, newest-first, throttled to `body_backfill_per_minute` per account
+        // so a large mailbox doesn't burst the IMAP server / Gmail's daily cap.
+        // Each fetch indexes the body for search and dequeues itself.
+        for (account_id, _name) in &registered_ids {
+            let sync = Arc::clone(&sync_service);
+            let id = *account_id;
+            let sd = shutdown.clone();
+            let rate = config.body_backfill_per_minute;
+            tokio::spawn(async move {
+                sync.run_backfill(id, rate, sd).await;
+            });
+        }
+
         // ── Server-side mailbox watchers ─────────────────────────────────────
         // One background task per account watches INBOX via IMAP IDLE.
         // Each ProviderNotification is mapped to a domain command/event so that
@@ -969,6 +988,7 @@ mod tests {
             index_path: "/tmp/test_index_sync".to_string(),
             accounts: vec![],
             ui_bin: "mail-cat-ui".to_string(),
+            body_backfill_per_minute: 30,
         };
 
         // Verify AppContext can be created with wired dependencies.

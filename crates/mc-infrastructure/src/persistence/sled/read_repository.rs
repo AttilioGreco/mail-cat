@@ -20,11 +20,20 @@ use tracing::debug;
 
 use mc_domain::{
     Account, AccountId, AccountReadRepository, AccountStatus, AccountSummary,
-    AccountWriteRepository, AggregateType, Contact, ContactId, ContactReadRepository,
-    ContactSummary, ContactWriteRepository, DomainError, DomainEvent, EmailAddress, EventEnvelope,
-    EventStore, Flag, Mailbox, MailboxId, MailboxReadRepository, Message, MessageId,
-    MessageReadRepository, MessageSummary, ProjectionCheckpoint, ProviderUid, ReadModelProjector,
+    AccountWriteRepository, AggregateType, BackfillEntry, BodyBackfillQueue, Contact, ContactId,
+    ContactReadRepository, ContactSummary, ContactWriteRepository, DomainError, DomainEvent,
+    EmailAddress, EventEnvelope, EventStore, Flag, Mailbox, MailboxId, MailboxReadRepository,
+    Message, MessageId, MessageReadRepository, MessageSummary, ProjectionCheckpoint, ProviderUid,
+    ReadModelProjector,
 };
+
+/// Value stored in `BODY_BACKFILL_TREE`; the key already carries account + time.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BackfillValue {
+    message_id: MessageId,
+    mailbox_id: MailboxId,
+    provider_uid: u32,
+}
 use mc_shared::pagination::{PagedResult, Pagination};
 
 const ACCOUNTS_TREE: &str = "accounts";
@@ -33,6 +42,9 @@ const MAILBOXES_BY_ACCOUNT_TREE: &str = "mailboxes_by_account";
 const MESSAGES_TREE: &str = "messages";
 const MESSAGE_SUMMARIES_TREE: &str = "message_summaries";
 const PROJECTION_CHECKPOINTS_TREE: &str = "projection_checkpoints";
+/// Bodies awaiting download, keyed `{account}:{inverted_received_at}:{message_id}`
+/// so a prefix scan yields newest-first for free.
+const BODY_BACKFILL_TREE: &str = "body_backfill";
 /// `"{contact_id}"` → JSON(ContactSummary)
 const CONTACTS_TREE: &str = "contacts";
 /// `"{email_address}:{contact_id}"` → `""` — secondary index for fast email lookup
@@ -658,6 +670,21 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     .insert(summary_key.as_bytes(), summary_json)
                     .map_err(|e| DomainError::Repository(e.to_string()))?;
 
+                // Enqueue for background body backfill (drained newest-first).
+                // Dequeued by MessageBodyFetched — so on replay this rebuilds to
+                // exactly "received but body not yet fetched".
+                let backfill_tree = self.tree(BODY_BACKFILL_TREE)?;
+                let backfill_key = Self::backfill_key(account_id, received_at, message_id);
+                let backfill_val = serde_json::to_vec(&BackfillValue {
+                    message_id: *message_id,
+                    mailbox_id: *mailbox_id,
+                    provider_uid: provider_uid.value(),
+                })
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                backfill_tree
+                    .insert(backfill_key.as_bytes(), backfill_val)
+                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+
                 debug!(message_id = %message_id, "projected MessageReceived");
 
                 // ── Conversation (thread) projection ──────────────────
@@ -781,6 +808,15 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                         .map_err(|e| DomainError::Serialization(e.to_string()))?;
                     tree.insert(message_id.to_string().as_bytes(), json)
                         .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    // Drain from the backfill queue — body is now present.
+                    let backfill_tree = self.tree(BODY_BACKFILL_TREE)?;
+                    let backfill_key =
+                        Self::backfill_key(&message.account_id, &message.received_at, message_id);
+                    backfill_tree
+                        .remove(backfill_key.as_bytes())
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+
                     debug!(message_id = %message_id, "projected MessageBodyFetched");
                 }
             }
@@ -1322,6 +1358,17 @@ impl<ES: EventStore> SledRepository<ES> {
         format!("{}:{:016}:{}", mailbox_id, inverted, message_id)
     }
 
+    /// Backfill-queue key: inverted timestamp so a prefix scan is newest-first.
+    fn backfill_key(
+        account_id: &AccountId,
+        received_at: &chrono::DateTime<chrono::Utc>,
+        message_id: &MessageId,
+    ) -> String {
+        let millis = received_at.timestamp_millis() as u64;
+        let inverted = u64::MAX - millis;
+        format!("{}:{:016}:{}", account_id, inverted, message_id)
+    }
+
     /// Build conversation summaries scoped to a single mailbox (Thunderbird-style
     /// per-folder threading): groups this mailbox's message summaries by thread,
     /// with stats (count, unread, latest sender/date) computed only from the
@@ -1528,6 +1575,33 @@ impl<ES: EventStore> SledRepository<ES> {
         }
 
         Ok(())
+    }
+}
+
+// ── BodyBackfillQueue ──────────────────────────────────────────────────
+
+#[async_trait]
+impl<ES: EventStore> BodyBackfillQueue for SledRepository<ES> {
+    async fn list_pending_backfill(
+        &self,
+        account_id: &AccountId,
+        limit: usize,
+    ) -> Result<Vec<BackfillEntry>, DomainError> {
+        let tree = self.tree(BODY_BACKFILL_TREE)?;
+        let prefix = format!("{}:", account_id);
+        let mut out = Vec::new();
+        // Keys use an inverted timestamp → prefix scan is newest-first.
+        for item in tree.scan_prefix(prefix.as_bytes()).take(limit) {
+            let (_key, value) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let v: BackfillValue = serde_json::from_slice(&value)
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            out.push(BackfillEntry {
+                message_id: v.message_id,
+                mailbox_id: v.mailbox_id,
+                provider_uid: v.provider_uid,
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -2053,6 +2127,70 @@ mod tests {
         let (_es, repo) = make_store_and_repo();
         let result = AccountWriteRepository::load(&repo, &AccountId::new()).await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn backfill_queue_newest_first_and_dequeues_on_body() {
+        let (_es, repo) = make_store_and_repo();
+        let account_id = AccountId::new();
+        let mailbox_id = MailboxId::new();
+        let older = MessageId::new();
+        let newer = MessageId::new();
+        let t0 = chrono::Utc::now();
+        let t1 = t0 + chrono::Duration::seconds(60); // strictly newer
+
+        let recv = |pos: u64, id: MessageId, uid: u32, at: chrono::DateTime<chrono::Utc>| {
+            make_event_envelope(
+                pos,
+                &id.to_string(),
+                AggregateType::Message,
+                1,
+                DomainEvent::MessageReceived {
+                    message_id: id,
+                    account_id,
+                    mailbox_id,
+                    provider_uid: ProviderUid::new(uid),
+                    envelope: test_envelope(),
+                    flags: vec![],
+                    size_bytes: 0,
+                    has_attachments: false,
+                    message_rfc_id: None,
+                    in_reply_to: None,
+                    references: vec![],
+                    received_at: at,
+                },
+            )
+        };
+
+        repo.project(&recv(1, older, 10, t0)).await.unwrap();
+        repo.project(&recv(2, newer, 20, t1)).await.unwrap();
+
+        // Newest received comes first, carrying the right provider_uid.
+        let pending = repo.list_pending_backfill(&account_id, 10).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].message_id.to_string(), newer.to_string());
+        assert_eq!(pending[0].provider_uid, 20);
+        assert_eq!(pending[1].message_id.to_string(), older.to_string());
+
+        // Fetching a body dequeues exactly that entry.
+        repo.project(&make_event_envelope(
+            3,
+            &newer.to_string(),
+            AggregateType::Message,
+            2,
+            DomainEvent::MessageBodyFetched {
+                message_id: newer,
+                body_text: Some("hi".into()),
+                body_html: None,
+                attachments: vec![],
+            },
+        ))
+        .await
+        .unwrap();
+
+        let pending = repo.list_pending_backfill(&account_id, 10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id.to_string(), older.to_string());
     }
 
     #[tokio::test]
