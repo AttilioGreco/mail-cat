@@ -185,7 +185,7 @@ impl AppContext {
                 account_config.imap_host.clone(),
                 account_config.imap_port,
                 account_config.username.clone(),
-                imap_password.clone(),
+                mc_infrastructure::email::imap::ImapCredential::Password(imap_password.clone()),
                 account_config.use_tls,
                 smtp_sender,
             ));

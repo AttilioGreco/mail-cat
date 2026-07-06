@@ -1,8 +1,10 @@
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_imap::types::Seq;
 use async_trait::async_trait;
 use futures::Stream;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
@@ -20,6 +22,32 @@ use crate::email::smtp::SmtpSender;
 
 use super::mapper::{flag_to_imap, mailbox_path_to_string};
 
+/// Credential an `ImapEmailProvider` authenticates with.
+///
+/// `OAuthToken` wraps a shared cell so a background token refresh (see
+/// `mc-server`'s periodic OAuth refresh loop) is visible on the very next
+/// connection without restarting anything.
+pub enum ImapCredential {
+    Password(String),
+    OAuthToken(Arc<RwLock<String>>),
+}
+
+/// SASL XOAUTH2 authenticator — sends the full bearer-token response
+/// immediately, ignoring the (empty) server challenge, per Google's/
+/// Microsoft's XOAUTH2 spec.
+struct XOAuth2Authenticator {
+    user: String,
+    access_token: String,
+}
+
+impl async_imap::Authenticator for XOAuth2Authenticator {
+    type Response = String;
+
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        format!("user={}\x01auth=Bearer {}\x01\x01", self.user, self.access_token)
+    }
+}
+
 /// IMAP email provider implementation.
 ///
 /// Uses async-native-tls for TLS (natively futures-compatible with async-imap).
@@ -28,7 +56,7 @@ pub struct ImapEmailProvider {
     host: String,
     port: u16,
     username: String,
-    password: String,
+    credential: ImapCredential,
     use_tls: bool,
     /// Pre-built SMTP sender. `None` when no SMTP config was provided for this
     /// account — sending will be rejected with a clear error.
@@ -40,11 +68,11 @@ impl ImapEmailProvider {
         host: String,
         port: u16,
         username: String,
-        password: String,
+        credential: ImapCredential,
         use_tls: bool,
         smtp_sender: Option<SmtpSender>,
     ) -> Self {
-        Self { host, port, username, password, use_tls, smtp_sender }
+        Self { host, port, username, credential, use_tls, smtp_sender }
     }
 
     /// Get IMAP configuration for display/debugging.
@@ -80,12 +108,22 @@ impl ImapEmailProvider {
             .await
             .map_err(|e| DomainError::Provider(format!("TLS connection failed: {}", e)))?;
 
-        // Create IMAP client and login
+        // Create IMAP client and authenticate
         let client = async_imap::Client::new(tls_stream);
-        let session = client
-            .login(&self.username, &self.password)
-            .await
-            .map_err(|e| DomainError::Provider(format!("IMAP authentication failed: {:?}", e.0)))?;
+        let session = match &self.credential {
+            ImapCredential::Password(password) => client
+                .login(&self.username, password)
+                .await
+                .map_err(|e| DomainError::Provider(format!("IMAP authentication failed: {:?}", e.0)))?,
+            ImapCredential::OAuthToken(token_cell) => {
+                let access_token = token_cell.read().await.clone();
+                let auth = XOAuth2Authenticator { user: self.username.clone(), access_token };
+                client
+                    .authenticate("XOAUTH2", auth)
+                    .await
+                    .map_err(|e| DomainError::Provider(format!("IMAP XOAUTH2 authentication failed: {:?}", e.0)))?
+            }
+        };
 
         Ok(session)
     }
@@ -1114,7 +1152,7 @@ mod tests {
             "imap.example.com".to_string(),
             993,
             "user@example.com".to_string(),
-            "password".to_string(),
+            ImapCredential::Password("password".to_string()),
             true,
             None, // no SMTP sender in unit test
         );
@@ -1124,5 +1162,15 @@ mod tests {
         assert_eq!(port, 993);
         assert_eq!(username, "user@example.com");
         assert!(use_tls);
+    }
+
+    #[test]
+    fn xoauth2_sasl_string_has_expected_format() {
+        let mut auth = XOAuth2Authenticator {
+            user: "me@gmail.com".into(),
+            access_token: "ya29.abc".into(),
+        };
+        let response = async_imap::Authenticator::process(&mut auth, &[]);
+        assert_eq!(response, "user=me@gmail.com\x01auth=Bearer ya29.abc\x01\x01");
     }
 }
