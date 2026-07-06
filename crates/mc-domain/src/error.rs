@@ -63,6 +63,10 @@ pub enum DomainError {
     // ── Serialization ───────────────────────────────────────────────
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    // ── Secret Store ────────────────────────────────────────────────
+    #[error("Secret store error: {0}")]
+    SecretStore(String),
 }
 
 impl From<serde_json::Error> for DomainError {

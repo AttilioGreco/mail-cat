@@ -92,19 +92,28 @@ pub struct SmtpConnectionConfig {
 }
 
 /// Authentication configuration.
+///
+/// Secret fields (`password`, tokens, `app_password`) are `#[serde(skip)]`: they
+/// are NEVER written to the event store. Secrets live only in the OS keychain
+/// (see [`crate::SecretStore`]) and are resolved by account email at runtime.
+/// On load these fields deserialize to their default (empty), which is expected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuthConfig {
     Plain {
         username: String,
+        #[serde(skip)]
         password: String,
     },
     OAuth2 {
+        #[serde(skip)]
         access_token: String,
+        #[serde(skip)]
         refresh_token: String,
         expires_at: DateTime<Utc>,
     },
     AppPassword {
         username: String,
+        #[serde(skip)]
         app_password: String,
     },
 }

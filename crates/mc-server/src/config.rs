@@ -69,7 +69,11 @@ pub struct AccountConfig {
     pub imap_port: u16,
     pub use_tls: bool,
     pub username: String,
-    pub password: String,
+    /// Plaintext password. Present only transiently: on startup the daemon
+    /// moves it into the OS keychain and rewrites the file without it (see
+    /// `secret_ingest`). Absent (`None`) means "already in the keychain".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
     // ── SMTP ─────────────────────────────────────────────────────────────────
     /// Dedicated SMTP configuration. Without this block the account cannot
     /// send messages.
@@ -229,7 +233,7 @@ security = "start_tls"
                 imap_port: 993,
                 use_tls: true,
                 username: "test@example.com".into(),
-                password: "secret".into(),
+                password: Some("secret".into()),
                 smtp: Some(SmtpAccountConfig {
                     host: "smtp.example.com".into(),
                     port: 587,

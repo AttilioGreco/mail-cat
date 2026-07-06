@@ -7,6 +7,15 @@ use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() {
+    // WebKitGTK's TLS stack enumerates every p11-kit PKCS#11 module at startup,
+    // including tpm2-pkcs11, which spews TCTI/FAPI errors when no TPM is
+    // accessible. mail-cat never touches the TPM — mute the tss2 log noise.
+    // ponytail: unconditional; harmless even on machines with a working TPM.
+    if std::env::var_os("TSS2_LOG").is_none() {
+        // SAFETY: set before any code reads the env / spawns webview threads.
+        unsafe { std::env::set_var("TSS2_LOG", "all+NONE") };
+    }
+
     tracing_subscriber::fmt::init();
 
     let server_url = std::env::var("MAILCAT_SERVER_URL")

@@ -3,11 +3,15 @@
 //! DDD email client with Event Sourcing + CQRS architecture.
 //! Exposes gRPC API for account management, mailbox browsing, message operations, and search.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use anyhow::Context;
 use tonic::transport::Server;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
+mod secret_ingest;
 mod wiring;
 
 use config::ServerConfig;
@@ -64,8 +68,21 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Accounts: {}", config.accounts.len());
     }
 
+    // Secret store (OS keychain). No fallback: if the system keychain is
+    // unavailable this surfaces as a clear error below.
+    let secret_store: Arc<dyn mc_domain::SecretStore> =
+        Arc::new(mc_infrastructure::KeyringSecretStore::new());
+
+    // Migrate any plaintext passwords in the config file into the keychain,
+    // then keep watching the file so pasting a password gets picked up live.
+    secret_ingest::ingest_plaintext_secrets(Path::new(&config_path), secret_store.as_ref())
+        .context("failed to migrate plaintext secrets into the system keychain")?;
+    let _config_watcher =
+        secret_ingest::spawn_config_watcher(PathBuf::from(&config_path), secret_store.clone())
+            .context("failed to start config watcher")?;
+
     // Wire up all dependencies
-    let app_ctx = AppContext::new(&config)
+    let app_ctx = AppContext::new(&config, secret_store.as_ref())
         .await
         .context("failed to initialize application context")?;
 

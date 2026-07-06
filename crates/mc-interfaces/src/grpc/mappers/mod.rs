@@ -36,7 +36,8 @@ pub fn domain_error_to_status(error: DomainError) -> Status {
         | DomainError::Repository(msg)
         | DomainError::SearchIndex(msg)
         | DomainError::SearchQuery(msg)
-        | DomainError::Serialization(msg) => Status::internal(msg),
+        | DomainError::Serialization(msg)
+        | DomainError::SecretStore(msg) => Status::internal(msg),
         DomainError::NotSupported(msg) => Status::unimplemented(msg),
     }
 }

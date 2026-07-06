@@ -76,7 +76,18 @@ uuid = { version = "1", features = ["v7", "serde"] }
 
 # Config
 toml = "1.1"
+toml_edit = "0.25"
 dirs = "6"
+
+# Secrets (OS keychain, cross-platform) + config file watching
+# v3 is the mature line; v4's `v1` auto-init is broken (never sets a default store).
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
+notify = "8"
 
 # Utilities
 futures = "0.3"

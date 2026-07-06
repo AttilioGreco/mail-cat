@@ -14,7 +14,8 @@ use mc_application::{SyncConfig, SyncService, SyncTrigger};
 use mc_domain::{
     Account, AccountEventSource, AccountId, AccountReadRepository, AccountWriteRepository,
     AuthConfig, ConnectionConfig, EmailAddress, Identity, MailboxId, MailboxPath,
-    ProviderNotification, ProviderRegistry, ProviderType, ProviderUid,
+    MessageReadRepository, ProviderNotification, ProviderRegistry, ProviderType, ProviderUid,
+    SearchIndex,
 };
 use mc_domain::model::account::{SmtpConnectionConfig, SmtpSecurity};
 use mc_infrastructure::{
@@ -71,7 +72,14 @@ pub struct AppContext {
 
 impl AppContext {
     /// Wire up all dependencies from configuration.
-    pub async fn new(config: &ServerConfig) -> anyhow::Result<Self> {
+    ///
+    /// Account passwords/tokens are resolved from `secret_store` (the OS
+    /// keychain), not from the config file — which by this point has already
+    /// had its plaintext migrated out (see `secret_ingest`).
+    pub async fn new(
+        config: &ServerConfig,
+        secret_store: &dyn mc_domain::SecretStore,
+    ) -> anyhow::Result<Self> {
         tracing::info!("Initializing application context...");
 
         // Shared shutdown token — cancel this to stop all background tasks.
@@ -113,6 +121,20 @@ impl AppContext {
         for account_config in &config.accounts {
             tracing::info!("Creating IMAP provider for {}", account_config.email);
 
+            // Resolve secrets from the OS keychain (plaintext was migrated out
+            // of the config file at startup by secret_ingest).
+            let secrets = secret_store
+                .load(&account_config.email)
+                .with_context(|| format!("reading keychain secrets for {}", account_config.email))?
+                .unwrap_or_default();
+            let imap_password = secrets.imap_password.clone().unwrap_or_default();
+            if imap_password.is_empty() {
+                tracing::warn!(
+                    "⚠ {}: nessuna password nel keychain di sistema — inserisci `password = \"...\"` in config.toml per importarla",
+                    account_config.email
+                );
+            }
+
             // ── Build SMTP sender (optional) ──────────────────────────────
             let smtp_sender = if let Some(smtp_cfg) = &account_config.smtp {
                 let domain_smtp = SmtpConnectionConfig {
@@ -123,9 +145,9 @@ impl AppContext {
                         crate::config::SmtpSecurityConfig::StartTls => SmtpSecurity::StartTls,
                     },
                     username: smtp_cfg.username.clone(),
-                    password: smtp_cfg.password.clone(),
+                    password: secrets.smtp_password.clone(),
                 };
-                match SmtpSender::build(&domain_smtp, &account_config.username, &account_config.password) {
+                match SmtpSender::build(&domain_smtp, &account_config.username, &imap_password) {
                     Ok(sender) => {
                         match sender.test_connection().await {
                             Ok(true) => tracing::info!(
@@ -163,7 +185,7 @@ impl AppContext {
                 account_config.imap_host.clone(),
                 account_config.imap_port,
                 account_config.username.clone(),
-                account_config.password.clone(),
+                imap_password.clone(),
                 account_config.use_tls,
                 smtp_sender,
             ));
@@ -282,7 +304,9 @@ impl AppContext {
                         crate::config::SmtpSecurityConfig::StartTls => SmtpSecurity::StartTls,
                     },
                     username: s.username.clone(),
-                    password: s.password.clone(),
+                    // Secret lives in the keychain, not the persisted aggregate
+                    // (AuthConfig secret fields are #[serde(skip)]).
+                    password: None,
                 });
                 let connection_config = ConnectionConfig {
                     imap_host: Some(account_config.imap_host.clone()),
@@ -290,7 +314,7 @@ impl AppContext {
                     use_tls: account_config.use_tls,
                     auth: AuthConfig::Plain {
                         username: account_config.username.clone(),
-                        password: account_config.password.clone(),
+                        password: String::new(), // resolved from keychain at runtime
                     },
                     smtp: smtp_domain_config,
                     smtp_host: None,
@@ -536,6 +560,35 @@ impl AppContext {
             tracing::info!("Desktop notification subscriber started");
         }
 
+        // ── Search-index de-index subscriber ─────────────────────────────────
+        // The Tantivy index is a projection of domain events. Sync indexes
+        // bodies inline (eager_body_fetch=true) and removes them in reconcile,
+        // but permanent local deletes go through the command bus, which never
+        // owned the index — so they leaked stale search entries. This subscriber
+        // closes that one gap. (Indexing stays with sync's reliable bulk path;
+        // remove_message is idempotent, so overlapping with reconcile is fine.)
+        {
+            let mut sub = event_bus.subscribe();
+            let search = search_index.clone();
+            let sd = shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    let envelope = tokio::select! {
+                        _ = sd.cancelled() => break,
+                        e = sub.recv() => match e { Some(v) => v, None => break },
+                    };
+                    if let mc_domain::DomainEvent::MessageDeleted { message_id, .. } =
+                        &envelope.payload
+                        && let Err(e) = search.remove_message(message_id).await
+                    {
+                        tracing::warn!("Search de-index for {message_id} failed: {e}");
+                    }
+                }
+                tracing::info!("Search de-index subscriber exited");
+            });
+            tracing::info!("Search de-index subscriber started");
+        }
+
         // Re-run projection catch-up if new accounts were created
         if created_new {
             tracing::info!("Re-running projection catch-up for newly created accounts...");
@@ -544,6 +597,24 @@ impl AppContext {
                 .await
                 .context("failed to catch up projections after account creation")?;
             tracing::info!("Projections caught up after account creation");
+        }
+
+        // ── Rebuild search index from the read model on startup ──────────────
+        // The Tantivy index isn't event-sourced with a checkpoint like the read
+        // model, and the bus is best-effort (lag-drops), so it can drift from the
+        // event store. Since the server is a long-running daemon (restarts are
+        // rare), a full rebuild on boot from the now-current read model is the
+        // simple, robust reconciliation: it heals lag-dropped de-indexes, orphaned
+        // deletes, and any never-indexed messages. `scan_all_messages` returns only
+        // live messages (deleted rows are gone from MESSAGES_TREE), so the rebuilt
+        // index contains exactly what should be searchable. Non-fatal: a stale
+        // index must not block the server from starting.
+        match repository_arc.scan_all_messages(None).await {
+            Ok(messages) => match search_index.rebuild(messages).await {
+                Ok(count) => tracing::info!("Search index rebuilt on startup: {count} message(s)"),
+                Err(e) => tracing::warn!("Startup search-index rebuild failed: {e}"),
+            },
+            Err(e) => tracing::warn!("Startup search-index rebuild: scan failed: {e}"),
         }
 
         // ── Auto-sync registered accounts in background ─────────────────
@@ -852,8 +923,10 @@ mod tests {
             ui_bin: "mail-cat-ui".to_string(),
         };
 
-        // Verify AppContext can be created with wired dependencies
-        let context = match AppContext::new(&config).await {
+        // Verify AppContext can be created with wired dependencies.
+        // No accounts → the secret store is never queried.
+        let secret_store = mc_infrastructure::KeyringSecretStore::new();
+        let context = match AppContext::new(&config, &secret_store).await {
             Ok(ctx) => ctx,
             Err(e) => panic!("failed to create app context: {}", e),
         };
