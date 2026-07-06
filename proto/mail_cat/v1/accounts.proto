@@ -23,6 +23,11 @@ service AccountService {
 
   // Sync account mailboxes and messages (server-streaming for progress).
   rpc SyncAccount(SyncAccountRequest) returns (stream SyncProgressEvent);
+
+  // Start an OAuth2 login (Google/Microsoft) for a new account. Streams:
+  // one AwaitingBrowser event with the URL to open, then exactly one of
+  // OAuthLoginSucceeded/OAuthLoginFailed once the browser redirect completes.
+  rpc StartOAuthLogin(StartOAuthLoginRequest) returns (stream OAuthLoginEvent);
 }
 
 // Provider type for email account.
@@ -39,6 +44,12 @@ enum AccountStatus {
   ACCOUNT_STATUS_ACTIVE = 1;
   ACCOUNT_STATUS_DISABLED = 2;
   ACCOUNT_STATUS_ERROR = 3;
+}
+
+enum OAuthProvider {
+  OAUTH_PROVIDER_UNSPECIFIED = 0;
+  OAUTH_PROVIDER_GOOGLE = 1;
+  OAUTH_PROVIDER_MICROSOFT = 2;
 }
 
 // Authentication configuration (oneof pattern).
@@ -172,4 +183,30 @@ enum SyncPhase {
   SYNC_PHASE_INDEXING = 4;
   SYNC_PHASE_COMPLETE = 5;
   SYNC_PHASE_ERROR = 6;
+}
+
+message StartOAuthLoginRequest {
+  string name = 1;
+  string email = 2;
+  OAuthProvider provider = 3;
+}
+
+message OAuthLoginEvent {
+  oneof event {
+    AwaitingBrowser awaiting_browser = 1;
+    OAuthLoginSucceeded succeeded = 2;
+    OAuthLoginFailed failed = 3;
+  }
+}
+
+message AwaitingBrowser {
+  string authorize_url = 1;
+}
+
+message OAuthLoginSucceeded {
+  string email = 1;
+}
+
+message OAuthLoginFailed {
+  string message = 1;
 }
