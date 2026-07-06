@@ -74,6 +74,11 @@ pub struct AccountConfig {
     /// `secret_ingest`). Absent (`None`) means "already in the keychain".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Present only for accounts authenticating via OAuth2. When set,
+    /// `password`/smtp `password` are irrelevant — the XOAUTH2 token comes
+    /// from the keychain's `AccountSecrets.oauth` instead.
+    #[serde(default)]
+    pub oauth_provider: Option<OAuthProviderConfig>,
     // ── SMTP ─────────────────────────────────────────────────────────────────
     /// Dedicated SMTP configuration. Without this block the account cannot
     /// send messages.
@@ -95,6 +100,22 @@ impl From<ProviderTypeConfig> for mc_domain::ProviderType {
             ProviderTypeConfig::Imap => Self::Imap,
             ProviderTypeConfig::GmailApi => Self::GmailApi,
             ProviderTypeConfig::OutlookApi => Self::OutlookApi,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OAuthProviderConfig {
+    Google,
+    Microsoft,
+}
+
+impl From<OAuthProviderConfig> for mc_domain::OAuthProvider {
+    fn from(provider: OAuthProviderConfig) -> Self {
+        match provider {
+            OAuthProviderConfig::Google => Self::Google,
+            OAuthProviderConfig::Microsoft => Self::Microsoft,
         }
     }
 }
@@ -241,6 +262,7 @@ security = "start_tls"
                     username: None,
                     password: None,
                 }),
+                oauth_provider: None,
             }],
             ui_bin: "/usr/local/bin/mail-cat-ui".into(),
         };
@@ -251,5 +273,48 @@ security = "start_tls"
         assert_eq!(parsed.grpc_addr, config.grpc_addr);
         assert_eq!(parsed.accounts.len(), 1);
         assert_eq!(parsed.accounts[0].name, "Test Account");
+    }
+
+    const OAUTH_ACCOUNT_TOML: &str = r#"
+[[accounts]]
+name = "Work Gmail"
+email = "me@gmail.com"
+provider_type = "imap"
+imap_host = "imap.gmail.com"
+imap_port = 993
+use_tls = true
+username = "me@gmail.com"
+oauth_provider = "google"
+
+[accounts.smtp]
+host = "smtp.gmail.com"
+port = 587
+security = "start_tls"
+"#;
+
+    #[test]
+    fn account_config_parses_oauth_provider() {
+        let config: ServerConfig = toml::from_str(OAUTH_ACCOUNT_TOML).unwrap();
+        assert_eq!(config.accounts.len(), 1);
+        assert_eq!(config.accounts[0].oauth_provider, Some(OAuthProviderConfig::Google));
+        assert!(config.accounts[0].password.is_none());
+    }
+
+    #[test]
+    fn account_config_without_oauth_provider_defaults_to_none() {
+        let config: ServerConfig = toml::from_str(
+            r#"
+[[accounts]]
+name = "Plain"
+email = "me@example.com"
+provider_type = "imap"
+imap_host = "imap.example.com"
+imap_port = 993
+use_tls = true
+username = "me@example.com"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.accounts[0].oauth_provider, None);
     }
 }
