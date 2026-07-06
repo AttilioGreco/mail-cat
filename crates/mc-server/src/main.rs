@@ -11,6 +11,7 @@ use tonic::transport::Server;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
+mod oauth_login;
 mod secret_ingest;
 mod wiring;
 
@@ -81,8 +82,13 @@ async fn main() -> anyhow::Result<()> {
         secret_ingest::spawn_config_watcher(PathBuf::from(&config_path), secret_store.clone())
             .context("failed to start config watcher")?;
 
+    let oauth_challenges = std::sync::Arc::new(oauth_login::OAuthChallengeManager::new(
+        PathBuf::from(&config_path),
+        secret_store.clone(),
+    ));
+
     // Wire up all dependencies
-    let app_ctx = AppContext::new(&config, secret_store.as_ref())
+    let app_ctx = AppContext::new(&config, &config_path, secret_store.clone(), oauth_challenges)
         .await
         .context("failed to initialize application context")?;
 
