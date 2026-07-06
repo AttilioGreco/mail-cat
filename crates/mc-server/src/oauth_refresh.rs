@@ -21,9 +21,9 @@ pub struct OAuthRuntimeState {
     pub expires_at: Arc<RwLock<DateTime<Utc>>>,
 }
 
-/// True once `expires_at` is within 2 minutes of (or past) `now`.
+/// True once `expires_at` is within 10 minutes of (or past) `now`.
 pub fn needs_refresh(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    expires_at - now <= ChronoDuration::minutes(2)
+    expires_at - now <= ChronoDuration::minutes(10)
 }
 
 /// Spawns the periodic check. Call once per server startup with every
@@ -38,7 +38,6 @@ pub fn spawn_refresh_loop(
     }
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
-        interval.tick().await; // skip immediate first tick
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,

@@ -98,16 +98,8 @@ pub fn proto_auth_to_domain(auth: &ProtoAuthConfig) -> Result<DomainAuthConfig, 
             username: plain.username.clone(),
             password: plain.password.clone(),
         }),
-        Some(proto::auth_config::AuthType::Oauth2(oauth2)) => {
-            use chrono::{DateTime, Utc};
-            let expires_at =
-                DateTime::from_timestamp(oauth2.expires_at, 0).unwrap_or_else(Utc::now);
-            Ok(DomainAuthConfig::OAuth2 {
-                provider: mc_domain::OAuthProvider::Google,
-                access_token: oauth2.access_token.clone(),
-                refresh_token: oauth2.refresh_token.clone(),
-                expires_at,
-            })
+        Some(proto::auth_config::AuthType::Oauth2(_)) => {
+            Err("OAuth2Auth via AddAccount/UpdateAccount is not supported — the proto message carries no provider field; use the StartOAuthLogin RPC instead".to_string())
         }
         Some(proto::auth_config::AuthType::AppPassword(app)) => Ok(DomainAuthConfig::AppPassword {
             username: app.username.clone(),
