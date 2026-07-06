@@ -4,16 +4,17 @@ use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::{
     application_error_to_status, domain_account_summary_to_detail, domain_account_summary_to_proto,
-    proto_connection_to_domain, proto_email_to_domain, proto_provider_type_to_domain,
+    proto_connection_to_domain, proto_email_to_domain, proto_oauth_provider_to_domain,
+    proto_provider_type_to_domain,
 };
 use crate::grpc::proto::{
     self, AddAccountRequest, AddAccountResponse, GetAccountRequest, GetAccountResponse,
     ListAccountsRequest, ListAccountsResponse, RemoveAccountRequest, RemoveAccountResponse,
-    SyncAccountRequest, UpdateAccountRequest, UpdateAccountResponse,
+    StartOAuthLoginRequest, SyncAccountRequest, UpdateAccountRequest, UpdateAccountResponse,
     account_service_server::AccountService,
 };
 use mc_application::{
-    SyncState, SyncTrigger,
+    OAuthLoginProgress, OAuthLoginTrigger, SyncState, SyncTrigger,
     bus::{CommandBus, QueryBus},
     commands::{Command, CommandResult},
     queries::Query,
@@ -25,6 +26,7 @@ pub struct AccountServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
     command_bus: Arc<C>,
     query_bus: Arc<Q>,
     sync_trigger: Option<Arc<dyn SyncTrigger>>,
+    oauth_trigger: Option<Arc<dyn OAuthLoginTrigger>>,
 }
 
 impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
@@ -33,11 +35,17 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
             command_bus,
             query_bus,
             sync_trigger: None,
+            oauth_trigger: None,
         }
     }
 
     pub fn with_sync_trigger(mut self, trigger: Arc<dyn SyncTrigger>) -> Self {
         self.sync_trigger = Some(trigger);
+        self
+    }
+
+    pub fn with_oauth_trigger(mut self, trigger: Arc<dyn OAuthLoginTrigger>) -> Self {
+        self.oauth_trigger = Some(trigger);
         self
     }
 }
@@ -281,6 +289,52 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+
+    type StartOAuthLoginStream = ReceiverStream<Result<proto::OAuthLoginEvent, Status>>;
+
+    async fn start_o_auth_login(
+        &self,
+        request: Request<StartOAuthLoginRequest>,
+    ) -> Result<Response<Self::StartOAuthLoginStream>, Status> {
+        let req = request.into_inner();
+        let provider =
+            proto_oauth_provider_to_domain(req.provider).map_err(Status::invalid_argument)?;
+
+        let trigger = self
+            .oauth_trigger
+            .clone()
+            .ok_or_else(|| Status::unavailable("OAuth login not configured"))?;
+
+        let mut progress_rx = trigger.start_login(req.name, req.email, provider);
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+
+        tokio::spawn(async move {
+            while let Some(event) = progress_rx.recv().await {
+                let proto_event = oauth_login_progress_to_proto(event);
+                if tx.send(Ok(proto_event)).await.is_err() {
+                    break; // client disconnected
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+fn oauth_login_progress_to_proto(event: OAuthLoginProgress) -> proto::OAuthLoginEvent {
+    use proto::o_auth_login_event::Event;
+    let event = match event {
+        OAuthLoginProgress::AwaitingBrowser { authorize_url } => {
+            Event::AwaitingBrowser(proto::AwaitingBrowser { authorize_url })
+        }
+        OAuthLoginProgress::Succeeded { email } => {
+            Event::Succeeded(proto::OAuthLoginSucceeded { email })
+        }
+        OAuthLoginProgress::Failed { message } => {
+            Event::Failed(proto::OAuthLoginFailed { message })
+        }
+    };
+    proto::OAuthLoginEvent { event: Some(event) }
 }
 
 fn sync_state_to_phase(state: &SyncState) -> i32 {

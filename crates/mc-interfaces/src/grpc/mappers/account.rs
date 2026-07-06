@@ -47,6 +47,17 @@ pub fn proto_account_status_to_domain(status: i32) -> Result<DomainAccountStatus
     }
 }
 
+/// Convert proto OAuthProvider to domain OAuthProvider.
+pub fn proto_oauth_provider_to_domain(provider: i32) -> Result<mc_domain::OAuthProvider, String> {
+    match proto::OAuthProvider::try_from(provider).ok() {
+        Some(proto::OAuthProvider::OauthProviderGoogle) => Ok(mc_domain::OAuthProvider::Google),
+        Some(proto::OAuthProvider::OauthProviderMicrosoft) => {
+            Ok(mc_domain::OAuthProvider::Microsoft)
+        }
+        _ => Err(format!("Invalid OAuth provider: {}", provider)),
+    }
+}
+
 /// Convert domain AuthConfig to proto AuthConfig.
 pub fn domain_auth_to_proto(auth: &DomainAuthConfig) -> ProtoAuthConfig {
     let auth_type = match auth {
