@@ -72,7 +72,15 @@ impl OAuthLoginTrigger for OAuthChallengeManager {
                 }
             };
 
-            let mut bundle = secret_store.load(&email).ok().flatten().unwrap_or_default();
+            let mut bundle = match secret_store.load(&email) {
+                Ok(existing) => existing.unwrap_or_default(),
+                Err(e) => {
+                    let _ = tx
+                        .send(OAuthLoginProgress::Failed { message: format!("reading existing keychain entry: {e}") })
+                        .await;
+                    return;
+                }
+            };
             bundle.oauth = Some(secrets);
             if let Err(e) = secret_store.store(&email, &bundle) {
                 let _ = tx
