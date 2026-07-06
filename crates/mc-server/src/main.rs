@@ -12,6 +12,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
 mod oauth_login;
+mod oauth_refresh;
 mod secret_ingest;
 mod wiring;
 

@@ -16,6 +16,7 @@ mc-infrastructure = { workspace = true }
 mc-interfaces = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+chrono = { workspace = true }
 tonic = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }

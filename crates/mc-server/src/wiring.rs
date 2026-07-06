@@ -1,9 +1,11 @@
 //! Dependency injection and application wiring.
 
 use anyhow::Context;
+use chrono::Utc;
 use futures::stream::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
@@ -19,6 +21,7 @@ use mc_domain::{
 };
 use mc_domain::model::account::{SmtpConnectionConfig, SmtpSecurity};
 use mc_infrastructure::{
+    email::imap::ImapCredential,
     email::smtp::SmtpSender,
     ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SledEventStore,
     SledRepository, TantivyContactIndex, TantivySearchIndex,
@@ -28,6 +31,8 @@ use mc_interfaces::grpc::services::{
 };
 
 use crate::config::ServerConfig;
+use crate::oauth_login::OAuthChallengeManager;
+use crate::oauth_refresh::{self, OAuthRuntimeState};
 
 // Type aliases for concrete implementations
 type ProviderRegistryImpl = InMemoryProviderRegistry<ImapEmailProvider>;
@@ -78,9 +83,11 @@ impl AppContext {
     /// had its plaintext migrated out (see `secret_ingest`).
     pub async fn new(
         config: &ServerConfig,
-        secret_store: &dyn mc_domain::SecretStore,
+        config_path: &str,
+        secret_store: Arc<dyn mc_domain::SecretStore>,
+        oauth_challenges: Arc<OAuthChallengeManager>,
     ) -> anyhow::Result<Self> {
-        tracing::info!("Initializing application context...");
+        tracing::info!("Initializing application context (config: {config_path})...");
 
         // Shared shutdown token — cancel this to stop all background tasks.
         let shutdown = CancellationToken::new();
@@ -118,6 +125,7 @@ impl AppContext {
         // Create provider registry and build providers from config
         let provider_registry = Arc::new(InMemoryProviderRegistry::new());
         let mut providers_by_email: HashMap<String, Arc<ImapEmailProvider>> = HashMap::new();
+        let mut oauth_states: Vec<OAuthRuntimeState> = Vec::new();
         for account_config in &config.accounts {
             tracing::info!("Creating IMAP provider for {}", account_config.email);
 
@@ -135,6 +143,34 @@ impl AppContext {
                 );
             }
 
+            // ── Resolve credential: OAuth2 token cell or plain password ────
+            let credential = if let Some(oauth_cfg) = account_config.oauth_provider {
+                let oauth_secrets = secrets.oauth.clone().unwrap_or_else(|| {
+                    tracing::warn!(
+                        "⚠ {}: nessun token OAuth nel keychain — esegui `mc accounts add-oauth`",
+                        account_config.email
+                    );
+                    mc_domain::OAuthSecrets {
+                        access_token: String::new(),
+                        refresh_token: String::new(),
+                        expires_at: Utc::now(),
+                    }
+                });
+                let access_token = Arc::new(RwLock::new(oauth_secrets.access_token.clone()));
+                let refresh_token = Arc::new(RwLock::new(oauth_secrets.refresh_token.clone()));
+                let expires_at = Arc::new(RwLock::new(oauth_secrets.expires_at));
+                oauth_states.push(OAuthRuntimeState {
+                    email: account_config.email.clone(),
+                    provider: oauth_cfg.into(),
+                    access_token: access_token.clone(),
+                    refresh_token,
+                    expires_at,
+                });
+                ImapCredential::OAuthToken(access_token)
+            } else {
+                ImapCredential::Password(imap_password.clone())
+            };
+
             // ── Build SMTP sender (optional) ──────────────────────────────
             let smtp_sender = if let Some(smtp_cfg) = &account_config.smtp {
                 let domain_smtp = SmtpConnectionConfig {
@@ -147,7 +183,15 @@ impl AppContext {
                     username: smtp_cfg.username.clone(),
                     password: secrets.smtp_password.clone(),
                 };
-                match SmtpSender::build(&domain_smtp, &account_config.username, &imap_password) {
+                let sender_result = match &credential {
+                    ImapCredential::OAuthToken(token) => {
+                        Ok(SmtpSender::build_oauth(&domain_smtp, &account_config.username, token.clone()))
+                    }
+                    ImapCredential::Password(_) => {
+                        SmtpSender::build(&domain_smtp, &account_config.username, &imap_password)
+                    }
+                };
+                match sender_result {
                     Ok(sender) => {
                         match sender.test_connection().await {
                             Ok(true) => tracing::info!(
@@ -185,7 +229,7 @@ impl AppContext {
                 account_config.imap_host.clone(),
                 account_config.imap_port,
                 account_config.username.clone(),
-                mc_infrastructure::email::imap::ImapCredential::Password(imap_password.clone()),
+                credential,
                 account_config.use_tls,
                 smtp_sender,
             ));
@@ -682,6 +726,9 @@ impl AppContext {
             tracing::info!("Periodic re-sync timer started (every 5 minutes)");
         }
 
+        // ── Periodic OAuth token refresh (piggybacks the same 5-minute cadence) ──
+        oauth_refresh::spawn_refresh_loop(oauth_states, secret_store.clone(), shutdown.clone());
+
         // ── Server-side mailbox watchers ─────────────────────────────────────
         // One background task per account watches INBOX via IMAP IDLE.
         // Each ProviderNotification is mapped to a domain command/event so that
@@ -862,7 +909,8 @@ impl AppContext {
 
         // Create gRPC services
         let account_service = AccountServiceImpl::new(command_bus.clone(), query_bus.clone())
-            .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>);
+            .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>)
+            .with_oauth_trigger(oauth_challenges as Arc<dyn mc_application::OAuthLoginTrigger>);
 
         let mailbox_service = MailboxServiceImpl::new(query_bus.clone());
 
@@ -925,8 +973,13 @@ mod tests {
 
         // Verify AppContext can be created with wired dependencies.
         // No accounts → the secret store is never queried.
-        let secret_store = mc_infrastructure::KeyringSecretStore::new();
-        let context = match AppContext::new(&config, &secret_store).await {
+        let secret_store: Arc<dyn mc_domain::SecretStore> =
+            Arc::new(mc_infrastructure::KeyringSecretStore::new());
+        let oauth_challenges = Arc::new(crate::oauth_login::OAuthChallengeManager::new(
+            std::path::PathBuf::from("/tmp/test_config_sync.toml"),
+            secret_store.clone(),
+        ));
+        let context = match AppContext::new(&config, "/tmp/test_config_sync.toml", secret_store, oauth_challenges).await {
             Ok(ctx) => ctx,
             Err(e) => panic!("failed to create app context: {}", e),
         };
