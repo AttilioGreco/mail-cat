@@ -168,3 +168,18 @@ pub enum SyncPhase {
     Complete,
     Error(String),
 }
+
+/// OAuth2 provider for account login (Google/Microsoft).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthProvider {
+    Google,
+    Microsoft,
+}
+
+/// Streaming event emitted during an OAuth2 login flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthLoginEvent {
+    AwaitingBrowser { authorize_url: String },
+    Succeeded { email: String },
+    Failed { message: String },
+}

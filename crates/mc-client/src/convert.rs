@@ -189,3 +189,42 @@ fn proto_ts_to_datetime(ts: Option<pb::Timestamp>) -> DateTime<Utc> {
     ts.and_then(|t| Utc.timestamp_opt(t.seconds, t.nanos as u32).single())
         .unwrap_or_else(Utc::now)
 }
+
+pub fn oauth_login_event_from_proto(event: pb::OAuthLoginEvent) -> crate::types::OAuthLoginEvent {
+    use pb::o_auth_login_event::Event;
+    match event.event {
+        Some(Event::AwaitingBrowser(e)) => {
+            crate::types::OAuthLoginEvent::AwaitingBrowser { authorize_url: e.authorize_url }
+        }
+        Some(Event::Succeeded(e)) => crate::types::OAuthLoginEvent::Succeeded { email: e.email },
+        Some(Event::Failed(e)) => crate::types::OAuthLoginEvent::Failed { message: e.message },
+        None => crate::types::OAuthLoginEvent::Failed { message: "empty OAuth login event".into() },
+    }
+}
+
+pub(crate) fn oauth_provider_to_proto(provider: crate::types::OAuthProvider) -> i32 {
+    match provider {
+        crate::types::OAuthProvider::Google => pb::OAuthProvider::OauthProviderGoogle as i32,
+        crate::types::OAuthProvider::Microsoft => pb::OAuthProvider::OauthProviderMicrosoft as i32,
+    }
+}
+
+#[cfg(test)]
+mod oauth_tests {
+    use super::*;
+
+    #[test]
+    fn awaiting_browser_event_converts() {
+        let proto_event = pb::OAuthLoginEvent {
+            event: Some(pb::o_auth_login_event::Event::AwaitingBrowser(pb::AwaitingBrowser {
+                authorize_url: "https://accounts.google.com/x".into(),
+            })),
+        };
+        match oauth_login_event_from_proto(proto_event) {
+            crate::types::OAuthLoginEvent::AwaitingBrowser { authorize_url } => {
+                assert_eq!(authorize_url, "https://accounts.google.com/x");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+}

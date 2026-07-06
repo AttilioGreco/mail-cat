@@ -402,4 +402,29 @@ impl MailCatClient {
             item.map(sync_progress_from_proto).map_err(ClientError::Grpc)
         }))
     }
+
+    /// Start an OAuth2 login (Google/Microsoft) for a new account. Streams an
+    /// `AwaitingBrowser` event with the URL to open, then exactly one of
+    /// `Succeeded`/`Failed` once the browser redirect completes.
+    pub async fn start_oauth_login(
+        &self,
+        name: &str,
+        email: &str,
+        provider: crate::types::OAuthProvider,
+    ) -> Result<impl Stream<Item = Result<crate::types::OAuthLoginEvent>>> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        let stream = client
+            .start_o_auth_login(pb::StartOAuthLoginRequest {
+                name: name.to_owned(),
+                email: email.to_owned(),
+                provider: crate::convert::oauth_provider_to_proto(provider),
+            })
+            .await?
+            .into_inner();
+
+        Ok(tokio_stream::StreamExt::map(stream, |item| {
+            item.map(crate::convert::oauth_login_event_from_proto)
+                .map_err(ClientError::Grpc)
+        }))
+    }
 }
