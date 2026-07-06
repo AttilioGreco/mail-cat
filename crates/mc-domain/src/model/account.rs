@@ -91,6 +91,15 @@ pub struct SmtpConnectionConfig {
     pub password: Option<String>,
 }
 
+/// Which OAuth2 provider issued the tokens on an `AuthConfig::OAuth2` account.
+/// Needed to pick the right token-refresh endpoint later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthProvider {
+    Google,
+    Microsoft,
+}
+
 /// Authentication configuration.
 ///
 /// Secret fields (`password`, tokens, `app_password`) are `#[serde(skip)]`: they
@@ -105,6 +114,7 @@ pub enum AuthConfig {
         password: String,
     },
     OAuth2 {
+        provider: OAuthProvider,
         #[serde(skip)]
         access_token: String,
         #[serde(skip)]
@@ -443,5 +453,19 @@ mod tests {
 
         assert_eq!(deserialized.name, "Serialize Test");
         assert_eq!(deserialized.provider_type, ProviderType::GmailApi);
+    }
+
+    #[test]
+    fn oauth2_variant_carries_provider() {
+        let auth = AuthConfig::OAuth2 {
+            provider: OAuthProvider::Google,
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            expires_at: Utc::now(),
+        };
+        match auth {
+            AuthConfig::OAuth2 { provider, .. } => assert_eq!(provider, OAuthProvider::Google),
+            _ => panic!("expected OAuth2 variant"),
+        }
     }
 }

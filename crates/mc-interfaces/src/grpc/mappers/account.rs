@@ -57,6 +57,7 @@ pub fn domain_auth_to_proto(auth: &DomainAuthConfig) -> ProtoAuthConfig {
             }))
         }
         DomainAuthConfig::OAuth2 {
+            provider: _,
             access_token,
             refresh_token,
             expires_at,
@@ -91,6 +92,7 @@ pub fn proto_auth_to_domain(auth: &ProtoAuthConfig) -> Result<DomainAuthConfig, 
             let expires_at =
                 DateTime::from_timestamp(oauth2.expires_at, 0).unwrap_or_else(Utc::now);
             Ok(DomainAuthConfig::OAuth2 {
+                provider: mc_domain::OAuthProvider::Google,
                 access_token: oauth2.access_token.clone(),
                 refresh_token: oauth2.refresh_token.clone(),
                 expires_at,
