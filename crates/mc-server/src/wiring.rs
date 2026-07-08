@@ -333,6 +333,8 @@ impl AppContext {
 
         let mut registered_ids: Vec<(AccountId, String)> = Vec::new();
         let mut created_new = false;
+        // Per-account backfill rate override (falls back to the global default).
+        let mut backfill_rates: HashMap<AccountId, u32> = HashMap::new();
 
         for account_config in &config.accounts {
             let provider = providers_by_email
@@ -352,6 +354,12 @@ impl AppContext {
                     summary.email
                 );
                 registered_ids.push((summary.id, summary.name.clone()));
+                backfill_rates.insert(
+                    summary.id,
+                    account_config
+                        .body_backfill_per_minute
+                        .unwrap_or(config.body_backfill_per_minute),
+                );
             } else {
                 // Not in DB — create via aggregate + save
                 let email =
@@ -409,6 +417,12 @@ impl AppContext {
                     account_config.email
                 );
                 registered_ids.push((account_id, account_config.name.clone()));
+                backfill_rates.insert(
+                    account_id,
+                    account_config
+                        .body_backfill_per_minute
+                        .unwrap_or(config.body_backfill_per_minute),
+                );
                 created_new = true;
             }
         }
@@ -747,7 +761,10 @@ impl AppContext {
             let sync = Arc::clone(&sync_service);
             let id = *account_id;
             let sd = shutdown.clone();
-            let rate = config.body_backfill_per_minute;
+            let rate = backfill_rates
+                .get(account_id)
+                .copied()
+                .unwrap_or(config.body_backfill_per_minute);
             tokio::spawn(async move {
                 sync.run_backfill(id, rate, sd).await;
             });
@@ -994,6 +1011,7 @@ mod tests {
             accounts: vec![],
             ui_bin: "mail-cat-ui".to_string(),
             body_backfill_per_minute: 30,
+            log_level: None,
         };
 
         // Verify AppContext can be created with wired dependencies.

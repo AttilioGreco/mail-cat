@@ -34,6 +34,12 @@ pub struct ServerConfig {
     /// in newest-first at this rate to avoid the daily bandwidth cap.
     #[serde(default = "default_body_backfill_per_minute")]
     pub body_backfill_per_minute: u32,
+
+    /// `tracing_subscriber::EnvFilter` directive, e.g. `"info"` or
+    /// `"mc_server=debug,tower=warn"`. Overridden by the `RUST_LOG` env var
+    /// when set. Defaults to `mc_server=info,mc_application=debug,mc_infrastructure=debug`.
+    #[serde(default)]
+    pub log_level: Option<String>,
 }
 
 fn default_body_backfill_per_minute() -> u32 {
@@ -95,6 +101,10 @@ pub struct AccountConfig {
     /// send messages.
     #[serde(default)]
     pub smtp: Option<SmtpAccountConfig>,
+    /// Per-account override of the top-level `body_backfill_per_minute`.
+    /// Absent means "use the global default".
+    #[serde(default)]
+    pub body_backfill_per_minute: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -140,6 +150,7 @@ impl Default for ServerConfig {
             accounts: vec![],
             ui_bin: default_ui_bin(),
             body_backfill_per_minute: default_body_backfill_per_minute(),
+            log_level: None,
         }
     }
 }
@@ -275,9 +286,11 @@ security = "start_tls"
                     password: None,
                 }),
                 oauth_provider: None,
+                body_backfill_per_minute: Some(10),
             }],
             ui_bin: "/usr/local/bin/mail-cat-ui".into(),
             body_backfill_per_minute: 30,
+            log_level: Some("debug".into()),
         };
 
         let toml = toml::to_string_pretty(&config).unwrap();

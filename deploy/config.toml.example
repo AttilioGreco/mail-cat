@@ -18,6 +18,26 @@ grpc_addr = "127.0.0.1:50051"
 # Default: ~/.local/bin/mail-cat-ui  (posizione usata da `just install`)
 # ui_bin = "/home/utente/.local/bin/mail-cat-ui"
 
+# Livello di log, direttiva tracing_subscriber::EnvFilter (es. "info",
+# "debug", o granulare "mc_server=debug,tower=warn").
+# La variabile d'ambiente RUST_LOG, se impostata, ha SEMPRE la precedenza
+# su questo valore (utile per un debug estemporaneo senza toccare il file).
+# Serve per lasciare acceso un livello di debug permanente (es. in produzione
+# dopo un bug intermittente) senza dover ricordarsi di esportare RUST_LOG
+# ad ogni riavvio/restart del servizio (systemd, boot, ecc.).
+# Default: mc_server=info,mc_application=debug,mc_infrastructure=debug
+# log_level = "info"
+
+# Messaggi (corpo) scaricati al minuto dal worker di backfill in background,
+# per account. La sync iniziale scarica solo gli envelope; i corpi arrivano
+# dopo, dal più recente al più vecchio, a questo ritmo — per non superare il
+# tetto giornaliero di banda imposto da provider come Gmail su mailbox grandi.
+# `0` disabilita il backfill (i corpi si caricano solo all'apertura del messaggio).
+# Puoi anche impostarlo per singolo account (vedi sotto `[[accounts]]`),
+# utile se un account ha una mailbox enorme e un altro no.
+# Default: 30 (= 30 corpi/minuto, ~1 ogni 2 secondi)
+# body_backfill_per_minute = 30
+
 # ── Account email ────────────────────────────────────────────────────────────
 # Aggiungere un blocco [[accounts]] per ogni casella da sincronizzare.
 
@@ -35,6 +55,10 @@ smtp_port   = 587
 
 username    = "tuo@indirizzo.it"
 password    = "password_o_app_password"
+
+# Override del body_backfill_per_minute globale solo per questo account.
+# Se assente usa il valore globale definito sopra.
+# body_backfill_per_minute = 5
 
 # [[accounts]]
 # name      = "Work"

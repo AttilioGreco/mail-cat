@@ -41,21 +41,24 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Initialize tracing
+    // Load configuration (before tracing init: log_level is a fallback filter directive)
+    let config_path = ServerConfig::default_path();
+    let config = ServerConfig::load_or_default(&config_path);
+
+    // Initialize tracing. RUST_LOG always wins; otherwise config.log_level;
+    // otherwise the hardcoded default.
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "mc_server=info,mc_application=debug,mc_infrastructure=debug".into()
-            }),
-        )
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            config
+                .log_level
+                .clone()
+                .unwrap_or_else(|| "mc_server=info,mc_application=debug,mc_infrastructure=debug".into())
+                .into()
+        }))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     tracing::info!("🚀 Starting mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE}) [{RUSTC}]");
-
-    // Load configuration
-    let config_path = ServerConfig::default_path();
-    let config = ServerConfig::load_or_default(&config_path);
     tracing::info!("Config:  {}", config_path);
     tracing::info!("gRPC:    {}", config.grpc_addr);
     tracing::info!("DB:      {}", config.db_path);
