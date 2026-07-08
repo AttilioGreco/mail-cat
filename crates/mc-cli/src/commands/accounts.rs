@@ -22,6 +22,15 @@ pub enum AccountsCmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Rename an existing account's display name
+    Rename {
+        /// Email address of the account to rename
+        #[arg(long)]
+        email: String,
+        /// New display name
+        #[arg(long)]
+        name: String,
+    },
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -45,7 +54,20 @@ pub async fn run(cmd: AccountsCmd, client: MailCatClient) -> Result<()> {
         AccountsCmd::AddOauth { provider, email, name } => {
             add_oauth(client, provider.into(), email, name).await
         }
+        AccountsCmd::Rename { email, name } => rename(client, email, name).await,
     }
+}
+
+async fn rename(client: MailCatClient, email: String, name: String) -> Result<()> {
+    let account = client
+        .list_accounts()
+        .await?
+        .into_iter()
+        .find(|a| a.email == email)
+        .with_context(|| format!("nessun account con email {email}"))?;
+    client.rename_account(&account.id, &name).await?;
+    println!("{} account {} rinominato in \"{}\"", "✓".green(), email, name);
+    Ok(())
 }
 
 async fn add_oauth(

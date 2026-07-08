@@ -6,5 +6,7 @@
 //! and at-least-once on rebuild (which requires idempotent projectors).
 
 pub mod read_model;
+pub mod search_index;
 
 pub use read_model::ProjectionEventHandler;
+pub use search_index::SearchProjectionHandler;

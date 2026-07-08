@@ -10,14 +10,13 @@ use tokio_util::sync::CancellationToken;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::{CommandBus, QueryBus};
-use mc_application::projections::ProjectionEventHandler;
+use mc_application::projections::{ProjectionEventHandler, SearchProjectionHandler};
 use mc_domain::ReadModelProjector;
 use mc_application::{SyncConfig, SyncService, SyncTrigger};
 use mc_domain::{
     Account, AccountEventSource, AccountId, AccountReadRepository, AccountWriteRepository,
     AuthConfig, ConnectionConfig, EmailAddress, Identity, MailboxId, MailboxPath,
-    MessageReadRepository, ProviderNotification, ProviderRegistry, ProviderType, ProviderUid,
-    SearchIndex,
+    ProviderNotification, ProviderRegistry, ProviderType, ProviderUid,
 };
 use mc_domain::model::account::{SmtpConnectionConfig, SmtpSecurity};
 use mc_infrastructure::{
@@ -54,7 +53,7 @@ type QueryBusImpl = InProcessQueryBus<
     SledRepository<SledEventStore>, // CR
 >;
 type SyncServiceImpl =
-    SyncService<ProviderRegistryImpl, SledEventStore, SledRepository<SledEventStore>, TantivySearchIndex>;
+    SyncService<ProviderRegistryImpl, SledEventStore, SledRepository<SledEventStore>>;
 
 /// Application context with all wired dependencies.
 pub struct AppContext {
@@ -136,7 +135,9 @@ impl AppContext {
                 .with_context(|| format!("reading keychain secrets for {}", account_config.email))?
                 .unwrap_or_default();
             let imap_password = secrets.imap_password.clone().unwrap_or_default();
-            if imap_password.is_empty() {
+            // OAuth accounts authenticate with a token, not a password — don't
+            // warn about a missing keychain password for them (it's never set).
+            if imap_password.is_empty() && account_config.oauth_provider.is_none() {
                 tracing::warn!(
                     "⚠ {}: nessuna password nel keychain di sistema — inserisci `password = \"...\"` in config.toml per importarla",
                     account_config.email
@@ -284,25 +285,37 @@ impl AppContext {
                 provider_registry.clone(),
                 event_store.clone(),
                 repository_arc.clone(),
-                search_index.clone(),
                 sync_config,
             )
             .with_event_publisher(event_bus.clone()),
         );
         tracing::info!("Initialized sync service");
 
-        // Create projection event handler and start catching up
+        // Create projection event handlers and start catching up
         let live_projector = bare_repository.clone();
+        // Search index is an event-sourced projection with its own checkpoint,
+        // refreshing messages from the read model. Shared across boot catch-up,
+        // the live subscriber, and post-sync catch-up.
+        let search_handler = Arc::new(SearchProjectionHandler::new(
+            search_index.clone(),
+            bare_repository.clone(),
+            bare_repository.clone(),
+        ));
         let projection_handler =
             ProjectionEventHandler::new(bare_repository.clone(), bare_repository);
-        tracing::info!("Initialized projection handler");
+        tracing::info!("Initialized projection handlers");
 
-        // Catch up projections on startup (rebuild read models from events)
+        // Catch up projections on startup (rebuild read models from events).
+        // Read model first so the search projection reads a current read model.
         tracing::info!("Catching up projections from event store...");
         projection_handler
             .catch_up(event_store.as_ref())
             .await
             .context("failed to catch up projections")?;
+        search_handler
+            .catch_up(event_store.as_ref())
+            .await
+            .context("failed to catch up search index")?;
         tracing::info!("Projections caught up successfully");
 
         // ── Auto-create accounts from config ─────────────────────────────
@@ -408,6 +421,7 @@ impl AppContext {
         {
             let mut sub = event_bus.subscribe();
             let live_projector = live_projector.clone();
+            let search = search_handler.clone();
             let sd = shutdown.clone();
             tokio::spawn(async move {
                 loop {
@@ -415,8 +429,13 @@ impl AppContext {
                         _ = sd.cancelled() => break,
                         envelope = sub.recv() => match envelope {
                             Some(e) => {
+                                // Read model first, then search projection reads
+                                // the now-current read model for this message.
                                 if let Err(err) = live_projector.project(&e).await {
                                     tracing::warn!("Live projection error for {}: {}", e.payload.event_name(), err);
+                                }
+                                if let Err(err) = search.apply_live(&e).await {
+                                    tracing::warn!("Live search projection error for {}: {}", e.payload.event_name(), err);
                                 }
                             }
                             None => break,
@@ -608,34 +627,10 @@ impl AppContext {
             tracing::info!("Desktop notification subscriber started");
         }
 
-        // ── Search-index de-index subscriber ─────────────────────────────────
-        // The Tantivy index is a projection of domain events. Sync indexes
-        // bodies inline (eager_body_fetch=true) and removes them in reconcile,
-        // but permanent local deletes go through the command bus, which never
-        // owned the index — so they leaked stale search entries. This subscriber
-        // closes that one gap. (Indexing stays with sync's reliable bulk path;
-        // remove_message is idempotent, so overlapping with reconcile is fine.)
-        {
-            let mut sub = event_bus.subscribe();
-            let search = search_index.clone();
-            let sd = shutdown.clone();
-            tokio::spawn(async move {
-                loop {
-                    let envelope = tokio::select! {
-                        _ = sd.cancelled() => break,
-                        e = sub.recv() => match e { Some(v) => v, None => break },
-                    };
-                    if let mc_domain::DomainEvent::MessageDeleted { message_id, .. } =
-                        &envelope.payload
-                        && let Err(e) = search.remove_message(message_id).await
-                    {
-                        tracing::warn!("Search de-index for {message_id} failed: {e}");
-                    }
-                }
-                tracing::info!("Search de-index subscriber exited");
-            });
-            tracing::info!("Search de-index subscriber started");
-        }
+        // Search-index maintenance runs through the search-index projection: the
+        // live subscriber above applies runtime events instantly, and
+        // `search_handler.catch_up` (boot + after each sync) is the lossless
+        // backstop. No separate ad-hoc subscriber needed.
 
         // Re-run projection catch-up if new accounts were created
         if created_new {
@@ -647,29 +642,29 @@ impl AppContext {
             tracing::info!("Projections caught up after account creation");
         }
 
-        // ── Rebuild search index from the read model on startup ──────────────
-        // The Tantivy index isn't event-sourced with a checkpoint like the read
-        // model, and the bus is best-effort (lag-drops), so it can drift from the
-        // event store. Since the server is a long-running daemon (restarts are
-        // rare), a full rebuild on boot from the now-current read model is the
-        // simple, robust reconciliation: it heals lag-dropped de-indexes, orphaned
-        // deletes, and any never-indexed messages. `scan_all_messages` returns only
-        // live messages (deleted rows are gone from MESSAGES_TREE), so the rebuilt
-        // index contains exactly what should be searchable. Non-fatal: a stale
-        // index must not block the server from starting.
-        match repository_arc.scan_all_messages(None).await {
-            Ok(messages) => match search_index.rebuild(messages).await {
-                Ok(count) => tracing::info!("Search index rebuilt on startup: {count} message(s)"),
-                Err(e) => tracing::warn!("Startup search-index rebuild failed: {e}"),
-            },
-            Err(e) => tracing::warn!("Startup search-index rebuild: scan failed: {e}"),
+        // Search index was brought up to date incrementally by
+        // `search_handler.catch_up` above (checkpoint-driven, no full rebuild).
+        // If new accounts were just created, re-run it so any events replayed by
+        // the account-creation catch-up are indexed too.
+        if created_new {
+            search_handler
+                .catch_up(event_store.as_ref())
+                .await
+                .context("failed to catch up search index after account creation")?;
         }
 
         // ── Auto-sync registered accounts in background ─────────────────
+        // After each sync, run the search-index catch-up: sync appends events in
+        // bulk and the live bus drops under that load, so this lossless replay
+        // from the event store is what makes synced messages searchable.
+        // ponytail: concurrent per-account catch-ups are idempotent (writer is
+        // mutex-guarded); redundant overlap is fine, no coordination needed.
         for (account_id, name) in &registered_ids {
             let sync = sync_service.clone();
             let id = *account_id;
             let account_name = name.clone();
+            let search = search_handler.clone();
+            let es = event_store.clone();
             tokio::spawn(async move {
                 match sync.start_sync(&id).await {
                     Ok(events) => {
@@ -682,6 +677,9 @@ impl AppContext {
                     Err(e) => {
                         tracing::error!("Background sync failed for '{}': {}", account_name, e);
                     }
+                }
+                if let Err(e) = search.catch_up(es.as_ref()).await {
+                    tracing::warn!("Search index catch-up after sync of '{}' failed: {}", account_name, e);
                 }
             });
         }
@@ -697,6 +695,8 @@ impl AppContext {
             let sync_periodic = sync_service.clone();
             let ids: Vec<(AccountId, String)> = registered_ids.clone();
             let sd = shutdown.clone();
+            let search = search_handler.clone();
+            let es = event_store.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
                 interval.tick().await; // skip immediate first tick (initial sync already running)
@@ -723,6 +723,11 @@ impl AppContext {
                                 );
                             }
                         }
+                    }
+                    // Heal the search index from anything the bus dropped during
+                    // the bulk sync above (checkpoint-driven, incremental).
+                    if let Err(e) = search.catch_up(es.as_ref()).await {
+                        tracing::warn!("Periodic search index catch-up failed: {e}");
                     }
                 }
                 tracing::info!("Periodic re-sync timer stopped");

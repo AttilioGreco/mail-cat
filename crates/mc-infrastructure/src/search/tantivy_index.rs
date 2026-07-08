@@ -573,6 +573,10 @@ impl SearchIndex for TantivySearchIndex {
         Ok(result)
     }
 
+    async fn flush(&self) -> Result<(), DomainError> {
+        self.commit_and_reload()
+    }
+
     async fn rebuild(&self, messages: Vec<Message>) -> Result<u64, DomainError> {
         info!("Rebuilding index with {} messages", messages.len());
 

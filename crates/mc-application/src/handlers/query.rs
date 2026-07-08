@@ -334,6 +334,10 @@ mod tests {
         async fn rebuild(&self, _messages: Vec<Message>) -> Result<u64, DomainError> {
             Ok(0)
         }
+
+        async fn flush(&self) -> Result<(), DomainError> {
+            Ok(())
+        }
     }
 
     // ── Mock ConversationReadRepository ───────────────────────────────

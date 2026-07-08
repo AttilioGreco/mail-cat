@@ -52,6 +52,46 @@ pub trait SearchIndex: Send + Sync {
     /// The caller provides an iterator of messages. Returns the number of
     /// documents indexed.
     async fn rebuild(&self, messages: Vec<Message>) -> Result<u64, DomainError>;
+
+    /// Commit any pending writes and reload the reader so they become durable
+    /// and visible. Used by the search-index projection to bound the checkpoint
+    /// to what's durably committed.
+    async fn flush(&self) -> Result<(), DomainError>;
+}
+
+/// Blanket impl so an `Arc<impl SearchIndex>` (shared handle) also satisfies the
+/// generic `SI: SearchIndex` bound (e.g. in the search-index projection).
+#[async_trait]
+impl<T: SearchIndex + ?Sized> SearchIndex for std::sync::Arc<T> {
+    async fn index_message(&self, message: &Message) -> Result<(), DomainError> {
+        (**self).index_message(message).await
+    }
+    async fn remove_message(&self, message_id: &MessageId) -> Result<(), DomainError> {
+        (**self).remove_message(message_id).await
+    }
+    async fn search(
+        &self,
+        query: &str,
+        account_id: Option<&AccountId>,
+        mailbox_id: Option<&MailboxId>,
+        pagination: &Pagination,
+    ) -> Result<SearchResults, DomainError> {
+        (**self).search(query, account_id, mailbox_id, pagination).await
+    }
+    async fn suggest(
+        &self,
+        prefix: &str,
+        scope: Option<SuggestScope>,
+        max_per_field: usize,
+    ) -> Result<Vec<Suggestion>, DomainError> {
+        (**self).suggest(prefix, scope, max_per_field).await
+    }
+    async fn rebuild(&self, messages: Vec<Message>) -> Result<u64, DomainError> {
+        (**self).rebuild(messages).await
+    }
+    async fn flush(&self) -> Result<(), DomainError> {
+        (**self).flush().await
+    }
 }
 
 /// Which field(s) to scope suggestions to.

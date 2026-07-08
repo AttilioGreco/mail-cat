@@ -69,6 +69,19 @@ impl MailCatClient {
         Ok(resp.accounts.into_iter().map(account_from_proto).collect())
     }
 
+    /// Rename an account (updates only its display name; connection config untouched).
+    pub async fn rename_account(&self, account_id: &str, name: &str) -> Result<()> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        client
+            .update_account(pb::UpdateAccountRequest {
+                account_id: account_id.to_string(),
+                name: Some(name.to_string()),
+                connection_config: None,
+            })
+            .await?;
+        Ok(())
+    }
+
     // ── Mailboxes ─────────────────────────────────────────────────────────────
 
     pub async fn list_mailboxes(&self, account_id: &str) -> Result<Vec<Mailbox>> {

@@ -15,7 +15,7 @@ use mc_domain::{
     AccountId, AggregateType, BodyBackfillQueue, DomainEvent, EmailProvider, EventEnvelope,
     EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message,
     MessageId, MessageReadRepository, ProjectionCheckpoint, ProviderRegistry, ProviderUid,
-    ReadModelProjector, SearchIndex,
+    ReadModelProjector,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
@@ -85,12 +85,10 @@ pub struct SyncService<
     PR: ProviderRegistry,
     ES: EventStore,
     P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue,
-    SI: SearchIndex,
 > {
     provider_registry: Arc<PR>,
     event_store: Arc<ES>,
     projector: Arc<P>,
-    search_index: Arc<SI>,
     #[allow(dead_code)]
     config: SyncConfig,
     cancelled: AtomicBool,
@@ -104,22 +102,19 @@ impl<
     PR: ProviderRegistry,
     ES: EventStore,
     P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue,
-    SI: SearchIndex,
-> SyncService<PR, ES, P, SI>
+> SyncService<PR, ES, P>
 {
     /// Creates a new SyncService with the given dependencies.
     pub fn new(
         provider_registry: Arc<PR>,
         event_store: Arc<ES>,
         projector: Arc<P>,
-        search_index: Arc<SI>,
         config: SyncConfig,
     ) -> Self {
         Self {
             provider_registry,
             event_store,
             projector,
-            search_index,
             config,
             cancelled: AtomicBool::new(false),
             event_publisher: None,
@@ -397,7 +392,6 @@ impl<
                 let provider = self.provider_registry.get_provider(account_id)?;
                 match provider.fetch_bodies_bulk(&remote.path, &uids).await {
                     Ok(body_results) => {
-                        let mut indexed = 0u32;
                         for result in body_results {
                             if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
                                 let event = DomainEvent::MessageBodyFetched {
@@ -407,6 +401,9 @@ impl<
                                     // TODO: download and index attachments
                                     attachments: vec![],
                                 };
+                                // Search indexing is owned by the search-index
+                                // projection (driven off this event); no inline
+                                // index_message here.
                                 if let Err(e) = self
                                     .append_and_project(
                                         &message_id.to_string(),
@@ -418,26 +415,9 @@ impl<
                                     warn!(%message_id, error = %e, "Failed to project body");
                                     continue;
                                 }
-
-                                // Index the full message (envelope + body) for search
-                                match self.projector.get_message(message_id).await {
-                                    Ok(Some(full_msg)) => {
-                                        if let Err(e) = self.search_index.index_message(&full_msg).await {
-                                            warn!(%message_id, error = %e, "Failed to index message");
-                                        } else {
-                                            indexed += 1;
-                                        }
-                                    }
-                                    Ok(None) => {
-                                        warn!(%message_id, "Message not found in read model after body projection");
-                                    }
-                                    Err(e) => {
-                                        warn!(%message_id, error = %e, "Failed to read message for indexing");
-                                    }
-                                }
                             }
                         }
-                        info!(path = %remote.path, bodies = total_bodies, indexed, "Bodies fetched and indexed");
+                        info!(path = %remote.path, bodies = total_bodies, "Bodies fetched");
                     }
                     Err(e) => {
                         warn!(path = %remote.path, error = %e, "Bulk body fetch failed, skipping");
@@ -560,15 +540,8 @@ impl<
 
         self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
             .await?;
-
-        // Index the full message (envelope + body) for search. Both the
-        // on-demand open and the background backfill route through here, so this
-        // is the single place body text becomes searchable.
-        if let Ok(Some(full_msg)) = self.projector.get_message(message_id).await
-            && let Err(e) = self.search_index.index_message(&full_msg).await
-        {
-            warn!(%message_id, error = %e, "fetch_message_body: search index failed");
-        }
+        // Search indexing is owned by the search-index projection, driven off
+        // the MessageBodyFetched event just appended.
 
         Ok(Some(fetched))
     }
@@ -803,11 +776,7 @@ impl<
                                 warn!(%message_id, error = %e, "sync_mailbox: body projection failed");
                                 continue;
                             }
-                            if let Ok(Some(full_msg)) =
-                                self.projector.get_message(message_id).await
-                                && let Err(e) = self.search_index.index_message(&full_msg).await {
-                                    warn!(%message_id, error = %e, "sync_mailbox: search index failed");
-                                }
+                            // Search indexing owned by the search-index projection.
                         }
                     }
                 }
@@ -978,9 +947,7 @@ impl<
                 };
                 self.append_and_project(&summary.id.to_string(), AggregateType::Message, event)
                     .await?;
-                if let Err(e) = self.search_index.remove_message(&summary.id).await {
-                    warn!(message_id = %summary.id, error = %e, "Failed to remove message from search index");
-                }
+                // De-indexing owned by the search-index projection (MessageDeleted).
                 expunged += 1;
             } else if let Some(remote_flags) = remote_by_uid.get(&local_uid) {
                 // Message exists remotely — check for flag differences.
@@ -1039,9 +1006,7 @@ impl<
                     event,
                 )
                 .await?;
-                if let Err(e) = self.search_index.remove_message(&summary.id).await {
-                    warn!(message_id = %summary.id, error = %e, "Failed to remove message from search index");
-                }
+                // De-indexing owned by the search-index projection (MessageDeleted).
                 expunged += 1;
             }
         }
@@ -1079,8 +1044,7 @@ impl<
     PR: ProviderRegistry,
     ES: EventStore,
     P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue,
-    SI: SearchIndex,
-> SyncTrigger for SyncService<PR, ES, P, SI>
+> SyncTrigger for SyncService<PR, ES, P>
 {
     async fn trigger_sync(
         &self,
@@ -1514,51 +1478,13 @@ mod tests {
         }
     }
 
-    // ── Mock SearchIndex ────────────────────────────────────────────
-
-    struct MockSearchIndex;
-
-    #[async_trait]
-    impl SearchIndex for MockSearchIndex {
-        async fn index_message(&self, _message: &Message) -> Result<(), DomainError> {
-            Ok(())
-        }
-        async fn remove_message(&self, _message_id: &MessageId) -> Result<(), DomainError> {
-            Ok(())
-        }
-        async fn search(
-            &self,
-            _query: &str,
-            _account_id: Option<&AccountId>,
-            _mailbox_id: Option<&MailboxId>,
-            _pagination: &mc_shared::pagination::Pagination,
-        ) -> Result<mc_domain::traits::search_index::SearchResults, DomainError> {
-            Ok(mc_domain::traits::search_index::SearchResults {
-                hits: vec![],
-                total_count: 0,
-            })
-        }
-        async fn suggest(
-            &self,
-            _prefix: &str,
-            _scope: Option<mc_domain::SuggestScope>,
-            _max_per_field: usize,
-        ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
-            Ok(vec![])
-        }
-        async fn rebuild(&self, _messages: Vec<Message>) -> Result<u64, DomainError> {
-            Ok(0)
-        }
-    }
-
     fn make_service(
         provider: MockEmailProvider,
         event_store: Arc<MockEventStore>,
         projector: Arc<MockProjector>,
-    ) -> SyncService<MockProviderRegistry, MockEventStore, MockProjector, MockSearchIndex> {
+    ) -> SyncService<MockProviderRegistry, MockEventStore, MockProjector> {
         let registry = Arc::new(MockProviderRegistry::new(Arc::new(provider)));
-        let search_index = Arc::new(MockSearchIndex);
-        SyncService::new(registry, event_store, projector, search_index, SyncConfig::default())
+        SyncService::new(registry, event_store, projector, SyncConfig::default())
     }
 
     // ── Tests ─────────────────────────────────────────────────────────

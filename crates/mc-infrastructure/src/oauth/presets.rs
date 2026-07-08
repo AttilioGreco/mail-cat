@@ -15,17 +15,30 @@ pub struct ProviderPreset {
     pub smtp_host: &'static str,
     pub smtp_port: u16,
     client_id_env: &'static str,
+    client_id_baked: &'static str,
     client_secret_env: Option<&'static str>,
+    client_secret_baked: Option<&'static str>,
 }
 
 impl ProviderPreset {
+    /// Runtime env var wins (dev override); otherwise the value baked in at
+    /// compile time via `option_env!` (empty string if the build env was unset).
     pub fn client_id(&self) -> String {
-        std::env::var(self.client_id_env).unwrap_or_default()
+        std::env::var(self.client_id_env)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.client_id_baked.to_string())
     }
 
     pub fn client_secret(&self) -> Option<String> {
-        let env = self.client_secret_env?;
-        Some(std::env::var(env).unwrap_or_default())
+        if let Some(env) = self.client_secret_env {
+            if let Ok(v) = std::env::var(env) {
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+        self.client_secret_baked.map(String::from)
     }
 }
 
@@ -40,7 +53,9 @@ pub fn provider_preset(provider: OAuthProvider) -> ProviderPreset {
             smtp_host: "smtp.gmail.com",
             smtp_port: 587,
             client_id_env: "MAILCAT_GOOGLE_CLIENT_ID",
+            client_id_baked: option_env!("MAILCAT_GOOGLE_CLIENT_ID").unwrap_or(""),
             client_secret_env: Some("MAILCAT_GOOGLE_CLIENT_SECRET"),
+            client_secret_baked: option_env!("MAILCAT_GOOGLE_CLIENT_SECRET"),
         },
         OAuthProvider::Microsoft => ProviderPreset {
             auth_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
@@ -55,7 +70,9 @@ pub fn provider_preset(provider: OAuthProvider) -> ProviderPreset {
             smtp_host: "smtp.office365.com",
             smtp_port: 587,
             client_id_env: "MAILCAT_MICROSOFT_CLIENT_ID",
+            client_id_baked: option_env!("MAILCAT_MICROSOFT_CLIENT_ID").unwrap_or(""),
             client_secret_env: None,
+            client_secret_baked: None,
         },
     }
 }
