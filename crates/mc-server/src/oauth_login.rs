@@ -127,6 +127,17 @@ fn append_oauth_account(
         .as_array_of_tables_mut()
         .ok_or_else(|| anyhow::anyhow!("`accounts` in config.toml is not an array of tables"))?;
 
+    let already_present = accounts
+        .iter()
+        .any(|table| table.get("email").and_then(|v| v.as_str()) == Some(email));
+    if already_present {
+        // Re-auth of an existing account: the caller has already refreshed
+        // and stored the tokens in the keychain — the config entry itself
+        // hasn't changed, so appending here would create a duplicate
+        // [[accounts]] table.
+        return Ok(());
+    }
+
     let mut table = Table::new();
     table["name"] = value(name);
     table["email"] = value(email);
@@ -148,6 +159,27 @@ fn append_oauth_account(
 
     accounts.push(table);
     std::fs::write(config_path, doc.to_string())?;
+    Ok(())
+}
+
+/// Opens `url` in the OS default browser. Best-effort: callers should also
+/// show the URL so the user can open it manually if this fails (e.g. no
+/// desktop session).
+// ponytail: duplicates mc-cli's private open_browser (crates/mc-cli/src/commands/accounts.rs) —
+// extract to a shared location if a third caller needs it.
+pub(crate) fn open_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(url).status()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).status()?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd").args(["/C", "start", url]).status()?;
+    }
     Ok(())
 }
 
@@ -192,6 +224,24 @@ mod tests {
             Some(crate::config::OAuthProviderConfig::Google)
         );
         assert!(!written.contains("password"));
+    }
+
+    #[test]
+    fn append_oauth_account_is_idempotent_for_existing_email() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "grpc_addr = \"127.0.0.1:50051\"\n").unwrap();
+
+        append_oauth_account(&path, "Work Gmail", "me@gmail.com", OAuthProvider::Google).unwrap();
+        append_oauth_account(&path, "Work Gmail", "me@gmail.com", OAuthProvider::Google).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let parsed: crate::config::ServerConfig = toml::from_str(&written).unwrap();
+        assert_eq!(
+            parsed.accounts.len(),
+            1,
+            "re-auth of an existing account must not duplicate its config entry"
+        );
     }
 
     #[tokio::test]
