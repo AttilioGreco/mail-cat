@@ -135,19 +135,27 @@ pub fn spawn_refresh_loop(
                         );
                         *state.needs_reauth.write().await = true;
 
-                        let mut bundle = match secret_store.load(&state.email) {
-                            Ok(existing) => existing.unwrap_or_default(),
+                        let bundle = match secret_store.load(&state.email) {
+                            Ok(existing) => Some(existing.unwrap_or_default()),
                             Err(e) => {
+                                // Don't `continue` here: even though we can't clear the
+                                // keychain, the account still needs the user's attention
+                                // (needs_reauth is already true) — falling through to
+                                // append_account_event below is what drives the desktop
+                                // notification. Skipping it would strand the account
+                                // silently until a server restart.
                                 tracing::error!(
                                     "OAuth de-auth for {}: failed reading keychain before clearing: {e}",
                                     state.email
                                 );
-                                continue;
+                                None
                             }
                         };
-                        bundle.oauth = None;
-                        if let Err(e) = secret_store.store(&state.email, &bundle) {
-                            tracing::error!("OAuth de-auth for {}: failed clearing keychain: {e}", state.email);
+                        if let Some(mut bundle) = bundle {
+                            bundle.oauth = None;
+                            if let Err(e) = secret_store.store(&state.email, &bundle) {
+                                tracing::error!("OAuth de-auth for {}: failed clearing keychain: {e}", state.email);
+                            }
                         }
 
                         if let Err(e) = append_account_event(
