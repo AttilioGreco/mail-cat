@@ -549,12 +549,12 @@ mod tests {
                 .unwrap_or_default())
         }
 
-        async fn load_all_events(
+        fn load_all_events(
             &self,
             _aggregate_type: Option<AggregateType>,
             _from_global_position: u64,
-        ) -> Result<Vec<EventEnvelope>, DomainError> {
-            Ok(vec![])
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<EventEnvelope, DomainError>> + Send + '_>> {
+            Box::pin(futures::stream::empty())
         }
 
         fn subscribe(&self) -> Pin<Box<dyn futures::Stream<Item = EventEnvelope> + Send + '_>> {

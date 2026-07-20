@@ -49,15 +49,18 @@ pub trait EventStore: Send + Sync {
         from_sequence: u64,
     ) -> Result<Vec<EventEnvelope>, DomainError>;
 
-    /// Load events across all aggregates, optionally filtered by type.
+    /// Load events across all aggregates, optionally filtered by type, as a stream.
     ///
-    /// Events are returned in `global_position` order.
-    /// Pass `from_global_position = 0` to read from the beginning.
-    async fn load_all_events(
+    /// Events are yielded in `global_position` order. Pass `from_global_position = 0`
+    /// to read from the beginning. Streamed rather than collected up front: full-history
+    /// catch-up (read model, search index) only ever consumes this sequentially, and on
+    /// a large event store materializing it all as a `Vec` first would hold the entire
+    /// history in memory at once for no reason.
+    fn load_all_events(
         &self,
         aggregate_type: Option<AggregateType>,
         from_global_position: u64,
-    ) -> Result<Vec<EventEnvelope>, DomainError>;
+    ) -> Pin<Box<dyn Stream<Item = Result<EventEnvelope, DomainError>> + Send + '_>>;
 
     /// Subscribe to new events as they are appended.
     ///

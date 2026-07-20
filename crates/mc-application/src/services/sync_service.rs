@@ -12,10 +12,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mc_domain::{
-    AccountId, AggregateType, BodyBackfillQueue, DomainEvent, EmailProvider, EventEnvelope,
-    EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message,
-    MessageId, MessageReadRepository, ProjectionCheckpoint, ProviderRegistry, ProviderUid,
-    ReadModelProjector,
+    AccountId, AggregateType, BackfillEntry, BodyBackfillQueue, DomainEvent, EmailProvider,
+    EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath,
+    MailboxReadRepository, Message, MessageBodyResult, MessageId, MessageReadRepository,
+    ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
@@ -546,13 +546,63 @@ impl<
         Ok(Some(fetched))
     }
 
+    /// Fetches bodies for multiple messages in the same mailbox over a single
+    /// IMAP session (see `EmailProvider::fetch_bodies_bulk`), emitting one
+    /// `MessageBodyFetched` event per message. Used by `run_backfill` so a
+    /// batch of pending messages costs one connection, not one per message.
+    async fn fetch_message_bodies_bulk(
+        &self,
+        account_id: &AccountId,
+        mailbox_path: &MailboxPath,
+        entries: &[BackfillEntry],
+    ) -> Result<(), ApplicationError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let provider = self.provider_registry.get_provider(account_id)?;
+        let uids: Vec<ProviderUid> = entries
+            .iter()
+            .map(|e| ProviderUid::new(e.provider_uid))
+            .collect();
+
+        let results = provider
+            .fetch_bodies_bulk(mailbox_path, &uids)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to bulk fetch bodies: {e}")))?;
+        let by_uid: HashMap<u32, MessageBodyResult> =
+            results.into_iter().map(|r| (r.provider_uid.value(), r)).collect();
+
+        for entry in entries {
+            let Some(result) = by_uid.get(&entry.provider_uid) else {
+                // Not returned by the server this pass (e.g. deleted meanwhile);
+                // leave it queued, retried next pass.
+                warn!(%account_id, message_id = %entry.message_id, "backfill: message missing from bulk fetch result");
+                continue;
+            };
+            let event = DomainEvent::MessageBodyFetched {
+                message_id: entry.message_id,
+                body_text: result.body_text.clone(),
+                body_html: result.body_html.clone(),
+                attachments: vec![],
+            };
+            self.append_and_project(&entry.message_id.to_string(), AggregateType::Message, event)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     /// Background body-backfill loop for one account.
     ///
-    /// Drains the backfill queue newest-first, downloading one body every
-    /// `60/per_minute` seconds so we never burst the IMAP server (or trip
-    /// Gmail's daily bandwidth cap). Each fetch emits `MessageBodyFetched`,
-    /// which both indexes the body and dequeues the entry. Failed fetches stay
-    /// queued and are retried on the next pass. Runs until `shutdown` fires.
+    /// Drains the backfill queue newest-first, downloading a batch of up to
+    /// `per_minute` bodies every 60s (grouped by mailbox, one IMAP session per
+    /// mailbox per batch — see `fetch_message_bodies_bulk`) so we never burst
+    /// the IMAP server (or trip Gmail's daily bandwidth cap) while avoiding a
+    /// fresh TCP+TLS connection per message. Each fetch emits
+    /// `MessageBodyFetched`, which both indexes the body and dequeues the
+    /// entry. Failed fetches stay queued and are retried on the next pass.
+    /// Runs until `shutdown` fires.
     pub async fn run_backfill(
         &self,
         account_id: AccountId,
@@ -562,7 +612,8 @@ impl<
         if per_minute == 0 {
             return;
         }
-        let delay = std::time::Duration::from_millis(60_000 / per_minute as u64);
+        let batch_size = per_minute.max(1) as usize;
+        let cycle = std::time::Duration::from_secs(60);
         let idle_poll = std::time::Duration::from_secs(60);
 
         loop {
@@ -597,30 +648,36 @@ impl<
                 }
             }
 
-            for entry in pending {
+            for chunk in pending.chunks(batch_size) {
                 if shutdown.is_cancelled() {
                     return;
                 }
-                let Some(path) = path_by_id.get(&entry.mailbox_id) else {
-                    // Mailbox not yet known locally — skip this pass.
-                    continue;
-                };
-                if let Err(e) = self
-                    .fetch_message_body(
-                        &account_id,
-                        path,
-                        &entry.message_id,
-                        ProviderUid::new(entry.provider_uid),
-                    )
-                    .await
-                {
-                    // Leave it queued; retried next pass.
-                    warn!(%account_id, error = %e, "backfill: body fetch failed");
+
+                // Group by mailbox so each mailbox gets exactly one IMAP
+                // session for the whole chunk instead of one per message.
+                let mut by_mailbox: HashMap<MailboxId, Vec<BackfillEntry>> = HashMap::new();
+                for entry in chunk {
+                    by_mailbox.entry(entry.mailbox_id).or_default().push(entry.clone());
                 }
+
+                for (mailbox_id, entries) in by_mailbox {
+                    let Some(path) = path_by_id.get(&mailbox_id) else {
+                        // Mailbox not yet known locally — skip this pass.
+                        continue;
+                    };
+                    if let Err(e) = self
+                        .fetch_message_bodies_bulk(&account_id, path, &entries)
+                        .await
+                    {
+                        // Leave them queued; retried next pass.
+                        warn!(%account_id, error = %e, "backfill: bulk body fetch failed");
+                    }
+                }
+
                 // Rate limit (interruptible).
                 tokio::select! {
                     _ = shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(delay) => {}
+                    _ = tokio::time::sleep(cycle) => {}
                 }
             }
         }
@@ -1073,6 +1130,7 @@ mod tests {
         mailboxes: Vec<Mailbox>,
         envelopes: Vec<MessageEnvelopeSummary>,
         status: Option<MailboxStatus>,
+        bulk_fetch_calls: Mutex<Vec<Vec<u32>>>,
     }
 
     impl MockEmailProvider {
@@ -1091,7 +1149,14 @@ mod tests {
                     total_messages: 0,
                     unseen_messages: 0,
                 }),
+                bulk_fetch_calls: Mutex::new(vec![]),
             }
+        }
+
+        /// Number of times `fetch_bodies_bulk` was called (i.e. number of IMAP
+        /// sessions opened for bulk body fetches).
+        fn bulk_fetch_call_count(&self) -> usize {
+            self.bulk_fetch_calls.lock().unwrap().len()
         }
 
         fn with_envelopes(mut self, envelopes: Vec<MessageEnvelopeSummary>) -> Self {
@@ -1204,9 +1269,18 @@ mod tests {
         async fn fetch_bodies_bulk(
             &self,
             _mailbox: &MailboxPath,
-            _uids: &[ProviderUid],
+            uids: &[ProviderUid],
         ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError> {
-            Ok(vec![])
+            let uid_values: Vec<u32> = uids.iter().map(|u| u.value()).collect();
+            self.bulk_fetch_calls.lock().unwrap().push(uid_values.clone());
+            Ok(uid_values
+                .into_iter()
+                .map(|uid| mc_domain::traits::email_provider::MessageBodyResult {
+                    provider_uid: ProviderUid::new(uid),
+                    body_text: Some(format!("body-{uid}")),
+                    body_html: None,
+                })
+                .collect())
         }
     }
 
@@ -1280,12 +1354,12 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn load_all_events(
+        fn load_all_events(
             &self,
             _aggregate_type: Option<AggregateType>,
             _from_global_position: u64,
-        ) -> Result<Vec<EventEnvelope>, DomainError> {
-            Ok(vec![])
+        ) -> Pin<Box<dyn Stream<Item = Result<EventEnvelope, DomainError>> + Send + '_>> {
+            Box::pin(futures::stream::empty())
         }
 
         fn subscribe(&self) -> Pin<Box<dyn Stream<Item = EventEnvelope> + Send + '_>> {
@@ -1522,6 +1596,56 @@ mod tests {
         assert_eq!(discovered_count, 2, "Should discover INBOX and Sent");
     }
 
+    /// Backfill's whole point is avoiding one IMAP reconnect per message.
+    /// `fetch_message_bodies_bulk` must fetch a batch of messages in the same
+    /// mailbox over a single `fetch_bodies_bulk` call, not one call per message.
+    #[tokio::test]
+    async fn fetch_message_bodies_bulk_uses_one_session_for_whole_batch() {
+        let account_id = AccountId::new();
+        let mailbox_path = MailboxPath::new(vec!["INBOX".to_string()], '/').unwrap();
+        let mailbox_id = MailboxId::new();
+
+        let provider = MockEmailProvider::new();
+        let event_store = Arc::new(MockEventStore::new());
+        let projector = Arc::new(MockProjector::new());
+        let service = make_service(provider, event_store.clone(), projector.clone());
+
+        let entries: Vec<BackfillEntry> = (1..=3u32)
+            .map(|uid| BackfillEntry {
+                message_id: MessageId::new(),
+                mailbox_id,
+                provider_uid: uid,
+            })
+            .collect();
+
+        service
+            .fetch_message_bodies_bulk(&account_id, &mailbox_path, &entries)
+            .await
+            .unwrap();
+
+        // One `fetch_bodies_bulk` call for all 3 entries — not 3 separate calls.
+        let registry_provider = &service.provider_registry.get_provider(&account_id).unwrap();
+        assert_eq!(registry_provider.bulk_fetch_call_count(), 1);
+        assert_eq!(
+            registry_provider.bulk_fetch_calls.lock().unwrap()[0].len(),
+            3
+        );
+
+        // Each entry got its own MessageBodyFetched event, keyed by message_id.
+        let appended = event_store.appended_events();
+        let body_fetched_ids: Vec<MessageId> = appended
+            .iter()
+            .filter_map(|(_, e)| match e {
+                DomainEvent::MessageBodyFetched { message_id, .. } => Some(*message_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(body_fetched_ids.len(), 3);
+        for entry in &entries {
+            assert!(body_fetched_ids.contains(&entry.message_id));
+        }
+    }
+
     #[tokio::test]
     async fn sync_fetches_envelopes_and_emits_message_received() {
         let account_id = AccountId::new();
@@ -1572,6 +1696,7 @@ mod tests {
         let provider = MockEmailProvider {
             mailboxes: vec![inbox],
             envelopes: vec![],
+            bulk_fetch_calls: Mutex::new(vec![]),
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 10,
@@ -1691,6 +1816,7 @@ mod tests {
         let provider = MockEmailProvider {
             mailboxes: vec![inbox],
             envelopes: vec![],
+            bulk_fetch_calls: Mutex::new(vec![]),
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 1,
@@ -1734,6 +1860,7 @@ mod tests {
         let provider = MockEmailProvider {
             mailboxes: vec![inbox],
             envelopes: vec![],
+            bulk_fetch_calls: Mutex::new(vec![]),
             status: Some(MailboxStatus {
                 uid_validity: 42,
                 uid_next: 100,

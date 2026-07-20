@@ -251,31 +251,49 @@ impl EventStore for SledEventStore {
         Ok(envelopes)
     }
 
-    async fn load_all_events(
+    fn load_all_events(
         &self,
         aggregate_type: Option<AggregateType>,
         from_global_position: u64,
-    ) -> Result<Vec<EventEnvelope>, DomainError> {
-        let tree = self.events_global_tree()?;
+    ) -> Pin<Box<dyn Stream<Item = Result<EventEnvelope, DomainError>> + Send + '_>> {
         let start_key = Self::global_key(from_global_position);
 
-        let mut envelopes = Vec::new();
-        for item in tree.range(start_key.as_bytes()..) {
-            let (_key, value) = item.map_err(|e| DomainError::EventStore(e.to_string()))?;
+        let stream = async_stream::stream! {
+            let tree = match self.events_global_tree() {
+                Ok(tree) => tree,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
 
-            let envelope: EventEnvelope = serde_json::from_slice(&value)
-                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            for item in tree.range(start_key.as_bytes()..) {
+                let (_key, value) = match item {
+                    Ok(kv) => kv,
+                    Err(e) => {
+                        yield Err(DomainError::EventStore(e.to_string()));
+                        return;
+                    }
+                };
 
-            if let Some(ref filter_type) = aggregate_type
-                && &envelope.aggregate_type != filter_type
-            {
-                continue;
+                let envelope: EventEnvelope = match serde_json::from_slice(&value) {
+                    Ok(envelope) => envelope,
+                    Err(e) => {
+                        yield Err(DomainError::Serialization(e.to_string()));
+                        return;
+                    }
+                };
+
+                if let Some(ref filter_type) = aggregate_type
+                    && &envelope.aggregate_type != filter_type
+                {
+                    continue;
+                }
+
+                yield Ok(envelope);
             }
-
-            envelopes.push(envelope);
-        }
-
-        Ok(envelopes)
+        };
+        Box::pin(stream)
     }
 
     fn subscribe(&self) -> Pin<Box<dyn Stream<Item = EventEnvelope> + Send + '_>> {
@@ -299,6 +317,7 @@ impl EventStore for SledEventStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::TryStreamExt;
     use mc_domain::{AccountId, EmailAddress, ProviderType};
 
     fn make_event() -> DomainEvent {
@@ -395,7 +414,7 @@ mod tests {
             .await
             .unwrap();
 
-        let all = store.load_all_events(None, 0).await.unwrap();
+        let all: Vec<EventEnvelope> = store.load_all_events(None, 0).try_collect().await.unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].global_position, 1);
         assert_eq!(all[1].global_position, 2);
@@ -421,19 +440,22 @@ mod tests {
             .await
             .unwrap();
 
-        let account_events = store
+        let account_events: Vec<EventEnvelope> = store
             .load_all_events(Some(AggregateType::Account), 0)
+            .try_collect()
             .await
             .unwrap();
         assert_eq!(account_events.len(), 1);
 
-        let message_events = store
+        let message_events: Vec<EventEnvelope> = store
             .load_all_events(Some(AggregateType::Message), 0)
+            .try_collect()
             .await
             .unwrap();
         assert_eq!(message_events.len(), 1);
 
-        let all_events = store.load_all_events(None, 0).await.unwrap();
+        let all_events: Vec<EventEnvelope> =
+            store.load_all_events(None, 0).try_collect().await.unwrap();
         assert_eq!(all_events.len(), 2);
     }
 

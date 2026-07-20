@@ -420,14 +420,14 @@ impl<ES: EventStore> mc_domain::traits::repository::ConversationReadRepository
         }
 
         // 2. Replay all events from the event store (projection is idempotent).
-        let events = self
-            .event_store
-            .load_all_events(None, 0)
-            .await?;
-
-        let total = events.len() as u64;
-        for envelope in &events {
-            self.project(envelope).await?;
+        // Streamed rather than collected into a Vec first: on a large event
+        // store that would hold the entire history in memory at once.
+        use futures::StreamExt;
+        let mut stream = self.event_store.load_all_events(None, 0);
+        let mut total = 0u64;
+        while let Some(envelope) = stream.next().await {
+            self.project(&envelope?).await?;
+            total += 1;
         }
 
         Ok(total)

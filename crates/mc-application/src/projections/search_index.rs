@@ -17,6 +17,7 @@
 //! (read-model catch-up runs before search catch-up on boot; the live subscriber
 //! chains read-model then search per event).
 
+use futures::StreamExt;
 use tracing::{debug, info};
 
 use mc_domain::{
@@ -112,25 +113,16 @@ where
             .await
             .map_err(ApplicationError::Domain)?;
 
-        let events = store
-            .load_all_events(None, last_pos + 1)
-            .await
-            .map_err(ApplicationError::Domain)?;
+        debug!(from_position = last_pos + 1, "search index catching up");
 
-        if events.is_empty() {
-            return Ok(0);
-        }
-
-        debug!(
-            from_position = last_pos + 1,
-            event_count = events.len(),
-            "search index catching up"
-        );
-
+        let mut stream = store.load_all_events(None, last_pos + 1);
         let mut count = 0u64;
         let mut last_committed = last_pos;
-        for envelope in &events {
-            self.project(envelope).await?;
+        let mut last_position = last_pos;
+        while let Some(envelope) = stream.next().await {
+            let envelope = envelope.map_err(ApplicationError::Domain)?;
+            last_position = envelope.global_position;
+            self.project(&envelope).await?;
             count += 1;
             if count.is_multiple_of(CHECKPOINT_EVERY) {
                 self.search_index
@@ -138,24 +130,22 @@ where
                     .await
                     .map_err(ApplicationError::Domain)?;
                 self.checkpoint
-                    .save_checkpoint(PROJECTION_NAME, envelope.global_position)
+                    .save_checkpoint(PROJECTION_NAME, last_position)
                     .await
                     .map_err(ApplicationError::Domain)?;
-                last_committed = envelope.global_position;
+                last_committed = last_position;
                 info!(progress = count, "search index catch-up progress");
             }
         }
 
         // Final flush + checkpoint for the remainder.
-        if let Some(last) = events.last()
-            && last.global_position > last_committed
-        {
+        if last_position > last_committed {
             self.search_index
                 .flush()
                 .await
                 .map_err(ApplicationError::Domain)?;
             self.checkpoint
-                .save_checkpoint(PROJECTION_NAME, last.global_position)
+                .save_checkpoint(PROJECTION_NAME, last_position)
                 .await
                 .map_err(ApplicationError::Domain)?;
         }
@@ -288,17 +278,19 @@ mod tests {
         ) -> Result<Vec<EventEnvelope>, DomainError> {
             unimplemented!()
         }
-        async fn load_all_events(
+        fn load_all_events(
             &self,
             _t: Option<AggregateType>,
             from: u64,
-        ) -> Result<Vec<EventEnvelope>, DomainError> {
-            Ok(self
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<EventEnvelope, DomainError>> + Send + '_>>
+        {
+            let events: Vec<_> = self
                 .events
                 .iter()
                 .filter(|e| e.global_position >= from)
                 .cloned()
-                .collect())
+                .collect();
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
         }
         fn subscribe(
             &self,
