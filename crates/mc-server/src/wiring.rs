@@ -12,7 +12,7 @@ use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQuery
 use mc_application::{CommandBus, QueryBus};
 use mc_application::projections::{ProjectionEventHandler, SearchProjectionHandler};
 use mc_domain::ReadModelProjector;
-use mc_application::{SyncConfig, SyncService, SyncTrigger};
+use mc_application::{OAuthLoginTrigger, SyncConfig, SyncService, SyncTrigger};
 use mc_domain::{
     Account, AccountEventSource, AccountId, AccountReadRepository, AccountWriteRepository,
     AuthConfig, ConnectionConfig, EmailAddress, Identity, MailboxId, MailboxPath,
@@ -124,7 +124,15 @@ impl AppContext {
         // Create provider registry and build providers from config
         let provider_registry = Arc::new(InMemoryProviderRegistry::new());
         let mut providers_by_email: HashMap<String, Arc<ImapEmailProvider>> = HashMap::new();
-        let mut oauth_states: Vec<OAuthRuntimeState> = Vec::new();
+        let mut oauth_cells_by_email: HashMap<
+            String,
+            (
+                Arc<RwLock<String>>,
+                Arc<RwLock<String>>,
+                Arc<RwLock<chrono::DateTime<Utc>>>,
+                mc_domain::OAuthProvider,
+            ),
+        > = HashMap::new();
         for account_config in &config.accounts {
             tracing::info!("Creating IMAP provider for {}", account_config.email);
 
@@ -160,13 +168,10 @@ impl AppContext {
                 let access_token = Arc::new(RwLock::new(oauth_secrets.access_token.clone()));
                 let refresh_token = Arc::new(RwLock::new(oauth_secrets.refresh_token.clone()));
                 let expires_at = Arc::new(RwLock::new(oauth_secrets.expires_at));
-                oauth_states.push(OAuthRuntimeState {
-                    email: account_config.email.clone(),
-                    provider: oauth_cfg.into(),
-                    access_token: access_token.clone(),
-                    refresh_token,
-                    expires_at,
-                });
+                oauth_cells_by_email.insert(
+                    account_config.email.clone(),
+                    (access_token.clone(), refresh_token, expires_at, oauth_cfg.into()),
+                );
                 ImapCredential::OAuthToken(access_token)
             } else {
                 ImapCredential::Password(imap_password.clone())
@@ -332,6 +337,7 @@ impl AppContext {
             .collect();
 
         let mut registered_ids: Vec<(AccountId, String)> = Vec::new();
+        let mut oauth_states: Vec<OAuthRuntimeState> = Vec::new();
         let mut created_new = false;
         // Per-account backfill rate override (falls back to the global default).
         let mut backfill_rates: HashMap<AccountId, u32> = HashMap::new();
@@ -354,6 +360,20 @@ impl AppContext {
                     summary.email
                 );
                 registered_ids.push((summary.id, summary.name.clone()));
+                if let Some((access_token, refresh_token, expires_at, provider)) =
+                    oauth_cells_by_email.remove(&account_config.email)
+                {
+                    oauth_states.push(OAuthRuntimeState {
+                        account_id: summary.id,
+                        name: summary.name.clone(),
+                        email: account_config.email.clone(),
+                        provider,
+                        access_token,
+                        refresh_token,
+                        expires_at,
+                        needs_reauth: Arc::new(RwLock::new(false)),
+                    });
+                }
                 backfill_rates.insert(
                     summary.id,
                     account_config
@@ -417,6 +437,20 @@ impl AppContext {
                     account_config.email
                 );
                 registered_ids.push((account_id, account_config.name.clone()));
+                if let Some((access_token, refresh_token, expires_at, provider)) =
+                    oauth_cells_by_email.remove(&account_config.email)
+                {
+                    oauth_states.push(OAuthRuntimeState {
+                        account_id,
+                        name: account_config.name.clone(),
+                        email: account_config.email.clone(),
+                        provider,
+                        access_token,
+                        refresh_token,
+                        expires_at,
+                        needs_reauth: Arc::new(RwLock::new(false)),
+                    });
+                }
                 backfill_rates.insert(
                     account_id,
                     account_config
@@ -511,11 +545,21 @@ impl AppContext {
         //       "Archivia" → MoveMessage to Archive mailbox via command bus
         //       "Apri Mail Cat" → spawns the mail-cat-ui process
         //   • AccountSyncFailed – error alert (no actions)
+        //   • AccountAuthExpired – error alert with "Ri-autentica" action:
+        //       drives OAuthChallengeManager::start_login() in-process, opens the
+        //       system browser, and on success hot-swaps the new tokens into the
+        //       live OAuthRuntimeState cells (no server restart needed)
         {
             let mut sub = event_bus.subscribe();
             let notif_cmd_bus = command_bus.clone();
             let notif_q_bus = query_bus.clone();
             let notif_ui_bin = config.ui_bin.clone();
+            let notif_oauth_states = oauth_states.clone();
+            let notif_oauth_challenges = oauth_challenges.clone();
+            let notif_secret_store = secret_store.clone();
+            let notif_repository = repository_arc.clone() as Arc<dyn mc_domain::AccountWriteRepository>;
+            let notif_event_store = event_store.clone() as Arc<dyn mc_domain::EventStore>;
+            let notif_event_publisher = event_bus.clone() as Arc<dyn mc_application::EventPublisher>;
             let sd = shutdown.clone();
             tokio::spawn(async move {
                 loop {
@@ -631,6 +675,128 @@ impl AppContext {
                                 {
                                     tracing::warn!("Desktop notification failed: {e}");
                                 }
+                            });
+                        }
+                        mc_domain::DomainEvent::AccountAuthExpired { account_id, error } => {
+                            let Some(state) = notif_oauth_states
+                                .iter()
+                                .find(|s| s.account_id == account_id)
+                                .cloned()
+                            else {
+                                tracing::warn!(
+                                    "AccountAuthExpired for unknown account {}",
+                                    account_id.as_uuid()
+                                );
+                                continue;
+                            };
+                            let challenges = notif_oauth_challenges.clone();
+                            let secret_store = notif_secret_store.clone();
+                            let repository = notif_repository.clone();
+                            let event_store = notif_event_store.clone();
+                            let publisher = notif_event_publisher.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let handle = match notify_rust::Notification::new()
+                                    .summary(&format!("{} richiede una nuova autenticazione", state.email))
+                                    .body(&error)
+                                    .icon("dialog-error")
+                                    .action("reauth", "Ri-autentica")
+                                    .show()
+                                {
+                                    Ok(h) => h,
+                                    Err(e) => {
+                                        tracing::warn!("Desktop notification failed: {e}");
+                                        return;
+                                    }
+                                };
+                                let rt = tokio::runtime::Handle::current();
+                                handle.wait_for_action(move |action| {
+                                    if action != "reauth" {
+                                        return;
+                                    }
+                                    rt.block_on(async move {
+                                        let mut progress = challenges.start_login(
+                                            state.name.clone(),
+                                            state.email.clone(),
+                                            state.provider,
+                                        );
+                                        while let Some(update) = progress.recv().await {
+                                            match update {
+                                                mc_application::OAuthLoginProgress::AwaitingBrowser {
+                                                    authorize_url,
+                                                } => {
+                                                    if let Err(e) =
+                                                        crate::oauth_login::open_browser(&authorize_url)
+                                                    {
+                                                        tracing::warn!(
+                                                            "Failed to open browser for re-auth ({e}) — \
+                                                             apri manualmente: {authorize_url}"
+                                                        );
+                                                    }
+                                                }
+                                                mc_application::OAuthLoginProgress::Succeeded { .. } => {
+                                                    match secret_store.load(&state.email) {
+                                                        Ok(Some(bundle)) => {
+                                                            if let Some(oauth) = bundle.oauth {
+                                                                *state.access_token.write().await =
+                                                                    oauth.access_token;
+                                                                *state.refresh_token.write().await =
+                                                                    oauth.refresh_token;
+                                                                *state.expires_at.write().await =
+                                                                    oauth.expires_at;
+                                                            }
+                                                        }
+                                                        Ok(None) => tracing::warn!(
+                                                            "Re-auth succeeded for {} but keychain entry is missing",
+                                                            state.email
+                                                        ),
+                                                        Err(e) => tracing::warn!(
+                                                            "Re-auth succeeded for {} but re-reading keychain failed: {e}",
+                                                            state.email
+                                                        ),
+                                                    }
+                                                    *state.needs_reauth.write().await = false;
+
+                                                    if let Err(e) = oauth_refresh::append_account_event(
+                                                        state.account_id,
+                                                        mc_domain::DomainEvent::AccountReauthenticated {
+                                                            account_id: state.account_id,
+                                                        },
+                                                        &event_store,
+                                                        &repository,
+                                                        &publisher,
+                                                    )
+                                                    .await
+                                                    {
+                                                        tracing::warn!(
+                                                            "Failed to record AccountReauthenticated for {}: {e}",
+                                                            state.email
+                                                        );
+                                                    }
+
+                                                    let _ = notify_rust::Notification::new()
+                                                        .summary(&format!("{} ri-autenticato", state.email))
+                                                        .body("Account riattivato con successo.")
+                                                        .icon("dialog-information")
+                                                        .show();
+                                                }
+                                                mc_application::OAuthLoginProgress::Failed { message } => {
+                                                    tracing::warn!(
+                                                        "Re-auth failed for {}: {message}",
+                                                        state.email
+                                                    );
+                                                    let _ = notify_rust::Notification::new()
+                                                        .summary(&format!(
+                                                            "Ri-autenticazione fallita per {}",
+                                                            state.email
+                                                        ))
+                                                        .body(&message)
+                                                        .icon("dialog-error")
+                                                        .show();
+                                                }
+                                            }
+                                        }
+                                    });
+                                });
                             });
                         }
                         _ => {}
@@ -750,7 +916,14 @@ impl AppContext {
         }
 
         // ── Periodic OAuth token refresh (piggybacks the same 5-minute cadence) ──
-        oauth_refresh::spawn_refresh_loop(oauth_states, secret_store.clone(), shutdown.clone());
+        oauth_refresh::spawn_refresh_loop(
+            oauth_states,
+            secret_store.clone(),
+            event_store.clone() as Arc<dyn mc_domain::EventStore>,
+            repository_arc.clone() as Arc<dyn mc_domain::AccountWriteRepository>,
+            event_bus.clone() as Arc<dyn mc_application::EventPublisher>,
+            shutdown.clone(),
+        );
 
         // ── Background body backfill ─────────────────────────────────────────
         // The initial sync only pulls envelopes; message bodies are downloaded
