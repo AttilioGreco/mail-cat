@@ -496,6 +496,40 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 debug!(account_id = %account_id, "projected AccountRemoved");
             }
 
+            DomainEvent::AccountAuthExpired { account_id, .. } => {
+                let tree = self.tree(ACCOUNTS_TREE)?;
+                if let Some(bytes) = tree
+                    .get(account_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let mut summary: AccountSummary = serde_json::from_slice(&bytes)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    summary.status = AccountStatus::NeedsReauth;
+                    let json = serde_json::to_vec(&summary)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    tree.insert(account_id.to_string().as_bytes(), json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    debug!(account_id = %account_id, "projected AccountAuthExpired");
+                }
+            }
+
+            DomainEvent::AccountReauthenticated { account_id } => {
+                let tree = self.tree(ACCOUNTS_TREE)?;
+                if let Some(bytes) = tree
+                    .get(account_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let mut summary: AccountSummary = serde_json::from_slice(&bytes)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    summary.status = AccountStatus::Active;
+                    let json = serde_json::to_vec(&summary)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    tree.insert(account_id.to_string().as_bytes(), json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    debug!(account_id = %account_id, "projected AccountReauthenticated");
+                }
+            }
+
             DomainEvent::AccountSyncStarted { .. }
             | DomainEvent::AccountSyncCompleted { .. }
             | DomainEvent::AccountSyncFailed { .. } => {

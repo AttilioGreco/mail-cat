@@ -34,6 +34,11 @@ pub fn domain_account_status_to_proto(status: &DomainAccountStatus) -> i32 {
         DomainAccountStatus::Active => ProtoAccountStatus::Active as i32,
         DomainAccountStatus::Disabled => ProtoAccountStatus::Disabled as i32,
         DomainAccountStatus::Error => ProtoAccountStatus::Error as i32,
+        // The proto enum has no dedicated re-auth state; surfacing accounts
+        // needing re-authentication over gRPC is out of scope for now (see
+        // docs/superpowers/specs/2026-07-20-oauth-token-reauth-design.md).
+        // Error is the closest existing meaning for external consumers.
+        DomainAccountStatus::NeedsReauth => ProtoAccountStatus::Error as i32,
     }
 }
 
