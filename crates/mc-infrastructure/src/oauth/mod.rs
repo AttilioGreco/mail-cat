@@ -107,7 +107,7 @@ pub async fn refresh(provider: OAuthProvider, refresh_token: &str) -> Result<OAu
         .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
         .request_async(oauth2::reqwest::async_http_client)
         .await
-        .map_err(|e| DomainError::Provider(format!("OAuth token refresh failed: {e}")))?;
+        .map_err(classify_refresh_error)?;
 
     let mut secrets = token_response_to_secrets(&token)?;
     if secrets.refresh_token.is_empty() {
@@ -115,6 +115,22 @@ pub async fn refresh(provider: OAuthProvider, refresh_token: &str) -> Result<OAu
         secrets.refresh_token = refresh_token.to_string();
     }
     Ok(secrets)
+}
+
+/// Distinguishes a dead refresh token (revoked/invalid — the account needs a
+/// full user re-auth) from a transient failure (network hiccup, timeout,
+/// provider 5xx — safe to retry next cycle).
+fn classify_refresh_error<RE: std::error::Error + 'static>(
+    e: oauth2::RequestTokenError<RE, oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>>,
+) -> DomainError {
+    match e {
+        oauth2::RequestTokenError::ServerResponse(resp)
+            if matches!(resp.error(), oauth2::basic::BasicErrorResponseType::InvalidGrant) =>
+        {
+            DomainError::AuthenticationFailed(format!("refresh token invalid or revoked: {resp}"))
+        }
+        other => DomainError::Provider(format!("OAuth token refresh failed: {other}")),
+    }
 }
 
 fn token_response_to_secrets<TR: TokenResponse<oauth2::basic::BasicTokenType>>(
@@ -140,5 +156,39 @@ mod tests {
         assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth"));
         assert!(url.contains("code_challenge"));
         assert!(url.contains("mail.google.com"));
+    }
+
+    #[test]
+    fn classify_invalid_grant_as_authentication_failed() {
+        let resp = oauth2::StandardErrorResponse::new(
+            oauth2::basic::BasicErrorResponseType::InvalidGrant,
+            None,
+            None,
+        );
+        let err: oauth2::RequestTokenError<
+            std::io::Error,
+            oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>,
+        > = oauth2::RequestTokenError::ServerResponse(resp);
+
+        let classified = classify_refresh_error(err);
+
+        assert!(matches!(classified, DomainError::AuthenticationFailed(_)));
+    }
+
+    #[test]
+    fn classify_other_server_response_as_provider_error() {
+        let resp = oauth2::StandardErrorResponse::new(
+            oauth2::basic::BasicErrorResponseType::InvalidRequest,
+            None,
+            None,
+        );
+        let err: oauth2::RequestTokenError<
+            std::io::Error,
+            oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>,
+        > = oauth2::RequestTokenError::ServerResponse(resp);
+
+        let classified = classify_refresh_error(err);
+
+        assert!(matches!(classified, DomainError::Provider(_)));
     }
 }
