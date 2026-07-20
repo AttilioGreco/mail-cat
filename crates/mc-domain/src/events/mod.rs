@@ -111,6 +111,18 @@ pub enum DomainEvent {
         error: String,
     },
 
+    /// A background token refresh discovered the account's OAuth refresh
+    /// token is dead (revoked/invalid). Tokens have already been cleared
+    /// from the keychain by the time this is appended.
+    AccountAuthExpired {
+        account_id: AccountId,
+        error: String,
+    },
+
+    /// The user completed a fresh OAuth login for an account that was
+    /// previously flagged `AccountAuthExpired`.
+    AccountReauthenticated { account_id: AccountId },
+
     // ── Mailbox Events ──────────────────────────────────────────────
     /// A new mailbox was discovered during sync.
     MailboxDiscovered {
@@ -270,7 +282,9 @@ impl DomainEvent {
             | Self::AccountRemoved { .. }
             | Self::AccountSyncStarted { .. }
             | Self::AccountSyncCompleted { .. }
-            | Self::AccountSyncFailed { .. } => AggregateType::Account,
+            | Self::AccountSyncFailed { .. }
+            | Self::AccountAuthExpired { .. }
+            | Self::AccountReauthenticated { .. } => AggregateType::Account,
 
             Self::MailboxDiscovered { .. }
             | Self::MailboxCountsUpdated { .. }
@@ -302,6 +316,8 @@ impl DomainEvent {
             Self::AccountSyncStarted { .. } => "AccountSyncStarted",
             Self::AccountSyncCompleted { .. } => "AccountSyncCompleted",
             Self::AccountSyncFailed { .. } => "AccountSyncFailed",
+            Self::AccountAuthExpired { .. } => "AccountAuthExpired",
+            Self::AccountReauthenticated { .. } => "AccountReauthenticated",
             Self::MailboxDiscovered { .. } => "MailboxDiscovered",
             Self::MailboxCountsUpdated { .. } => "MailboxCountsUpdated",
             Self::MailboxRenamed { .. } => "MailboxRenamed",
@@ -443,5 +459,24 @@ mod tests {
         assert_eq!(format!("{}", AggregateType::Account), "account");
         assert_eq!(format!("{}", AggregateType::Mailbox), "mailbox");
         assert_eq!(format!("{}", AggregateType::Message), "message");
+    }
+
+    #[test]
+    fn account_auth_expired_aggregate_type_and_name() {
+        let event = DomainEvent::AccountAuthExpired {
+            account_id: AccountId::new(),
+            error: "invalid_grant".into(),
+        };
+        assert_eq!(event.aggregate_type(), AggregateType::Account);
+        assert_eq!(event.event_name(), "AccountAuthExpired");
+    }
+
+    #[test]
+    fn account_reauthenticated_aggregate_type_and_name() {
+        let event = DomainEvent::AccountReauthenticated {
+            account_id: AccountId::new(),
+        };
+        assert_eq!(event.aggregate_type(), AggregateType::Account);
+        assert_eq!(event.event_name(), "AccountReauthenticated");
     }
 }

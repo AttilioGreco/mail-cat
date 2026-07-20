@@ -66,6 +66,7 @@ pub enum AccountStatus {
     Active,
     Disabled,
     Error,
+    NeedsReauth,
 }
 
 /// SMTP security mode.
@@ -257,6 +258,12 @@ impl Account {
             DomainEvent::AccountRemoved { .. } => {
                 self.status = AccountStatus::Disabled;
             }
+            DomainEvent::AccountAuthExpired { .. } => {
+                self.status = AccountStatus::NeedsReauth;
+            }
+            DomainEvent::AccountReauthenticated { .. } => {
+                self.status = AccountStatus::Active;
+            }
             DomainEvent::AccountSyncStarted { .. }
             | DomainEvent::AccountSyncCompleted { .. }
             | DomainEvent::AccountSyncFailed { .. } => {
@@ -430,6 +437,47 @@ mod tests {
 
         let account = Account::rehydrate(&events).unwrap();
         assert_eq!(account.status, AccountStatus::Disabled);
+    }
+
+    #[test]
+    fn rehydrate_account_needs_reauth() {
+        let id = AccountId::new();
+        let events = vec![
+            DomainEvent::AccountAdded {
+                account_id: id,
+                name: "Test".into(),
+                email: EmailAddress::new("test@example.com").unwrap(),
+                provider_type: ProviderType::Imap,
+            },
+            DomainEvent::AccountAuthExpired {
+                account_id: id,
+                error: "invalid_grant".into(),
+            },
+        ];
+
+        let account = Account::rehydrate(&events).unwrap();
+        assert_eq!(account.status, AccountStatus::NeedsReauth);
+    }
+
+    #[test]
+    fn reauthenticated_returns_account_to_active() {
+        let id = AccountId::new();
+        let events = vec![
+            DomainEvent::AccountAdded {
+                account_id: id,
+                name: "Test".into(),
+                email: EmailAddress::new("test@example.com").unwrap(),
+                provider_type: ProviderType::Imap,
+            },
+            DomainEvent::AccountAuthExpired {
+                account_id: id,
+                error: "invalid_grant".into(),
+            },
+            DomainEvent::AccountReauthenticated { account_id: id },
+        ];
+
+        let account = Account::rehydrate(&events).unwrap();
+        assert_eq!(account.status, AccountStatus::Active);
     }
 
     #[test]
