@@ -371,7 +371,9 @@ impl AppContext {
                         access_token,
                         refresh_token,
                         expires_at,
-                        needs_reauth: Arc::new(RwLock::new(false)),
+                        needs_reauth: Arc::new(RwLock::new(
+                            summary.status == mc_domain::AccountStatus::NeedsReauth,
+                        )),
                     });
                 }
                 backfill_rates.insert(
@@ -461,6 +463,33 @@ impl AppContext {
             }
         }
 
+        // The port every OAuth login goes through — notification button, UI
+        // button, add-account dialog. It owns pushing a fresh token back into the
+        // live runtime state, so no caller has to remember to.
+        let oauth_trigger = Arc::new(crate::oauth_reauth::ReauthTrigger::new(
+            oauth_challenges,
+            oauth_states.clone(),
+            secret_store.clone(),
+            event_store.clone() as Arc<dyn mc_domain::EventStore>,
+            repository_arc.clone() as Arc<dyn mc_domain::AccountWriteRepository>,
+            event_bus.clone() as Arc<dyn mc_application::EventPublisher>,
+        )) as Arc<dyn OAuthLoginTrigger>;
+
+        // ── Re-fire re-auth notification for accounts still needing it ──────────
+        // On a fresh boot, needs_reauth is seeded from the persisted read-model
+        // status above — so an account that died before the user re-authenticated
+        // (e.g. server restarted mid-outage) gets its "Ri-autentica" notification
+        // reissued immediately instead of staying silently orphaned.
+        for state in &oauth_states {
+            if *state.needs_reauth.read().await {
+                spawn_reauth_notification(
+                    state.clone(),
+                    "Autenticazione scaduta — accedi di nuovo".to_owned(),
+                    oauth_trigger.clone(),
+                );
+            }
+        }
+
         // ── Live projection subscriber ───────────────────────────────────────
         // Subscribe the read-model projector to the event bus so that domain
         // events emitted at runtime (e.g. ApplyRemoteFlagChange → MessageFlagged)
@@ -544,6 +573,13 @@ impl AppContext {
         //   • MessageReceived  – new unread mail popup with action buttons:
         //       "Archivia" → MoveMessage to Archive mailbox via command bus
         //       "Apri Mail Cat" → spawns the mail-cat-ui process
+        //     Actions are routed by the shared NotificationCenter listener, not
+        //     by notify-rust's per-notification wait, so they keep working after
+        //     the banner has moved into the shell's notification panel.
+        //   • MessageFlagged(Seen) / MessageMoved / MessageDeleted – dismiss any
+        //     notification still up for that message. Covers reading the mail in
+        //     another client (remote flag change → MessageFlagged) as well as
+        //     acting on it from the notification itself.
         //   • AccountSyncFailed – error alert (no actions)
         //   • AccountAuthExpired – error alert with "Ri-autentica" action:
         //       drives OAuthChallengeManager::start_login() in-process, opens the
@@ -551,15 +587,19 @@ impl AppContext {
         //       live OAuthRuntimeState cells (no server restart needed)
         {
             let mut sub = event_bus.subscribe();
-            let notif_cmd_bus = command_bus.clone();
-            let notif_q_bus = query_bus.clone();
+            let notif_cmd_bus =
+                command_bus.clone() as Arc<dyn mc_application::bus::CommandBus>;
+            let notif_q_bus = query_bus.clone() as Arc<dyn mc_application::bus::QueryBus>;
             let notif_ui_bin = config.ui_bin.clone();
+            let center = crate::notifications::NotificationCenter::connect().await;
+            center.clone().spawn_action_loop(
+                notif_cmd_bus.clone(),
+                notif_q_bus.clone(),
+                notif_ui_bin.clone(),
+                shutdown.clone(),
+            );
             let notif_oauth_states = oauth_states.clone();
-            let notif_oauth_challenges = oauth_challenges.clone();
-            let notif_secret_store = secret_store.clone();
-            let notif_repository = repository_arc.clone() as Arc<dyn mc_domain::AccountWriteRepository>;
-            let notif_event_store = event_store.clone() as Arc<dyn mc_domain::EventStore>;
-            let notif_event_publisher = event_bus.clone() as Arc<dyn mc_application::EventPublisher>;
+            let notif_oauth_trigger = oauth_trigger.clone();
             let sd = shutdown.clone();
             tokio::spawn(async move {
                 loop {
@@ -588,15 +628,25 @@ impl AppContext {
                             let cmd = notif_cmd_bus.clone();
                             let q = notif_q_bus.clone();
                             let ui_bin = notif_ui_bin.clone();
+                            let center = center.clone();
+                            let target = crate::notifications::NotifiedMessage {
+                                message_id,
+                                account_id,
+                                mailbox_id,
+                            };
                             // Capture the tokio handle before entering the blocking task so we
                             // can drive async work (command dispatch, mailbox lookup) from the
-                            // synchronous wait_for_action callback.
+                            // synchronous fallback action callback.
                             let rt = tokio::runtime::Handle::current();
                             tokio::task::spawn_blocking(move || {
                                 let handle = match notify_rust::Notification::new()
                                     .summary(&format!("New message from {from}"))
                                     .body(&subject)
                                     .icon(&app_icon_path())
+                                    // "default" is the freedesktop action fired when the
+                                    // notification body itself is clicked, which is what
+                                    // most people reach for. It carries no button label.
+                                    .action("default", "Apri")
                                     .action("archive", "Archivia")
                                     .action("open", "Apri Mail Cat")
                                     .show()
@@ -607,63 +657,36 @@ impl AppContext {
                                         return;
                                     }
                                 };
-                                handle.wait_for_action(move |action| match action {
-                                    "archive" => {
-                                        rt.block_on(async move {
-                                            // Fetch all mailboxes for the account so we can
-                                            // resolve both the source path and the Archive target.
-                                            let mailboxes = match q
-                                                .dispatch(mc_application::Query::ListMailboxes {
-                                                    account_id,
-                                                })
-                                                .await
-                                            {
-                                                Ok(mc_application::QueryResult::Mailboxes(m)) => m,
-                                                _ => return,
-                                            };
-                                            let from_mb =
-                                                mailboxes.iter().find(|m| m.id == mailbox_id);
-                                            let archive_mb = mailboxes.iter().find(|m| {
-                                                m.mailbox_type == mc_domain::MailboxType::Archive
-                                            });
-                                            match (from_mb, archive_mb) {
-                                                (Some(src), Some(dst)) => {
-                                                    if let Err(e) = cmd
-                                                        .dispatch(
-                                                            mc_application::Command::MoveMessage {
-                                                                message_id,
-                                                                from_mailbox_id: src.id,
-                                                                to_mailbox_id: dst.id,
-                                                                from_mailbox_path: src.path.clone(),
-                                                                to_mailbox_path: dst.path.clone(),
-                                                            },
-                                                        )
-                                                        .await
-                                                    {
-                                                        tracing::warn!(
-                                                            "Archive from notification failed: {e}"
-                                                        );
-                                                    }
-                                                }
-                                                _ => tracing::warn!(
-                                                    "Archive mailbox not found for account {}",
-                                                    account_id.as_uuid()
-                                                ),
-                                            }
-                                        });
-                                    }
-                                    "open" => {
-                                        if let Err(e) =
-                                            std::process::Command::new(&ui_bin).spawn()
-                                        {
-                                            tracing::warn!(
-                                                "Failed to open Mail Cat (ui_bin='{ui_bin}'): {e}"
-                                            );
-                                        }
-                                    }
-                                    _ => {}
+                                if center.is_listening() {
+                                    // The shared listener owns the actions from here
+                                    // on; it survives the banner being swept into the
+                                    // notification panel, and keeping the id lets us
+                                    // dismiss the notification once the mail is read.
+                                    center.track(handle.id(), target);
+                                    return;
+                                }
+                                // Fallback (no session bus): one-shot listener, actions
+                                // only work while the notification is on screen.
+                                handle.wait_for_action(move |action| {
+                                    rt.block_on(crate::notifications::run_action(
+                                        action, target, &cmd, &q, &ui_bin,
+                                    ));
                                 });
                             });
+                        }
+
+                        // Mail the user already dealt with — read here or in another
+                        // client, archived, or deleted — should not keep a popup up.
+                        mc_domain::DomainEvent::MessageFlagged {
+                            message_id,
+                            ref flags_added,
+                            ..
+                        } if flags_added.contains(&mc_domain::Flag::Seen) => {
+                            center.close_for_message(&message_id).await;
+                        }
+                        mc_domain::DomainEvent::MessageMoved { message_id, .. }
+                        | mc_domain::DomainEvent::MessageDeleted { message_id, .. } => {
+                            center.close_for_message(&message_id).await;
                         }
                         mc_domain::DomainEvent::AccountSyncFailed { account_id, error } => {
                             tokio::task::spawn_blocking(move || {
@@ -689,115 +712,11 @@ impl AppContext {
                                 );
                                 continue;
                             };
-                            let challenges = notif_oauth_challenges.clone();
-                            let secret_store = notif_secret_store.clone();
-                            let repository = notif_repository.clone();
-                            let event_store = notif_event_store.clone();
-                            let publisher = notif_event_publisher.clone();
-                            tokio::task::spawn_blocking(move || {
-                                let handle = match notify_rust::Notification::new()
-                                    .summary(&format!("{} richiede una nuova autenticazione", state.email))
-                                    .body(&error)
-                                    .icon("dialog-error")
-                                    .action("reauth", "Ri-autentica")
-                                    .show()
-                                {
-                                    Ok(h) => h,
-                                    Err(e) => {
-                                        tracing::warn!("Desktop notification failed: {e}");
-                                        return;
-                                    }
-                                };
-                                let rt = tokio::runtime::Handle::current();
-                                handle.wait_for_action(move |action| {
-                                    if action != "reauth" {
-                                        return;
-                                    }
-                                    rt.block_on(async move {
-                                        let mut progress = challenges.start_login(
-                                            state.name.clone(),
-                                            state.email.clone(),
-                                            state.provider,
-                                        );
-                                        while let Some(update) = progress.recv().await {
-                                            match update {
-                                                mc_application::OAuthLoginProgress::AwaitingBrowser {
-                                                    authorize_url,
-                                                } => {
-                                                    if let Err(e) =
-                                                        crate::oauth_login::open_browser(&authorize_url)
-                                                    {
-                                                        tracing::warn!(
-                                                            "Failed to open browser for re-auth ({e}) — \
-                                                             apri manualmente: {authorize_url}"
-                                                        );
-                                                    }
-                                                }
-                                                mc_application::OAuthLoginProgress::Succeeded { .. } => {
-                                                    match secret_store.load(&state.email) {
-                                                        Ok(Some(bundle)) => {
-                                                            if let Some(oauth) = bundle.oauth {
-                                                                *state.access_token.write().await =
-                                                                    oauth.access_token;
-                                                                *state.refresh_token.write().await =
-                                                                    oauth.refresh_token;
-                                                                *state.expires_at.write().await =
-                                                                    oauth.expires_at;
-                                                            }
-                                                        }
-                                                        Ok(None) => tracing::warn!(
-                                                            "Re-auth succeeded for {} but keychain entry is missing",
-                                                            state.email
-                                                        ),
-                                                        Err(e) => tracing::warn!(
-                                                            "Re-auth succeeded for {} but re-reading keychain failed: {e}",
-                                                            state.email
-                                                        ),
-                                                    }
-                                                    *state.needs_reauth.write().await = false;
-
-                                                    if let Err(e) = oauth_refresh::append_account_event(
-                                                        state.account_id,
-                                                        mc_domain::DomainEvent::AccountReauthenticated {
-                                                            account_id: state.account_id,
-                                                        },
-                                                        &event_store,
-                                                        &repository,
-                                                        &publisher,
-                                                    )
-                                                    .await
-                                                    {
-                                                        tracing::warn!(
-                                                            "Failed to record AccountReauthenticated for {}: {e}",
-                                                            state.email
-                                                        );
-                                                    }
-
-                                                    let _ = notify_rust::Notification::new()
-                                                        .summary(&format!("{} ri-autenticato", state.email))
-                                                        .body("Account riattivato con successo.")
-                                                        .icon("dialog-information")
-                                                        .show();
-                                                }
-                                                mc_application::OAuthLoginProgress::Failed { message } => {
-                                                    tracing::warn!(
-                                                        "Re-auth failed for {}: {message}",
-                                                        state.email
-                                                    );
-                                                    let _ = notify_rust::Notification::new()
-                                                        .summary(&format!(
-                                                            "Ri-autenticazione fallita per {}",
-                                                            state.email
-                                                        ))
-                                                        .body(&message)
-                                                        .icon("dialog-error")
-                                                        .show();
-                                                }
-                                            }
-                                        }
-                                    });
-                                });
-                            });
+                            spawn_reauth_notification(
+                                state,
+                                error,
+                                notif_oauth_trigger.clone(),
+                            );
                         }
                         _ => {}
                     }
@@ -997,12 +916,23 @@ impl AppContext {
                 let id = *account_id;
                 let account_name = name.clone();
                 let sd = shutdown.clone();
+                let watch_repository =
+                    repository_arc.clone() as Arc<dyn mc_domain::AccountWriteRepository>;
+                let watch_event_store = event_store.clone() as Arc<dyn mc_domain::EventStore>;
+                let watch_event_publisher =
+                    event_bus.clone() as Arc<dyn mc_application::EventPublisher>;
 
                 // Semaphore(1): at most one triggered sync in flight per account.
                 let sync_gate = Arc::new(tokio::sync::Semaphore::new(1));
 
                 tokio::spawn(async move {
                     tracing::info!("[Watcher] Started INBOX IDLE for '{}'", account_name);
+
+                    // The watcher keeps retrying (with backoff) after a credential
+                    // rejection, but the account must be flagged only once — otherwise
+                    // every retry appends another AccountAuthExpired and re-fires the
+                    // desktop notification.
+                    let mut auth_reported = false;
 
                     loop {
                     let result = tokio::select! {
@@ -1098,6 +1028,37 @@ impl AppContext {
                                 // uid=0 FlagsChanged are spurious IMAP EXISTS echoes — ignore.
                                 ProviderNotification::FlagsChanged { .. } => {}
                             },
+                            // A rejected credential never recovers on its own. Flag the
+                            // account so it surfaces in the UI and drives the re-auth
+                            // flow, instead of rotting behind a WARN line forever.
+                            Err(mc_domain::DomainError::AuthenticationFailed(msg)) => {
+                                if auth_reported {
+                                    continue;
+                                }
+                                auth_reported = true;
+                                tracing::error!(
+                                    "[Watcher] '{}' rejected our credential ({msg}) — \
+                                     flagging account, backing off",
+                                    account_name
+                                );
+                                if let Err(e) = crate::oauth_refresh::append_account_event(
+                                    id,
+                                    mc_domain::DomainEvent::AccountAuthExpired {
+                                        account_id: id,
+                                        error: msg,
+                                    },
+                                    &watch_event_store,
+                                    &watch_repository,
+                                    &watch_event_publisher,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        "[Watcher] '{}': failed recording AccountAuthExpired: {e}",
+                                        account_name
+                                    );
+                                }
+                            }
                             Err(e) => {
                                 tracing::warn!(
                                     "[Watcher] IDLE error for '{}': {e}",
@@ -1124,7 +1085,13 @@ impl AppContext {
         // Create gRPC services
         let account_service = AccountServiceImpl::new(command_bus.clone(), query_bus.clone())
             .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>)
-            .with_oauth_trigger(oauth_challenges as Arc<dyn mc_application::OAuthLoginTrigger>);
+            .with_oauth_trigger(oauth_trigger.clone())
+            .with_provisioner(Arc::new(
+                crate::account_provisioner::ConfigAccountProvisioner::new(
+                    std::path::PathBuf::from(config_path),
+                    secret_store.clone(),
+                ),
+            ) as Arc<dyn mc_application::AccountProvisioner>);
 
         let mailbox_service = MailboxServiceImpl::new(query_bus.clone());
 
@@ -1152,6 +1119,80 @@ impl AppContext {
             db,
         })
     }
+}
+
+/// Pops a desktop notification with a "Ri-autentica" action for an account whose
+/// OAuth refresh token is dead, and drives the full re-auth flow if the user clicks
+/// it. Fire-and-forget: spawns a blocking OS thread and returns immediately.
+fn spawn_reauth_notification(
+    state: OAuthRuntimeState,
+    error: String,
+    trigger: Arc<dyn OAuthLoginTrigger>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let handle = match notify_rust::Notification::new()
+            .summary(&format!("{} richiede una nuova autenticazione", state.email))
+            .body(&error)
+            .icon("dialog-error")
+            .action("reauth", "Ri-autentica")
+            .show()
+        {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("Desktop notification failed: {e}");
+                return;
+            }
+        };
+        let rt = tokio::runtime::Handle::current();
+        handle.wait_for_action(move |action| {
+            if action != "reauth" {
+                return;
+            }
+            rt.block_on(async move {
+                // The trigger owns reviving the account (tokens back into the
+                // live cells, needs_reauth cleared, AccountReauthenticated
+                // appended) — here we only drive the browser and report.
+                let mut progress = trigger.start_reauth(state.account_id);
+                while let Some(update) = progress.recv().await {
+                    match update {
+                        mc_application::OAuthLoginProgress::AwaitingBrowser {
+                            authorize_url,
+                        } => {
+                            if let Err(e) =
+                                mc_shared::browser::open_browser(&authorize_url)
+                            {
+                                tracing::warn!(
+                                    "Failed to open browser for re-auth ({e}) — \
+                                     apri manualmente: {authorize_url}"
+                                );
+                            }
+                        }
+                        mc_application::OAuthLoginProgress::Succeeded { .. } => {
+                            let _ = notify_rust::Notification::new()
+                                .summary(&format!("{} ri-autenticato", state.email))
+                                .body("Account riattivato con successo.")
+                                .icon("dialog-information")
+                                .show();
+                        }
+                        mc_application::OAuthLoginProgress::Failed { message } => {
+                            tracing::warn!(
+                                "Re-auth failed for {}: {message}",
+                                state.email
+                            );
+                            let _ = notify_rust::Notification::new()
+                                .summary(&format!(
+                                    "Ri-autenticazione fallita per {}",
+                                    state.email
+                                ))
+                                .body(&message)
+                                .icon("dialog-error")
+                                .show();
+                        }
+                    }
+                }
+            });
+        });
+    });
 }
 
 /// Returns the path or name to use as the icon for desktop notifications.

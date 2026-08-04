@@ -98,7 +98,14 @@ pub fn spawn_refresh_loop(
                     continue;
                 }
                 let refresh_token = state.refresh_token.read().await.clone();
-                match mc_infrastructure::oauth::refresh(state.provider, &refresh_token).await {
+                let refresh_result = if refresh_token.is_empty() {
+                    Err(DomainError::AuthenticationFailed(
+                        "no refresh token stored — account needs re-authentication".into(),
+                    ))
+                } else {
+                    mc_infrastructure::oauth::refresh(state.provider, &refresh_token).await
+                };
+                match refresh_result {
                     Ok(new_secrets) => {
                         *state.access_token.write().await = new_secrets.access_token.clone();
                         *state.refresh_token.write().await = new_secrets.refresh_token.clone();

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
-import type { Mailbox } from './types';
+import type { Mailbox, MailboxKind } from './types';
 
 async function fetchMailboxes(accountId: string): Promise<Mailbox[]> {
   const dtos = await invoke<{
@@ -8,6 +8,7 @@ async function fetchMailboxes(accountId: string): Promise<Mailbox[]> {
     account_id: string;
     path: string;
     display_name: string;
+    mailbox_type: MailboxKind;
     total_messages: number;
     unread_messages: number;
   }[]>('list_mailboxes', { accountId });
@@ -17,6 +18,7 @@ async function fetchMailboxes(accountId: string): Promise<Mailbox[]> {
     accountId: d.account_id,
     path: d.path,
     name: d.display_name,
+    kind: d.mailbox_type,
     totalMessages: d.total_messages,
     unreadMessages: d.unread_messages,
     attributes: [],

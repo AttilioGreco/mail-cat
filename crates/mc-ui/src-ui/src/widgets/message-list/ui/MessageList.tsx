@@ -2,10 +2,20 @@ import { List, type RowComponentProps } from 'react-window';
 import { RefreshCw, Inbox, MailOpen, MessageSquare, List as ListIcon } from 'lucide-react';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useMessages, MessageRow, type MessageEnvelope } from '@/entities/message';
-import { useMailboxes } from '@/entities/mailbox';
+import { useMailboxes, type Mailbox } from '@/entities/mailbox';
 import { useConversations, ConversationRow, type ConversationSummary } from '@/entities/conversation';
 import { useMailboxWatcher } from '@/features/watch-mailbox';
 import { SearchBar, SearchResults, useSearchStore } from '@/features/search-messages';
+import { useShortcuts } from '@/features/keyboard-shortcuts';
+import {
+  useMarkAsRead,
+  useMarkAsUnread,
+  useToggleStar,
+  useDeleteMessage,
+  useMoveMessage,
+  useMarkMailboxRead,
+  useSelectNeighbour,
+} from '@/features/message-actions';
 
 const MESSAGE_ROW_HEIGHT = 76;
 const CONV_ROW_HEIGHT = 64;
@@ -13,12 +23,13 @@ const CONV_ROW_HEIGHT = 64;
 export function MessageList() {
   const {
     selectedAccountId, selectedMailboxId,
-    selectedMessageId, selectMessage,
+    selectedMessageId, selectMessage, selectMailbox,
     selectedThreadMessageId, selectThread,
     conversationMode, setConversationMode,
     showUnreadOnly, toggleUnreadOnly,
   } = useSessionStore();
   const searchQuery = useSearchStore((s) => s.searchQuery);
+  const requestSearchFocus = useSearchStore((s) => s.requestFocus);
 
   const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
   const selectedMailbox = mailboxes.find((m) => m.id === selectedMailboxId) ?? null;
@@ -29,20 +40,134 @@ export function MessageList() {
   useMailboxWatcher(selectedMailboxId, key, selectedAccountId);
 
   const { data: rawMessages = [], isLoading: messagesLoading } = useMessages(conversationMode ? null : key);
-  const { data: conversations = [], isLoading: convsLoading } = useConversations(
+  const { data: rawConversations = [], isLoading: convsLoading } = useConversations(
     conversationMode && selectedAccountId ? selectedAccountId : null,
     selectedMailboxId
   );
 
   const messages = showUnreadOnly ? rawMessages.filter((m) => !m.isRead) : rawMessages;
+  // A thread counts as unread while any message in it is unread — same rule the
+  // unread badge already uses.
+  const conversations = showUnreadOnly
+    ? rawConversations.filter((c) => c.unreadCount > 0)
+    : rawConversations;
   const isLoading = conversationMode ? convsLoading : messagesLoading;
 
   const isSearching = searchQuery !== null && searchQuery.trim().length > 0;
   const unreadCount = conversationMode
-    ? conversations.filter((c) => c.unreadCount > 0).length
+    ? rawConversations.filter((c) => c.unreadCount > 0).length
     : rawMessages.filter((m) => !m.isRead).length;
 
   const hasContent = selectedAccountId || selectedMailbox;
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────
+  // Bound here because this is where the ordered list and the selection live.
+  const markAsRead = useMarkAsRead();
+  const markAsUnread = useMarkAsUnread();
+  const toggleStar = useToggleStar();
+  const deleteMessage = useDeleteMessage();
+  const moveMessage = useMoveMessage();
+  const markFolderRead = useMarkMailboxRead();
+  const selectNeighbour = useSelectNeighbour();
+
+  const selected = messages.find((m) => m.uid === selectedMessageId) ?? null;
+
+  /** Move the selection by `delta`, clamped, starting from the top when nothing
+   *  is selected. Works on threads too when the list is in conversation mode. */
+  const step = (delta: number) => {
+    if (conversationMode) {
+      if (conversations.length === 0) return;
+      const at = conversations.findIndex((c) => c.sampleMessageId === selectedThreadMessageId);
+      const next = at === -1 ? 0 : Math.min(conversations.length - 1, Math.max(0, at + delta));
+      selectThread(conversations[next].sampleMessageId);
+      return;
+    }
+    if (messages.length === 0) return;
+    const at = messages.findIndex((m) => m.uid === selectedMessageId);
+    const next = at === -1 ? 0 : Math.min(messages.length - 1, Math.max(0, at + delta));
+    selectMessage(messages[next].uid);
+  };
+
+  /** Move the selection to the next/previous unread message. */
+  const stepUnread = (delta: number) => {
+    if (conversationMode || messages.length === 0) return;
+    const from = messages.findIndex((m) => m.uid === selectedMessageId);
+    // Scan outward from the current position, wrapping is deliberately not done:
+    // running off the end should stop, not silently jump back to the top.
+    for (let i = from + delta; i >= 0 && i < messages.length; i += delta) {
+      if (!messages[i].isRead) {
+        selectMessage(messages[i].uid);
+        return;
+      }
+    }
+  };
+
+  /** Jump to a folder by special-use type — names are localized, types are not. */
+  const goToKind = (kind: Mailbox['kind']) => {
+    const target = mailboxes.find((m) => m.kind === kind);
+    if (target) selectMailbox(target.id);
+  };
+
+  /** The folder an "archive" lands in: Gmail has no \\Archive, its All Mail doubles as one. */
+  const archiveMailbox =
+    mailboxes.find((m) => m.kind === 'archive') ?? mailboxes.find((m) => m.kind === 'all');
+
+  useShortcuts({
+    nextMessage: () => step(1),
+    prevMessage: () => step(-1),
+    nextUnread: () => stepUnread(1),
+    prevUnread: () => stepUnread(-1),
+    focusSearch: requestSearchFocus,
+    toggleUnreadFilter: toggleUnreadOnly,
+    toggleConversations: () => setConversationMode(!conversationMode),
+    goInbox: () => goToKind('inbox'),
+    goSent: () => goToKind('sent'),
+    goDrafts: () => goToKind('drafts'),
+    goArchive: () => goToKind('archive'),
+    goSpam: () => goToKind('spam'),
+    goTrash: () => goToKind('trash'),
+    markFolderRead: () => {
+      if (selectedMailboxId) markFolderRead.mutate(selectedMailboxId);
+    },
+    // Message-scoped keys are left unbound in conversation mode: ThreadView
+    // registers them there, on the whole thread, and two registrations of the
+    // same chord would collide.
+    toggleRead: conversationMode ? undefined : () => {
+      if (!selected) return;
+      const key = mailboxKey(selectedAccountId, selectedMailboxId) ?? undefined;
+      if (selected.isRead) markAsUnread.mutate(selected.uid, key);
+      else markAsRead.mutate(selected.uid, key);
+    },
+    toggleFlag: conversationMode ? undefined : () => {
+      if (!selected) return;
+      if (selected.isFlagged) toggleStar.unstar(selected.uid);
+      else toggleStar.star(selected.uid);
+    },
+    // These four take the message out of the list, so each hands the selection
+    // on to the next row first — `messages` (not the cache) because it is the
+    // filtered list the user is actually looking at.
+    deleteMessage: conversationMode ? undefined : () => {
+      if (!selected) return;
+      selectNeighbour(selected.uid, messages);
+      deleteMessage.mutate({ messageId: selected.uid });
+    },
+    deletePermanently: conversationMode ? undefined : () => {
+      if (!selected) return;
+      selectNeighbour(selected.uid, messages);
+      deleteMessage.mutate({ messageId: selected.uid, permanently: true });
+    },
+    markSpam: conversationMode ? undefined : () => {
+      const spam = mailboxes.find((m) => m.kind === 'spam');
+      if (!selected || !spam) return;
+      selectNeighbour(selected.uid, messages);
+      moveMessage.mutate({ messageId: selected.uid, toMailboxId: spam.id });
+    },
+    archiveMessage: conversationMode ? undefined : () => {
+      if (!selected || !archiveMailbox) return;
+      selectNeighbour(selected.uid, messages);
+      moveMessage.mutate({ messageId: selected.uid, toMailboxId: archiveMailbox.id });
+    },
+  });
 
   return (
     <div className="flex h-full flex-col">
@@ -67,23 +192,21 @@ export function MessageList() {
               {conversationMode ? 'Msgs' : 'Threads'}
             </button>
 
-            {!conversationMode && (
-              <button
-                onClick={toggleUnreadOnly}
-                title={showUnreadOnly ? 'Show all' : 'Show unread only'}
-                className={[
-                  'flex items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors',
-                  showUnreadOnly
-                    ? 'bg-primary text-primary-foreground'
-                    : unreadCount > 0
-                      ? 'text-foreground hover:bg-accent'
-                      : 'text-muted hover:text-foreground hover:bg-accent',
-                ].join(' ')}
-              >
-                <MailOpen size={12} />
-                {unreadCount > 0 ? `${unreadCount}` : '0'}
-              </button>
-            )}
+            <button
+              onClick={toggleUnreadOnly}
+              title={showUnreadOnly ? 'Show all' : 'Show unread only'}
+              className={[
+                'flex items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors',
+                showUnreadOnly
+                  ? 'bg-primary text-primary-foreground'
+                  : unreadCount > 0
+                    ? 'text-foreground hover:bg-accent'
+                    : 'text-muted hover:text-foreground hover:bg-accent',
+              ].join(' ')}
+            >
+              <MailOpen size={12} />
+              {unreadCount > 0 ? `${unreadCount}` : '0'}
+            </button>
 
             <span className="text-xs text-muted">
               {conversationMode ? conversations.length : messages.length}
@@ -103,7 +226,10 @@ export function MessageList() {
         />
       ) : conversationMode ? (
         conversations.length === 0 ? (
-          <EmptyState icon={<MessageSquare size={32} className="text-muted" />} text="No conversations" />
+          <EmptyState
+            icon={<MessageSquare size={32} className="text-muted" />}
+            text={showUnreadOnly ? 'No unread conversations' : 'No conversations'}
+          />
         ) : (
           <div className="flex-1 overflow-hidden">
             <List

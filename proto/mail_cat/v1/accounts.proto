@@ -21,13 +21,27 @@ service AccountService {
   // Remove an account.
   rpc RemoveAccount(RemoveAccountRequest) returns (RemoveAccountResponse);
 
+  // Download progress for one account (how much is stored locally).
+  rpc GetAccountStats(GetAccountStatsRequest) returns (GetAccountStatsResponse);
+
   // Sync account mailboxes and messages (server-streaming for progress).
   rpc SyncAccount(SyncAccountRequest) returns (stream SyncProgressEvent);
+
+  // Observe sync progress without triggering a sync: the server syncs on its
+  // own (at boot, every 5 minutes, and via the body backfill worker), so a
+  // client that just opened needs to watch rather than start.
+  rpc WatchSyncProgress(WatchSyncProgressRequest) returns (stream SyncProgressEvent);
 
   // Start an OAuth2 login (Google/Microsoft) for a new account. Streams:
   // one AwaitingBrowser event with the URL to open, then exactly one of
   // OAuthLoginSucceeded/OAuthLoginFailed once the browser redirect completes.
   rpc StartOAuthLogin(StartOAuthLoginRequest) returns (stream OAuthLoginEvent);
+
+  // Re-run the OAuth2 login for an account that already exists, for when its
+  // refresh token has been revoked or expired. Same event stream as
+  // StartOAuthLogin; takes only the account id because the OAuth provider an
+  // account was registered with is not derivable from its address.
+  rpc ReauthAccount(ReauthAccountRequest) returns (stream OAuthLoginEvent);
 }
 
 // Provider type for email account.
@@ -44,6 +58,8 @@ enum AccountStatus {
   ACCOUNT_STATUS_ACTIVE = 1;
   ACCOUNT_STATUS_DISABLED = 2;
   ACCOUNT_STATUS_ERROR = 3;
+  // Credentials are gone/rejected: the account needs an interactive re-login.
+  ACCOUNT_STATUS_NEEDS_REAUTH = 4;
 }
 
 enum OAuthProvider {
@@ -160,6 +176,26 @@ message RemoveAccountResponse {
   bool success = 1;
 }
 
+message GetAccountStatsRequest {
+  string account_id = 1;
+}
+
+// Local download state. Envelopes still to fetch are
+// `total_messages - synced_messages`; bodies still to fetch are `pending_bodies`.
+message GetAccountStatsResponse {
+  // Messages the server reports across all known mailboxes.
+  uint32 total_messages = 1;
+  // Envelopes stored locally.
+  uint32 synced_messages = 2;
+  // Stored envelopes whose body is still queued.
+  uint32 pending_bodies = 3;
+}
+
+message WatchSyncProgressRequest {
+  // Empty = every account.
+  string account_id = 1;
+}
+
 message SyncAccountRequest {
   string account_id = 1;
   bool full_sync = 2;  // If true, sync all mailboxes; if false, incremental
@@ -189,6 +225,10 @@ message StartOAuthLoginRequest {
   string name = 1;
   string email = 2;
   OAuthProvider provider = 3;
+}
+
+message ReauthAccountRequest {
+  string account_id = 1;
 }
 
 message OAuthLoginEvent {

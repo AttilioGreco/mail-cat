@@ -11,6 +11,7 @@ pub fn domain_mailbox_type_to_proto(mailbox_type: &DomainMailboxType) -> i32 {
         DomainMailboxType::Trash => ProtoMailboxType::Trash as i32,
         DomainMailboxType::Spam => ProtoMailboxType::Spam as i32,
         DomainMailboxType::Archive => ProtoMailboxType::Archive as i32,
+        DomainMailboxType::All => ProtoMailboxType::All as i32,
         DomainMailboxType::Custom => ProtoMailboxType::Custom as i32,
     }
 }

@@ -139,6 +139,14 @@ where
                     .handle_set_flags(message_id, mailbox_path, flags_to_add, flags_to_remove)
                     .await
             }
+            Command::MarkMailboxRead {
+                mailbox_id,
+                mailbox_path,
+            } => {
+                self.message_handler
+                    .handle_mark_mailbox_read(mailbox_id, mailbox_path)
+                    .await
+            }
             Command::MoveMessage {
                 message_id,
                 from_mailbox_id,
@@ -164,6 +172,23 @@ where
             } => {
                 self.message_handler
                     .handle_delete(message_id, mailbox_id, mailbox_path, permanently)
+                    .await
+            }
+            Command::DeleteMessages {
+                message_ids,
+                permanently,
+            } => {
+                self.message_handler
+                    .handle_delete_many(message_ids, permanently)
+                    .await
+            }
+            Command::MoveMessages {
+                message_ids,
+                to_mailbox_id,
+                to_mailbox_path,
+            } => {
+                self.message_handler
+                    .handle_move_many(message_ids, to_mailbox_id, to_mailbox_path)
                     .await
             }
             Command::SendMessage {

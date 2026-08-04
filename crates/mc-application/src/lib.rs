@@ -19,6 +19,6 @@ pub use error::ApplicationError;
 pub use projections::ProjectionEventHandler;
 pub use queries::{Query, QueryResult};
 pub use services::{
-    OAuthLoginProgress, OAuthLoginTrigger, SyncConfig, SyncProgressEvent, SyncService, SyncState,
-    SyncTrigger,
+    AccountProvisioner, ImapProvisionParams, OAuthLoginProgress, OAuthLoginTrigger, SyncConfig,
+    SyncProgressEvent, SyncService, SyncState, SyncTrigger,
 };

@@ -16,6 +16,7 @@ mc-infrastructure = { workspace = true }
 mc-interfaces = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+async-trait = { workspace = true }
 chrono = { workspace = true }
 tonic = { workspace = true }
 anyhow = { workspace = true }
@@ -26,8 +27,13 @@ serde = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 sled = { workspace = true }
-notify = { workspace = true }
 notify-rust = "4"
+
+# Notification actions must outlive the on-screen banner (notify-rust's
+# per-notification listener does not), so we drive the session bus directly.
+# Same major as notify-rust's own zbus, so no second copy gets built.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
 
 [dev-dependencies]
 tempfile = { workspace = true }

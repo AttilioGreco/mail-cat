@@ -1,7 +1,9 @@
-import { RefreshCw, SearchX } from 'lucide-react';
+import { useState } from 'react';
+import { RefreshCw, SearchX, Trash2 } from 'lucide-react';
 import { useSearchMessages } from '../model/useSearch';
 import { useSearchStore } from '../model/search-store';
 import { useSessionStore } from '@/entities/session';
+import { useDeleteMessages } from '@/features/message-actions';
 import { cn, formatDate } from '@/shared/lib/utils';
 import type { SearchHit } from '../model/types';
 
@@ -9,6 +11,35 @@ export function SearchResults() {
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const { selectedAccountId, selectedMessageId, selectMessage } = useSessionStore();
   const { data: hits = [], isLoading } = useSearchMessages(searchQuery, selectedAccountId);
+  const deleteMany = useDeleteMessages();
+  const [outcome, setOutcome] = useState<string | null>(null);
+
+  // Group action over the whole result set: the query *is* the selection.
+  // Trash only — a permanent bulk expunge driven by a search query is one
+  // mistyped filter away from shredding a mailbox, so it isn't offered here.
+  const trashAll = () => {
+    const ids = hits.map((h) => h.messageId);
+    if (ids.length === 0) return;
+    if (!window.confirm(`Sposti nel cestino ${ids.length} messaggi?`)) return;
+
+    setOutcome(null);
+    deleteMany.mutate(
+      { messageIds: ids },
+      {
+        onSuccess: ([succeeded, failed]) => {
+          selectMessage(null);
+          // The index can be behind the mailbox, so "all of them" is a claim
+          // worth checking rather than assuming.
+          setOutcome(
+            failed === 0
+              ? `${succeeded} messaggi spostati nel cestino`
+              : `${succeeded} spostati, ${failed} non trovati (indice non allineato)`,
+          );
+        },
+        onError: (e) => setOutcome(`Errore: ${String(e)}`),
+      },
+    );
+  };
 
   if (isLoading) {
     return (
@@ -32,8 +63,24 @@ export function SearchResults() {
     <div className="flex h-full flex-col overflow-y-auto">
       <div className="flex items-center justify-between border-b border-border px-4 py-2">
         <span className="text-sm font-semibold text-foreground">Search results</span>
-        <span className="text-xs text-muted">{hits.length}</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={trashAll}
+            disabled={deleteMany.isPending}
+            title={`Sposta nel cestino tutti i ${hits.length} risultati`}
+            className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-muted transition-colors hover:bg-accent hover:text-destructive disabled:opacity-50"
+          >
+            <Trash2 size={12} />
+            {deleteMany.isPending ? 'Sposto…' : 'Cestina tutti'}
+          </button>
+          <span className="text-xs text-muted">{hits.length}</span>
+        </div>
       </div>
+      {outcome && (
+        <div className="border-b border-border bg-surface-hover px-4 py-1.5 text-xs text-muted">
+          {outcome}
+        </div>
+      )}
       {hits.map((hit) => (
         <SearchHitRow
           key={hit.messageId}

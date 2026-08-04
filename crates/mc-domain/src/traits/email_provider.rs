@@ -73,6 +73,16 @@ pub trait EmailProvider: Send + Sync {
         flags_to_remove: &[Flag],
     ) -> Result<(), DomainError>;
 
+    /// Set or unset flags on multiple messages in one provider round-trip
+    /// (single IMAP connection, batched UID STORE).
+    async fn set_flags_bulk(
+        &self,
+        mailbox: &MailboxPath,
+        uids: &[ProviderUid],
+        flags_to_add: &[Flag],
+        flags_to_remove: &[Flag],
+    ) -> Result<(), DomainError>;
+
     /// Move a message between mailboxes. Returns the new UID if available.
     async fn move_message(
         &self,
@@ -88,6 +98,37 @@ pub trait EmailProvider: Send + Sync {
         uid: ProviderUid,
         permanently: bool,
     ) -> Result<(), DomainError>;
+
+    /// Move many messages in one go. The default walks them one by one; a
+    /// provider that can express the whole set in a single request (IMAP can —
+    /// `UID COPY 1,4,7:9`) should override it. Bulk callers must use this
+    /// rather than looping `move_message` themselves: with one connection per
+    /// operation, a loop over a few hundred messages is a few hundred TLS
+    /// handshakes, which is what gets an account throttled.
+    async fn move_messages(
+        &self,
+        uids: &[ProviderUid],
+        from: &MailboxPath,
+        to: &MailboxPath,
+    ) -> Result<(), DomainError> {
+        for uid in uids {
+            self.move_message(*uid, from, to).await?;
+        }
+        Ok(())
+    }
+
+    /// Delete many messages in one go. Same rationale as [`move_messages`].
+    async fn delete_messages(
+        &self,
+        mailbox: &MailboxPath,
+        uids: &[ProviderUid],
+        permanently: bool,
+    ) -> Result<(), DomainError> {
+        for uid in uids {
+            self.delete_message(mailbox, *uid, permanently).await?;
+        }
+        Ok(())
+    }
 
     /// Send a message via the provider's send mechanism (SMTP, API, etc.).
     async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError>;

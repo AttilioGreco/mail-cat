@@ -1,0 +1,30 @@
+[Unit]
+# Shipped by the deb/rpm/msi package into the systemd *user* unit directory.
+# mail-cat always runs per-user: the package installs shared binaries, then each
+# user runs `systemctl --user enable --now mail-cat-server`. The dev-install
+# counterpart lives in deploy/ and points at ~/.local/bin instead.
+Description=Mail Cat – gRPC email server
+Documentation=https://github.com/agreco/mail-cat
+After=network.target
+
+[Service]
+Type=simple
+# Path relativi in config.toml (db_path, index_path) si risolvono contro questa
+# directory, non contro il repo. Usare sempre path assoluti in config.toml.
+WorkingDirectory=%h
+ExecStart=/usr/bin/mail-cat-server
+Restart=on-failure
+RestartSec=5
+
+# Configurazione
+# MAIL_CAT_CONFIG non è necessaria: il server cerca ~/.config/mail-cat/config.toml
+# di default (usando $HOME a runtime). Decommentare solo per sovrascrivere il path.
+# Environment=MAIL_CAT_CONFIG=/percorso/alternativo/config.toml
+
+# Standard output → journald (accessibile con: journalctl --user -u mail-cat-server)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mail-cat-server
+
+[Install]
+WantedBy=default.target

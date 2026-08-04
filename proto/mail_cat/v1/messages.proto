@@ -24,11 +24,21 @@ service MessageService {
   // Set message flags.
   rpc SetFlags(SetFlagsRequest) returns (SetFlagsResponse);
 
+  // Mark every unread message in a mailbox as read (single provider round-trip).
+  rpc MarkMailboxRead(MarkMailboxReadRequest) returns (MarkMailboxReadResponse);
+
   // Move message to another mailbox.
   rpc MoveMessage(MoveMessageRequest) returns (MoveMessageResponse);
 
   // Delete message.
   rpc DeleteMessage(DeleteMessageRequest) returns (DeleteMessageResponse);
+
+  // Delete many messages in a single provider round-trip. Partial success is
+  // normal (stale index, message already gone) — see BulkChangeResponse.
+  rpc DeleteMessages(DeleteMessagesRequest) returns (BulkChangeResponse);
+
+  // Move many messages to one mailbox in a single provider round-trip.
+  rpc MoveMessages(MoveMessagesRequest) returns (BulkChangeResponse);
 
   // Send a new message.
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
@@ -163,6 +173,14 @@ message SetFlagsResponse {
   MessageSummary message = 1;
 }
 
+message MarkMailboxReadRequest {
+  string mailbox_id = 1;
+}
+
+message MarkMailboxReadResponse {
+  uint32 marked_count = 1;
+}
+
 message MoveMessageRequest {
   string message_id = 1;
   string to_mailbox_id = 2;
@@ -175,6 +193,24 @@ message MoveMessageResponse {
 message DeleteMessageRequest {
   string message_id = 1;
   bool permanently = 2;  // If true, expunge; if false, mark as deleted
+}
+
+message DeleteMessagesRequest {
+  repeated string message_ids = 1;
+  bool permanently = 2;
+}
+
+message MoveMessagesRequest {
+  repeated string message_ids = 1;
+  string to_mailbox_id = 2;
+}
+
+// Shared result of a bulk operation. `failed` counts messages skipped because
+// they could not be loaded, had no provider UID, or their mailbox was gone —
+// the batch continues past them rather than aborting.
+message BulkChangeResponse {
+  uint32 succeeded = 1;
+  uint32 failed = 2;
 }
 
 message DeleteMessageResponse {

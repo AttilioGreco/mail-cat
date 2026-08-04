@@ -62,6 +62,9 @@ pub async fn begin_authorization(
     for scope in preset.scopes {
         request = request.add_scope(Scope::new((*scope).to_string()));
     }
+    for (k, v) in preset.auth_extra_params {
+        request = request.add_extra_param(*k, *v);
+    }
     let (authorize_url, csrf_token) = request.url();
 
     Ok((
@@ -156,6 +159,10 @@ mod tests {
         assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth"));
         assert!(url.contains("code_challenge"));
         assert!(url.contains("mail.google.com"));
+        // Without these Google returns no refresh token and the account has to
+        // re-authenticate every time the 1h access token dies.
+        assert!(url.contains("access_type=offline"));
+        assert!(url.contains("prompt=consent"));
     }
 
     #[test]

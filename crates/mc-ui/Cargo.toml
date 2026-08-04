@@ -11,11 +11,15 @@ path = "src/main.rs"
 [dependencies]
 # Tauri
 tauri = { version = "2.11", features = ["devtools"] }
+# Forwards argv to the already-running window instead of opening a second one,
+# which is what makes the notification deep link focus the existing client.
+tauri-plugin-single-instance = "2"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 # Client SDK
 mc-client = { workspace = true }
+mc-shared = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

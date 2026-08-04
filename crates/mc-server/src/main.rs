@@ -10,8 +10,11 @@ use anyhow::Context;
 use tonic::transport::Server;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod account_provisioner;
 mod config;
+mod notifications;
 mod oauth_login;
+mod oauth_reauth;
 mod oauth_refresh;
 mod secret_ingest;
 mod wiring;
@@ -78,13 +81,14 @@ async fn main() -> anyhow::Result<()> {
     let secret_store: Arc<dyn mc_domain::SecretStore> =
         Arc::new(mc_infrastructure::KeyringSecretStore::new());
 
-    // Migrate any plaintext passwords in the config file into the keychain,
-    // then keep watching the file so pasting a password gets picked up live.
+    // Migrate any plaintext passwords in the config file into the keychain.
+    //
+    // Startup-only by design: providers resolve their credentials once during
+    // wiring, so a password migrated while the daemon runs would not be picked
+    // up until a restart anyway. The inotify watcher that used to do this live
+    // bought nothing and could spin a core at 100%, so it was removed.
     secret_ingest::ingest_plaintext_secrets(Path::new(&config_path), secret_store.as_ref())
         .context("failed to migrate plaintext secrets into the system keychain")?;
-    let _config_watcher =
-        secret_ingest::spawn_config_watcher(PathBuf::from(&config_path), secret_store.clone())
-            .context("failed to start config watcher")?;
 
     let oauth_challenges = std::sync::Arc::new(oauth_login::OAuthChallengeManager::new(
         PathBuf::from(&config_path),

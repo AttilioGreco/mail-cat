@@ -17,4 +17,8 @@ pub trait SyncTrigger: Send + Sync {
         &self,
         account_id: &AccountId,
     ) -> Result<Vec<SyncProgressEvent>, ApplicationError>;
+
+    /// Live progress for every account, including syncs this client didn't start
+    /// (boot sync, the periodic tick, the body backfill worker).
+    fn subscribe_progress(&self) -> tokio::sync::broadcast::Receiver<SyncProgressEvent>;
 }

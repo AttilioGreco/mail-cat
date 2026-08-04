@@ -6,6 +6,7 @@ export interface MessageEnvelope {
   toAddresses: string[];
   date: string; // ISO 8601
   isRead: boolean;
+  isFlagged: boolean;
   hasAttachment: boolean;
   preview: string;
 }

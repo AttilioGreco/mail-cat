@@ -12,6 +12,7 @@ interface MessageSummaryDto {
   to: string[];
   date: string;
   is_read: boolean;
+  is_flagged: boolean;
   has_attachments: boolean;
 }
 
@@ -34,6 +35,7 @@ async function fetchEnvelopes(accountId: string, mailboxId: string): Promise<Mes
     toAddresses: d.to,
     date: d.date,
     isRead: d.is_read,
+    isFlagged: d.is_flagged,
     hasAttachment: d.has_attachments,
     preview: '',
   }));

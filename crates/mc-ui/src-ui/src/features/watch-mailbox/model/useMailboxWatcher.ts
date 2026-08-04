@@ -46,18 +46,14 @@ export function useMailboxWatcher(
       }
       console.log('[watcher] processing event kind=', payload.kind)
 
-      switch (payload.kind) {
-        case 'new_message':
-        case 'message_expunged':
-        case 'flags_changed':
-          console.log('[watcher] invalidating messages key=', mailboxKey)
-          queryClient.invalidateQueries({ queryKey: ['messages', mailboxKey] })
-          break
-        case 'counts_changed':
-          console.log('[watcher] invalidating messages + mailboxes accountId=', accountId)
-          queryClient.invalidateQueries({ queryKey: ['messages', mailboxKey] })
-          queryClient.invalidateQueries({ queryKey: ['mailboxes', accountId] })
-          break
+      // Refresh both list shapes: the flat message list and the conversation
+      // list are two views of the same mailbox, and only one of them is mounted
+      // at a time. Invalidating just ['messages'] left conversation mode frozen
+      // until the client was restarted.
+      queryClient.invalidateQueries({ queryKey: ['messages', mailboxKey] })
+      queryClient.invalidateQueries({ queryKey: ['conversations', accountId] })
+      if (payload.kind === 'counts_changed') {
+        queryClient.invalidateQueries({ queryKey: ['mailboxes', accountId] })
       }
     }).then((fn) => {
       console.log('[watcher] listener registered for mailbox', mailboxId)

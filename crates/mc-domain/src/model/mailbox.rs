@@ -51,6 +51,9 @@ pub enum MailboxType {
     Trash,
     Spam,
     Archive,
+    /// RFC 6154 `\All` — virtual "everything" folder. Gmail ships this instead of
+    /// an Archive folder, so it is the archive target when `Archive` is absent.
+    All,
     Custom,
 }
 
@@ -114,6 +117,16 @@ impl Mailbox {
         }
     }
 
+    /// Correct the special-use classification and produce the event.
+    pub fn reclassify(&mut self, mailbox_type: MailboxType) -> DomainEvent {
+        self.mailbox_type = mailbox_type;
+
+        DomainEvent::MailboxTypeChanged {
+            mailbox_id: self.id,
+            mailbox_type,
+        }
+    }
+
     /// Rename the mailbox and produce the event.
     pub fn rename(&mut self, new_path: MailboxPath) -> DomainEvent {
         let old_path = self.path.clone();
@@ -150,6 +163,9 @@ impl Mailbox {
             } => {
                 self.total_messages = *total_messages;
                 self.unread_messages = *unread_messages;
+            }
+            DomainEvent::MailboxTypeChanged { mailbox_type, .. } => {
+                self.mailbox_type = *mailbox_type;
             }
             DomainEvent::MailboxRenamed { new_path, .. } => {
                 self.display_name = new_path.name().to_string();

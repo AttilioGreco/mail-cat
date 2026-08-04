@@ -93,6 +93,15 @@ mod tests {
         ) -> Result<(), DomainError> {
             Ok(())
         }
+        async fn set_flags_bulk(
+            &self,
+            _mailbox: &MailboxPath,
+            _uids: &[ProviderUid],
+            _add: &[Flag],
+            _remove: &[Flag],
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
         async fn move_message(
             &self,
             _uid: ProviderUid,

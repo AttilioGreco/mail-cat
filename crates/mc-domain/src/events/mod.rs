@@ -132,6 +132,17 @@ pub enum DomainEvent {
         mailbox_type: MailboxType,
     },
 
+    /// Mailbox special-use classification changed.
+    ///
+    /// Emitted when a resync sees a different type than the one recorded at
+    /// discovery — a folder's type is derived from the server's LIST response, so
+    /// improved detection (or a server enabling SPECIAL-USE) must be able to
+    /// correct mailboxes that were already discovered.
+    MailboxTypeChanged {
+        mailbox_id: MailboxId,
+        mailbox_type: MailboxType,
+    },
+
     /// Mailbox message counts were updated.
     MailboxCountsUpdated {
         mailbox_id: MailboxId,
@@ -287,6 +298,7 @@ impl DomainEvent {
             | Self::AccountReauthenticated { .. } => AggregateType::Account,
 
             Self::MailboxDiscovered { .. }
+            | Self::MailboxTypeChanged { .. }
             | Self::MailboxCountsUpdated { .. }
             | Self::MailboxRenamed { .. }
             | Self::MailboxDeleted { .. } => AggregateType::Mailbox,
@@ -319,6 +331,7 @@ impl DomainEvent {
             Self::AccountAuthExpired { .. } => "AccountAuthExpired",
             Self::AccountReauthenticated { .. } => "AccountReauthenticated",
             Self::MailboxDiscovered { .. } => "MailboxDiscovered",
+            Self::MailboxTypeChanged { .. } => "MailboxTypeChanged",
             Self::MailboxCountsUpdated { .. } => "MailboxCountsUpdated",
             Self::MailboxRenamed { .. } => "MailboxRenamed",
             Self::MailboxDeleted { .. } => "MailboxDeleted",

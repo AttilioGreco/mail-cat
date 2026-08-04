@@ -5,6 +5,9 @@ interface SearchState {
   /** Active search query — when set, MessageList shows search results */
   searchQuery: string | null;
   setSearchQuery: (query: string | null) => void;
+  /** Bumped to ask SearchBar to take focus (keyboard shortcut). */
+  focusSignal: number;
+  requestFocus: () => void;
 }
 
 export const useSearchStore = create<SearchState>((set) => ({
@@ -15,4 +18,6 @@ export const useSearchStore = create<SearchState>((set) => ({
     // same as switching mailboxes does.
     useSessionStore.getState().selectMessage(null);
   },
+  focusSignal: 0,
+  requestFocus: () => set((s) => ({ focusSignal: s.focusSignal + 1 })),
 }));

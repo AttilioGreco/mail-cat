@@ -1,3 +1,4 @@
+use async_imap::types::NameAttribute;
 use mailparse::{MailParseError, parse_mail};
 
 use mc_domain::error::DomainError;
@@ -22,21 +23,53 @@ pub fn mailbox_path_to_string(path: &MailboxPath) -> String {
     path.segments().join(&path.delimiter().to_string())
 }
 
-/// Infer mailbox type from name (heuristic).
-#[allow(dead_code)] // Day 9: Will be used in IMAP integration
+/// Classify a mailbox from its `LIST` response.
+///
+/// Prefers the RFC 6154 SPECIAL-USE attributes the server advertises, because the
+/// name heuristic below is English-only and silently misclassifies every localized
+/// account: "Archivio", "Cestino" and "Posta inviata" match none of these stems, and
+/// Gmail has no folder named "Archive" at all (its archive is `\All`). Getting this
+/// wrong breaks archive, delete-to-Trash and the Sent folder alike, so the attributes
+/// win whenever the server bothers to send them.
+pub fn classify_mailbox(name: &str, attributes: &[NameAttribute<'_>]) -> MailboxType {
+    for attr in attributes {
+        let special = match attr {
+            NameAttribute::Sent => MailboxType::Sent,
+            NameAttribute::Drafts => MailboxType::Drafts,
+            NameAttribute::Trash => MailboxType::Trash,
+            NameAttribute::Junk => MailboxType::Spam,
+            NameAttribute::Archive => MailboxType::Archive,
+            NameAttribute::All => MailboxType::All,
+            _ => continue,
+        };
+        return special;
+    }
+    // INBOX is not a special-use attribute — it is a reserved name (RFC 3501 §5.1).
+    if name.eq_ignore_ascii_case("inbox") {
+        return MailboxType::Inbox;
+    }
+    infer_mailbox_type(name)
+}
+
+/// Infer mailbox type from name. Fallback for servers that don't advertise SPECIAL-USE.
+///
+/// Stems are matched against the lowercased name, so they must be the shortest form
+/// shared by the languages we care about ("archiv" covers Archive/Archivio/Archiv).
 pub fn infer_mailbox_type(name: &str) -> MailboxType {
     let name_lower = name.to_lowercase();
-    if name_lower.contains("inbox") {
+    let has = |stems: &[&str]| stems.iter().any(|s| name_lower.contains(s));
+
+    if has(&["inbox", "posta in arrivo"]) {
         MailboxType::Inbox
-    } else if name_lower.contains("sent") {
+    } else if has(&["sent", "inviat", "gesendet", "envoyé", "enviado"]) {
         MailboxType::Sent
-    } else if name_lower.contains("draft") {
+    } else if has(&["draft", "bozze", "entwür", "brouillon", "borrador"]) {
         MailboxType::Drafts
-    } else if name_lower.contains("trash") || name_lower.contains("deleted") {
+    } else if has(&["trash", "deleted", "cestino", "papierkorb", "corbeille", "papelera"]) {
         MailboxType::Trash
-    } else if name_lower.contains("spam") || name_lower.contains("junk") {
+    } else if has(&["spam", "junk", "indesiderat", "pourriel"]) {
         MailboxType::Spam
-    } else if name_lower.contains("archive") {
+    } else if has(&["archiv", "archief"]) {
         MailboxType::Archive
     } else {
         MailboxType::Custom
@@ -179,6 +212,40 @@ mod tests {
         assert_eq!(infer_mailbox_type("Spam"), MailboxType::Spam);
         assert_eq!(infer_mailbox_type("Archive"), MailboxType::Archive);
         assert_eq!(infer_mailbox_type("Custom"), MailboxType::Custom);
+
+        // Localized names — these all fell through to Custom before, which is why
+        // "Archivia" from a notification silently did nothing.
+        assert_eq!(infer_mailbox_type("Archivio"), MailboxType::Archive);
+        assert_eq!(infer_mailbox_type("Archiv"), MailboxType::Archive);
+        assert_eq!(infer_mailbox_type("Cestino"), MailboxType::Trash);
+        assert_eq!(infer_mailbox_type("Posta inviata"), MailboxType::Sent);
+        assert_eq!(infer_mailbox_type("Bozze"), MailboxType::Drafts);
+    }
+
+    #[test]
+    fn special_use_attributes_beat_the_name_heuristic() {
+        // Gmail's Italian All Mail: the name matches no stem, only the \All attribute
+        // identifies it — and it is the archive target for Gmail accounts.
+        assert_eq!(
+            classify_mailbox("[Gmail]/Tutti i messaggi", &[NameAttribute::All]),
+            MailboxType::All
+        );
+        assert_eq!(
+            classify_mailbox("[Gmail]/Posta inviata", &[NameAttribute::Sent]),
+            MailboxType::Sent
+        );
+        // No attributes → fall back to the name.
+        assert_eq!(
+            classify_mailbox("Archivio", &[]),
+            MailboxType::Archive
+        );
+        // INBOX is a reserved name, not a special-use attribute.
+        assert_eq!(classify_mailbox("INBOX", &[]), MailboxType::Inbox);
+        // Non-special-use attributes must not shadow the name.
+        assert_eq!(
+            classify_mailbox("Cestino", &[NameAttribute::NoInferiors]),
+            MailboxType::Trash
+        );
     }
 
     #[test]

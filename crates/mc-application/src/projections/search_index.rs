@@ -234,6 +234,12 @@ mod tests {
         ) -> Result<Option<MessageSummary>, DomainError> {
             Ok(None)
         }
+        async fn find_unread_by_mailbox(
+            &self,
+            _m: &MailboxId,
+        ) -> Result<Vec<MessageSummary>, DomainError> {
+            Ok(vec![])
+        }
         async fn scan_all_messages(
             &self,
             _a: Option<&AccountId>,

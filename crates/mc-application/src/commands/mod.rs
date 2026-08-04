@@ -50,6 +50,12 @@ pub enum Command {
         flags_to_remove: Vec<Flag>,
     },
 
+    /// Mark every unread message in a mailbox as read, in one provider round-trip.
+    MarkMailboxRead {
+        mailbox_id: MailboxId,
+        mailbox_path: MailboxPath,
+    },
+
     /// Move a message to another mailbox.
     MoveMessage {
         message_id: MessageId,
@@ -65,6 +71,21 @@ pub enum Command {
         mailbox_id: MailboxId,
         mailbox_path: MailboxPath,
         permanently: bool,
+    },
+
+    /// Delete many messages (soft or permanent) in one provider round trip.
+    /// Mailbox paths are resolved per message inside the handler — a bulk
+    /// selection can span folders, so the caller cannot supply one path.
+    DeleteMessages {
+        message_ids: Vec<MessageId>,
+        permanently: bool,
+    },
+
+    /// Move many messages to one destination mailbox.
+    MoveMessages {
+        message_ids: Vec<MessageId>,
+        to_mailbox_id: MailboxId,
+        to_mailbox_path: MailboxPath,
     },
 
     /// Send a message via SMTP or provider API.
@@ -159,8 +180,14 @@ pub enum CommandResult {
     SyncStarted,
     MessageBodyFetched,
     FlagsSet,
+    /// Count of messages marked read.
+    MailboxMarkedRead { count: u32 },
     MessageMoved,
     MessageDeleted,
+    /// Bulk result: `succeeded` messages changed locally, `failed` were skipped
+    /// (already gone, no provider UID, stale search index). Partial success is
+    /// normal here and must be reported, not swallowed.
+    MessagesBulkChanged { succeeded: u32, failed: u32 },
     MessageSent { message_id: MessageId },
     DraftSaved { message_id: MessageId },
     DraftDiscarded,

@@ -5,16 +5,54 @@ use crate::proto::mail_cat::v1 as pb;
 use crate::types::*;
 
 pub fn account_from_proto(a: pb::AccountSummary) -> Account {
+    use crate::types::AccountStatus;
+
+    let status = match pb::AccountStatus::try_from(a.status) {
+        Ok(pb::AccountStatus::Active) => AccountStatus::Active,
+        Ok(pb::AccountStatus::Disabled) => AccountStatus::Disabled,
+        Ok(pb::AccountStatus::Error) => AccountStatus::Error,
+        Ok(pb::AccountStatus::NeedsReauth) => AccountStatus::NeedsReauth,
+        _ => AccountStatus::Unknown,
+    };
+
     Account {
         id: a.id,
         name: a.name,
         email: a.email.map(|e| e.email).unwrap_or_default(),
-        is_active: a.status == pb::AccountStatus::Active as i32,
+        status,
     }
 }
 
+/// Same shape as [`account_from_proto`], for the detail message returned by
+/// AddAccount/GetAccount.
+pub fn account_detail_from_proto(a: pb::AccountDetail) -> Account {
+    account_from_proto(pb::AccountSummary {
+        id: a.id,
+        name: a.name,
+        email: a.email,
+        provider_type: a.provider_type,
+        status: a.status,
+        created_at: a.created_at,
+        updated_at: a.updated_at,
+    })
+}
+
 pub fn mailbox_from_proto(m: pb::MailboxSummary) -> Mailbox {
+    use crate::types::MailboxKind;
+
+    let mailbox_type = match pb::MailboxType::try_from(m.mailbox_type) {
+        Ok(pb::MailboxType::Inbox) => MailboxKind::Inbox,
+        Ok(pb::MailboxType::Sent) => MailboxKind::Sent,
+        Ok(pb::MailboxType::Drafts) => MailboxKind::Drafts,
+        Ok(pb::MailboxType::Trash) => MailboxKind::Trash,
+        Ok(pb::MailboxType::Spam) => MailboxKind::Spam,
+        Ok(pb::MailboxType::Archive) => MailboxKind::Archive,
+        Ok(pb::MailboxType::All) => MailboxKind::All,
+        _ => MailboxKind::Custom,
+    };
+
     Mailbox {
+        mailbox_type,
         id: m.id,
         account_id: m.account_id,
         path: m.path,
@@ -39,6 +77,7 @@ pub fn message_summary_from_proto(m: pb::MessageSummary) -> MessageSummary {
         cc: envelope.cc.into_iter().map(|a| a.email).collect(),
         date,
         is_read: m.flags.contains(&(pb::Flag::Seen as i32)),
+        is_flagged: m.flags.contains(&(pb::Flag::Flagged as i32)),
         has_attachments: m.has_attachments,
     }
 }
@@ -57,6 +96,7 @@ pub fn message_body_from_proto(m: pb::MessageDetail) -> MessageBody {
 pub fn sync_progress_from_proto(e: pb::SyncProgressEvent) -> SyncProgress {
     use crate::types::SyncPhase;
 
+    let message = e.message.clone();
     let phase = match pb::SyncPhase::try_from(e.phase).unwrap_or(pb::SyncPhase::Unspecified) {
         pb::SyncPhase::DiscoveringMailboxes => SyncPhase::DiscoveringMailboxes,
         pb::SyncPhase::FetchingEnvelopes => SyncPhase::FetchingEnvelopes,
@@ -73,6 +113,7 @@ pub fn sync_progress_from_proto(e: pb::SyncProgressEvent) -> SyncProgress {
         mailbox_name: e.mailbox_name,
         processed: e.processed,
         total: e.total,
+        message,
     }
 }
 

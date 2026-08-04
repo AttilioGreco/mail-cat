@@ -86,7 +86,7 @@ async fn add_oauth(
         match event.context("reading OAuth login progress")? {
             OAuthLoginEvent::AwaitingBrowser { authorize_url } => {
                 println!("{} {}", "Apro il browser per il login:".cyan(), authorize_url);
-                if let Err(e) = open_browser(&authorize_url) {
+                if let Err(e) = mc_shared::browser::open_browser(&authorize_url) {
                     println!(
                         "{} apri manualmente questo link: {}",
                         format!("Impossibile aprire il browser automaticamente ({e}) —").yellow(),
@@ -110,21 +110,6 @@ async fn add_oauth(
     bail!("Login OAuth interrotto: stream terminato senza un evento finale");
 }
 
-fn open_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open").arg(url).status()?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).status()?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd").args(["/C", "start", url]).status()?;
-    }
-    Ok(())
-}
 
 #[derive(Tabled)]
 struct AccountRow {
@@ -152,10 +137,10 @@ async fn list(client: MailCatClient) -> Result<()> {
             id: a.id,
             name: a.name,
             email: a.email,
-            status: if a.is_active {
-                "active".green().to_string()
-            } else {
-                "inactive".red().to_string()
+            status: match a.status {
+                mc_client::AccountStatus::Active => "active".green().to_string(),
+                mc_client::AccountStatus::NeedsReauth => "needs re-auth".yellow().to_string(),
+                other => other.as_str().red().to_string(),
             },
         })
         .collect();

@@ -6,12 +6,10 @@
 //! only acts on plaintext, so our own rewrite triggers no further work and the
 //! watcher can never loop.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use mc_domain::SecretStore;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use toml_edit::DocumentMut;
 
 const SERVICE: &str = "mail-cat";
@@ -97,38 +95,6 @@ fn take_str(table: &mut toml_edit::Table, k: &str) -> Option<String> {
     }
     table.remove(k);
     Some(val)
-}
-
-/// Watch the config file for changes and migrate any plaintext secrets. The
-/// returned watcher must be kept alive for the daemon's lifetime.
-pub fn spawn_config_watcher(
-    config_path: PathBuf,
-    store: Arc<dyn SecretStore>,
-) -> Result<RecommendedWatcher> {
-    let watched = config_path.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| match res {
-        Ok(event) if event.paths.iter().any(|p| p == &watched) => {
-            match ingest_plaintext_secrets(&watched, store.as_ref()) {
-                Ok(true) => tracing::info!(
-                    "Migrated plaintext secret(s) from {} into the system keychain",
-                    watched.display()
-                ),
-                Ok(false) => {}
-                Err(e) => tracing::warn!("secret ingest on config change failed: {e}"),
-            }
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!("config watcher error: {e}"),
-    })
-    .context("creating config watcher")?;
-
-    // Watch the parent directory (NonRecursive): editors often replace the file
-    // via atomic rename, which would break a direct file watch.
-    let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-    watcher
-        .watch(dir, RecursiveMode::NonRecursive)
-        .with_context(|| format!("watching config directory {}", dir.display()))?;
-    Ok(watcher)
 }
 
 #[cfg(test)]

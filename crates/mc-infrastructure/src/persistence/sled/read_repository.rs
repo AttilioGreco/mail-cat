@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 use mc_domain::{
-    Account, AccountId, AccountReadRepository, AccountStatus, AccountSummary,
+    Account, AccountId, AccountReadRepository, AccountStatus, AccountSummary, AccountSyncStats,
     AccountWriteRepository, AggregateType, BackfillEntry, BodyBackfillQueue, Contact, ContactId,
     ContactReadRepository, ContactSummary, ContactWriteRepository, DomainError, DomainEvent,
     EmailAddress, EventEnvelope, EventStore, Flag, Mailbox, MailboxId, MailboxReadRepository,
@@ -172,6 +172,47 @@ impl<ES: EventStore> AccountReadRepository for SledRepository<ES> {
         }
 
         Ok(accounts)
+    }
+
+    async fn account_stats(&self, id: &AccountId) -> Result<AccountSyncStats, DomainError> {
+        let mailbox_tree = self.tree(MAILBOXES_TREE)?;
+        let index_tree = self.tree(MAILBOXES_BY_ACCOUNT_TREE)?;
+        let summary_tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
+
+        let mut total_messages: u32 = 0;
+        let mut synced_messages: u32 = 0;
+
+        for item in index_tree.scan_prefix(format!("{}:", id).as_bytes()) {
+            let (key, _) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let key = String::from_utf8_lossy(&key);
+            let Some(mailbox_id) = key.split(':').nth(1) else {
+                continue;
+            };
+
+            if let Some(bytes) = mailbox_tree
+                .get(mailbox_id.as_bytes())
+                .map_err(|e| DomainError::Repository(e.to_string()))?
+            {
+                let mailbox: Mailbox = serde_json::from_slice(&bytes)
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                total_messages = total_messages.saturating_add(mailbox.total_messages);
+            }
+
+            // Summaries are keyed "{mailbox_id}:…", so counting keys is enough —
+            // no need to deserialize each one.
+            let local = summary_tree
+                .scan_prefix(format!("{}:", mailbox_id).as_bytes())
+                .count() as u32;
+            synced_messages = synced_messages.saturating_add(local);
+        }
+
+        let pending_bodies = self.count_pending_backfill(id).await?;
+
+        Ok(AccountSyncStats {
+            total_messages,
+            synced_messages,
+            pending_bodies,
+        })
     }
 }
 
@@ -330,6 +371,24 @@ impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
             }
         }
         Ok(None)
+    }
+
+    async fn find_unread_by_mailbox(
+        &self,
+        mailbox_id: &MailboxId,
+    ) -> Result<Vec<MessageSummary>, DomainError> {
+        let tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
+        let prefix = format!("{}:", mailbox_id);
+        let mut unread = Vec::new();
+        for item in tree.scan_prefix(prefix.as_bytes()) {
+            let (_key, value) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let summary: MessageSummary = serde_json::from_slice(&value)
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            if !summary.flags.contains(&Flag::Seen) {
+                unread.push(summary);
+            }
+        }
+        Ok(unread)
     }
 
     async fn scan_all_messages(
@@ -570,6 +629,26 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     .map_err(|e| DomainError::Repository(e.to_string()))?;
 
                 debug!(mailbox_id = %mailbox_id, "projected MailboxDiscovered");
+            }
+
+            DomainEvent::MailboxTypeChanged {
+                mailbox_id,
+                mailbox_type,
+            } => {
+                let tree = self.tree(MAILBOXES_TREE)?;
+                if let Some(bytes) = tree
+                    .get(mailbox_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let mut mailbox: Mailbox = serde_json::from_slice(&bytes)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    mailbox.mailbox_type = *mailbox_type;
+                    let json = serde_json::to_vec(&mailbox)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    tree.insert(mailbox_id.to_string().as_bytes(), json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    debug!(mailbox_id = %mailbox_id, ?mailbox_type, "projected MailboxTypeChanged");
+                }
             }
 
             DomainEvent::MailboxCountsUpdated {
@@ -869,7 +948,9 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 {
                     let mut message: Message = serde_json::from_slice(&bytes)
                         .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    let was_seen = message.flags.contains(&Flag::Seen);
                     apply_flag_changes(&mut message.flags, flags_added, flags_removed);
+                    let is_seen = message.flags.contains(&Flag::Seen);
                     let json = serde_json::to_vec(&message)
                         .map_err(|e| DomainError::Serialization(e.to_string()))?;
                     msg_tree
@@ -880,10 +961,17 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     self.update_summary_flags(message_id, flags_added, flags_removed)?;
                     debug!(message_id = %message_id, "projected MessageFlagged");
 
-                    // Update conversation unread_count if Seen flag changed.
-                    let added_seen = flags_added.contains(&Flag::Seen);
-                    let removed_seen = flags_removed.contains(&Flag::Seen);
-                    if added_seen || removed_seen {
+                    // Compare before/after rather than trusting the requested flags:
+                    // re-marking an already-read message must not move any counter.
+                    let unread_delta = match (was_seen, is_seen) {
+                        (false, true) => -1,
+                        (true, false) => 1,
+                        _ => 0,
+                    };
+                    self.adjust_mailbox_unread(&message.mailbox_id, unread_delta)?;
+
+                    // Update conversation unread_count if the read state actually flipped.
+                    if unread_delta != 0 {
                         let msg_thread_tree = self.tree(MESSAGE_TO_THREAD_TREE)?;
                         if let Some(val_bytes) = msg_thread_tree
                             .get(message_id.to_string().as_bytes())
@@ -900,11 +988,9 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                                     let mut conv: mc_domain::traits::repository::ConversationSummary =
                                         serde_json::from_slice(&bytes)
                                             .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                                    if added_seen && conv.unread_count > 0 {
-                                        conv.unread_count -= 1;
-                                    } else if removed_seen {
-                                        conv.unread_count += 1;
-                                    }
+                                    conv.unread_count = conv
+                                        .unread_count
+                                        .saturating_add_signed(unread_delta);
                                     let json = serde_json::to_vec(&conv)
                                         .map_err(|e| DomainError::Serialization(e.to_string()))?;
                                     conv_tree
@@ -944,6 +1030,12 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                         to_mailbox_id,
                         &message.received_at,
                     )?;
+
+                    // An unread message carries its unread-ness to the new mailbox.
+                    if !message.flags.contains(&Flag::Seen) {
+                        self.adjust_mailbox_unread(&old_mailbox_id, -1)?;
+                        self.adjust_mailbox_unread(to_mailbox_id, 1)?;
+                    }
                     debug!(message_id = %message_id, "projected MessageMoved");
                 }
             }
@@ -981,6 +1073,9 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     // conversation list, and skews unread/message counts.
                     let was_unread = !message.flags.contains(&Flag::Seen);
                     self.remove_message_from_conversation(message_id, was_unread)?;
+                    if was_unread {
+                        self.adjust_mailbox_unread(&message.mailbox_id, -1)?;
+                    }
 
                     // Drop the cross-mailbox dedup marker so that if this same RFC
                     // message reappears elsewhere (e.g. moved into Trash) it is
@@ -1480,6 +1575,36 @@ impl<ES: EventStore> SledRepository<ES> {
     /// If the removed message was the conversation's `sample_message_id` (the id
     /// used to open the thread), the sample is repointed to any surviving message
     /// so `get_thread` keeps working.
+    /// Adjust a mailbox's cached unread counter.
+    ///
+    /// The sidebar badge reads this field. Without incremental maintenance it only
+    /// moves when a sync emits `MailboxCountsUpdated`, so reading a message left the
+    /// badge stale until the next poll.
+    fn adjust_mailbox_unread(
+        &self,
+        mailbox_id: &MailboxId,
+        delta: i32,
+    ) -> Result<(), DomainError> {
+        if delta == 0 {
+            return Ok(());
+        }
+        let tree = self.tree(MAILBOXES_TREE)?;
+        let Some(bytes) = tree
+            .get(mailbox_id.to_string().as_bytes())
+            .map_err(|e| DomainError::Repository(e.to_string()))?
+        else {
+            return Ok(());
+        };
+        let mut mailbox: Mailbox = serde_json::from_slice(&bytes)
+            .map_err(|e| DomainError::Serialization(e.to_string()))?;
+        mailbox.unread_messages = mailbox.unread_messages.saturating_add_signed(delta);
+        let json = serde_json::to_vec(&mailbox)
+            .map_err(|e| DomainError::Serialization(e.to_string()))?;
+        tree.insert(mailbox_id.to_string().as_bytes(), json)
+            .map_err(|e| DomainError::Repository(e.to_string()))?;
+        Ok(())
+    }
+
     fn remove_message_from_conversation(
         &self,
         message_id: &MessageId,
@@ -1636,6 +1761,13 @@ impl<ES: EventStore> BodyBackfillQueue for SledRepository<ES> {
             });
         }
         Ok(out)
+    }
+
+    async fn count_pending_backfill(&self, account_id: &AccountId) -> Result<u32, DomainError> {
+        Ok(self
+            .tree(BODY_BACKFILL_TREE)?
+            .scan_prefix(format!("{}:", account_id).as_bytes())
+            .count() as u32)
     }
 }
 
@@ -1935,6 +2067,10 @@ impl<ES: EventStore> AccountReadRepository for SharedSledRepository<ES> {
     async fn list_accounts(&self) -> Result<Vec<AccountSummary>, DomainError> {
         self.0.list_accounts().await
     }
+
+    async fn account_stats(&self, id: &AccountId) -> Result<AccountSyncStats, DomainError> {
+        self.0.account_stats(id).await
+    }
 }
 
 #[async_trait]
@@ -2027,6 +2163,13 @@ impl<ES: EventStore> MessageReadRepository for SharedSledRepository<ES> {
         provider_uid: u32,
     ) -> Result<Option<MessageSummary>, DomainError> {
         self.0.find_by_provider_uid(mailbox_id, provider_uid).await
+    }
+
+    async fn find_unread_by_mailbox(
+        &self,
+        mailbox_id: &MailboxId,
+    ) -> Result<Vec<MessageSummary>, DomainError> {
+        self.0.find_unread_by_mailbox(mailbox_id).await
     }
 
     async fn scan_all_messages(
@@ -2228,6 +2371,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_stats_report_server_total_local_envelopes_and_queued_bodies() {
+        let (_es, repo) = make_store_and_repo();
+        let account_id = AccountId::new();
+        let mailbox_id = MailboxId::new();
+
+        repo.project(&make_event_envelope(
+            1,
+            &mailbox_id.to_string(),
+            AggregateType::Mailbox,
+            1,
+            DomainEvent::MailboxDiscovered {
+                mailbox_id,
+                account_id,
+                path: MailboxPath::inbox(),
+                mailbox_type: MailboxType::Inbox,
+            },
+        ))
+        .await
+        .unwrap();
+
+        // The server says 5 messages; we hold 2 envelopes, one with a body.
+        repo.project(&make_event_envelope(
+            2,
+            &mailbox_id.to_string(),
+            AggregateType::Mailbox,
+            2,
+            DomainEvent::MailboxCountsUpdated {
+                mailbox_id,
+                total_messages: 5,
+                unread_messages: 1,
+            },
+        ))
+        .await
+        .unwrap();
+
+        let stored = MessageId::new();
+        let queued = MessageId::new();
+        for (pos, id, uid) in [(3u64, stored, 10u32), (4, queued, 11)] {
+            repo.project(&make_event_envelope(
+                pos,
+                &id.to_string(),
+                AggregateType::Message,
+                1,
+                DomainEvent::MessageReceived {
+                    message_id: id,
+                    account_id,
+                    mailbox_id,
+                    provider_uid: ProviderUid::new(uid),
+                    envelope: test_envelope(),
+                    flags: vec![],
+                    size_bytes: 0,
+                    has_attachments: false,
+                    message_rfc_id: None,
+                    in_reply_to: None,
+                    references: vec![],
+                    received_at: chrono::Utc::now(),
+                },
+            ))
+            .await
+            .unwrap();
+        }
+
+        repo.project(&make_event_envelope(
+            5,
+            &stored.to_string(),
+            AggregateType::Message,
+            2,
+            DomainEvent::MessageBodyFetched {
+                message_id: stored,
+                body_text: Some("hi".into()),
+                body_html: None,
+                attachments: vec![],
+            },
+        ))
+        .await
+        .unwrap();
+
+        let stats = AccountReadRepository::account_stats(&repo, &account_id)
+            .await
+            .unwrap();
+        assert_eq!(stats.total_messages, 5, "server-side count");
+        assert_eq!(stats.synced_messages, 2, "envelopes held locally");
+        assert_eq!(stats.pending_bodies, 1, "only the body-less one is queued");
+
+        // A different account must not see these.
+        let other = AccountReadRepository::account_stats(&repo, &AccountId::new())
+            .await
+            .unwrap();
+        assert_eq!(other, AccountSyncStats::default());
+    }
+
+    #[tokio::test]
     async fn projection_checkpoint_roundtrip() {
         let (_es, repo) = make_store_and_repo();
 
@@ -2390,6 +2625,27 @@ mod tests {
         assert_eq!(mailbox.total_messages, 42);
         assert_eq!(mailbox.unread_messages, 5);
 
+        // Project MailboxTypeChanged — a resync must be able to correct a folder
+        // classified by an older, name-only heuristic.
+        let env = make_event_envelope(
+            3,
+            &mailbox_id.to_string(),
+            AggregateType::Mailbox,
+            3,
+            DomainEvent::MailboxTypeChanged {
+                mailbox_id,
+                mailbox_type: MailboxType::Archive,
+            },
+        );
+        repo.project(&env).await.unwrap();
+
+        let mailbox = MailboxReadRepository::get_mailbox(&repo, &mailbox_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mailbox.mailbox_type, MailboxType::Archive);
+        assert_eq!(mailbox.total_messages, 42, "counts must survive reclassification");
+
         // Verify list_mailboxes by account works.
         let mailboxes = MailboxReadRepository::list_mailboxes(&repo, &account_id)
             .await
@@ -2417,6 +2673,112 @@ mod tests {
             .await
             .unwrap();
         assert!(mailboxes.is_empty());
+    }
+
+    /// The sidebar badge reads `mailbox.unread_messages`; flagging must maintain it
+    /// incrementally, and must not double-count a repeated mark-as-read.
+    #[tokio::test]
+    async fn flagging_seen_maintains_mailbox_unread_count() {
+        let (_es, repo) = make_store_and_repo();
+        let account_id = AccountId::new();
+        let mailbox_id = MailboxId::new();
+        let message_id = MessageId::new();
+
+        for (seq, event) in [
+            DomainEvent::MailboxDiscovered {
+                mailbox_id,
+                account_id,
+                path: MailboxPath::inbox(),
+                mailbox_type: MailboxType::Inbox,
+            },
+            DomainEvent::MailboxCountsUpdated {
+                mailbox_id,
+                total_messages: 1,
+                unread_messages: 1,
+            },
+            DomainEvent::MessageReceived {
+                message_id,
+                account_id,
+                mailbox_id,
+                provider_uid: ProviderUid::new(42),
+                envelope: test_envelope(),
+                flags: vec![Flag::Recent],
+                size_bytes: 2048,
+                has_attachments: false,
+                message_rfc_id: None,
+                in_reply_to: None,
+                references: vec![],
+                received_at: chrono::Utc::now(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let env = make_event_envelope(
+                seq as u64 + 1,
+                &mailbox_id.to_string(),
+                AggregateType::Mailbox,
+                seq as u64 + 1,
+                event,
+            );
+            repo.project(&env).await.unwrap();
+        }
+
+        macro_rules! unread {
+            () => {
+                MailboxReadRepository::get_mailbox(&repo, &mailbox_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unread_messages
+            };
+        }
+        assert_eq!(unread!(), 1);
+
+        let mark_seen = || DomainEvent::MessageFlagged {
+            message_id,
+            mailbox_id,
+            flags_added: vec![Flag::Seen],
+            flags_removed: vec![],
+        };
+
+        // Reading the message drops the badge to zero.
+        let env = make_event_envelope(
+            4,
+            &message_id.to_string(),
+            AggregateType::Message,
+            4,
+            mark_seen(),
+        );
+        repo.project(&env).await.unwrap();
+        assert_eq!(unread!(), 0);
+
+        // Re-applying Seen must not underflow or double-count.
+        let env = make_event_envelope(
+            5,
+            &message_id.to_string(),
+            AggregateType::Message,
+            5,
+            mark_seen(),
+        );
+        repo.project(&env).await.unwrap();
+        assert_eq!(unread!(), 0);
+
+        // Marking unread again puts it back.
+        let env = make_event_envelope(
+            6,
+            &message_id.to_string(),
+            AggregateType::Message,
+            6,
+            DomainEvent::MessageFlagged {
+                message_id,
+                mailbox_id,
+                flags_added: vec![],
+                flags_removed: vec![Flag::Seen],
+            },
+        );
+        repo.project(&env).await.unwrap();
+        assert_eq!(unread!(), 1);
     }
 
     #[tokio::test]

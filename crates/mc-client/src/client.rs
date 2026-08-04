@@ -69,6 +69,68 @@ impl MailCatClient {
         Ok(resp.accounts.into_iter().map(account_from_proto).collect())
     }
 
+    /// Add an IMAP/SMTP account with plain credentials. OAuth accounts go through
+    /// [`start_oauth_login`](Self::start_oauth_login) instead — the AddAccount RPC
+    /// carries no OAuth provider.
+    pub async fn add_imap_account(&self, params: ImapAccountParams) -> Result<Account> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        let resp = client
+            .add_account(pb::AddAccountRequest {
+                name: params.name,
+                email: params.email,
+                provider_type: pb::ProviderType::Imap as i32,
+                connection_config: Some(pb::ConnectionConfig {
+                    imap_host: Some(params.imap_host),
+                    imap_port: Some(params.imap_port as u32),
+                    smtp_host: params.smtp_host,
+                    smtp_port: params.smtp_port.map(|p| p as u32),
+                    use_tls: params.use_tls,
+                    auth: Some(pb::AuthConfig {
+                        auth_type: Some(pb::auth_config::AuthType::Plain(pb::PlainAuth {
+                            username: params.username,
+                            password: params.password,
+                        })),
+                    }),
+                }),
+            })
+            .await?
+            .into_inner();
+
+        let detail = resp
+            .account
+            .ok_or_else(|| ClientError::InvalidResponse("AddAccount returned no account".into()))?;
+
+        Ok(account_detail_from_proto(detail))
+    }
+
+    /// Remove an account and everything projected from it.
+    pub async fn remove_account(&self, account_id: &str) -> Result<()> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        client
+            .remove_account(pb::RemoveAccountRequest {
+                account_id: account_id.to_owned(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// How much of an account is downloaded locally.
+    pub async fn account_stats(&self, account_id: &str) -> Result<AccountStats> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        let resp = client
+            .get_account_stats(pb::GetAccountStatsRequest {
+                account_id: account_id.to_owned(),
+            })
+            .await?
+            .into_inner();
+
+        Ok(AccountStats {
+            total_messages: resp.total_messages,
+            synced_messages: resp.synced_messages,
+            pending_bodies: resp.pending_bodies,
+        })
+    }
+
     /// Rename an account (updates only its display name; connection config untouched).
     pub async fn rename_account(&self, account_id: &str, name: &str) -> Result<()> {
         let mut client = AccountServiceClient::new(self.channel.clone());
@@ -207,6 +269,19 @@ impl MailCatClient {
         Ok(message_summary_from_proto(summary))
     }
 
+    /// Mark every unread message in a mailbox as read (single provider round-trip).
+    pub async fn mark_mailbox_read(&self, mailbox_id: &str) -> Result<u32> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let resp = client
+            .mark_mailbox_read(pb::MarkMailboxReadRequest {
+                mailbox_id: mailbox_id.to_owned(),
+            })
+            .await?
+            .into_inner();
+
+        Ok(resp.marked_count)
+    }
+
     /// Move a message to another mailbox.
     pub async fn move_message(
         &self,
@@ -244,6 +319,43 @@ impl MailCatClient {
             .await?;
 
         Ok(())
+    }
+
+    /// Delete many messages in one round-trip. Returns `(succeeded, failed)` —
+    /// partial success is expected when the search index is behind the mailbox.
+    pub async fn delete_messages(
+        &self,
+        message_ids: Vec<String>,
+        permanently: bool,
+    ) -> Result<(u32, u32)> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let resp = client
+            .delete_messages(pb::DeleteMessagesRequest {
+                message_ids,
+                permanently,
+            })
+            .await?
+            .into_inner();
+
+        Ok((resp.succeeded, resp.failed))
+    }
+
+    /// Move many messages to one mailbox in a single round-trip.
+    pub async fn move_messages(
+        &self,
+        message_ids: Vec<String>,
+        to_mailbox_id: &str,
+    ) -> Result<(u32, u32)> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let resp = client
+            .move_messages(pb::MoveMessagesRequest {
+                message_ids,
+                to_mailbox_id: to_mailbox_id.to_owned(),
+            })
+            .await?
+            .into_inner();
+
+        Ok((resp.succeeded, resp.failed))
     }
 
     /// Send a new email.
@@ -416,6 +528,27 @@ impl MailCatClient {
         }))
     }
 
+    /// Observe sync progress without starting a sync. `account_id` of `None`
+    /// watches every account. Most syncs are server-initiated (boot, the
+    /// 5-minute tick, the body backfill worker), so a client that just opened
+    /// watches rather than triggering one.
+    pub async fn watch_sync_progress(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<impl Stream<Item = Result<SyncProgress>>> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        let stream = client
+            .watch_sync_progress(pb::WatchSyncProgressRequest {
+                account_id: account_id.unwrap_or_default().to_owned(),
+            })
+            .await?
+            .into_inner();
+
+        Ok(tokio_stream::StreamExt::map(stream, |item| {
+            item.map(sync_progress_from_proto).map_err(ClientError::Grpc)
+        }))
+    }
+
     /// Start an OAuth2 login (Google/Microsoft) for a new account. Streams an
     /// `AwaitingBrowser` event with the URL to open, then exactly one of
     /// `Succeeded`/`Failed` once the browser redirect completes.
@@ -431,6 +564,27 @@ impl MailCatClient {
                 name: name.to_owned(),
                 email: email.to_owned(),
                 provider: crate::convert::oauth_provider_to_proto(provider),
+            })
+            .await?
+            .into_inner();
+
+        Ok(tokio_stream::StreamExt::map(stream, |item| {
+            item.map(crate::convert::oauth_login_event_from_proto)
+                .map_err(ClientError::Grpc)
+        }))
+    }
+
+    /// Re-run the OAuth2 login for an existing account whose refresh token died.
+    /// Same event stream as [`start_oauth_login`](Self::start_oauth_login); the
+    /// server resolves name/email/provider from the account id.
+    pub async fn reauth_account(
+        &self,
+        account_id: &str,
+    ) -> Result<impl Stream<Item = Result<crate::types::OAuthLoginEvent>>> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        let stream = client
+            .reauth_account(pb::ReauthAccountRequest {
+                account_id: account_id.to_owned(),
             })
             .await?
             .into_inner();

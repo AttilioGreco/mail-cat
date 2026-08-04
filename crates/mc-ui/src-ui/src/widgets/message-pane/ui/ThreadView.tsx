@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronDown, Forward, MailOpen, Reply, ReplyAll, Send, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Archive, ChevronDown, Forward, MailOpen, Reply, ReplyAll, Send, Trash2, X } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useThread, type ThreadMessage } from '@/entities/conversation';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { formatDate } from '@/shared/lib/utils';
 import { useAccounts } from '@/entities/account';
-import { useSetFlags } from '@/features/message-actions';
+import { useSetFlags, useDeleteMessage, useMoveMessage, useToggleStar } from '@/features/message-actions';
+import { useMailboxes } from '@/entities/mailbox';
+import { useShortcuts } from '@/features/keyboard-shortcuts';
 import { useSendMessage } from '@/features/compose-message';
+import { EmailContent } from './EmailContent';
 
 // ── Main component ─────────────────────────────────────────────────────────
 
@@ -15,11 +18,16 @@ export function ThreadView() {
     selectedThreadMessageId,
     selectedAccountId,
     selectedMailboxId,
+    selectThread,
   } = useSessionStore();
 
   const { data: messages, isLoading, error } = useThread(selectedThreadMessageId);
   const { data: accounts = [] } = useAccounts();
   const setFlags = useSetFlags();
+  const deleteMsg = useDeleteMessage();
+  const moveMsg = useMoveMessage();
+  const toggleStar = useToggleStar();
+  const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
   const qc = useQueryClient();
 
   const currentAccount = accounts.find((a) => a.id === selectedAccountId) ?? null;
@@ -71,6 +79,59 @@ export function ThreadView() {
     return () => clearTimeout(t);
   }, [selectedThreadMessageId]);
 
+  /** Delete = move to Trash (see `handle_delete` on the server), so this is
+   *  recoverable and needs no confirmation, like the single-message toolbar. */
+  async function deleteMessages(ids: string[], permanently = false) {
+    if (!ids.length) return;
+    await Promise.all(ids.map((id) => deleteMsg.mutateAsync({ messageId: id, permanently })));
+    // Leave the thread only when nothing is left to show — deleting one message
+    // out of five must keep the conversation open.
+    if (ids.length >= (messages?.length ?? 0)) selectThread(null);
+  }
+
+  /** Move every message of the thread to `kind`, if the account has that folder. */
+  async function moveThreadTo(kind: 'archive' | 'all' | 'spam') {
+    const target =
+      mailboxes.find((m) => m.kind === kind) ??
+      // Gmail has no \\Archive; its All Mail doubles as the archive target.
+      (kind === 'archive' ? mailboxes.find((m) => m.kind === 'all') : undefined);
+    if (!target || !messages?.length) return;
+    await Promise.all(
+      messages.map((m) => moveMsg.mutateAsync({ messageId: m.id, toMailboxId: target.id })),
+    );
+    selectThread(null);
+  }
+
+  // Bound here, not in MessageList: the flat list only knows a conversation's
+  // sample id, while the whole thread's message ids live in this component. Every
+  // action here applies to the whole conversation — the labels say so too.
+  const threadIds = (messages ?? []).map((m) => m.id);
+  const hasUnread = !!messages?.some((m) => !m.isRead);
+  useShortcuts({
+    deleteMessage: () => void deleteMessages(threadIds),
+    deletePermanently: () => void deleteMessages(threadIds, true),
+    archiveMessage: () => void moveThreadTo('archive'),
+    markSpam: () => void moveThreadTo('spam'),
+    toggleRead: () => void markConversation(hasUnread),
+    toggleFlag: () => {
+      // Star the newest message: starring an entire thread is not a thing IMAP
+      // models, and it is what the row indicator reflects.
+      const newest = messages?.[messages.length - 1];
+      if (newest) toggleStar.star(newest.id);
+    },
+    reply: () => openReplyOnNewest('reply'),
+    replyAll: () => openReplyOnNewest('replyAll'),
+    forward: () => openReplyOnNewest('forward'),
+  });
+
+  /** Reply to the newest message in the thread — the one auto-expanded on open. */
+  function openReplyOnNewest(mode: 'reply' | 'replyAll' | 'forward') {
+    const newest = messages?.[messages.length - 1];
+    if (!newest) return;
+    setExpandedIds((prev) => new Set(prev).add(newest.id));
+    setReplyingTo({ id: newest.id, mode });
+  }
+
   if (!selectedThreadMessageId) return null;
 
   if (isLoading) {
@@ -90,7 +151,6 @@ export function ThreadView() {
   }
 
   const subject = messages[0].subject ?? '(senza oggetto)';
-  const hasUnread = messages.some((m) => !m.isRead);
 
   function toggleExpanded(id: string) {
     const isExpanded = expandedIds.has(id);
@@ -148,14 +208,34 @@ export function ThreadView() {
               {messages.length} messagg{messages.length === 1 ? 'io' : 'i'}
             </p>
           </div>
-          <button
-            type="button"
-            title={hasUnread ? 'Segna tutto come letto' : 'Segna tutto come non letto'}
-            onClick={() => void markConversation(hasUnread)}
-            className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
-          >
-            <MailOpen size={15} />
-          </button>
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              title={hasUnread ? 'Segna tutto come letto' : 'Segna tutto come non letto'}
+              onClick={() => void markConversation(hasUnread)}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
+            >
+              <MailOpen size={15} />
+            </button>
+            <button
+              type="button"
+              title="Archivia la conversazione"
+              disabled={moveMsg.isPending}
+              onClick={() => void moveThreadTo('archive')}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground disabled:opacity-50"
+            >
+              <Archive size={15} />
+            </button>
+            <button
+              type="button"
+              title="Sposta la conversazione nel cestino"
+              disabled={deleteMsg.isPending}
+              onClick={() => void deleteMessages(messages.map((m) => m.id))}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-destructive disabled:opacity-50"
+            >
+              <Trash2 size={15} />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -191,6 +271,7 @@ export function ThreadView() {
                     onReply={() => setReplyingTo({ id: message.id, mode: 'reply' })}
                     onReplyAll={() => setReplyingTo({ id: message.id, mode: 'replyAll' })}
                     onForward={() => setReplyingTo({ id: message.id, mode: 'forward' })}
+                    onDelete={() => void deleteMessages([message.id])}
                     onCloseReply={() => setReplyingTo(null)}
                     replyMode={replyingTo?.id === message.id ? replyingTo.mode : null}
                     replyAllTo={replyAllTo}
@@ -281,6 +362,7 @@ interface ExpandedProps {
   onReply: () => void;
   onReplyAll: () => void;
   onForward: () => void;
+  onDelete: () => void;
   onCloseReply: () => void;
 }
 
@@ -298,6 +380,7 @@ function ExpandedMessage({
   onReply,
   onReplyAll,
   onForward,
+  onDelete,
   onCloseReply,
 }: ExpandedProps) {
   return (
@@ -334,7 +417,7 @@ function ExpandedMessage({
 
       {/* Email body */}
       <div className="ml-11 mt-4">
-        <AutoSizedFrame html={message.htmlBody} text={message.textBody} />
+        <EmailContent htmlBody={message.htmlBody} textBody={message.textBody} />
       </div>
 
       {/* Action bar */}
@@ -342,6 +425,7 @@ function ExpandedMessage({
         <ActionBtn icon={<Reply size={13} />} label="Rispondi" onClick={onReply} />
         <ActionBtn icon={<ReplyAll size={13} />} label="Rispondi a tutti" onClick={onReplyAll} />
         <ActionBtn icon={<Forward size={13} />} label="Inoltra" onClick={onForward} />
+        <ActionBtn icon={<Trash2 size={13} />} label="Elimina" onClick={onDelete} />
       </div>
 
       {/* Inline reply box */}
@@ -361,73 +445,6 @@ function ExpandedMessage({
         </div>
       )}
     </div>
-  );
-}
-
-// ── Auto-sized iframe (isolates email CSS) ─────────────────────────────────
-
-function AutoSizedFrame({ html, text }: { html: string | null; text: string | null }) {
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const [height, setHeight] = useState(200);
-
-  // Build a sandboxed document with CSS reset to neutralize custom styles
-  const srcdoc = html
-    ? `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-        *{box-sizing:border-box;margin:0;padding:0}
-        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
-             font-size:14px;line-height:1.6;color:#1a1a1a;word-break:break-word;overflow:hidden;
-             padding:12px 16px}
-        img{max-width:100%;height:auto;display:block}
-        a{color:#1a73e8}
-        blockquote{border-left:3px solid #dadce0;margin:8px 0;padding-left:12px;color:#555}
-        pre,code{font-family:monospace;font-size:13px;background:#f5f5f5;border-radius:3px;padding:2px 4px}
-        pre{padding:10px;overflow-x:auto;white-space:pre-wrap}
-        table{border-collapse:collapse;max-width:100%}
-        td,th{padding:4px 8px}
-      </style></head><body>${html}</body></html>`
-    : null;
-
-  const measure = useCallback(() => {
-    const doc = iframeRef.current?.contentDocument;
-    if (!doc) return;
-    const h = doc.documentElement.scrollHeight;
-    if (h > 0) setHeight(h);
-  }, []);
-
-  const onLoad = useCallback(() => {
-    measure();
-    // Watch for images and lazy content finishing
-    const doc = iframeRef.current?.contentDocument;
-    if (!doc) return;
-    const ro = new ResizeObserver(measure);
-    ro.observe(doc.body);
-    // Images
-    doc.querySelectorAll('img').forEach((img) => img.addEventListener('load', measure));
-  }, [measure]);
-
-  if (!srcdoc && !text) {
-    return <p className="text-sm text-muted-foreground italic">(nessun contenuto)</p>;
-  }
-
-  if (!srcdoc) {
-    // Plain text fallback — no iframe needed
-    return (
-      <pre className="whitespace-pre-wrap break-words font-sans text-sm text-foreground leading-relaxed">
-        {text}
-      </pre>
-    );
-  }
-
-  return (
-    <iframe
-      ref={iframeRef}
-      srcDoc={srcdoc}
-      sandbox="allow-same-origin"
-      onLoad={onLoad}
-      style={{ height: `${height}px` }}
-      className="w-full border-0 bg-white"
-      title="email body"
-    />
   );
 }
 

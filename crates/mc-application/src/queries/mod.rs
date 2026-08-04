@@ -4,7 +4,8 @@
 //! [`QueryBus`](crate::bus::QueryBus) and return projected read models.
 
 use mc_domain::{
-    AccountId, AccountSummary, ContactSearchHit, ConversationSummary, Mailbox, MailboxId, Message,
+    AccountId, AccountSummary, AccountSyncStats, ContactSearchHit, ConversationSummary, Mailbox,
+    MailboxId, Message,
     MessageSummary, SearchResults, SuggestScope, Suggestion, ThreadId,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
@@ -20,6 +21,9 @@ pub enum Query {
 
     /// List all configured accounts.
     ListAccounts,
+
+    /// Download progress (total / synced / pending bodies) for one account.
+    GetAccountStats { account_id: AccountId },
 
     // ── Mailbox ────────────────────────────────────────────────────────
     /// Get a single mailbox.
@@ -102,6 +106,7 @@ use mc_domain::MessageId;
 pub enum QueryResult {
     Account(Option<AccountSummary>),
     Accounts(Vec<AccountSummary>),
+    AccountStats(AccountSyncStats),
     Mailbox(Option<Mailbox>),
     Mailboxes(Vec<Mailbox>),
     Message(Box<Option<Message>>),
@@ -135,6 +140,15 @@ impl QueryResult {
     pub fn into_accounts(self) -> Result<Vec<AccountSummary>, ApplicationError> {
         match self {
             Self::Accounts(v) => Ok(v),
+            _ => Err(ApplicationError::Internal(
+                "unexpected query result variant".into(),
+            )),
+        }
+    }
+
+    pub fn into_account_stats(self) -> Result<AccountSyncStats, ApplicationError> {
+        match self {
+            Self::AccountStats(v) => Ok(v),
             _ => Err(ApplicationError::Internal(
                 "unexpected query result variant".into(),
             )),

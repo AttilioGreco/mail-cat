@@ -27,11 +27,43 @@ ui:
 build:
     cargo build --workspace
 
-# compila in release
+# compila i tre binari in release, senza generare pacchetti
 [working-directory: 'crates/mc-ui']
 build-release:
-    cargo build --workspace --release
+    # --no-bundle salta deb/rpm/AppImage ma esegue comunque il build del frontend.
+    cargo build --workspace --release --exclude mc-ui
+    NO_STRIP=1 cargo tauri build --no-bundle
+
+# genera i pacchetti deb + rpm + AppImage, con server e CLI inclusi
+[working-directory: 'crates/mc-ui']
+package: build-release
+    # I binari non-UI devono già esistere: il bundler li copia, non li compila.
     NO_STRIP=1 cargo tauri build
+    @echo ""
+    @echo "→ pacchetti in target/release/bundle/:"
+    @ls -1 ../../target/release/bundle/*/* 2>/dev/null || true
+
+# ── Versione ─────────────────────────────────────────────────────────────────
+
+# mostra la versione corrente (workspace Cargo.toml = unica sorgente di verità)
+version:
+    @grep -m1 '^version' Cargo.toml | cut -d'"' -f2
+
+# allinea tauri.conf.json alla versione del workspace
+version-sync:
+    #!/usr/bin/env bash
+    # Due file separati che divergono in silenzio: senza questo il pacchetto
+    # finisce etichettato con una versione diversa dai binari che contiene.
+    set -euo pipefail
+    V=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+    CUR=$(jq -r .version crates/mc-ui/tauri.conf.json)
+    if [ "$V" = "$CUR" ]; then
+        echo "✓ versione allineata: $V"
+        exit 0
+    fi
+    jq --arg v "$V" '.version = $v' crates/mc-ui/tauri.conf.json > /tmp/tauri.conf.json.$$
+    mv /tmp/tauri.conf.json.$$ crates/mc-ui/tauri.conf.json
+    echo "→ tauri.conf.json: $CUR → $V"
 
 # ── Test & Check ──────────────────────────────────────────────────────────────
 
@@ -76,10 +108,11 @@ ui-dev:
 
 # ── Install ───────────────────────────────────────────────────────────────────
 
-# compila release e installa server + UI in ~/.local (no root)
+# installa server + UI + CLI in ~/.local (no root) — per i pacchetti usa `just package`
 install: build-release
     @echo "→ binari..."
     mkdir -p ~/.local/bin
+    systemctl stop --user mail-cat-server.service
     cp target/release/mail-cat-server ~/.local/bin/
     cp target/release/mail-cat-ui ~/.local/bin/
     cp target/release/mc ~/.local/bin/

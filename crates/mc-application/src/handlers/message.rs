@@ -7,6 +7,7 @@
 
 #[allow(unused_imports)]
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use mc_domain::{
@@ -116,6 +117,58 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         });
 
         Ok(CommandResult::FlagsSet)
+    }
+
+    /// Mark every unread message in a mailbox as read, in a single provider
+    /// round-trip (one `set_flags_bulk` call instead of one `set_flags` per
+    /// message).
+    pub async fn handle_mark_mailbox_read(
+        &self,
+        mailbox_id: MailboxId,
+        mailbox_path: MailboxPath,
+    ) -> Result<CommandResult, ApplicationError> {
+        let unread = self
+            .message_read_repo
+            .find_unread_by_mailbox(&mailbox_id)
+            .await?;
+
+        if unread.is_empty() {
+            return Ok(CommandResult::MailboxMarkedRead { count: 0 });
+        }
+
+        let mut provider_uids = Vec::new();
+        let account_id = unread[0].account_id.clone();
+
+        for summary in &unread {
+            let (mut message, seq) = self.load_message(&summary.id).await?;
+            let event = message.change_flags(vec![Flag::Seen], vec![]);
+            self.append_and_publish(&summary.id, AggregateType::Message, seq, event)
+                .await?;
+
+            if let Some(provider_uid) = summary.provider_uid {
+                provider_uids.push(provider_uid);
+            }
+        }
+
+        info!(%mailbox_id, count = unread.len(), "mailbox marked read locally, syncing to IMAP in background");
+
+        if !provider_uids.is_empty() {
+            let provider = self.provider_registry.get_provider(&account_id)?;
+
+            // Fire-and-forget IMAP update, single round-trip for the whole batch.
+            tokio::spawn(async move {
+                if let Err(e) = provider
+                    .set_flags_bulk(&mailbox_path, &provider_uids, &[Flag::Seen], &[])
+                    .await
+                {
+                    tracing::warn!(%e, "Background IMAP set_flags_bulk failed — next sync will reconcile");
+                }
+            });
+        }
+
+        Ok(CommandResult::MailboxMarkedRead {
+            count: unread.len() as u32,
+        })
     }
 
     /// Apply a flag change that arrived from a remote IMAP IDLE notification.
@@ -285,6 +338,184 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         });
 
         Ok(CommandResult::MessageDeleted)
+    }
+
+    /// Bulk delete. Applies the same Trash-vs-expunge rules as [`Self::handle_delete`]
+    /// per message, then groups the survivors by source mailbox and fires **one**
+    /// background provider call per group.
+    ///
+    /// The grouping is the whole point: the per-message path spawns a task each,
+    /// so deleting a search result set of 800 would open 800 concurrent IMAP
+    /// connections. One `UID STORE` over a compressed UID set is what IMAP is for.
+    ///
+    /// A message that can't be loaded, has no provider UID, or whose mailbox has
+    /// vanished is counted in `failed` and skipped — a stale search index must not
+    /// abort the rest of the batch halfway through.
+    pub async fn handle_delete_many(
+        &self,
+        message_ids: Vec<MessageId>,
+        permanently: bool,
+    ) -> Result<CommandResult, ApplicationError> {
+        let mut failed: u32 = 0;
+        let mut succeeded: u32 = 0;
+        // (account, source path, Some(trash dest) | None = expunge) -> uids
+        let mut groups: HashMap<(AccountId, MailboxPath, Option<MailboxPath>), Vec<ProviderUid>> =
+            HashMap::new();
+        // list_mailboxes hits the read model — once per account, not once per message.
+        let mut mailbox_cache: HashMap<AccountId, Vec<mc_domain::Mailbox>> = HashMap::new();
+
+        for message_id in message_ids {
+            let Ok((mut message, seq)) = self.load_message(&message_id).await else {
+                failed += 1;
+                continue;
+            };
+            let Some(provider_uid) = message.provider_uid else {
+                failed += 1;
+                continue;
+            };
+
+            let account_id = message.account_id;
+            if !mailbox_cache.contains_key(&account_id) {
+                let boxes = self.message_read_repo.list_mailboxes(&account_id).await?;
+                mailbox_cache.insert(account_id, boxes);
+            }
+            let mailboxes = &mailbox_cache[&account_id];
+
+            let Some(source) = mailboxes.iter().find(|m| m.id == message.mailbox_id) else {
+                failed += 1;
+                continue;
+            };
+            let source_path = source.path.clone();
+            let source_is_trash = source.mailbox_type == MailboxType::Trash;
+            let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
+
+            let (event, dest) = if !permanently
+                && !source_is_trash
+                && let Some(trash) = trash
+            {
+                (message.move_to(trash.id), Some(trash.path.clone()))
+            } else {
+                (message.delete(true), None)
+            };
+
+            if self
+                .append_and_publish(&message_id, AggregateType::Message, seq, event)
+                .await
+                .is_err()
+            {
+                failed += 1;
+                continue;
+            }
+            succeeded += 1;
+
+            groups
+                .entry((account_id, source_path, dest))
+                .or_default()
+                .push(provider_uid);
+        }
+
+        info!(succeeded, failed, "bulk delete applied locally, syncing to IMAP in background");
+
+        for ((account_id, from_path, dest), uids) in groups {
+            let provider = match self.provider_registry.get_provider(&account_id) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(%e, "Bulk delete: no provider for account — next sync will reconcile");
+                    continue;
+                }
+            };
+            tokio::spawn(async move {
+                let result = match &dest {
+                    Some(to) => provider.move_messages(&uids, &from_path, to).await,
+                    None => provider.delete_messages(&from_path, &uids, true).await,
+                };
+                if let Err(e) = result {
+                    tracing::warn!(%e, "Background IMAP bulk delete failed — next sync will reconcile");
+                }
+            });
+        }
+
+        Ok(CommandResult::MessagesBulkChanged { succeeded, failed })
+    }
+
+    /// Bulk move to a single destination. Same grouping rationale as
+    /// [`Self::handle_delete_many`]: one provider call per source mailbox.
+    pub async fn handle_move_many(
+        &self,
+        message_ids: Vec<MessageId>,
+        to_mailbox_id: MailboxId,
+        to_mailbox_path: MailboxPath,
+    ) -> Result<CommandResult, ApplicationError> {
+        let mut failed: u32 = 0;
+        let mut succeeded: u32 = 0;
+        let mut groups: HashMap<(AccountId, MailboxPath), Vec<ProviderUid>> = HashMap::new();
+        let mut mailbox_cache: HashMap<AccountId, Vec<mc_domain::Mailbox>> = HashMap::new();
+
+        for message_id in message_ids {
+            let Ok((mut message, seq)) = self.load_message(&message_id).await else {
+                failed += 1;
+                continue;
+            };
+            let Some(provider_uid) = message.provider_uid else {
+                failed += 1;
+                continue;
+            };
+            // Moving a message to the folder it already sits in is a no-op, not
+            // a copy — skip it before it reaches IMAP.
+            if message.mailbox_id == to_mailbox_id {
+                continue;
+            }
+
+            let account_id = message.account_id;
+            if !mailbox_cache.contains_key(&account_id) {
+                let boxes = self.message_read_repo.list_mailboxes(&account_id).await?;
+                mailbox_cache.insert(account_id, boxes);
+            }
+            let Some(source) = mailbox_cache[&account_id]
+                .iter()
+                .find(|m| m.id == message.mailbox_id)
+            else {
+                failed += 1;
+                continue;
+            };
+            let source_path = source.path.clone();
+
+            let event = message.move_to(to_mailbox_id);
+            if self
+                .append_and_publish(&message_id, AggregateType::Message, seq, event)
+                .await
+                .is_err()
+            {
+                failed += 1;
+                continue;
+            }
+            succeeded += 1;
+
+            groups
+                .entry((account_id, source_path))
+                .or_default()
+                .push(provider_uid);
+        }
+
+        info!(succeeded, failed, "bulk move applied locally, syncing to IMAP in background");
+
+        for ((account_id, from_path), uids) in groups {
+            let provider = match self.provider_registry.get_provider(&account_id) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(%e, "Bulk move: no provider for account — next sync will reconcile");
+                    continue;
+                }
+            };
+            let to = to_mailbox_path.clone();
+            tokio::spawn(async move {
+                if let Err(e) = provider.move_messages(&uids, &from_path, &to).await {
+                    tracing::warn!(%e, "Background IMAP bulk move failed — next sync will reconcile");
+                }
+            });
+        }
+
+        Ok(CommandResult::MessagesBulkChanged { succeeded, failed })
     }
 
     pub async fn handle_send(
@@ -616,6 +847,15 @@ mod tests {
         ) -> Result<(), DomainError> {
             Ok(())
         }
+        async fn set_flags_bulk(
+            &self,
+            _mailbox: &MailboxPath,
+            _uids: &[ProviderUid],
+            _add: &[Flag],
+            _remove: &[Flag],
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
         async fn move_message(
             &self,
             _uid: ProviderUid,
@@ -762,6 +1002,13 @@ mod tests {
             Ok(None)
         }
 
+        async fn find_unread_by_mailbox(
+            &self,
+            _mailbox_id: &MailboxId,
+        ) -> Result<Vec<mc_domain::MessageSummary>, DomainError> {
+            Ok(vec![])
+        }
+
         async fn scan_all_messages(
             &self,
             _account_id: Option<&mc_domain::AccountId>,
@@ -869,6 +1116,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_mark_mailbox_read_with_no_unread_is_noop() {
+        let msg = make_test_message();
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let registry = Arc::new(MockProviderRegistry::new(
+            Arc::new(MockEmailProvider::new()),
+        ));
+        let bus = Arc::new(MockEventBus::new());
+        let read_repo = Arc::new(MockMessageReadRepo::new()); // find_unread_by_mailbox -> []
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
+
+        let result = handler
+            .handle_mark_mailbox_read(MailboxId::new(), MailboxPath::inbox())
+            .await
+            .unwrap();
+
+        assert!(matches!(result, CommandResult::MailboxMarkedRead { count: 0 }));
+        assert!(bus.last_event_name().is_none());
+    }
+
+    #[tokio::test]
     async fn handle_move_produces_event() {
         let msg = make_test_message();
         let msg_id = msg.id;
@@ -952,6 +1219,59 @@ mod tests {
             .unwrap();
 
         assert!(matches!(result, CommandResult::MessageDeleted));
+        assert_eq!(bus.last_event_name().unwrap(), "MessageMoved");
+    }
+
+    /// The bulk path must survive ids it cannot resolve: a search index that is
+    /// behind the mailbox will hand it messages that no longer exist, and one of
+    /// those must not abort the rest of the batch.
+    #[tokio::test]
+    async fn handle_delete_many_counts_partial_success() {
+        let msg = make_test_message();
+        let msg_id = msg.id;
+
+        let source = mc_domain::Mailbox {
+            id: msg.mailbox_id,
+            account_id: msg.account_id,
+            path: MailboxPath::inbox(),
+            display_name: "INBOX".into(),
+            mailbox_type: MailboxType::Inbox,
+            flags: vec![],
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        };
+        let trash = mc_domain::Mailbox {
+            id: MailboxId::new(),
+            account_id: msg.account_id,
+            path: MailboxPath::parse("Trash", '/').unwrap(),
+            display_name: "Trash".into(),
+            mailbox_type: MailboxType::Trash,
+            flags: vec![],
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        };
+
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let registry = Arc::new(MockProviderRegistry::new(Arc::new(MockEmailProvider::new())));
+        let bus = Arc::new(MockEventBus::new());
+        let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![source, trash]));
+        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
+
+        // One real message, one id that isn't in the event store.
+        let result = handler
+            .handle_delete_many(vec![msg_id, MessageId::new()], false)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, CommandResult::MessagesBulkChanged { succeeded: 1, failed: 1 }),
+            "expected 1 ok / 1 skipped, got {result:?}"
+        );
+        // Trash exists and the message wasn't in it, so a plain bulk delete moves.
         assert_eq!(bus.last_event_name().unwrap(), "MessageMoved");
     }
 

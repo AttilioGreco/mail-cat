@@ -1,12 +1,16 @@
-import { ChevronDown, RefreshCw, AlertCircle, Pencil, Settings } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { ChevronDown, RefreshCw, AlertCircle, Pencil, Settings, MailCheck, KeyRound } from 'lucide-react';
 import { cn } from '@/shared/lib/utils';
+import { ContextMenu } from '@/shared/ui/ContextMenu';
 import { useSessionStore } from '@/entities/session';
 import { useAccounts, type Account } from '@/entities/account';
-import { useMailboxes, FolderItem } from '@/entities/mailbox';
+import { useMailboxes, FolderItem, type Mailbox } from '@/entities/mailbox';
 import { useInboxWatcher } from '@/features/watch-mailbox';
 import { useComposeStore } from '@/features/compose-message';
 import { useSettingsStore } from '@/features/manage-settings';
+import { useOAuthLogin } from '@/features/manage-accounts';
 import { useSearchStore } from '@/features/search-messages';
+import { useMarkMailboxRead } from '@/features/message-actions';
 
 export function Sidebar() {
   const { selectedAccountId, selectedMailboxId, selectAccount, selectMailbox } = useSessionStore();
@@ -24,6 +28,13 @@ export function Sidebar() {
     selectMailbox(mailboxId);
     resetSearch(null);
   };
+
+  // Land on an account at startup: the persisted one if it still exists, else the first.
+  useEffect(() => {
+    if (accounts.length === 0) return;
+    if (accounts.some((a) => a.id === selectedAccountId)) return;
+    selectAccount(accounts[0].id);
+  }, [accounts, selectedAccountId, selectAccount]);
 
   return (
     <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-border bg-surface">
@@ -77,7 +88,7 @@ export function Sidebar() {
           className="flex w-full items-center justify-center gap-2 rounded-md border border-border bg-background px-2.5 py-2 text-xs text-foreground transition-colors hover:bg-surface-hover"
         >
           <Settings size={13} />
-          Impostazioni Locali
+          Impostazioni
         </button>
       </div>
     </aside>
@@ -94,23 +105,62 @@ function AccountRow({
   onSelect: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={cn(
-        'flex w-full items-center gap-2 rounded-md px-2.5 py-2 transition-colors',
-        isSelected
-          ? 'bg-surface-active text-foreground'
-          : 'text-muted-foreground hover:bg-surface-hover hover:text-foreground',
-      )}
-    >
-      <AccountAvatar email={account.email} />
-      <div className="flex-1 overflow-hidden text-left">
-        <div className="truncate text-xs font-semibold">{account.name}</div>
-        <div className="truncate text-[11px] text-muted">{account.email}</div>
+    <>
+      <button
+        type="button"
+        onClick={onSelect}
+        className={cn(
+          'flex w-full items-center gap-2 rounded-md px-2.5 py-2 transition-colors',
+          isSelected
+            ? 'bg-surface-active text-foreground'
+            : 'text-muted-foreground hover:bg-surface-hover hover:text-foreground',
+        )}
+      >
+        <AccountAvatar email={account.email} />
+        <div className="flex-1 overflow-hidden text-left">
+          <div className="truncate text-xs font-semibold">{account.name}</div>
+          <div className="truncate text-[11px] text-muted">{account.email}</div>
+        </div>
+        <ChevronDown size={12} className="shrink-0 text-muted" />
+      </button>
+      {account.status === 'needs_reauth' && <ReauthBanner accountId={account.id} />}
+    </>
+  );
+}
+
+/**
+ * A dead OAuth token silently stops all mail for an account, so the fix has to
+ * be reachable from where the mail is — not buried in settings.
+ */
+function ReauthBanner({ accountId }: { accountId: string }) {
+  const { reauth, event, pending } = useOAuthLogin();
+  // The oauth:event stream is global; this keeps a second stale account's banner
+  // from mirroring the progress of the one actually being re-authenticated.
+  const [started, setStarted] = useState(false);
+  const busy = started && pending;
+
+  return (
+    <div className="mx-0.5 mb-1 rounded-md border border-amber-500/40 bg-amber-500/5 px-2 py-1.5">
+      <div className="flex items-center gap-1.5 text-[11px] text-amber-500">
+        <KeyRound size={11} className="shrink-0" />
+        <span>Autenticazione scaduta</span>
       </div>
-      <ChevronDown size={12} className="shrink-0 text-muted" />
-    </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => {
+          setStarted(true);
+          reauth(accountId);
+        }}
+        className="mt-1.5 flex w-full items-center justify-center gap-1.5 rounded border border-amber-500/40 px-2 py-1 text-[11px] font-medium text-amber-500 transition-colors hover:bg-amber-500/10 disabled:opacity-60"
+      >
+        {busy && <RefreshCw size={10} className="animate-spin" />}
+        {busy ? 'Apri il browser…' : 'Ri-autentica'}
+      </button>
+      {started && event?.kind === 'failed' && (
+        <p className="mt-1 text-[10px] text-destructive">{event.message}</p>
+      )}
+    </div>
   );
 }
 
@@ -137,10 +187,20 @@ function FolderTree({
   onSelect: (mailboxId: string) => void;
 }) {
   const { data: mailboxes = [], isLoading, error } = useMailboxes(accountId);
+  const markMailboxRead = useMarkMailboxRead();
+  const [menu, setMenu] = useState<{ mailbox: Mailbox; x: number; y: number } | null>(null);
 
   // Keep INBOX watched permanently so unread badges update even when viewing another folder.
   const inbox = mailboxes.find((m) => m.path.toUpperCase() === 'INBOX') ?? null;
   useInboxWatcher(accountId, inbox);
+
+  // Same for the folder: restore the persisted one, else default to INBOX.
+  useEffect(() => {
+    if (mailboxes.length === 0) return;
+    if (mailboxes.some((m) => m.id === selectedMailboxId)) return;
+    const target = inbox ?? mailboxes[0];
+    onSelect(target.id);
+  }, [mailboxes, selectedMailboxId, inbox, onSelect]);
 
   if (isLoading) {
     return (
@@ -168,8 +228,25 @@ function FolderTree({
           mailbox={mailbox}
           isSelected={selectedMailboxId === mailbox.id}
           onSelect={() => onSelect(mailbox.id)}
+          onContextMenu={(x, y) => setMenu({ mailbox, x, y })}
         />
       ))}
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+          <button
+            type="button"
+            disabled={menu.mailbox.unreadMessages === 0}
+            onClick={() => {
+              markMailboxRead.mutate(menu.mailbox.id);
+              setMenu(null);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-foreground transition-colors hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+          >
+            <MailCheck size={14} className="shrink-0" />
+            Segna tutti come letti
+          </button>
+        </ContextMenu>
+      )}
     </nav>
   );
 }

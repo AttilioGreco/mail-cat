@@ -9,10 +9,12 @@ use crate::grpc::mappers::{
     proto_to_domain_pagination,
 };
 use crate::grpc::proto::{
-    CountsChangedEvent, DeleteMessageRequest, DeleteMessageResponse, FlagsChangedEvent,
+    BulkChangeResponse, CountsChangedEvent, DeleteMessageRequest, DeleteMessageResponse,
+    DeleteMessagesRequest, MoveMessagesRequest, FlagsChangedEvent,
     GetMessageRequest, GetMessageResponse, GetThreadRequest, GetThreadResponse,
     ListConversationsRequest, ListConversationsResponse,
-    ListMessagesRequest, ListMessagesResponse, MailboxEvent, MessageExpungedEvent,
+    ListMessagesRequest, ListMessagesResponse, MailboxEvent, MarkMailboxReadRequest,
+    MarkMailboxReadResponse, MessageExpungedEvent,
     MoveMessageRequest, MoveMessageResponse, NewMessageEvent,
     RebuildConversationIndexRequest, RebuildConversationIndexResponse,
     SaveDraftRequest, SaveDraftResponse,
@@ -28,6 +30,29 @@ use mc_application::{
 use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::Message;
 use mc_domain::{AccountId, DomainEvent, MailboxId, MessageId};
+
+/// Parse a bulk request's ids up-front: one malformed id means the caller sent
+/// garbage, so reject the whole request rather than half-deleting a selection.
+fn parse_message_ids(ids: &[String]) -> Result<Vec<MessageId>, Status> {
+    ids.iter()
+        .map(|id| {
+            uuid::Uuid::parse_str(id)
+                .map(MessageId::from_uuid)
+                .map_err(|e| Status::invalid_argument(format!("invalid message_id {id}: {e}")))
+        })
+        .collect()
+}
+
+fn bulk_counts(result: mc_application::commands::CommandResult) -> Result<(u32, u32), Status> {
+    match result {
+        mc_application::commands::CommandResult::MessagesBulkChanged { succeeded, failed } => {
+            Ok((succeeded, failed))
+        }
+        other => Err(Status::internal(format!(
+            "unexpected command result for bulk operation: {other:?}"
+        ))),
+    }
+}
 
 /// Message service implementation with CQRS bus integration.
 pub struct MessageServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
@@ -178,22 +203,43 @@ where
     ) -> Result<Response<GetMessageResponse>, Status> {
         let req = request.into_inner();
 
-        let message_id = MessageId::from_uuid(
-            uuid::Uuid::parse_str(&req.message_id)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?,
-        );
+        let (message, mailbox) = self.get_message_context(&req.message_id).await?;
 
-        let query = Query::GetMessage { message_id };
-        let result = self
-            .query_bus
-            .dispatch(query)
-            .await
-            .map_err(application_error_to_status)?;
-
-        let message = result
-            .into_message()
-            .map_err(|e| Status::internal(e.to_string()))?
-            .ok_or_else(|| Status::not_found("message not found"))?;
+        // The background backfill worker drains newest-first, so a just-arrived
+        // message can still be body-less when the user clicks it — which renders
+        // as a blank pane. Opening a message is the strongest possible "I want
+        // this one now" signal, so jump the queue and fetch it inline. Failure
+        // (offline, provider hiccup) falls through to the empty body rather than
+        // erroring the whole read: the backfill worker will retry.
+        let message = if message.body_text.is_none()
+            && message.body_html.is_none()
+            && message.provider_uid.is_some()
+        {
+            let message_id = message.id;
+            match self
+                .command_bus
+                .dispatch(Command::FetchMessageBody {
+                    message_id,
+                    mailbox_path: mailbox.path.clone(),
+                })
+                .await
+            {
+                Ok(_) => self
+                    .query_bus
+                    .dispatch(Query::GetMessage { message_id })
+                    .await
+                    .map_err(application_error_to_status)?
+                    .into_message()
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .unwrap_or(message),
+                Err(e) => {
+                    tracing::warn!(%message_id, "on-open body fetch failed: {e}");
+                    message
+                }
+            }
+        } else {
+            message
+        };
 
         Ok(Response::new(GetMessageResponse {
             message: Some(domain_message_to_detail(&message)),
@@ -338,6 +384,49 @@ where
         }))
     }
 
+    async fn mark_mailbox_read(
+        &self,
+        request: Request<MarkMailboxReadRequest>,
+    ) -> Result<Response<MarkMailboxReadResponse>, Status> {
+        let req = request.into_inner();
+
+        let mailbox_id = MailboxId::from_uuid(
+            uuid::Uuid::parse_str(&req.mailbox_id)
+                .map_err(|e| Status::invalid_argument(format!("invalid mailbox_id: {e}")))?,
+        );
+
+        let mailbox = self
+            .query_bus
+            .dispatch(Query::GetMailbox { mailbox_id })
+            .await
+            .map_err(application_error_to_status)?
+            .into_mailbox()
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("mailbox not found"))?;
+
+        let command = Command::MarkMailboxRead {
+            mailbox_id,
+            mailbox_path: mailbox.path,
+        };
+
+        let result = self
+            .command_bus
+            .dispatch(command)
+            .await
+            .map_err(application_error_to_status)?;
+
+        let count = match result {
+            mc_application::commands::CommandResult::MailboxMarkedRead { count } => count,
+            _ => {
+                return Err(Status::internal(
+                    "unexpected command result for MarkMailboxRead",
+                ));
+            }
+        };
+
+        Ok(Response::new(MarkMailboxReadResponse { marked_count: count }))
+    }
+
     async fn move_message(
         &self,
         request: Request<MoveMessageRequest>,
@@ -413,6 +502,62 @@ where
             .map_err(application_error_to_status)?;
 
         Ok(Response::new(DeleteMessageResponse { success: true }))
+    }
+
+    async fn delete_messages(
+        &self,
+        request: Request<DeleteMessagesRequest>,
+    ) -> Result<Response<BulkChangeResponse>, Status> {
+        let req = request.into_inner();
+        let message_ids = parse_message_ids(&req.message_ids)?;
+
+        let result = self
+            .command_bus
+            .dispatch(Command::DeleteMessages {
+                message_ids,
+                permanently: req.permanently,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+
+        let (succeeded, failed) = bulk_counts(result)?;
+        Ok(Response::new(BulkChangeResponse { succeeded, failed }))
+    }
+
+    async fn move_messages(
+        &self,
+        request: Request<MoveMessagesRequest>,
+    ) -> Result<Response<BulkChangeResponse>, Status> {
+        let req = request.into_inner();
+        let message_ids = parse_message_ids(&req.message_ids)?;
+
+        let to_mailbox_id = MailboxId::from_uuid(
+            uuid::Uuid::parse_str(&req.to_mailbox_id)
+                .map_err(|e| Status::invalid_argument(format!("invalid to_mailbox_id: {e}")))?,
+        );
+        let to_mailbox = self
+            .query_bus
+            .dispatch(Query::GetMailbox {
+                mailbox_id: to_mailbox_id,
+            })
+            .await
+            .map_err(application_error_to_status)?
+            .into_mailbox()
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("target mailbox not found"))?;
+
+        let result = self
+            .command_bus
+            .dispatch(Command::MoveMessages {
+                message_ids,
+                to_mailbox_id: to_mailbox.id,
+                to_mailbox_path: to_mailbox.path,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+
+        let (succeeded, failed) = bulk_counts(result)?;
+        Ok(Response::new(BulkChangeResponse { succeeded, failed }))
     }
 
     async fn send_message(

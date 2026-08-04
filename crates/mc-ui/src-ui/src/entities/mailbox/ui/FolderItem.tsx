@@ -41,12 +41,18 @@ interface FolderItemProps {
   mailbox: Mailbox;
   isSelected: boolean;
   onSelect: () => void;
+  onContextMenu?: (x: number, y: number) => void;
 }
 
-export function FolderItem({ mailbox, isSelected, onSelect }: FolderItemProps) {
+export function FolderItem({ mailbox, isSelected, onSelect, onContextMenu }: FolderItemProps) {
   return (
     <button
       onClick={onSelect}
+      onContextMenu={(e) => {
+        if (!onContextMenu) return;
+        e.preventDefault();
+        onContextMenu(e.clientX, e.clientY);
+      }}
       className={cn(
         'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors',
         isSelected

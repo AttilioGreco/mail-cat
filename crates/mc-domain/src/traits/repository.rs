@@ -51,11 +51,30 @@ pub struct AccountSummary {
     pub total_unread: u32,
 }
 
+/// How much of an account is actually downloaded locally.
+///
+/// `total_messages` is what the *server* reports across the account's mailboxes;
+/// the other two are local facts. So "still to download" is
+/// `total_messages - synced_messages` envelopes and `pending_bodies` bodies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountSyncStats {
+    /// Sum of server-side message counts over all known mailboxes.
+    pub total_messages: u32,
+    /// Envelopes stored in the local read model.
+    pub synced_messages: u32,
+    /// Stored envelopes whose body is still queued for download.
+    pub pending_bodies: u32,
+}
+
 /// Read-side repository for accounts.
 #[async_trait]
 pub trait AccountReadRepository: Send + Sync {
     async fn get_account(&self, id: &AccountId) -> Result<Option<AccountSummary>, DomainError>;
     async fn list_accounts(&self) -> Result<Vec<AccountSummary>, DomainError>;
+
+    /// Download progress for one account. Walks the local trees, so it is a
+    /// scan — call it for a settings view, not per message.
+    async fn account_stats(&self, id: &AccountId) -> Result<AccountSyncStats, DomainError>;
 }
 
 /// Read model for message list views (without body).
@@ -105,6 +124,12 @@ pub trait MessageReadRepository: Send + Sync {
         provider_uid: u32,
     ) -> Result<Option<MessageSummary>, DomainError>;
 
+    /// All unread (no `Seen` flag) message summaries in a mailbox.
+    async fn find_unread_by_mailbox(
+        &self,
+        mailbox_id: &MailboxId,
+    ) -> Result<Vec<MessageSummary>, DomainError>;
+
     /// Scan every stored message, optionally filtered by account.
     ///
     /// Used for contact backfill: extracts `from`/`to`/`cc` addresses from the
@@ -149,6 +174,10 @@ pub trait BodyBackfillQueue: Send + Sync {
         account_id: &AccountId,
         limit: usize,
     ) -> Result<Vec<BackfillEntry>, DomainError>;
+
+    /// How many bodies are still queued for this account — the "N messages
+    /// left to download" number, unbounded by any page size.
+    async fn count_pending_backfill(&self, account_id: &AccountId) -> Result<u32, DomainError>;
 }
 
 // ── Contact Repositories ─────────────────────────────────────────────────────

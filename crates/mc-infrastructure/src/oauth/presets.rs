@@ -10,6 +10,12 @@ pub struct ProviderPreset {
     pub auth_url: &'static str,
     pub token_url: &'static str,
     pub scopes: &'static [&'static str],
+    /// Extra query params on the authorize URL. Google needs
+    /// `access_type=offline` to return a refresh token at all, and
+    /// `prompt=consent` to return it again on re-auth (it only ships one on
+    /// the *first* consent, so without this a re-login never repairs an
+    /// account that has no refresh token).
+    pub auth_extra_params: &'static [(&'static str, &'static str)],
     pub imap_host: &'static str,
     pub imap_port: u16,
     pub smtp_host: &'static str,
@@ -48,6 +54,7 @@ pub fn provider_preset(provider: OAuthProvider) -> ProviderPreset {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: "https://oauth2.googleapis.com/token",
             scopes: &["https://mail.google.com/"],
+            auth_extra_params: &[("access_type", "offline"), ("prompt", "consent")],
             imap_host: "imap.gmail.com",
             imap_port: 993,
             smtp_host: "smtp.gmail.com",
@@ -65,6 +72,7 @@ pub fn provider_preset(provider: OAuthProvider) -> ProviderPreset {
                 "https://outlook.office.com/SMTP.Send",
                 "offline_access",
             ],
+            auth_extra_params: &[],
             imap_host: "outlook.office365.com",
             imap_port: 993,
             smtp_host: "smtp.office365.com",

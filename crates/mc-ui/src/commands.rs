@@ -1,13 +1,14 @@
-use std::collections::HashMap;
 use serde::Serialize;
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 use mc_client::{
-    Account, ContactHit, ConversationSummary, Mailbox, MailCatClient, MailboxNotificationKind,
-    MessageBody, MessageFlag, MessageSummary, SearchHit, SendMessageParams, Suggestion,
+    Account, ContactHit, ConversationSummary, ImapAccountParams, MailCatClient, Mailbox,
+    MailboxNotificationKind, MessageBody, MessageFlag, MessageSummary, OAuthLoginEvent,
+    OAuthProvider, SearchHit, SendMessageParams, Suggestion, SyncPhase, SyncProgress,
     ThreadMessage,
 };
 
@@ -15,6 +16,84 @@ use mc_client::{
 pub struct AppState {
     pub client: Mutex<Option<MailCatClient>>,
     pub server_url: String,
+}
+
+/// Where a desktop notification wants the UI to navigate.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepLink {
+    pub account_id: String,
+    pub mailbox_id: String,
+    pub message_id: String,
+}
+
+impl DeepLink {
+    /// Parse `--open-message <account>/<mailbox>/<message>` out of a process argv.
+    ///
+    /// Returns `None` for anything malformed: a bad deep link must degrade to
+    /// "just open the app", never abort startup.
+    pub fn from_args<I, S>(args: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            let arg = arg.as_ref();
+            // Accept both `--open-message VALUE` and `--open-message=VALUE`.
+            if let Some(value) = arg.strip_prefix(Self::FLAG) {
+                return match value.strip_prefix('=') {
+                    Some(inline) => Self::parse(inline),
+                    None if value.is_empty() => Self::parse(args.next()?.as_ref()),
+                    None => None, // e.g. `--open-messageXYZ`
+                };
+            }
+        }
+        None
+    }
+
+    pub const FLAG: &'static str = "--open-message";
+
+    fn parse(value: &str) -> Option<Self> {
+        let mut parts = value.split('/');
+        let account_id = parts.next()?.trim().to_owned();
+        let mailbox_id = parts.next()?.trim().to_owned();
+        let message_id = parts.next()?.trim().to_owned();
+        if parts.next().is_some()
+            || account_id.is_empty()
+            || mailbox_id.is_empty()
+            || message_id.is_empty()
+        {
+            return None;
+        }
+        Some(Self {
+            account_id,
+            mailbox_id,
+            message_id,
+        })
+    }
+
+    /// Render back to the `<account>/<mailbox>/<message>` wire form.
+    pub fn to_arg_value(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.account_id, self.mailbox_id, self.message_id
+        )
+    }
+}
+
+/// Deep link captured at startup, waiting for the frontend to ask for it.
+///
+/// The webview is not listening yet when the process starts, so a cold-start
+/// link cannot be delivered as an event — the frontend pulls it instead.
+pub struct PendingDeepLink(pub Mutex<Option<DeepLink>>);
+
+/// Hand the startup deep link to the frontend exactly once.
+#[tauri::command]
+pub async fn take_pending_deep_link(
+    state: State<'_, PendingDeepLink>,
+) -> Result<Option<DeepLink>, String> {
+    Ok(state.0.lock().await.take())
 }
 
 /// Tracks active mailbox watch tasks (mailbox_id → (token, ref_count)).
@@ -29,7 +108,9 @@ pub struct WatchState {
 
 impl WatchState {
     pub fn new() -> Self {
-        Self { watchers: Mutex::new(HashMap::new()) }
+        Self {
+            watchers: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -40,7 +121,37 @@ pub struct AccountDto {
     pub id: String,
     pub name: String,
     pub email: String,
-    pub is_active: bool,
+    /// "active" | "disabled" | "error" | "needs_reauth" | "unknown"
+    pub status: String,
+}
+
+/// Download progress for one account.
+#[derive(Serialize)]
+pub struct AccountStatsDto {
+    pub total_messages: u32,
+    pub synced_messages: u32,
+    pub pending_bodies: u32,
+}
+
+/// Live sync progress, emitted as the `sync:progress` Tauri event.
+#[derive(Serialize, Clone)]
+pub struct SyncProgressPayload {
+    pub account_id: String,
+    /// "discovering_mailboxes" | "fetching_envelopes" | "fetching_bodies" | "indexing" | "complete" | "error"
+    pub phase: String,
+    pub processed: u32,
+    pub total: Option<u32>,
+    pub message: Option<String>,
+}
+
+/// OAuth login progress, emitted as the `oauth:event` Tauri event.
+#[derive(Serialize, Clone)]
+pub struct OAuthEventPayload {
+    /// "awaiting_browser" | "succeeded" | "failed"
+    pub kind: String,
+    pub authorize_url: Option<String>,
+    pub email: Option<String>,
+    pub message: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -49,6 +160,8 @@ pub struct MailboxDto {
     pub account_id: String,
     pub path: String,
     pub display_name: String,
+    /// "inbox" | "sent" | "drafts" | "trash" | "spam" | "archive" | "all" | "custom"
+    pub mailbox_type: String,
     pub total_messages: u32,
     pub unread_messages: u32,
 }
@@ -64,6 +177,7 @@ pub struct MessageSummaryDto {
     pub cc: Vec<String>,
     pub date: String, // ISO 8601
     pub is_read: bool,
+    pub is_flagged: bool,
     pub has_attachments: bool,
 }
 
@@ -81,7 +195,7 @@ pub struct MessageBodyDto {
 #[derive(Clone, Serialize)]
 pub struct MailboxEventPayload {
     pub mailbox_id: String,
-    pub kind: String,          // "counts_changed" | "new_message" | "message_expunged" | "flags_changed"
+    pub kind: String, // "counts_changed" | "new_message" | "message_expunged" | "flags_changed"
     pub total: Option<u32>,
     pub unseen: Option<u32>,
     pub provider_uid: Option<u32>,
@@ -90,7 +204,37 @@ pub struct MailboxEventPayload {
 // ── Conversions ──────────────────────────────────────────────────────────────
 
 fn account_to_dto(a: Account) -> AccountDto {
-    AccountDto { id: a.id, name: a.name, email: a.email, is_active: a.is_active }
+    AccountDto {
+        id: a.id,
+        name: a.name,
+        email: a.email,
+        status: a.status.as_str().to_string(),
+    }
+}
+
+fn sync_phase_to_str(phase: &SyncPhase) -> &'static str {
+    match phase {
+        SyncPhase::DiscoveringMailboxes => "discovering_mailboxes",
+        SyncPhase::FetchingEnvelopes => "fetching_envelopes",
+        SyncPhase::FetchingBodies => "fetching_bodies",
+        SyncPhase::Indexing => "indexing",
+        SyncPhase::Complete => "complete",
+        SyncPhase::Error(_) => "error",
+    }
+}
+
+fn sync_progress_to_payload(p: SyncProgress) -> SyncProgressPayload {
+    SyncProgressPayload {
+        account_id: p.account_id,
+        phase: sync_phase_to_str(&p.phase).to_string(),
+        processed: p.processed,
+        total: p.total,
+        message: match &p.phase {
+            // The failure text is inside the phase, not the message field.
+            SyncPhase::Error(e) => Some(e.clone()),
+            _ => p.message,
+        },
+    }
 }
 
 fn mailbox_to_dto(m: Mailbox) -> MailboxDto {
@@ -99,6 +243,7 @@ fn mailbox_to_dto(m: Mailbox) -> MailboxDto {
         account_id: m.account_id,
         path: m.path,
         display_name: m.display_name,
+        mailbox_type: m.mailbox_type.as_str().to_string(),
         total_messages: m.total_messages,
         unread_messages: m.unread_messages,
     }
@@ -115,6 +260,7 @@ fn message_to_dto(m: MessageSummary) -> MessageSummaryDto {
         cc: m.cc,
         date: m.date.to_rfc3339(),
         is_read: m.is_read,
+        is_flagged: m.is_flagged,
         has_attachments: m.has_attachments,
     }
 }
@@ -153,6 +299,326 @@ pub async fn list_accounts(state: State<'_, AppState>) -> Result<Vec<AccountDto>
         .await
         .map(|v| v.into_iter().map(account_to_dto).collect())
         .map_err(|e| e.to_string())
+}
+
+/// Reserved `WatchState` key for the single sync-progress watcher — it shares the
+/// mailbox watcher's ref-counting so repeated mounts don't spawn duplicate tasks.
+const SYNC_WATCH_KEY: &str = "__sync_progress__";
+
+/// First delay before re-opening a dropped server stream.
+const INITIAL_WATCH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+/// Ceiling for the reconnect delay: a watcher that stays down this long is
+/// waiting for the server to come back, and hammering it buys nothing.
+const MAX_WATCH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Double the reconnect delay, capped. Kept separate so the ramp is testable.
+fn next_backoff(current: std::time::Duration) -> std::time::Duration {
+    (current * 2).min(MAX_WATCH_BACKOFF)
+}
+
+#[tauri::command]
+pub async fn account_stats(
+    account_id: String,
+    state: State<'_, AppState>,
+) -> Result<AccountStatsDto, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .account_stats(&account_id)
+        .await
+        .map(|s| AccountStatsDto {
+            total_messages: s.total_messages,
+            synced_messages: s.synced_messages,
+            pending_bodies: s.pending_bodies,
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Settings-form input for a manually configured IMAP account.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImapAccountInput {
+    pub name: String,
+    pub email: String,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub use_tls: bool,
+    pub username: String,
+    pub password: String,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u16>,
+}
+
+/// Add an IMAP account. The server records it in its config and keychain, but
+/// only starts syncing it after a restart — see `restart_server`.
+#[tauri::command]
+pub async fn add_imap_account(
+    params: ImapAccountInput,
+    state: State<'_, AppState>,
+) -> Result<AccountDto, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .add_imap_account(ImapAccountParams {
+            name: params.name,
+            email: params.email,
+            imap_host: params.imap_host,
+            imap_port: params.imap_port,
+            smtp_host: params.smtp_host,
+            smtp_port: params.smtp_port,
+            use_tls: params.use_tls,
+            username: params.username,
+            password: params.password,
+        })
+        .await
+        .map(account_to_dto)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn remove_account(account_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .remove_account(&account_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Ask the server to sync an account now. Returns as soon as the sync is under
+/// way — progress arrives through the `sync:progress` event stream.
+#[tauri::command]
+pub async fn sync_now(account_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let client = get_or_connect(&state).await?;
+
+    // Opening the stream is what triggers the sync; the events themselves reach
+    // the frontend through the watcher, so this task only has to drain it. The
+    // stream borrows the client, so both move into the task.
+    tokio::spawn(async move {
+        let stream = match client.sync_account(&account_id, false).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("sync_now failed for {account_id}: {e}");
+                return;
+            }
+        };
+        tokio::pin!(stream);
+        while let Some(item) = stream.next().await {
+            if let Err(e) = item {
+                tracing::warn!("sync_now stream error for {account_id}: {e}");
+                break;
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// Stream server-side sync progress into `sync:progress` Tauri events.
+///
+/// Watches every account, including syncs the client never asked for (boot sync,
+/// the periodic tick, the body backfill worker) — that is where the download
+/// percentage actually comes from. Idempotent; ref-counted like mailbox watchers.
+#[tauri::command]
+pub async fn start_sync_watch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    watch_state: State<'_, WatchState>,
+) -> Result<(), String> {
+    let mut watchers = watch_state.watchers.lock().await;
+    if let Some((_, ref_count)) = watchers.get_mut(SYNC_WATCH_KEY) {
+        *ref_count += 1;
+        return Ok(());
+    }
+
+    let client = get_or_connect(&state).await?;
+    let token = CancellationToken::new();
+    watchers.insert(SYNC_WATCH_KEY.to_string(), (token.clone(), 1));
+    drop(watchers);
+
+    tokio::spawn(async move {
+        let mut backoff = INITIAL_WATCH_BACKOFF;
+
+        // Same reconnect discipline as the mailbox watcher: without it a server
+        // restart silently ends progress updates for the rest of the session.
+        'reconnect: while !token.is_cancelled() {
+            match client.watch_sync_progress(None).await {
+                Ok(stream) => {
+                    backoff = INITIAL_WATCH_BACKOFF;
+                    tokio::pin!(stream);
+
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break 'reconnect,
+                            item = stream.next() => match item {
+                                None => {
+                                    tracing::warn!("sync progress stream ended, reconnecting");
+                                    break;
+                                }
+                                Some(Err(e)) => {
+                                    tracing::error!("sync progress stream error: {e}, reconnecting");
+                                    break;
+                                }
+                                Some(Ok(progress)) => {
+                                    let payload = sync_progress_to_payload(progress);
+                                    if let Err(e) = app.emit("sync:progress", &payload) {
+                                        tracing::warn!("Failed to emit sync:progress: {e}");
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("watch_sync_progress failed: {e}, retrying"),
+            }
+
+            tokio::select! {
+                _ = token.cancelled() => break 'reconnect,
+                _ = tokio::time::sleep(backoff) => {}
+            }
+            backoff = next_backoff(backoff);
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_sync_watch(watch_state: State<'_, WatchState>) -> Result<(), String> {
+    stop_watching(SYNC_WATCH_KEY.to_string(), watch_state).await
+}
+
+/// Run an OAuth2 login. Opens the system browser when the server hands us the
+/// authorize URL, then reports the outcome through `oauth:event`.
+#[tauri::command]
+pub async fn start_oauth_login(
+    name: String,
+    email: String,
+    provider: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let provider = match provider.as_str() {
+        "google" => OAuthProvider::Google,
+        "microsoft" => OAuthProvider::Microsoft,
+        other => return Err(format!("unknown OAuth provider: {other}")),
+    };
+
+    let client = get_or_connect(&state).await?;
+
+    tokio::spawn(async move {
+        match client.start_oauth_login(&name, &email, provider).await {
+            Ok(stream) => pump_oauth_events(app, stream).await,
+            Err(e) => emit_oauth_failure(&app, e.to_string()),
+        }
+    });
+
+    Ok(())
+}
+
+/// Re-run the OAuth2 login for an existing account whose token was revoked or
+/// expired. Reports through the same `oauth:event` channel as a fresh login.
+#[tauri::command]
+pub async fn reauth_account(
+    account_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let client = get_or_connect(&state).await?;
+
+    tokio::spawn(async move {
+        match client.reauth_account(&account_id).await {
+            Ok(stream) => pump_oauth_events(app, stream).await,
+            Err(e) => emit_oauth_failure(&app, e.to_string()),
+        }
+    });
+
+    Ok(())
+}
+
+fn emit_oauth_failure(app: &AppHandle, message: String) {
+    let _ = app.emit(
+        "oauth:event",
+        &OAuthEventPayload {
+            kind: "failed".into(),
+            authorize_url: None,
+            email: None,
+            message: Some(message),
+        },
+    );
+}
+
+/// Forwards an OAuth progress stream to the frontend as `oauth:event`, opening
+/// the system browser when the authorize URL arrives.
+async fn pump_oauth_events(
+    app: AppHandle,
+    stream: impl tokio_stream::Stream<Item = mc_client::Result<OAuthLoginEvent>>,
+) {
+    tokio::pin!(stream);
+    while let Some(item) = stream.next().await {
+        let payload = match item {
+            Ok(OAuthLoginEvent::AwaitingBrowser { authorize_url }) => {
+                // Best-effort: the URL also goes to the frontend so the user
+                // can open it by hand if there is no desktop handler.
+                if let Err(e) = mc_shared::browser::open_browser(&authorize_url) {
+                    tracing::warn!("Failed to open browser for OAuth login: {e}");
+                }
+                OAuthEventPayload {
+                    kind: "awaiting_browser".into(),
+                    authorize_url: Some(authorize_url),
+                    email: None,
+                    message: None,
+                }
+            }
+            Ok(OAuthLoginEvent::Succeeded { email }) => OAuthEventPayload {
+                kind: "succeeded".into(),
+                authorize_url: None,
+                email: Some(email),
+                message: None,
+            },
+            Ok(OAuthLoginEvent::Failed { message }) => OAuthEventPayload {
+                kind: "failed".into(),
+                authorize_url: None,
+                email: None,
+                message: Some(message),
+            },
+            Err(e) => OAuthEventPayload {
+                kind: "failed".into(),
+                authorize_url: None,
+                email: None,
+                message: Some(e.to_string()),
+            },
+        };
+
+        let done = payload.kind != "awaiting_browser";
+        if let Err(e) = app.emit("oauth:event", &payload) {
+            tracing::warn!("Failed to emit oauth:event: {e}");
+        }
+        if done {
+            break;
+        }
+    }
+}
+
+/// Restart the mail-cat server so newly added (or removed) accounts take effect.
+///
+/// Accounts are declared in the server's config file and turned into providers
+/// at boot, so add/remove only becomes real after a restart.
+// ponytail: assumes the packaged systemd --user unit (see packaging/systemd).
+// If the server is started some other way, surface the error and let the user
+// restart it by hand.
+#[tauri::command]
+pub async fn restart_server() -> Result<(), String> {
+    let output = tokio::process::Command::new("systemctl")
+        .args(["--user", "restart", "mail-cat-server"])
+        .output()
+        .await
+        .map_err(|e| format!("could not run systemctl: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "systemctl --user restart mail-cat-server failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
 }
 
 #[tauri::command]
@@ -224,34 +690,37 @@ pub async fn start_watching(
     let mid = mailbox_id.clone();
     tokio::spawn(async move {
         tracing::info!("Starting mailbox watcher for {mid}");
+        let mut backoff = INITIAL_WATCH_BACKOFF;
 
-        let stream = match client.watch_mailbox(&mid).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("watch_mailbox failed for {mid}: {e}");
-                return;
-            }
-        };
+        // Reconnect until cancelled. A dropped stream (server restart, transient
+        // error) used to end this task for good: the `watchers` entry stayed
+        // behind with its ref count, so every later `start_watching` was a no-op
+        // and live updates never came back until the whole app was restarted.
+        // The INBOX watcher makes that permanent, since the sidebar holds a
+        // reference for the lifetime of the window.
+        'reconnect: while !token.is_cancelled() {
+            match client.watch_mailbox(&mid).await {
+                Ok(stream) => {
+                    backoff = INITIAL_WATCH_BACKOFF; // connected — reset the delay
+                    tokio::pin!(stream);
 
-        tokio::pin!(stream);
-
-        loop {
-            tokio::select! {
-                _ = token.cancelled() => {
-                    tracing::info!("Mailbox watcher cancelled for {mid}");
-                    break;
-                }
-                item = stream.next() => {
-                    match item {
-                        None => {
-                            tracing::warn!("Mailbox watch stream ended for {mid}");
-                            break;
-                        }
-                        Some(Err(e)) => {
-                            tracing::error!("Mailbox watch error for {mid}: {e}");
-                            break;
-                        }
-                        Some(Ok(notification)) => {
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                tracing::info!("Mailbox watcher cancelled for {mid}");
+                                break 'reconnect;
+                            }
+                            item = stream.next() => {
+                                match item {
+                                    None => {
+                                        tracing::warn!("Mailbox watch stream ended for {mid}, reconnecting");
+                                        break;
+                                    }
+                                    Some(Err(e)) => {
+                                        tracing::error!("Mailbox watch error for {mid}: {e}, reconnecting");
+                                        break;
+                                    }
+                                    Some(Ok(notification)) => {
                             let payload = match notification.event {
                                 MailboxNotificationKind::CountsChanged { total, unseen } => {
                                     MailboxEventPayload {
@@ -291,14 +760,28 @@ pub async fn start_watching(
                                 }
                             };
 
-                            tracing::info!("[tauri] Emitting mailbox:event kind={} mailbox_id={}", payload.kind, payload.mailbox_id);
-                            if let Err(e) = app.emit("mailbox:event", &payload) {
-                                tracing::warn!("Failed to emit mailbox:event: {e}");
+                                        tracing::debug!(
+                                            "[tauri] Emitting mailbox:event kind={} mailbox_id={}",
+                                            payload.kind,
+                                            payload.mailbox_id
+                                        );
+                                        if let Err(e) = app.emit("mailbox:event", &payload) {
+                                            tracing::warn!("Failed to emit mailbox:event: {e}");
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                Err(e) => tracing::warn!("watch_mailbox failed for {mid}: {e}, retrying"),
             }
+
+            tokio::select! {
+                _ = token.cancelled() => break 'reconnect,
+                _ = tokio::time::sleep(backoff) => {}
+            }
+            backoff = next_backoff(backoff);
         }
     });
 
@@ -369,11 +852,26 @@ pub async fn set_flags(
 ) -> Result<MessageSummaryDto, String> {
     let client = get_or_connect(&state).await?;
     let add: Vec<MessageFlag> = flags_to_add.iter().filter_map(|s| str_to_flag(s)).collect();
-    let remove: Vec<MessageFlag> = flags_to_remove.iter().filter_map(|s| str_to_flag(s)).collect();
+    let remove: Vec<MessageFlag> = flags_to_remove
+        .iter()
+        .filter_map(|s| str_to_flag(s))
+        .collect();
     client
         .set_flags(&message_id, &add, &remove)
         .await
         .map(message_to_dto)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn mark_mailbox_read(
+    mailbox_id: String,
+    state: State<'_, AppState>,
+) -> Result<u32, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .mark_mailbox_read(&mailbox_id)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -401,6 +899,36 @@ pub async fn delete_message(
     client
         .delete_message(&message_id, permanently)
         .await
+        .map_err(|e| e.to_string())
+}
+
+/// Bulk delete. Returns `[succeeded, failed]` so the UI can report a partial
+/// result instead of claiming everything worked.
+#[tauri::command]
+pub async fn delete_messages(
+    message_ids: Vec<String>,
+    permanently: bool,
+    state: State<'_, AppState>,
+) -> Result<[u32; 2], String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .delete_messages(message_ids, permanently)
+        .await
+        .map(|(ok, ko)| [ok, ko])
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn move_messages(
+    message_ids: Vec<String>,
+    to_mailbox_id: String,
+    state: State<'_, AppState>,
+) -> Result<[u32; 2], String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .move_messages(message_ids, &to_mailbox_id)
+        .await
+        .map(|(ok, ko)| [ok, ko])
         .map_err(|e| e.to_string())
 }
 
@@ -534,7 +1062,11 @@ pub struct SuggestionDto {
 }
 
 fn suggestion_to_dto(s: Suggestion) -> SuggestionDto {
-    SuggestionDto { field: s.field, value: s.value, doc_count: s.doc_count }
+    SuggestionDto {
+        field: s.field,
+        value: s.value,
+        doc_count: s.doc_count,
+    }
 }
 
 #[tauri::command]
@@ -647,4 +1179,88 @@ pub async fn get_thread(
         .await
         .map(|v| v.into_iter().map(thread_message_to_dto).collect())
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeepLink, INITIAL_WATCH_BACKOFF, MAX_WATCH_BACKOFF, next_backoff};
+
+    fn link(a: &str, m: &str, msg: &str) -> DeepLink {
+        DeepLink {
+            account_id: a.into(),
+            mailbox_id: m.into(),
+            message_id: msg.into(),
+        }
+    }
+
+    #[test]
+    fn watch_backoff_doubles_and_caps() {
+        let mut d = INITIAL_WATCH_BACKOFF;
+        let mut seen = vec![d];
+        for _ in 0..10 {
+            d = next_backoff(d);
+            seen.push(d);
+        }
+        assert_eq!(seen[1], INITIAL_WATCH_BACKOFF * 2, "the delay doubles");
+        assert_eq!(d, MAX_WATCH_BACKOFF, "and stops at the ceiling");
+        assert!(
+            seen.windows(2).all(|w| w[1] >= w[0]),
+            "never goes backwards: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn parses_both_flag_spellings() {
+        let expected = Some(link("acc", "mb", "msg"));
+        assert_eq!(
+            DeepLink::from_args(["--open-message", "acc/mb/msg"]),
+            expected
+        );
+        assert_eq!(DeepLink::from_args(["--open-message=acc/mb/msg"]), expected);
+        // Must still be found after unrelated arguments.
+        assert_eq!(
+            DeepLink::from_args(["--other", "x", "--open-message", "acc/mb/msg"]),
+            expected
+        );
+    }
+
+    #[test]
+    fn round_trips_through_the_wire_form() {
+        let original = link("acc", "mb", "msg");
+        let parsed = DeepLink::from_args(["--open-message", &original.to_arg_value()]);
+        assert_eq!(parsed, Some(original));
+    }
+
+    /// A malformed link must degrade to "just open the app", never panic or
+    /// half-navigate — the notification path has no way to report an error.
+    #[test]
+    fn malformed_links_are_ignored() {
+        assert_eq!(DeepLink::from_args(Vec::<String>::new()), None);
+        assert_eq!(
+            DeepLink::from_args(["--open-message"]),
+            None,
+            "flag with no value"
+        );
+        assert_eq!(
+            DeepLink::from_args(["--open-message", "acc/mb"]),
+            None,
+            "too few parts"
+        );
+        assert_eq!(
+            DeepLink::from_args(["--open-message", "a/b/c/d"]),
+            None,
+            "too many parts"
+        );
+        assert_eq!(
+            DeepLink::from_args(["--open-message", "acc//msg"]),
+            None,
+            "empty part"
+        );
+        assert_eq!(DeepLink::from_args(["--open-message", "//"]), None);
+        assert_eq!(
+            DeepLink::from_args(["--open-messageXYZ", "a/b/c"]),
+            None,
+            "flag typo"
+        );
+    }
 }

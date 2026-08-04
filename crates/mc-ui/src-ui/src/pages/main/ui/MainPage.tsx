@@ -2,7 +2,7 @@ import { Sidebar } from '@/widgets/sidebar';
 import { MessageList } from '@/widgets/message-list';
 import { MessagePane } from '@/widgets/message-pane';
 import { ComposeWindow, useComposeStore } from '@/features/compose-message';
-import { LocalSettingsPanel, useSettingsStore } from '@/features/manage-settings';
+import { useDeepLink } from '@/features/open-deep-link';
 
 /**
  * Root layout: 3-column email shell.
@@ -10,7 +10,9 @@ import { LocalSettingsPanel, useSettingsStore } from '@/features/manage-settings
  */
 export function MainPage() {
   const { composeOpen, composeData, closeCompose } = useComposeStore();
-  const { settingsOpen, closeSettings } = useSettingsStore();
+
+  // Notification click → jump to that message.
+  useDeepLink();
 
   return (
     <div className="flex h-full overflow-hidden bg-background">
@@ -29,8 +31,6 @@ export function MainPage() {
         onClose={closeCompose}
         initialData={composeData}
       />
-
-      <LocalSettingsPanel open={settingsOpen} onClose={closeSettings} />
     </div>
   );
 }

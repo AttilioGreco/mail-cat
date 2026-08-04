@@ -7,11 +7,15 @@
     "frontendDist": "src-ui/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "bun run dev",
-    "beforeBuildCommand": "bun run build"
+    "beforeBuildCommand": "../../../scripts/build-frontend.sh"
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage"],
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",
@@ -21,7 +25,22 @@
     ],
     "linux": {
       "deb": {
-        "depends": []
+        "depends": [],
+        "files": {
+          "/usr/bin/mail-cat-server": "../../target/release/mail-cat-server",
+          "/usr/bin/mc": "../../target/release/mc",
+          "/usr/lib/systemd/user/mail-cat-server.service": "../../packaging/systemd/mail-cat-server.service",
+          "/usr/share/mail-cat/config.toml.example": "../../deploy/config.toml.example"
+        }
+      },
+      "rpm": {
+        "depends": [],
+        "files": {
+          "/usr/bin/mail-cat-server": "../../target/release/mail-cat-server",
+          "/usr/bin/mc": "../../target/release/mc",
+          "/usr/lib/systemd/user/mail-cat-server.service": "../../packaging/systemd/mail-cat-server.service",
+          "/usr/share/mail-cat/config.toml.example": "../../deploy/config.toml.example"
+        }
       }
     }
   },

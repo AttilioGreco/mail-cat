@@ -91,7 +91,6 @@ keyring = { version = "3", features = [
     "sync-secret-service",
     "crypto-rust",
 ] }
-notify = "8"
 
 # Utilities
 futures = "0.3"

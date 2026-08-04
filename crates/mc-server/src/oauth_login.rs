@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mc_application::{OAuthLoginProgress, OAuthLoginTrigger};
+use mc_application::OAuthLoginProgress;
 use mc_domain::{OAuthProvider, SecretStore};
 use tokio::sync::mpsc;
 use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
@@ -17,14 +17,15 @@ pub struct OAuthChallengeManager {
     secret_store: Arc<dyn SecretStore>,
 }
 
+/// The raw login flow. Not the [`OAuthLoginTrigger`] port itself — that is
+/// implemented by `oauth_reauth::ReauthTrigger`, which wraps this and adds the
+/// live-state reconciliation a running server needs.
 impl OAuthChallengeManager {
     pub fn new(config_path: PathBuf, secret_store: Arc<dyn SecretStore>) -> Self {
         Self { config_path, secret_store }
     }
-}
 
-impl OAuthLoginTrigger for OAuthChallengeManager {
-    fn start_login(
+    pub fn start_login(
         &self,
         name: String,
         email: String,
@@ -159,27 +160,6 @@ fn append_oauth_account(
 
     accounts.push(table);
     std::fs::write(config_path, doc.to_string())?;
-    Ok(())
-}
-
-/// Opens `url` in the OS default browser. Best-effort: callers should also
-/// show the URL so the user can open it manually if this fails (e.g. no
-/// desktop session).
-// ponytail: duplicates mc-cli's private open_browser (crates/mc-cli/src/commands/accounts.rs) —
-// extract to a shared location if a third caller needs it.
-pub(crate) fn open_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open").arg(url).status()?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).status()?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd").args(["/C", "start", url]).status()?;
-    }
     Ok(())
 }
 

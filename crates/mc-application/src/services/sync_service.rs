@@ -7,13 +7,15 @@
 //! 4. Track progress via checkpoint for resume on restart
 //! 5. Emit domain events (MailboxDiscovered, MessageReceived, etc.)
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::broadcast;
 
 use mc_domain::{
-    AccountId, AggregateType, BackfillEntry, BodyBackfillQueue, DomainEvent, EmailProvider,
-    EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath,
+    AccountId, AggregateType, BackfillEntry, BodyBackfillQueue, DomainError, DomainEvent,
+    EmailProvider, EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath,
     MailboxReadRepository, Message, MessageBodyResult, MessageId, MessageReadRepository,
     ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
 };
@@ -24,6 +26,14 @@ use crate::bus::EventPublisher;
 use crate::error::ApplicationError;
 use crate::services::sync_trigger::SyncTrigger;
 
+/// Backoff after `failures` consecutive credential rejections: 5 min, doubling
+/// to a 1 hour cap. A rejected credential needs the user to act, so retrying on
+/// the normal cadence only burns connections and risks provider rate-limiting.
+fn auth_backoff(failures: u32) -> std::time::Duration {
+    let factor = 1u64 << failures.saturating_sub(1).min(20);
+    std::time::Duration::from_secs(300 * factor).min(std::time::Duration::from_secs(3600))
+}
+
 /// Tracks the state of a sync operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncState {
@@ -33,8 +43,8 @@ pub enum SyncState {
     ListingMailboxes,
     /// Currently fetching envelopes for a mailbox.
     FetchingEnvelopes { mailbox_id: MailboxId },
-    /// Fetching body for a single message.
-    FetchingMessageBody { message_id: MessageId },
+    /// Downloading message bodies (the background backfill worker).
+    FetchingMessageBody,
     /// Sync completed successfully.
     Completed,
     /// Sync failed with error.
@@ -96,6 +106,33 @@ pub struct SyncService<
     /// published here so in-process subscribers (e.g. desktop notifications)
     /// receive events emitted by the sync pipeline.
     event_publisher: Option<Arc<dyn EventPublisher>>,
+    /// Live progress fan-out. Most syncs are server-initiated (boot, the 5-minute
+    /// tick, the backfill worker), so a client subscribes to watch rather than
+    /// starting one itself.
+    progress_tx: broadcast::Sender<SyncProgressEvent>,
+    /// Last published (phase, percent, message) per account — the debounce gate.
+    last_progress: Mutex<HashMap<AccountId, ProgressKey>>,
+}
+
+/// What makes one progress event distinguishable from the previous one.
+type ProgressKey = (u8, u8, String);
+
+fn phase_rank(state: &SyncState) -> u8 {
+    match state {
+        SyncState::Idle => 0,
+        SyncState::ListingMailboxes => 1,
+        SyncState::FetchingEnvelopes { .. } => 2,
+        SyncState::FetchingMessageBody => 3,
+        SyncState::Completed => 4,
+        SyncState::Failed => 5,
+    }
+}
+
+fn percent(processed: u32, total: u32) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    ((processed as u64 * 100 / total as u64).min(100)) as u8
 }
 
 impl<
@@ -118,6 +155,53 @@ impl<
             config,
             cancelled: AtomicBool::new(false),
             event_publisher: None,
+            // Slow subscribers lag rather than block the sync; a dropped
+            // intermediate percentage costs nothing since the next one supersedes it.
+            progress_tx: broadcast::channel(64).0,
+            last_progress: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Subscribe to live sync progress for every account.
+    pub fn subscribe_progress(&self) -> broadcast::Receiver<SyncProgressEvent> {
+        self.progress_tx.subscribe()
+    }
+
+    /// Fan out a progress update to live subscribers, dropping it when it repeats
+    /// what was last published for the account.
+    ///
+    /// The gate is (phase, whole percentage point, message): without it a
+    /// 10k-message mailbox would emit 10k events no UI can render. Terminal
+    /// states always pass. Returns the event when it passed the gate.
+    fn publish(&self, event: SyncProgressEvent) -> Option<SyncProgressEvent> {
+        let terminal = matches!(event.state, SyncState::Completed | SyncState::Failed);
+        let key: ProgressKey = (
+            phase_rank(&event.state),
+            percent(event.processed, event.total),
+            event.message.clone(),
+        );
+
+        {
+            let mut last = self
+                .last_progress
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !terminal && last.get(&event.account_id) == Some(&key) {
+                return None;
+            }
+            last.insert(event.account_id, key);
+        }
+
+        // Err just means nobody is listening.
+        let _ = self.progress_tx.send(event.clone());
+        Some(event)
+    }
+
+    /// Publish a progress update and, if it passed the gate, keep it in the log
+    /// returned by `start_sync` (which the SyncAccount RPC replays).
+    fn emit(&self, progress: &mut Vec<SyncProgressEvent>, event: SyncProgressEvent) {
+        if let Some(event) = self.publish(event) {
+            progress.push(event);
         }
     }
 
@@ -136,8 +220,30 @@ impl<
     /// 3. For each mailbox: loads checkpoint, fetches new envelopes, emits MessageReceived events
     /// 4. Updates mailbox counts and saves checkpoint
     /// 5. Emits AccountSyncCompleted event
-    #[instrument(skip(self), fields(account_id = %account_id))]
     pub async fn start_sync(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Vec<SyncProgressEvent>, ApplicationError> {
+        let result = self.run_sync(account_id).await;
+
+        // Every failure path out of `run_sync` is a `?`, so without this nothing
+        // ever publishes a terminal event and a watching client sits on the last
+        // "in progress" percentage forever.
+        if let Err(e) = &result {
+            self.publish(SyncProgressEvent {
+                account_id: *account_id,
+                state: SyncState::Failed,
+                processed: 0,
+                total: 0,
+                message: e.to_string(),
+            });
+        }
+
+        result
+    }
+
+    #[instrument(skip(self), fields(account_id = %account_id))]
+    async fn run_sync(
         &self,
         account_id: &AccountId,
     ) -> Result<Vec<SyncProgressEvent>, ApplicationError> {
@@ -164,13 +270,16 @@ impl<
         .await?;
 
         // 2. List remote mailboxes
-        progress.push(SyncProgressEvent {
-            account_id: *account_id,
-            state: SyncState::ListingMailboxes,
-            processed: 0,
-            total: 0,
-            message: "Listing mailboxes...".to_string(),
-        });
+        self.emit(
+            &mut progress,
+            SyncProgressEvent {
+                account_id: *account_id,
+                state: SyncState::ListingMailboxes,
+                processed: 0,
+                total: 0,
+                message: "Listing mailboxes...".to_string(),
+            },
+        );
 
         let remote_mailboxes = provider.list_mailboxes().await.map_err(|e| {
             error!("Failed to list mailboxes: {}", e);
@@ -190,14 +299,33 @@ impl<
         let local_by_path: HashMap<&MailboxPath, &Mailbox> =
             local_mailboxes.iter().map(|m| (&m.path, m)).collect();
 
-        // 4. Discover new mailboxes
+        // 4. Discover new mailboxes, and correct the type of existing ones.
         for remote in &remote_mailboxes {
-            if !local_by_path.contains_key(&remote.path) {
-                info!(path = %remote.path, "Discovering new mailbox");
-                let (mailbox, event) =
-                    Mailbox::discover(*account_id, remote.path.clone(), remote.mailbox_type);
-                self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
-                    .await?;
+            match local_by_path.get(&remote.path) {
+                None => {
+                    info!(path = %remote.path, "Discovering new mailbox");
+                    let (mailbox, event) =
+                        Mailbox::discover(*account_id, remote.path.clone(), remote.mailbox_type);
+                    self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
+                        .await?;
+                }
+                Some(local) if local.mailbox_type != remote.mailbox_type => {
+                    // The type was recorded once at discovery. Detection has since
+                    // improved (SPECIAL-USE, localized names), so mailboxes classified
+                    // by an older build stay wrong forever unless we correct them here
+                    // — which is what silently broke Archive and Trash targeting.
+                    info!(
+                        path = %remote.path,
+                        from = ?local.mailbox_type,
+                        to = ?remote.mailbox_type,
+                        "Reclassifying mailbox"
+                    );
+                    let mut mailbox = (*local).clone();
+                    let event = mailbox.reclassify(remote.mailbox_type);
+                    self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
+                        .await?;
+                }
+                Some(_) => {}
             }
         }
 
@@ -228,15 +356,18 @@ impl<
                 }
             };
 
-            progress.push(SyncProgressEvent {
-                account_id: *account_id,
-                state: SyncState::FetchingEnvelopes {
-                    mailbox_id: local.id,
+            self.emit(
+                &mut progress,
+                SyncProgressEvent {
+                    account_id: *account_id,
+                    state: SyncState::FetchingEnvelopes {
+                        mailbox_id: local.id,
+                    },
+                    processed: mailboxes_synced,
+                    total: total_mailboxes,
+                    message: format!("Syncing {}...", remote.path),
                 },
-                processed: mailboxes_synced,
-                total: total_mailboxes,
-                message: format!("Syncing {}...", remote.path),
-            });
+            );
 
             // Get remote status (uid_validity, uid_next)
             let status = match provider.mailbox_status(&remote.path).await {
@@ -344,8 +475,25 @@ impl<
 
             // Process each envelope; collect (message_id, provider_uid) for body fetch
             let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
+            let envelope_total = envelopes.len() as u32;
+            // Stable per-mailbox text so `emit`'s gate reduces this to one event
+            // per percentage point instead of one per message.
+            let envelope_label = format!("Fetching messages in {}", remote.path);
 
-            for envelope_summary in &envelopes {
+            for (index, envelope_summary) in envelopes.iter().enumerate() {
+                self.emit(
+                    &mut progress,
+                    SyncProgressEvent {
+                        account_id: *account_id,
+                        state: SyncState::FetchingEnvelopes {
+                            mailbox_id: local.id,
+                        },
+                        processed: index as u32,
+                        total: envelope_total,
+                        message: envelope_label.clone(),
+                    },
+                );
+
                 if self.is_cancelled() {
                     break;
                 }
@@ -486,15 +634,18 @@ impl<
             "Sync completed"
         );
 
-        progress.push(SyncProgressEvent {
-            account_id: *account_id,
-            state: SyncState::Completed,
-            processed: mailboxes_synced,
-            total: total_mailboxes,
-            message: format!(
-                "Sync completed: {mailboxes_synced} mailboxes, {messages_synced} messages"
-            ),
-        });
+        self.emit(
+            &mut progress,
+            SyncProgressEvent {
+                account_id: *account_id,
+                state: SyncState::Completed,
+                processed: mailboxes_synced,
+                total: total_mailboxes,
+                message: format!(
+                    "Sync completed: {mailboxes_synced} mailboxes, {messages_synced} messages"
+                ),
+            },
+        );
 
         Ok(progress)
     }
@@ -555,9 +706,9 @@ impl<
         account_id: &AccountId,
         mailbox_path: &MailboxPath,
         entries: &[BackfillEntry],
-    ) -> Result<(), ApplicationError> {
+    ) -> Result<Vec<MessageId>, ApplicationError> {
         if entries.is_empty() {
-            return Ok(());
+            return Ok(vec![]);
         }
 
         let provider = self.provider_registry.get_provider(account_id)?;
@@ -566,18 +717,29 @@ impl<
             .map(|e| ProviderUid::new(e.provider_uid))
             .collect();
 
+        // Keep AuthenticationFailed typed (via the transparent Domain variant) so
+        // callers can back off on a rejected credential. Stringifying it into
+        // SyncFailed here is what previously made a dead account indistinguishable
+        // from a flaky network, so it got retried forever.
         let results = provider
             .fetch_bodies_bulk(mailbox_path, &uids)
             .await
-            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to bulk fetch bodies: {e}")))?;
+            .map_err(|e| match e {
+                DomainError::AuthenticationFailed(_) => ApplicationError::Domain(e),
+                other => ApplicationError::SyncFailed(format!(
+                    "Failed to bulk fetch bodies: {other}"
+                )),
+            })?;
         let by_uid: HashMap<u32, MessageBodyResult> =
             results.into_iter().map(|r| (r.provider_uid.value(), r)).collect();
 
+        let mut missing = Vec::new();
         for entry in entries {
             let Some(result) = by_uid.get(&entry.provider_uid) else {
-                // Not returned by the server this pass (e.g. deleted meanwhile);
-                // leave it queued, retried next pass.
-                warn!(%account_id, message_id = %entry.message_id, "backfill: message missing from bulk fetch result");
+                // Not returned by the server this pass (e.g. deleted meanwhile).
+                // Caller (`run_backfill`) tracks retry counts and gives up after
+                // too many misses, so this doesn't get retried forever.
+                missing.push(entry.message_id);
                 continue;
             };
             let event = DomainEvent::MessageBodyFetched {
@@ -590,8 +752,19 @@ impl<
                 .await?;
         }
 
-        Ok(())
+        Ok(missing)
     }
+
+    /// Give up on a message missing from the remote server after this many
+    /// backfill passes (e.g. it was deleted before its body was fetched).
+    ///
+    /// ponytail: the give-up set is in-memory only, scoped to one `run_backfill`
+    /// loop — it resets on restart, so an abandoned message gets a few more free
+    /// retries after every restart. That's fine: giving up just stops the log
+    /// spam for this run. If it ever needs to survive restarts too, persist a
+    /// `MessageBodyFetchAbandoned`-style event instead (mirroring how
+    /// `MessageBodyFetched` dequeues the backfill entry).
+    const MAX_BACKFILL_MISSING_ATTEMPTS: u32 = 5;
 
     /// Background body-backfill loop for one account.
     ///
@@ -601,7 +774,9 @@ impl<
     /// the IMAP server (or trip Gmail's daily bandwidth cap) while avoiding a
     /// fresh TCP+TLS connection per message. Each fetch emits
     /// `MessageBodyFetched`, which both indexes the body and dequeues the
-    /// entry. Failed fetches stay queued and are retried on the next pass.
+    /// entry. Whole-fetch failures (auth/network) leave entries queued and
+    /// retried next pass; entries the server no longer has get a few retries
+    /// before being abandoned (see `MAX_BACKFILL_MISSING_ATTEMPTS`).
     /// Runs until `shutdown` fires.
     pub async fn run_backfill(
         &self,
@@ -615,6 +790,11 @@ impl<
         let batch_size = per_minute.max(1) as usize;
         let cycle = std::time::Duration::from_secs(60);
         let idle_poll = std::time::Duration::from_secs(60);
+
+        let mut missing_counts: HashMap<MessageId, u32> = HashMap::new();
+        let mut abandoned: HashSet<MessageId> = HashSet::new();
+        // Consecutive credential rejections, used to back off. Reset on success.
+        let mut auth_failures: u32 = 0;
 
         loop {
             if shutdown.is_cancelled() {
@@ -634,13 +814,28 @@ impl<
                     }
                 };
 
-            let pending = self
+            let pending: Vec<BackfillEntry> = self
                 .projector
                 .list_pending_backfill(&account_id, 500)
                 .await
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| !abandoned.contains(&e.message_id))
+                .collect();
 
             if pending.is_empty() {
+                // Say so explicitly: this worker is otherwise silent while idle, so
+                // without an "all done" event a watching client keeps showing the
+                // last in-progress percentage forever. `total: 0` means "no backlog",
+                // which is what stops a percentage being rendered at all.
+                self.publish(SyncProgressEvent {
+                    account_id,
+                    state: SyncState::FetchingMessageBody,
+                    processed: 0,
+                    total: 0,
+                    message: "All message bodies downloaded".to_string(),
+                });
+
                 // Nothing queued — wait for new arrivals (or shutdown).
                 tokio::select! {
                     _ = shutdown.cancelled() => return,
@@ -648,7 +843,20 @@ impl<
                 }
             }
 
-            for chunk in pending.chunks(batch_size) {
+            // Measure against the whole backlog, not against what this pass happens
+            // to drain: `pending` is a capped window, so a percentage of it is
+            // meaningless — and it reads 50% the moment "downloaded this pass"
+            // equals "still queued". Against the backlog the number climbs
+            // monotonically towards 100% as the queue empties, and only moves
+            // backwards when new mail genuinely arrives.
+            let backlog = self
+                .projector
+                .count_pending_backfill(&account_id)
+                .await
+                .unwrap_or(pending.len() as u32);
+
+            let mut auth_rejected = false;
+            'drain: for chunk in pending.chunks(batch_size) {
                 if shutdown.is_cancelled() {
                     return;
                 }
@@ -665,19 +873,75 @@ impl<
                         // Mailbox not yet known locally — skip this pass.
                         continue;
                     };
-                    if let Err(e) = self
-                        .fetch_message_bodies_bulk(&account_id, path, &entries)
-                        .await
-                    {
-                        // Leave them queued; retried next pass.
-                        warn!(%account_id, error = %e, "backfill: bulk body fetch failed");
+                    match self.fetch_message_bodies_bulk(&account_id, path, &entries).await {
+                        Ok(missing) => {
+                            auth_failures = 0;
+                            for message_id in missing {
+                                let count = missing_counts.entry(message_id).or_insert(0);
+                                *count += 1;
+                                if *count >= Self::MAX_BACKFILL_MISSING_ATTEMPTS {
+                                    warn!(
+                                        %account_id, %message_id, attempts = *count,
+                                        "backfill: message missing from server after max retries, giving up"
+                                    );
+                                    missing_counts.remove(&message_id);
+                                    abandoned.insert(message_id);
+                                } else {
+                                    warn!(
+                                        %account_id, %message_id, attempts = *count,
+                                        "backfill: message missing from bulk fetch result"
+                                    );
+                                }
+                            }
+                        }
+                        // A rejected credential fails every remaining mailbox in
+                        // this pass identically. Abandon the drain immediately and
+                        // back off, instead of re-running the whole queue against a
+                        // server that is refusing us once a minute, forever.
+                        Err(e @ ApplicationError::Domain(DomainError::AuthenticationFailed(_))) => {
+                            auth_failures = auth_failures.saturating_add(1);
+                            warn!(
+                                %account_id, error = %e, attempts = auth_failures,
+                                "backfill: credential rejected, backing off"
+                            );
+                            auth_rejected = true;
+                            break 'drain;
+                        }
+                        Err(e) => {
+                            // Leave them queued; retried next pass (this is a
+                            // whole-fetch failure — e.g. network — not a
+                            // per-message "gone from server" signal, so no cap).
+                            warn!(%account_id, error = %e, "backfill: bulk body fetch failed");
+                        }
                     }
                 }
+
+                // Live progress: the queue length is the authoritative "N bodies
+                // left to download", so derive how far we are from it.
+                let remaining = self
+                    .projector
+                    .count_pending_backfill(&account_id)
+                    .await
+                    .unwrap_or(0);
+                self.publish(SyncProgressEvent {
+                    account_id,
+                    state: SyncState::FetchingMessageBody,
+                    processed: backlog.saturating_sub(remaining),
+                    total: backlog,
+                    message: "Downloading message bodies".to_string(),
+                });
 
                 // Rate limit (interruptible).
                 tokio::select! {
                     _ = shutdown.cancelled() => return,
                     _ = tokio::time::sleep(cycle) => {}
+                }
+            }
+
+            if auth_rejected {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(auth_backoff(auth_failures)) => continue,
                 }
             }
         }
@@ -1109,6 +1373,10 @@ impl<
     ) -> Result<Vec<SyncProgressEvent>, ApplicationError> {
         self.start_sync(account_id).await
     }
+
+    fn subscribe_progress(&self) -> broadcast::Receiver<SyncProgressEvent> {
+        SyncService::subscribe_progress(self)
+    }
 }
 
 #[cfg(test)]
@@ -1123,6 +1391,27 @@ mod tests {
     };
     use std::pin::Pin;
     use std::sync::Mutex;
+
+    #[test]
+    fn auth_backoff_grows_and_caps() {
+        assert_eq!(auth_backoff(1).as_secs(), 300, "first rejection waits 5 min");
+        assert_eq!(auth_backoff(2).as_secs(), 600);
+        assert_eq!(auth_backoff(4).as_secs(), 2400);
+        assert_eq!(auth_backoff(8).as_secs(), 3600, "caps at 1 hour");
+        // Must not overflow the shift on a long-dead account.
+        assert_eq!(auth_backoff(u32::MAX).as_secs(), 3600);
+    }
+
+    /// A credential rejection must stay typed all the way to `run_backfill`, which
+    /// is what lets it back off instead of retrying once a minute forever.
+    #[test]
+    fn auth_failure_survives_as_typed_error_not_stringified() {
+        let err = ApplicationError::from(DomainError::AuthenticationFailed("nope".into()));
+        assert!(matches!(
+            err,
+            ApplicationError::Domain(DomainError::AuthenticationFailed(_))
+        ));
+    }
 
     // ── Mock EmailProvider ─────────────────────────────────────────────
 
@@ -1215,6 +1504,16 @@ mod tests {
             Ok(())
         }
 
+        async fn set_flags_bulk(
+            &self,
+            _mailbox: &MailboxPath,
+            _uids: &[ProviderUid],
+            _add: &[Flag],
+            _remove: &[Flag],
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
         async fn move_message(
             &self,
             _uid: ProviderUid,
@@ -1287,12 +1586,19 @@ mod tests {
     // ── Mock ProviderRegistry ──────────────────────────────────────────
 
     struct MockProviderRegistry {
-        provider: Arc<MockEmailProvider>,
+        /// `None` reproduces "no provider registered for this account".
+        provider: Option<Arc<MockEmailProvider>>,
     }
 
     impl MockProviderRegistry {
         fn new(provider: Arc<MockEmailProvider>) -> Self {
-            Self { provider }
+            Self {
+                provider: Some(provider),
+            }
+        }
+
+        fn empty() -> Self {
+            Self { provider: None }
         }
     }
 
@@ -1303,7 +1609,9 @@ mod tests {
             &self,
             _account_id: &AccountId,
         ) -> Result<Arc<MockEmailProvider>, mc_domain::DomainError> {
-            Ok(self.provider.clone())
+            self.provider
+                .clone()
+                .ok_or_else(|| mc_domain::DomainError::Provider("no provider".into()))
         }
 
         fn register_provider(&self, _account_id: AccountId, _provider: Arc<MockEmailProvider>) {}
@@ -1478,6 +1786,13 @@ mod tests {
             Ok(None)
         }
 
+        async fn find_unread_by_mailbox(
+            &self,
+            _mailbox_id: &MailboxId,
+        ) -> Result<Vec<MessageSummary>, DomainError> {
+            Ok(vec![])
+        }
+
         async fn scan_all_messages(
             &self,
             _account_id: Option<&AccountId>,
@@ -1515,6 +1830,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<mc_domain::BackfillEntry>, DomainError> {
             Ok(vec![])
+        }
+
+        async fn count_pending_backfill(&self, _account_id: &AccountId) -> Result<u32, DomainError> {
+            Ok(0)
         }
     }
 
@@ -1562,6 +1881,130 @@ mod tests {
     }
 
     // ── Tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn progress_gate_collapses_repeats_but_keeps_percentage_steps() {
+        let service = make_service(
+            MockEmailProvider::new(),
+            Arc::new(MockEventStore::new()),
+            Arc::new(MockProjector::new()),
+        );
+        let account_id = AccountId::new();
+        let mailbox_id = MailboxId::new();
+        let mut published = Vec::new();
+
+        // 1000 messages in one mailbox: the gate must not let 1000 events out.
+        for i in 0..1000u32 {
+            service.emit(
+                &mut published,
+                SyncProgressEvent {
+                    account_id,
+                    state: SyncState::FetchingEnvelopes { mailbox_id },
+                    processed: i,
+                    total: 1000,
+                    message: "Fetching messages in INBOX".to_string(),
+                },
+            );
+        }
+
+        assert_eq!(
+            published.len(),
+            100,
+            "one event per whole percentage point, not one per message"
+        );
+
+        // A terminal event always passes, even repeated.
+        let completed = SyncProgressEvent {
+            account_id,
+            state: SyncState::Completed,
+            processed: 1,
+            total: 1,
+            message: "done".to_string(),
+        };
+        service.emit(&mut published, completed.clone());
+        service.emit(&mut published, completed);
+        assert_eq!(published.len(), 102, "Completed is never debounced away");
+    }
+
+    #[tokio::test]
+    async fn empty_backfill_queue_announces_itself() {
+        // Regression: the worker used to go silent once the queue drained, so a
+        // client kept rendering the last in-progress percentage forever.
+        let service = Arc::new(make_service(
+            MockEmailProvider::new(),
+            Arc::new(MockEventStore::new()),
+            Arc::new(MockProjector::new()), // empty queue
+        ));
+        let mut rx = service.subscribe_progress();
+
+        let shutdown = CancellationToken::new();
+        let worker = {
+            let service = service.clone();
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move { service.run_backfill(AccountId::new(), 30, shutdown).await })
+        };
+
+        let event = rx.recv().await.expect("idle worker published its state");
+        shutdown.cancel();
+        let _ = worker.await;
+
+        assert_eq!(event.state, SyncState::FetchingMessageBody);
+        assert_eq!(event.total, 0, "no backlog → no percentage to render");
+        assert!(event.message.contains("All message bodies"));
+    }
+
+    #[tokio::test]
+    async fn failed_sync_publishes_a_terminal_event() {
+        // No provider registered → start_sync fails on the first resolve.
+        let service = make_service(
+            MockEmailProvider::new(),
+            Arc::new(MockEventStore::new()),
+            Arc::new(MockProjector::new()),
+        );
+        let mut rx = service.subscribe_progress();
+
+        assert!(service.start_sync(&AccountId::new()).await.is_ok());
+
+        // The mock registry always resolves, so drive the failure path directly.
+        let broken: SyncService<MockProviderRegistry, MockEventStore, MockProjector> =
+            SyncService::new(
+                Arc::new(MockProviderRegistry::empty()),
+                Arc::new(MockEventStore::new()),
+                Arc::new(MockProjector::new()),
+                SyncConfig::default(),
+            );
+        let mut broken_rx = broken.subscribe_progress();
+        assert!(broken.start_sync(&AccountId::new()).await.is_err());
+
+        let event = broken_rx.try_recv().expect("a terminal event was published");
+        assert_eq!(event.state, SyncState::Failed);
+        // The healthy service published progress, not a failure.
+        assert!(!matches!(
+            rx.try_recv().map(|e| e.state),
+            Ok(SyncState::Failed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn progress_reaches_live_subscribers() {
+        let service = make_service(
+            MockEmailProvider::new(),
+            Arc::new(MockEventStore::new()),
+            Arc::new(MockProjector::new()),
+        );
+        let mut rx = service.subscribe_progress();
+
+        service.publish(SyncProgressEvent {
+            account_id: AccountId::new(),
+            state: SyncState::ListingMailboxes,
+            processed: 0,
+            total: 0,
+            message: "Listing mailboxes...".to_string(),
+        });
+
+        let event = rx.try_recv().expect("subscriber received the event");
+        assert_eq!(event.state, SyncState::ListingMailboxes);
+    }
 
     #[tokio::test]
     async fn sync_discovers_new_mailboxes() {

@@ -1,11 +1,20 @@
-import { useEffect, useRef } from 'react';
-import { RefreshCw, Paperclip, Reply, Forward, Trash2, Mail, MailOpen, MoreHorizontal } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  RefreshCw, Paperclip, Reply, ReplyAll, Forward, Trash2, Mail, MailOpen,
+  MoreHorizontal, Archive, Ban, Star, Flame,
+} from 'lucide-react';
 import { cn, formatDate } from '@/shared/lib/utils';
 import { useMessageBody, type MessageEnvelope } from '@/entities/message';
-import { useSetFlags, useDeleteMessage } from '@/features/message-actions';
+import {
+  useSetFlags, useDeleteMessage, useMoveMessage, useToggleStar, useSelectNeighbour,
+} from '@/features/message-actions';
+import { useMailboxes } from '@/entities/mailbox';
+import { useKeymap, type ShortcutBinding } from '@/features/keyboard-shortcuts';
+import { formatForDisplay } from '@tanstack/react-hotkeys';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useComposeStore } from '@/features/compose-message';
 import { useAccounts } from '@/entities/account';
+import { useShortcuts } from '@/features/keyboard-shortcuts';
 import { EmailContent } from './EmailContent';
 
 interface MessageViewerProps {
@@ -16,10 +25,16 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
   const { data: body, isLoading } = useMessageBody(envelope.uid);
   const setFlags = useSetFlags();
   const deleteMsg = useDeleteMessage();
-  const { selectMessage, selectedAccountId, selectedMailboxId } = useSessionStore();
+  const moveMsg = useMoveMessage();
+  const toggleStar = useToggleStar();
+  const selectNeighbour = useSelectNeighbour();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const { selectedAccountId, selectedMailboxId } = useSessionStore();
   const openCompose = useComposeStore((s) => s.openCompose);
   const { data: accounts = [] } = useAccounts();
+  const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
   const mbKey = mailboxKey(selectedAccountId, selectedMailboxId);
+  const keymap = useKeymap();
 
   // The account that received this message — drives identity pre-selection and chip search scope.
   const currentAccount = accounts.find((a) => a.id === selectedAccountId);
@@ -41,11 +56,67 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [envelope.uid]); // only fire when the selected message changes, not on isRead flip
 
-  const handleDelete = () => {
-    deleteMsg.mutate(
-      { messageId: envelope.uid },
-      { onSuccess: () => selectMessage(null) },
+  const senderAddress = envelope.fromName
+    ? `${envelope.fromName} <${envelope.fromEmail}>`
+    : envelope.fromEmail;
+
+  /** Shared by the toolbar and the keyboard shortcut. `all` also keeps the
+   *  original recipients, minus this account's own address. */
+  const replyTo = (all: boolean) => {
+    if (!all) return [senderAddress];
+    const others = envelope.toAddresses.filter(
+      (a) => !currentAccount?.email || !a.toLowerCase().includes(currentAccount.email.toLowerCase()),
     );
+    return [senderAddress, ...others];
+  };
+
+  const openReply = (all: boolean) =>
+    openCompose({
+      mode: 'reply',
+      from: currentAccount?.email,
+      accountId: selectedAccountId ?? undefined,
+      to: replyTo(all),
+      subject: envelope.subject.startsWith('Re:') ? envelope.subject : `Re: ${envelope.subject}`,
+      // References = this message's own ancestor chain + its own id, so the
+      // backend can thread the reply past just the immediate parent.
+      inReplyTo: body?.rfcMessageId ?? undefined,
+      references: body
+        ? [...body.references, ...(body.rfcMessageId ? [body.rfcMessageId] : [])]
+        : undefined,
+      identities: [],
+    });
+
+  const openForward = () =>
+    openCompose({
+      mode: 'forward',
+      from: currentAccount?.email,
+      accountId: selectedAccountId ?? undefined,
+      subject: envelope.subject.startsWith('Fwd:') ? envelope.subject : `Fwd: ${envelope.subject}`,
+      identities: [],
+    });
+
+  /** Gmail has no \\Archive; its All Mail doubles as the archive target. */
+  const archiveMailbox =
+    mailboxes.find((m) => m.kind === 'archive') ?? mailboxes.find((m) => m.kind === 'all');
+  const spamMailbox = mailboxes.find((m) => m.kind === 'spam');
+
+  const moveTo = (mailboxId: string) => {
+    // Hand the selection on before mutating: once the cache is invalidated the
+    // list no longer knows what came after this message.
+    selectNeighbour(envelope.uid);
+    moveMsg.mutate({ messageId: envelope.uid, toMailboxId: mailboxId });
+    setMenuOpen(false);
+  };
+
+  useShortcuts({
+    reply: () => openReply(false),
+    replyAll: () => openReply(true),
+    forward: openForward,
+  });
+
+  const handleDelete = () => {
+    selectNeighbour(envelope.uid);
+    deleteMsg.mutate({ messageId: envelope.uid });
   };
 
   const handleToggleRead = () => {
@@ -71,50 +142,83 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
       <div className="flex items-center gap-1 border-b border-border px-4 py-2">
         <ToolbarButton
           icon={<Reply size={15} />}
-          label="Reply"
-          onClick={() => openCompose({
-            mode: 'reply',
-            from: currentAccount?.email,
-            accountId: selectedAccountId ?? undefined,
-            // Use fromName + fromEmail so the chip shows the display name immediately
-            to: [envelope.fromName
-              ? `${envelope.fromName} <${envelope.fromEmail}>`
-              : envelope.fromEmail],
-            subject: envelope.subject.startsWith('Re:') ? envelope.subject : `Re: ${envelope.subject}`,
-            // References = this message's own ancestor chain + its own id, so the
-            // backend can thread the reply past just the immediate parent.
-            inReplyTo: body?.rfcMessageId ?? undefined,
-            references: body
-              ? [...body.references, ...(body.rfcMessageId ? [body.rfcMessageId] : [])]
-              : undefined,
-            identities: [],
-          })}
+          label="Rispondi"
+          onClick={() => openReply(false)}
+        />
+        <ToolbarButton
+          icon={<ReplyAll size={15} />}
+          label="Rispondi a tutti"
+          onClick={() => openReply(true)}
         />
         <ToolbarButton
           icon={<Forward size={15} />}
-          label="Forward"
-          onClick={() => openCompose({
-            mode: 'forward',
-            from: currentAccount?.email,
-            accountId: selectedAccountId ?? undefined,
-            subject: envelope.subject.startsWith('Fwd:') ? envelope.subject : `Fwd: ${envelope.subject}`,
-            identities: [],
-          })}
+          label="Inoltra"
+          onClick={openForward}
         />
         <div className="mx-2 h-4 w-px bg-border" />
         <ToolbarButton
           icon={envelope.isRead ? <Mail size={15} /> : <MailOpen size={15} />}
-          label={envelope.isRead ? 'Mark unread' : 'Mark read'}
+          label={envelope.isRead ? 'Segna come non letto' : 'Segna come letto'}
           onClick={handleToggleRead}
         />
+        {archiveMailbox && (
+          <ToolbarButton
+            icon={<Archive size={15} />}
+            label="Archivia"
+            onClick={() => moveTo(archiveMailbox.id)}
+          />
+        )}
         <ToolbarButton
           icon={<Trash2 size={15} />}
-          label="Delete"
+          label="Sposta nel cestino"
           variant="destructive"
           onClick={handleDelete}
         />
-        <div className="ml-auto">
-          <ToolbarButton icon={<MoreHorizontal size={15} />} label="More" />
+        <div className="relative ml-auto">
+          <ToolbarButton
+            icon={<MoreHorizontal size={15} />}
+            label="Altre azioni"
+            onClick={() => setMenuOpen((v) => !v)}
+          />
+          {menuOpen && (
+            <>
+              {/* Click-away layer: cheaper than a document listener for a menu
+                  that only exists while open. */}
+              <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} aria-hidden />
+              <div className="absolute right-0 z-50 mt-1 w-64 overflow-hidden rounded-lg border border-border bg-background py-1 shadow-xl">
+                <MenuItem
+                  icon={<Star size={13} />}
+                  label={envelope.isFlagged ? 'Togli la stella' : 'Aggiungi la stella'}
+                  hint={keyHint(keymap.toggleFlag)}
+                  onClick={() => {
+                    if (envelope.isFlagged) toggleStar.unstar(envelope.uid);
+                    else toggleStar.star(envelope.uid);
+                    setMenuOpen(false);
+                  }}
+                />
+                {spamMailbox && (
+                  <MenuItem
+                    icon={<Ban size={13} />}
+                    label="Segna come spam"
+                    hint={keyHint(keymap.markSpam)}
+                    onClick={() => moveTo(spamMailbox.id)}
+                  />
+                )}
+                <div className="my-1 h-px bg-border" />
+                <MenuItem
+                  icon={<Flame size={13} />}
+                  label="Elimina definitivamente"
+                  hint={keyHint(keymap.deletePermanently)}
+                  destructive
+                  onClick={() => {
+                    selectNeighbour(envelope.uid);
+                    deleteMsg.mutate({ messageId: envelope.uid, permanently: true });
+                    setMenuOpen(false);
+                  }}
+                />
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -199,6 +303,47 @@ function ToolbarButton({
     >
       {icon}
       <span>{label}</span>
+    </button>
+  );
+}
+
+/** First chord of a binding, for the key hint next to a menu entry. */
+function keyHint(binding: ShortcutBinding | undefined): string | null {
+  if (!binding) return null;
+  if (typeof binding === 'string') return formatForDisplay(binding);
+  if (Array.isArray(binding)) return formatForDisplay(binding[0]);
+  return binding.sequence.map((step) => formatForDisplay(step)).join(' ');
+}
+
+function MenuItem({
+  icon,
+  label,
+  hint,
+  destructive,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  hint: string | null;
+  destructive?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        'flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-surface-hover',
+        destructive ? 'text-destructive' : 'text-foreground',
+      ].join(' ')}
+    >
+      {icon}
+      <span className="flex-1">{label}</span>
+      {hint && (
+        <kbd className="rounded border border-border bg-surface px-1 py-0.5 font-mono text-[10px] text-muted">
+          {hint}
+        </kbd>
+      )}
     </button>
   );
 }

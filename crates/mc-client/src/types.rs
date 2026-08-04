@@ -21,7 +21,57 @@ pub struct Account {
     pub id: String,
     pub name: String,
     pub email: String,
-    pub is_active: bool,
+    pub status: AccountStatus,
+}
+
+/// Health of an account, as the server sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountStatus {
+    Active,
+    Disabled,
+    /// Sync is failing for a reason other than credentials.
+    Error,
+    /// Credentials were rejected or lost — needs an interactive re-login.
+    NeedsReauth,
+    Unknown,
+}
+
+impl AccountStatus {
+    /// Machine-readable tag, used as the wire value towards the desktop UI.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+            Self::Error => "error",
+            Self::NeedsReauth => "needs_reauth",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// How much of an account is downloaded locally.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AccountStats {
+    /// Messages the server reports across all known mailboxes.
+    pub total_messages: u32,
+    /// Envelopes stored locally.
+    pub synced_messages: u32,
+    /// Stored envelopes whose body is still queued for download.
+    pub pending_bodies: u32,
+}
+
+/// IMAP/SMTP settings for a manually configured account.
+#[derive(Debug, Clone)]
+pub struct ImapAccountParams {
+    pub name: String,
+    pub email: String,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u16>,
+    pub use_tls: bool,
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Debug, Clone)]
@@ -30,8 +80,40 @@ pub struct Mailbox {
     pub account_id: String,
     pub path: String,
     pub display_name: String,
+    /// Special-use classification. Folder names are localized, so this is the
+    /// only reliable way to find "the Sent folder".
+    pub mailbox_type: MailboxKind,
     pub total_messages: u32,
     pub unread_messages: u32,
+}
+
+/// RFC 6154 special-use classification of a folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxKind {
+    Inbox,
+    Sent,
+    Drafts,
+    Trash,
+    Spam,
+    Archive,
+    /// Gmail's "All Mail" (RFC 6154 `\All`) — doubles as its archive target.
+    All,
+    Custom,
+}
+
+impl MailboxKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inbox => "inbox",
+            Self::Sent => "sent",
+            Self::Drafts => "drafts",
+            Self::Trash => "trash",
+            Self::Spam => "spam",
+            Self::Archive => "archive",
+            Self::All => "all",
+            Self::Custom => "custom",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +127,8 @@ pub struct MessageSummary {
     pub cc: Vec<String>,
     pub date: DateTime<Utc>,
     pub is_read: bool,
+    /// `\Flagged` — needed for a real star toggle, not just "add a star".
+    pub is_flagged: bool,
     pub has_attachments: bool,
 }
 
@@ -65,6 +149,8 @@ pub struct SyncProgress {
     pub mailbox_name: Option<String>,
     pub processed: u32,
     pub total: Option<u32>,
+    /// Human-readable description of what is happening ("Syncing INBOX...").
+    pub message: Option<String>,
 }
 
 /// Flag that can be set/removed on a message.

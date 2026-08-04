@@ -31,7 +31,8 @@ pub use traits::provider_registry::ProviderRegistry;
 pub use traits::secret_store::{AccountSecrets, OAuthSecrets, SecretStore};
 pub use traits::read_model_projector::ReadModelProjector;
 pub use traits::repository::{
-    AccountReadRepository, AccountSummary, AccountWriteRepository, BackfillEntry, BodyBackfillQueue,
+    AccountReadRepository, AccountSummary, AccountSyncStats, AccountWriteRepository, BackfillEntry,
+    BodyBackfillQueue,
     ContactReadRepository, ContactSummary, ContactWriteRepository, ConversationReadRepository,
     ConversationSummary, MailboxReadRepository, MessageReadRepository, MessageSummary,
     ProjectionCheckpoint,

@@ -71,6 +71,7 @@ function FieldIcon({ field }: { field: string }) {
 
 export function SearchBar() {
   const { searchQuery, setSearchQuery } = useSearchStore();
+  const focusSignal = useSearchStore((s) => s.focusSignal);
   const [input, setInput] = useState(searchQuery ?? '');
   const [showDropdown, setShowDropdown] = useState(false);
   const [highlightIndex, setHighlightIndex] = useState(-1);
@@ -78,6 +79,12 @@ export function SearchBar() {
   const dropdownRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [debouncedInput, setDebouncedInput] = useState('');
+
+  // The search shortcut lives wherever the keymap is bound, not in here, so it
+  // asks for focus through the store.
+  useEffect(() => {
+    if (focusSignal > 0) inputRef.current?.focus();
+  }, [focusSignal]);
 
   const { scope, prefix } = useMemo(() => parseInput(debouncedInput), [debouncedInput]);
 

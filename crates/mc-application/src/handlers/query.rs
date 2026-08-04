@@ -72,6 +72,10 @@ where
                 let accounts = self.account_repo.list_accounts().await?;
                 Ok(QueryResult::Accounts(accounts))
             }
+            Query::GetAccountStats { account_id } => {
+                let stats = self.account_repo.account_stats(&account_id).await?;
+                Ok(QueryResult::AccountStats(stats))
+            }
             Query::GetMailbox { mailbox_id } => {
                 let mailbox = self.mailbox_repo.get_mailbox(&mailbox_id).await?;
                 Ok(QueryResult::Mailbox(mailbox))
@@ -198,6 +202,13 @@ mod tests {
                 total_unread: 3,
             }])
         }
+
+        async fn account_stats(
+            &self,
+            _id: &AccountId,
+        ) -> Result<mc_domain::AccountSyncStats, DomainError> {
+            Ok(mc_domain::AccountSyncStats::default())
+        }
     }
 
     // ── Mock MailboxReadRepository ─────────────────────────────────────
@@ -251,6 +262,13 @@ mod tests {
             _provider_uid: u32,
         ) -> Result<Option<MessageSummary>, DomainError> {
             Ok(None)
+        }
+
+        async fn find_unread_by_mailbox(
+            &self,
+            _mailbox_id: &MailboxId,
+        ) -> Result<Vec<MessageSummary>, DomainError> {
+            Ok(vec![])
         }
 
         async fn scan_all_messages(

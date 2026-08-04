@@ -32,6 +32,20 @@ pub enum ImapCredential {
     OAuthToken(Arc<RwLock<String>>),
 }
 
+/// Reconnect delay after `failures` consecutive failed attempts.
+///
+/// Transient faults (network down, server restarting) recover quickly, so they
+/// keep the short cadence and cap at 5 minutes. A rejected credential does not
+/// recover without the user acting, so it backs off far harder — retrying every
+/// 30s gets the client rate-limited or blocked by the provider, and buries the
+/// real problem under thousands of identical log lines.
+fn backoff_delay(failures: u32, auth_rejected: bool) -> std::time::Duration {
+    let (base_secs, cap_secs) = if auth_rejected { (60, 3600) } else { (30, 300) };
+    // Double per failure, saturating — shift beyond 31 would overflow.
+    let factor = 1u64 << failures.saturating_sub(1).min(20);
+    std::time::Duration::from_secs(base_secs * factor).min(std::time::Duration::from_secs(cap_secs))
+}
+
 /// SASL XOAUTH2 authenticator — sends the full bearer-token response
 /// immediately, ignoring the (empty) server challenge, per Google's/
 /// Microsoft's XOAUTH2 spec.
@@ -120,18 +134,32 @@ impl ImapEmailProvider {
             .await
             .map_err(|e| DomainError::Provider(format!("IMAP greeting read failed: {e}")))?
             .ok_or_else(|| DomainError::Provider("IMAP connection closed before greeting".into()))?;
+        // Credential rejection must surface as AuthenticationFailed, not the generic
+        // Provider error. Callers retry Provider errors (transient network faults);
+        // a rejected credential never recovers on its own, so collapsing the two
+        // makes a dead account get hammered forever instead of backing off.
         let session = match &self.credential {
             ImapCredential::Password(password) => client
                 .login(&self.username, password)
                 .await
-                .map_err(|e| DomainError::Provider(format!("IMAP authentication failed: {:?}", e.0)))?,
+                .map_err(|e| {
+                    DomainError::AuthenticationFailed(format!(
+                        "IMAP authentication failed: {:?}",
+                        e.0
+                    ))
+                })?,
             ImapCredential::OAuthToken(token_cell) => {
                 let access_token = token_cell.read().await.clone();
                 let auth = XOAuth2Authenticator { user: self.username.clone(), access_token };
                 client
                     .authenticate("XOAUTH2", auth)
                     .await
-                    .map_err(|e| DomainError::Provider(format!("IMAP XOAUTH2 authentication failed: {:?}", e.0)))?
+                    .map_err(|e| {
+                        DomainError::AuthenticationFailed(format!(
+                            "IMAP XOAUTH2 authentication failed: {:?}",
+                            e.0
+                        ))
+                    })?
             }
         };
 
@@ -247,8 +275,8 @@ impl EmailProvider for ImapEmailProvider {
             // Parse mailbox path
             let path = super::mapper::parse_mailbox_path(imap_name, delimiter)?;
 
-            // Infer mailbox type
-            let mailbox_type = super::mapper::infer_mailbox_type(imap_name);
+            // Classify from SPECIAL-USE attributes when the server sends them.
+            let mailbox_type = super::mapper::classify_mailbox(imap_name, mb.attributes());
 
             // Create placeholder Mailbox - account_id and id will be set during sync
             let mailbox = Mailbox {
@@ -629,6 +657,69 @@ impl EmailProvider for ImapEmailProvider {
         Ok(())
     }
 
+    async fn set_flags_bulk(
+        &self,
+        mailbox: &MailboxPath,
+        uids: &[ProviderUid],
+        flags_to_add: &[Flag],
+        flags_to_remove: &[Flag],
+    ) -> Result<(), DomainError> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            "Setting flags for {} messages in mailbox {}",
+            uids.len(),
+            mailbox_path_to_string(mailbox)
+        );
+
+        let mut session = self.create_imap_session().await?;
+        let mailbox_name = mailbox_path_to_string(mailbox);
+        session
+            .select(&mailbox_name)
+            .await
+            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+
+        let uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
+
+        for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
+            let query = Self::compress_uid_ranges(chunk);
+
+            if !flags_to_add.is_empty() {
+                let flags_str: Vec<String> = flags_to_add.iter().map(flag_to_imap).collect();
+                let flags_query = flags_str.join(" ");
+
+                let _ = session
+                    .uid_store(&query, format!("+FLAGS ({})", flags_query))
+                    .await
+                    .map_err(|e| DomainError::Provider(format!("Add flags failed: {}", e)))?;
+
+                debug!("Added flags: {} for {} UIDs", flags_query, chunk.len());
+            }
+
+            if !flags_to_remove.is_empty() {
+                let flags_str: Vec<String> = flags_to_remove.iter().map(flag_to_imap).collect();
+                let flags_query = flags_str.join(" ");
+
+                let _ = session
+                    .uid_store(&query, format!("-FLAGS ({})", flags_query))
+                    .await
+                    .map_err(|e| DomainError::Provider(format!("Remove flags failed: {}", e)))?;
+
+                debug!("Removed flags: {} for {} UIDs", flags_query, chunk.len());
+            }
+        }
+
+        session
+            .logout()
+            .await
+            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+
+        info!("Bulk flags updated successfully");
+        Ok(())
+    }
+
     async fn move_message(
         &self,
         uid: ProviderUid,
@@ -733,6 +824,115 @@ impl EmailProvider for ImapEmailProvider {
             .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
 
         info!("Message deleted successfully");
+        Ok(())
+    }
+
+    /// One session, one `UID STORE` over the whole set — the whole point of
+    /// this override. Mirrors `set_flags_bulk`: same range compression, same
+    /// chunking to stay under the server's command-line limit.
+    async fn delete_messages(
+        &self,
+        mailbox: &MailboxPath,
+        uids: &[ProviderUid],
+        permanently: bool,
+    ) -> Result<(), DomainError> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+
+        let mailbox_name = mailbox_path_to_string(mailbox);
+        info!(
+            "Deleting {} messages from {} (permanent: {})",
+            uids.len(),
+            mailbox_name,
+            permanently
+        );
+
+        let mut session = self.create_imap_session().await?;
+        session
+            .select(&mailbox_name)
+            .await
+            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+
+        // compress_uid_ranges assumes sorted input — the caller's order is
+        // whatever the selection was, so sort here rather than trusting it.
+        let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
+        uid_nums.sort_unstable();
+
+        for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
+            let query = Self::compress_uid_ranges(chunk);
+            let _ = session
+                .uid_store(&query, "+FLAGS (\\Deleted)")
+                .await
+                .map_err(|e| DomainError::Provider(format!("Delete flag failed: {e}")))?;
+        }
+
+        // One expunge for the whole batch, not one per chunk.
+        if permanently {
+            let _ = session
+                .expunge()
+                .await
+                .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?;
+        }
+
+        session
+            .logout()
+            .await
+            .map_err(|e| DomainError::Provider(format!("Logout failed: {e}")))?;
+
+        info!("Bulk delete of {} messages completed", uid_nums.len());
+        Ok(())
+    }
+
+    /// One session, one `UID COPY` + one `UID STORE` + one `EXPUNGE` for the
+    /// whole set. IMAP has no MOVE guarantee across servers, so this keeps the
+    /// copy-then-flag-then-expunge shape of `move_message`.
+    async fn move_messages(
+        &self,
+        uids: &[ProviderUid],
+        from: &MailboxPath,
+        to: &MailboxPath,
+    ) -> Result<(), DomainError> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+
+        let from_name = mailbox_path_to_string(from);
+        let to_name = mailbox_path_to_string(to);
+        info!("Moving {} messages from {} to {}", uids.len(), from_name, to_name);
+
+        let mut session = self.create_imap_session().await?;
+        session
+            .select(&from_name)
+            .await
+            .map_err(|e| DomainError::Provider(format!("Source mailbox select failed: {e}")))?;
+
+        let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
+        uid_nums.sort_unstable();
+
+        for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
+            let query = Self::compress_uid_ranges(chunk);
+            session
+                .uid_copy(&query, &to_name)
+                .await
+                .map_err(|e| DomainError::Provider(format!("Copy failed: {e}")))?;
+            let _ = session
+                .uid_store(&query, "+FLAGS (\\Deleted)")
+                .await
+                .map_err(|e| DomainError::Provider(format!("Delete flag failed: {e}")))?;
+        }
+
+        let _ = session
+            .expunge()
+            .await
+            .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?;
+
+        session
+            .logout()
+            .await
+            .map_err(|e| DomainError::Provider(format!("Logout failed: {e}")))?;
+
+        info!("Bulk move of {} messages completed", uid_nums.len());
         Ok(())
     }
 
@@ -844,13 +1044,33 @@ impl EmailProvider for ImapEmailProvider {
 
             info!("[watch] Starting IMAP IDLE for mailbox '{}'", mailbox_name);
 
+            // Consecutive connect failures, used to back off. Reset on every success.
+            let mut failures: u32 = 0;
+
             loop {
                 // Reuse the same TLS session creation as the rest of the provider
                 let mut session = match self.create_imap_session().await {
-                    Ok(s) => s,
+                    Ok(s) => {
+                        failures = 0;
+                        s
+                    }
                     Err(e) => {
-                        warn!("[watch] Session creation failed: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                        let fatal = matches!(e, DomainError::AuthenticationFailed(_));
+                        failures = failures.saturating_add(1);
+                        // A rejected credential will not fix itself: retrying every
+                        // 30s just burns connections and gets the client rate-limited
+                        // (or blocked) by the provider. Yield the error so the account
+                        // can be flagged, then back off hard.
+                        if fatal {
+                            warn!(
+                                "[watch] Authentication rejected for '{}' (attempt {}): {}",
+                                mailbox_name, failures, e
+                            );
+                            yield Err(e);
+                        } else {
+                            warn!("[watch] Session creation failed: {}", e);
+                        }
+                        tokio::time::sleep(backoff_delay(failures, fatal)).await;
                         continue;
                     }
                 };
@@ -1155,6 +1375,26 @@ fn decode_rfc2047_header(raw: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_grows_and_caps_per_failure_kind() {
+        let secs = |f, auth| backoff_delay(f, auth).as_secs();
+
+        // Transient: keeps the old 30s cadence on the first failure, caps at 5 min.
+        assert_eq!(secs(1, false), 30);
+        assert_eq!(secs(2, false), 60);
+        assert_eq!(secs(4, false), 240);
+        assert_eq!(secs(10, false), 300, "transient failures cap at 5 minutes");
+
+        // Auth rejection: starts higher and caps far higher — it will not self-heal.
+        assert_eq!(secs(1, true), 60);
+        assert_eq!(secs(2, true), 120);
+        assert_eq!(secs(10, true), 3600, "auth failures cap at 1 hour");
+
+        // A large failure count must not overflow the shift.
+        assert_eq!(secs(u32::MAX, true), 3600);
+        assert_eq!(secs(u32::MAX, false), 300);
+    }
 
     #[test]
     fn test_imap_provider_creation() {

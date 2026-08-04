@@ -2,6 +2,45 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import type { Mailbox } from '@/entities/mailbox';
 import type { MessageEnvelope } from '@/entities/message';
+import { useSessionStore, mailboxKey } from '@/entities/session';
+
+// ── Selection follow-through ────────────────────────────────────────────────
+
+/**
+ * After a message leaves the current list (deleted, archived, moved to spam),
+ * move the selection to the row that takes its place instead of dropping it:
+ * the next one down, or the previous one when the deleted message was last.
+ *
+ * Call this *before* the mutation invalidates the cache — it needs the list as
+ * it still is to know what "next" was. Pass `list` when the visible list is
+ * filtered (unread-only): the cache holds the unfiltered one, and picking a
+ * neighbour out of that would select a row the user cannot see.
+ */
+export function useSelectNeighbour() {
+  const qc = useQueryClient();
+  const selectedAccountId = useSessionStore((s) => s.selectedAccountId);
+  const selectedMailboxId = useSessionStore((s) => s.selectedMailboxId);
+  const selectMessage = useSessionStore((s) => s.selectMessage);
+
+  return (messageId: string, list?: MessageEnvelope[]) => {
+    const messages =
+      list ??
+      qc.getQueryData<MessageEnvelope[]>([
+        'messages',
+        mailboxKey(selectedAccountId, selectedMailboxId),
+      ]) ??
+      [];
+    const at = messages.findIndex((m) => m.uid === messageId);
+    // Not in the list (stale view, filtered out): clearing beats keeping a
+    // selection that points at a message about to disappear.
+    if (at === -1) {
+      selectMessage(null);
+      return;
+    }
+    const neighbour = messages[at + 1] ?? (at > 0 ? messages[at - 1] : undefined);
+    selectMessage(neighbour?.uid ?? null);
+  };
+}
 
 // ── Set Flags ───────────────────────────────────────────────────────────────
 
@@ -102,6 +141,27 @@ export function useToggleStar() {
   };
 }
 
+// ── Mark Mailbox Read ───────────────────────────────────────────────────────
+
+export function useMarkMailboxRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (mailboxId: string) => invoke<number>('mark_mailbox_read', { mailboxId }),
+    onMutate: (mailboxId) => {
+      // Optimistically zero the unread badge for this mailbox across all accounts' caches.
+      qc.setQueriesData<Mailbox[]>({ queryKey: ['mailboxes'] }, (prev) =>
+        prev?.map((mb) => (mb.id === mailboxId ? { ...mb, unreadMessages: 0 } : mb)),
+      );
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['messages'] });
+      qc.invalidateQueries({ queryKey: ['mailboxes'] });
+      qc.invalidateQueries({ queryKey: ['thread'] });
+      qc.invalidateQueries({ queryKey: ['conversations'] });
+    },
+  });
+}
+
 // ── Move Message ────────────────────────────────────────────────────────────
 
 export function useMoveMessage() {
@@ -115,7 +175,52 @@ export function useMoveMessage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['messages'] });
       qc.invalidateQueries({ queryKey: ['mailboxes'] });
+      // Same refresh set as setFlags: a message leaving a folder changes the
+      // conversation list and the open thread too, not just the flat list.
+      qc.invalidateQueries({ queryKey: ['thread'] });
+      qc.invalidateQueries({ queryKey: ['conversations'] });
     },
+  });
+}
+
+// ── Bulk actions ────────────────────────────────────────────────────────────
+
+/** `[succeeded, failed]`. The backend walks past messages it cannot touch
+ *  (already gone, stale search index) instead of aborting the batch, so a
+ *  non-zero `failed` is a normal outcome the caller must surface. */
+export type BulkResult = [number, number];
+
+function invalidateMessageViews(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ['messages'] });
+  qc.invalidateQueries({ queryKey: ['mailboxes'] });
+  qc.invalidateQueries({ queryKey: ['thread'] });
+  qc.invalidateQueries({ queryKey: ['conversations'] });
+  qc.invalidateQueries({ queryKey: ['search'] });
+}
+
+/** Delete many messages in one provider round trip. */
+export function useDeleteMessages() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { messageIds: string[]; permanently?: boolean }) =>
+      invoke<BulkResult>('delete_messages', {
+        messageIds: params.messageIds,
+        permanently: params.permanently ?? false,
+      }),
+    onSuccess: () => invalidateMessageViews(qc),
+  });
+}
+
+/** Move many messages to one mailbox in one provider round trip. */
+export function useMoveMessages() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { messageIds: string[]; toMailboxId: string }) =>
+      invoke<BulkResult>('move_messages', {
+        messageIds: params.messageIds,
+        toMailboxId: params.toMailboxId,
+      }),
+    onSuccess: () => invalidateMessageViews(qc),
   });
 }
 
@@ -132,6 +237,9 @@ export function useDeleteMessage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['messages'] });
       qc.invalidateQueries({ queryKey: ['mailboxes'] });
+      // A deleted message also drops out of its conversation and thread.
+      qc.invalidateQueries({ queryKey: ['thread'] });
+      qc.invalidateQueries({ queryKey: ['conversations'] });
     },
   });
 }
