@@ -263,12 +263,8 @@ impl<
         let sync_started = DomainEvent::AccountSyncStarted {
             account_id: *account_id,
         };
-        self.append_and_project(
-            &account_id.to_string(),
-            AggregateType::Account,
-            sync_started,
-        )
-        .await?;
+        self.project_transient(&account_id.to_string(), AggregateType::Account, sync_started)
+            .await?;
 
         // 2. List remote mailboxes
         self.emit(
@@ -615,12 +611,8 @@ impl<
             mailboxes_synced,
             messages_synced,
         };
-        self.append_and_project(
-            &account_id.to_string(),
-            AggregateType::Account,
-            sync_completed,
-        )
-        .await?;
+        self.project_transient(&account_id.to_string(), AggregateType::Account, sync_completed)
+            .await?;
 
         info!(
             mailboxes = mailboxes_synced,
@@ -1182,18 +1174,31 @@ impl<
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("Failed to append event: {e}")))?;
 
-        // Project into read model
         let envelope = EventEnvelope::new(aggregate_id.to_string(), aggregate_type, new_seq, event);
+        self.project_and_publish(envelope).await
+    }
+
+    /// Server-reported state (sync lifecycle, mailbox counts): applied to the
+    /// read model and announced on the bus, but never appended — it is not a
+    /// domain fact, and appending it every poll grew the log without bound.
+    async fn project_transient(
+        &self,
+        aggregate_id: &str,
+        aggregate_type: AggregateType,
+        event: DomainEvent,
+    ) -> Result<(), ApplicationError> {
+        self.project_and_publish(EventEnvelope::new(aggregate_id.to_string(), aggregate_type, 0, event))
+            .await
+    }
+
+    async fn project_and_publish(&self, envelope: EventEnvelope) -> Result<(), ApplicationError> {
         self.projector
             .project(&envelope)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("Failed to project event: {e}")))?;
-
-        // Broadcast to in-process subscribers (desktop notifications, live projection, etc.)
         if let Some(publisher) = &self.event_publisher {
             publisher.publish(envelope);
         }
-
         Ok(())
     }
 
@@ -1339,7 +1344,7 @@ impl<
         Ok((expunged, flags_changed))
     }
 
-    /// Update mailbox message counts via a MailboxCountsUpdated event.
+    /// Update mailbox message counts (transient: read model + bus, not the log).
     async fn update_mailbox_counts(
         &self,
         mailbox: &Mailbox,
@@ -1351,7 +1356,7 @@ impl<
             total_messages,
             unread_messages,
         };
-        self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
+        self.project_transient(&mailbox.id.to_string(), AggregateType::Mailbox, event)
             .await
     }
 }
@@ -2356,5 +2361,61 @@ mod tests {
 
         assert_eq!(uid_next, 100, "Should save uid_next checkpoint");
         assert_eq!(validity, 42, "Should save uid_validity checkpoint");
+    }
+
+    struct RecordingPublisher(Mutex<Vec<DomainEvent>>);
+
+    impl EventPublisher for RecordingPublisher {
+        fn publish(&self, envelope: EventEnvelope) {
+            self.0.lock().unwrap().push(envelope.payload);
+        }
+    }
+
+    #[tokio::test]
+    async fn status_events_reach_projector_and_bus_but_not_the_log() {
+        let account_id = AccountId::new();
+        let (inbox, _) = Mailbox::discover(
+            account_id,
+            MailboxPath::new(vec!["INBOX".to_string()], '/').unwrap(),
+            MailboxType::Inbox,
+        );
+        let provider = MockEmailProvider {
+            mailboxes: vec![inbox],
+            envelopes: vec![],
+            bulk_fetch_calls: Mutex::new(vec![]),
+            status: Some(MailboxStatus {
+                uid_validity: 1,
+                uid_next: 1,
+                total_messages: 42,
+                unseen_messages: 5,
+            }),
+        };
+        let event_store = Arc::new(MockEventStore::new());
+        let projector = Arc::new(MockProjector::new());
+        let bus = Arc::new(RecordingPublisher(Mutex::new(vec![])));
+        let service = make_service(provider, event_store.clone(), projector.clone())
+            .with_event_publisher(bus.clone());
+
+        service.start_sync(&account_id).await.unwrap();
+
+        let is_status = |e: &DomainEvent| {
+            matches!(
+                e,
+                DomainEvent::AccountSyncStarted { .. }
+                    | DomainEvent::AccountSyncCompleted { .. }
+                    | DomainEvent::MailboxCountsUpdated { .. }
+            )
+        };
+        let appended: Vec<_> = event_store.appended_events();
+        assert!(!appended.iter().any(|(_, e)| is_status(e)), "{appended:?}");
+        let projected = projector.projected_events();
+        assert!(projected.iter().any(|e| matches!(e, DomainEvent::AccountSyncStarted { .. })));
+        assert!(projected.iter().any(|e| matches!(e, DomainEvent::AccountSyncCompleted { .. })));
+        assert!(projected.iter().any(|e| matches!(e, DomainEvent::MailboxCountsUpdated { .. })));
+        let published = bus.0.lock().unwrap();
+        assert!(published.iter().any(|e| matches!(
+            e,
+            DomainEvent::MailboxCountsUpdated { total_messages: 42, unread_messages: 5, .. }
+        )));
     }
 }
