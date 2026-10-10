@@ -13,7 +13,7 @@ use std::sync::Arc;
 use mc_domain::{
     AccountId, AggregateType, DomainEvent, EmailProvider, Envelope, EventEnvelope, EventStore,
     Flag, MailboxId, MailboxPath, MailboxReadRepository, MailboxType, Message, MessageId,
-    MessageReadRepository, OutgoingMessage, ProviderRegistry, ReadModelProjector,
+    MessageBodyStore, MessageReadRepository, OutgoingMessage, ProviderRegistry, ReadModelProjector,
     value_objects::uid::ProviderUid,
 };
 use tracing::info;
@@ -27,14 +27,14 @@ use crate::error::ApplicationError;
 /// Works directly with the EventStore for message aggregate persistence
 /// (pure ES pattern). Uses ProviderRegistry to resolve the correct
 /// EmailProvider per account for remote operations.
-pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository, B: EventPublisher> {
+pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore, B: EventPublisher> {
     event_store: Arc<ES>,
     provider_registry: Arc<PR>,
     message_read_repo: Arc<MR>,
     event_bus: Arc<B>,
 }
 
-impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository, B: EventPublisher>
+impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore, B: EventPublisher>
     MessageCommandHandler<ES, PR, MR, B>
 {
     pub fn new(
@@ -74,6 +74,11 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
             detail.body_html.clone(),
             detail.attachments.clone(),
         );
+
+        // Body before the event, as in SyncService::store_body.
+        self.message_read_repo
+            .put_body(&message_id, detail.body_text.clone(), detail.body_html.clone())
+            .await?;
 
         self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
@@ -940,15 +945,29 @@ mod tests {
 
     struct MockMessageReadRepo {
         mailboxes: Vec<mc_domain::Mailbox>,
+        stored_bodies: std::sync::Mutex<Vec<(MessageId, Option<String>, Option<String>)>>,
     }
 
     impl MockMessageReadRepo {
         fn new() -> Self {
-            Self { mailboxes: vec![] }
+            Self { mailboxes: vec![], stored_bodies: std::sync::Mutex::new(vec![]) }
         }
 
         fn with_mailboxes(mailboxes: Vec<mc_domain::Mailbox>) -> Self {
-            Self { mailboxes }
+            Self { mailboxes, stored_bodies: std::sync::Mutex::new(vec![]) }
+        }
+    }
+
+    #[async_trait]
+    impl MessageBodyStore for MockMessageReadRepo {
+        async fn put_body(
+            &self,
+            message_id: &MessageId,
+            body_text: Option<String>,
+            body_html: Option<String>,
+        ) -> Result<(), DomainError> {
+            self.stored_bodies.lock().unwrap().push((*message_id, body_text, body_html));
+            Ok(())
         }
     }
 
@@ -1444,5 +1463,31 @@ mod tests {
             panic!("expected MessageSent event");
         };
         assert_eq!(*mailbox_id, sent_mailbox.id);
+    }
+
+    #[tokio::test]
+    async fn handle_fetch_body_stores_body_through_body_store() {
+        let msg = make_test_message();
+        let msg_id = msg.id;
+        let provider = MockEmailProvider::new();
+        *provider.detail_response.write().unwrap() = Some(Message {
+            body_text: Some("fetched text".into()),
+            body_html: Some("<p>fetched</p>".into()),
+            ..msg.clone()
+        });
+
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let registry = Arc::new(MockProviderRegistry::new(Arc::new(provider)));
+        let bus = Arc::new(MockEventBus::new());
+        let read_repo = Arc::new(MockMessageReadRepo::new());
+        let handler = MessageCommandHandler::new(es, registry, read_repo.clone(), bus.clone());
+
+        handler.handle_fetch_body(msg_id, MailboxPath::inbox()).await.unwrap();
+
+        assert_eq!(
+            read_repo.stored_bodies.lock().unwrap().as_slice(),
+            &[(msg_id, Some("fetched text".to_string()), Some("<p>fetched</p>".to_string()))]
+        );
+        assert_eq!(bus.last_event_name().unwrap(), "MessageBodyFetched");
     }
 }

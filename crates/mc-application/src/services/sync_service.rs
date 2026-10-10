@@ -14,9 +14,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 use mc_domain::{
-    AccountId, AggregateType, BackfillEntry, BodyBackfillQueue, DomainError, DomainEvent,
+    AccountId, AggregateType, Attachment, BackfillEntry, BodyBackfillQueue, DomainError, DomainEvent,
     EmailProvider, EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath,
-    MailboxReadRepository, Message, MessageBodyResult, MessageId, MessageReadRepository,
+    MailboxReadRepository, Message, MessageBodyResult, MessageBodyStore, MessageId,
+    MessageReadRepository,
     ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
 };
 use tokio_util::sync::CancellationToken;
@@ -94,7 +95,7 @@ impl Default for SyncConfig {
 pub struct SyncService<
     PR: ProviderRegistry,
     ES: EventStore,
-    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue,
+    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue + MessageBodyStore,
 > {
     provider_registry: Arc<PR>,
     event_store: Arc<ES>,
@@ -138,7 +139,7 @@ fn percent(processed: u32, total: u32) -> u8 {
 impl<
     PR: ProviderRegistry,
     ES: EventStore,
-    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue,
+    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue + MessageBodyStore,
 > SyncService<PR, ES, P>
 {
     /// Creates a new SyncService with the given dependencies.
@@ -546,22 +547,11 @@ impl<
                     Ok(body_results) => {
                         for result in body_results {
                             if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
-                                let event = DomainEvent::MessageBodyFetched {
-                                    message_id: *(*message_id),
-                                    body_text: result.body_text,
-                                    body_html: result.body_html,
-                                    // TODO: download and index attachments
-                                    attachments: vec![],
-                                };
                                 // Search indexing is owned by the search-index
                                 // projection (driven off this event); no inline
                                 // index_message here.
                                 if let Err(e) = self
-                                    .append_and_project(
-                                        &message_id.to_string(),
-                                        AggregateType::Message,
-                                        event,
-                                    )
+                                    .store_body(message_id, result.body_text, result.body_html, vec![])
                                     .await
                                 {
                                     warn!(%message_id, error = %e, "Failed to project body");
@@ -686,15 +676,13 @@ impl<
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("Failed to fetch body: {e}")))?;
 
-        let event = DomainEvent::MessageBodyFetched {
-            message_id: *message_id,
-            body_text: fetched.body_text.clone(),
-            body_html: fetched.body_html.clone(),
-            attachments: fetched.attachments.clone(),
-        };
-
-        self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
-            .await?;
+        self.store_body(
+            message_id,
+            fetched.body_text.clone(),
+            fetched.body_html.clone(),
+            fetched.attachments.clone(),
+        )
+        .await?;
         // Search indexing is owned by the search-index projection, driven off
         // the MessageBodyFetched event just appended.
 
@@ -746,14 +734,13 @@ impl<
                 missing.push(entry.message_id);
                 continue;
             };
-            let event = DomainEvent::MessageBodyFetched {
-                message_id: entry.message_id,
-                body_text: result.body_text.clone(),
-                body_html: result.body_html.clone(),
-                attachments: vec![],
-            };
-            self.append_and_project(&entry.message_id.to_string(), AggregateType::Message, event)
-                .await?;
+            self.store_body(
+                &entry.message_id,
+                result.body_text.clone(),
+                result.body_html.clone(),
+                vec![],
+            )
+            .await?;
         }
 
         Ok(missing)
@@ -1084,18 +1071,8 @@ impl<
                 Ok(body_results) => {
                     for result in body_results {
                         if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
-                            let body_event = DomainEvent::MessageBodyFetched {
-                                message_id: *(*message_id),
-                                body_text: result.body_text,
-                                body_html: result.body_html,
-                                attachments: vec![],
-                            };
                             if let Err(e) = self
-                                .append_and_project(
-                                    &message_id.to_string(),
-                                    AggregateType::Message,
-                                    body_event,
-                                )
+                                .store_body(message_id, result.body_text, result.body_html, vec![])
                                 .await
                             {
                                 warn!(%message_id, error = %e, "sync_mailbox: body projection failed");
@@ -1159,6 +1136,25 @@ impl<
     /// Check whether cancellation has been requested.
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Body first, then the event: if the append fails, the backfill queue (drained
+    /// only by projecting `MessageBodyFetched`) still lists the message, so it is
+    /// fetched again instead of being marked done without a record.
+    async fn store_body(
+        &self,
+        message_id: &MessageId,
+        body_text: Option<String>,
+        body_html: Option<String>,
+        attachments: Vec<Attachment>,
+    ) -> Result<(), ApplicationError> {
+        self.projector
+            .put_body(message_id, body_text, body_html)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to store body: {e}")))?;
+        let event = DomainEvent::MessageBodyFetched { message_id: *message_id, attachments };
+        self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
+            .await
     }
 
     /// Append a domain event to the event store and project it into the read model.
@@ -1366,7 +1362,7 @@ impl<
 impl<
     PR: ProviderRegistry,
     ES: EventStore,
-    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue,
+    P: ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint + BodyBackfillQueue + MessageBodyStore,
 > SyncTrigger for SyncService<PR, ES, P>
 {
     async fn trigger_sync(
@@ -1683,6 +1679,7 @@ mod tests {
         mailboxes: Mutex<Vec<Mailbox>>,
         checkpoints: Mutex<HashMap<String, u64>>,
         projected_events: Mutex<Vec<DomainEvent>>,
+        bodies: Mutex<HashMap<MessageId, (Option<String>, Option<String>)>>,
     }
 
     impl MockProjector {
@@ -1691,7 +1688,12 @@ mod tests {
                 mailboxes: Mutex::new(vec![]),
                 checkpoints: Mutex::new(HashMap::new()),
                 projected_events: Mutex::new(vec![]),
+                bodies: Mutex::new(HashMap::new()),
             }
+        }
+
+        fn stored_bodies(&self) -> HashMap<MessageId, (Option<String>, Option<String>)> {
+            self.bodies.lock().unwrap().clone()
         }
 
         fn projected_events(&self) -> Vec<DomainEvent> {
@@ -1820,6 +1822,19 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(name.to_string(), value);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl MessageBodyStore for MockProjector {
+        async fn put_body(
+            &self,
+            message_id: &MessageId,
+            body_text: Option<String>,
+            body_html: Option<String>,
+        ) -> Result<(), DomainError> {
+            self.bodies.lock().unwrap().insert(*message_id, (body_text, body_html));
             Ok(())
         }
     }
@@ -2088,6 +2103,18 @@ mod tests {
         assert_eq!(body_fetched_ids.len(), 3);
         for entry in &entries {
             assert!(body_fetched_ids.contains(&entry.message_id));
+        }
+
+        // Bodies went to the body store, once each, not into the events.
+        let bodies = projector.stored_bodies();
+        assert_eq!(bodies.len(), 3);
+        for entry in &entries {
+            let text = bodies.get(&entry.message_id).and_then(|(t, _)| t.clone());
+            assert!(text.is_some_and(|t| t.starts_with("body-")), "{bodies:?}");
+        }
+        for (_, event) in &appended {
+            let shown = format!("{event:?}");
+            assert!(!shown.contains("body-"), "body leaked into the log: {shown}");
         }
     }
 

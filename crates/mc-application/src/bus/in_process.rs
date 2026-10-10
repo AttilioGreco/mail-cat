@@ -9,7 +9,7 @@ use std::sync::Arc;
 use mc_domain::{
     AccountReadRepository, AccountWriteRepository, ContactIndex, ContactReadRepository,
     ContactWriteRepository, ConversationReadRepository, EventStore, MailboxReadRepository,
-    MessageReadRepository, ProviderRegistry, ReadModelProjector, SearchIndex,
+    MessageBodyStore, MessageReadRepository, ProviderRegistry, ReadModelProjector, SearchIndex,
 };
 use std::collections::HashSet;
 
@@ -33,7 +33,7 @@ where
     CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
     B: EventPublisher,
 {
     account_handler: AccountCommandHandler<AW, B>,
@@ -50,7 +50,7 @@ where
     CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
     B: EventPublisher,
 {
     pub fn new(
@@ -88,7 +88,7 @@ where
     CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
     B: EventPublisher,
 {
     async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {

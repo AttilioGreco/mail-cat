@@ -183,11 +183,11 @@ pub enum DomainEvent {
         received_at: DateTime<Utc>,
     },
 
-    /// A message body and attachments metadata were fetched.
+    /// A message body was fetched and stored (`MessageBodyStore`). The body
+    /// itself is not in the event: it is re-fetchable server state, and keeping
+    /// it here made the log the largest copy of every mailbox.
     MessageBodyFetched {
         message_id: MessageId,
-        body_text: Option<String>,
-        body_html: Option<String>,
         attachments: Vec<Attachment>,
     },
 
@@ -491,5 +491,20 @@ mod tests {
         };
         assert_eq!(event.aggregate_type(), AggregateType::Account);
         assert_eq!(event.event_name(), "AccountReauthenticated");
+    }
+
+    #[test]
+    fn legacy_body_fetched_event_still_deserializes() {
+        // Shape written to sled before bodies left the log; the store and the
+        // sled → SQLite migrator still read these.
+        let legacy = r#"{"MessageBodyFetched":{
+            "message_id":"019f3880-7549-7310-8e77-f48d3b5a12e2",
+            "body_text":"hello","body_html":"<p>hello</p>","attachments":[]}}"#;
+
+        let event: DomainEvent = serde_json::from_str(legacy).unwrap();
+
+        assert!(matches!(event, DomainEvent::MessageBodyFetched { ref attachments, .. } if attachments.is_empty()));
+        let reserialized = serde_json::to_string(&event).unwrap();
+        assert!(!reserialized.contains("body_text"), "{reserialized}");
     }
 }

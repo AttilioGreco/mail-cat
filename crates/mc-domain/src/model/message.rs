@@ -119,8 +119,6 @@ impl Message {
 
         DomainEvent::MessageBodyFetched {
             message_id: self.id,
-            body_text,
-            body_html,
             attachments,
         }
     }
@@ -206,14 +204,7 @@ impl Message {
             DomainEvent::MessageReceived { .. } => {
                 // Initial state is set by the constructor.
             }
-            DomainEvent::MessageBodyFetched {
-                body_text,
-                body_html,
-                attachments,
-                ..
-            } => {
-                self.body_text = body_text.clone();
-                self.body_html = body_html.clone();
+            DomainEvent::MessageBodyFetched { attachments, .. } => {
                 self.attachments = attachments.clone();
                 self.has_attachments = !self.attachments.is_empty();
             }
@@ -387,6 +378,8 @@ mod tests {
         assert_eq!(msg.body_text.as_deref(), Some("Hello plain text"));
         assert_eq!(msg.body_html.as_deref(), Some("<p>Hello HTML</p>"));
         assert_eq!(event.event_name(), "MessageBodyFetched");
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("Hello"), "body must not travel in the event: {json}");
     }
 
     #[test]
@@ -537,8 +530,6 @@ mod tests {
             },
             DomainEvent::MessageBodyFetched {
                 message_id: msg_id,
-                body_text: Some("Hello world".into()),
-                body_html: Some("<p>Hello world</p>".into()),
                 attachments: vec![],
             },
             DomainEvent::MessageFlagged {
@@ -555,7 +546,8 @@ mod tests {
         ];
 
         let message = Message::rehydrate(&events).unwrap();
-        assert_eq!(message.body_text.as_deref(), Some("Hello world"));
+        // Bodies live in MessageBodyStore, not the log.
+        assert!(message.body_text.is_none());
         assert!(message.is_read());
         assert!(message.is_flagged());
         assert_eq!(message.mailbox_id, target_mailbox);

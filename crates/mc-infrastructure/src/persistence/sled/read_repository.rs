@@ -897,8 +897,6 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
 
             DomainEvent::MessageBodyFetched {
                 message_id,
-                body_text,
-                body_html,
                 attachments,
             } => {
                 let tree = self.tree(MESSAGES_TREE)?;
@@ -908,8 +906,6 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 {
                     let mut message: Message = serde_json::from_slice(&bytes)
                         .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                    message.body_text = body_text.clone();
-                    message.body_html = body_html.clone();
                     message.attachments = attachments.clone();
                     message.has_attachments = !attachments.is_empty();
                     let json = serde_json::to_vec(&message)
@@ -2386,12 +2382,7 @@ mod tests {
             &newer.to_string(),
             AggregateType::Message,
             2,
-            DomainEvent::MessageBodyFetched {
-                message_id: newer,
-                body_text: Some("hi".into()),
-                body_html: None,
-                attachments: vec![],
-            },
+            DomainEvent::MessageBodyFetched { message_id: newer, attachments: vec![] },
         ))
         .await
         .unwrap();
@@ -2469,12 +2460,7 @@ mod tests {
             &stored.to_string(),
             AggregateType::Message,
             2,
-            DomainEvent::MessageBodyFetched {
-                message_id: stored,
-                body_text: Some("hi".into()),
-                body_html: None,
-                attachments: vec![],
-            },
+            DomainEvent::MessageBodyFetched { message_id: stored, attachments: vec![] },
         ))
         .await
         .unwrap();
@@ -2869,17 +2855,15 @@ mod tests {
         assert_eq!(page.items[0].from_email, "sender@example.com");
 
         // Project MessageBodyFetched.
+        repo.put_body(&message_id, Some("Hello plain".into()), Some("<p>Hello</p>".into()))
+            .await
+            .unwrap();
         let env = make_event_envelope(
             2,
             &message_id.to_string(),
             AggregateType::Message,
             2,
-            DomainEvent::MessageBodyFetched {
-                message_id,
-                body_text: Some("Hello plain".into()),
-                body_html: Some("<p>Hello</p>".into()),
-                attachments: vec![],
-            },
+            DomainEvent::MessageBodyFetched { message_id, attachments: vec![] },
         );
         repo.project(&env).await.unwrap();
 
@@ -3299,5 +3283,34 @@ mod tests {
         // Only the appended MessageBodyFetched marks the body done; if that
         // append failed, the message must still be fetched again.
         assert_eq!(repo.count_pending_backfill(&account_id).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn body_fetched_event_keeps_stored_body_and_drains_backfill() {
+        let (_es, repo) = make_store_and_repo();
+        let account_id = AccountId::new();
+        let message_id = MessageId::new();
+        repo.project(&received_event(account_id, message_id, chrono::Utc::now()))
+            .await
+            .unwrap();
+        repo.put_body(&message_id, Some("plain".into()), None).await.unwrap();
+
+        let fetched = make_event_envelope(
+            2,
+            &message_id.to_string(),
+            AggregateType::Message,
+            2,
+            DomainEvent::MessageBodyFetched { message_id, attachments: vec![] },
+        );
+        // Twice: catch-up and rebuild replay events that were already projected.
+        repo.project(&fetched).await.unwrap();
+        repo.project(&fetched).await.unwrap();
+
+        let msg = MessageReadRepository::get_message(&repo, &message_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.body_text.as_deref(), Some("plain"));
+        assert_eq!(repo.count_pending_backfill(&account_id).await.unwrap(), 0);
     }
 }
