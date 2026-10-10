@@ -109,8 +109,7 @@ impl SledEventStore {
         Ok(old_val + 1)
     }
 
-    /// Get the current sequence number for an aggregate.
-    fn current_sequence(&self, aggregate_id: &str) -> Result<u64, DomainError> {
+    fn stored_sequence(&self, aggregate_id: &str) -> Result<u64, DomainError> {
         let meta = self.aggregate_meta_tree()?;
         let val = meta
             .get(aggregate_id)
@@ -152,7 +151,7 @@ impl EventStore for SledEventStore {
         }
 
         // OCC check: verify the current sequence matches expected.
-        let current_seq = self.current_sequence(aggregate_id)?;
+        let current_seq = self.stored_sequence(aggregate_id)?;
         if current_seq != expected_sequence {
             return Err(DomainError::ConcurrencyConflict {
                 expected: expected_sequence,
@@ -213,13 +212,16 @@ impl EventStore for SledEventStore {
             )
             .map_err(|e| DomainError::EventStore(e.to_string()))?;
 
-        // Flush to ensure durability.
-        self.db
-            .flush_async()
-            .await
-            .map_err(|e| DomainError::EventStore(e.to_string()))?;
+        // No per-append fsync: everything here is re-fetchable from the provider,
+        // and fsyncing every event made a sync thousands of fsyncs. sled's
+        // background flush (every 500 ms) bounds a crash to the last half second,
+        // and the clean-shutdown path in main.rs flushes explicitly.
 
         Ok(last_sequence)
+    }
+
+    async fn current_sequence(&self, aggregate_id: &str) -> Result<u64, DomainError> {
+        self.stored_sequence(aggregate_id)
     }
 
     async fn load_events(
@@ -352,6 +354,8 @@ mod tests {
 
         let events = store.load_events("acc-1", 0).await.unwrap();
         assert_eq!(events.len(), 3);
+        assert_eq!(store.current_sequence("acc-1").await.unwrap(), 3);
+        assert_eq!(store.current_sequence("unknown").await.unwrap(), 0);
         assert_eq!(events[0].sequence_number, 1);
         assert_eq!(events[1].sequence_number, 2);
         assert_eq!(events[2].sequence_number, 3);

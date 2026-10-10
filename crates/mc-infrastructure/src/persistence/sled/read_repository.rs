@@ -94,12 +94,7 @@ impl<ES: EventStore> SledRepository<ES> {
 #[async_trait]
 impl<ES: EventStore> AccountWriteRepository for SledRepository<ES> {
     async fn save(&self, account: &Account, events: Vec<DomainEvent>) -> Result<(), DomainError> {
-        // Determine expected sequence: load current from event store.
-        let current_events = self
-            .event_store
-            .load_events(&account.id.to_string(), 0)
-            .await?;
-        let expected_seq = current_events.len() as u64;
+        let expected_seq = self.event_store.current_sequence(&account.id.to_string()).await?;
 
         self.event_store
             .append(
@@ -1812,11 +1807,7 @@ impl<ES: EventStore> ProjectionCheckpoint for SledRepository<ES> {
 #[async_trait]
 impl<ES: EventStore> ContactWriteRepository for SledRepository<ES> {
     async fn save(&self, contact: &Contact, events: Vec<DomainEvent>) -> Result<(), DomainError> {
-        let current_events = self
-            .event_store
-            .load_events(&contact.id.to_string(), 0)
-            .await?;
-        let expected_seq = current_events.len() as u64;
+        let expected_seq = self.event_store.current_sequence(&contact.id.to_string()).await?;
 
         self.event_store
             .append(

@@ -49,6 +49,15 @@ pub trait EventStore: Send + Sync {
         from_sequence: u64,
     ) -> Result<Vec<EventEnvelope>, DomainError>;
 
+    /// The aggregate's last sequence number (`0` if it has none) — the
+    /// `expected_sequence` for its next `append`.
+    ///
+    /// The default replays the whole history; stores should override it, since
+    /// appends call it and a message aggregate's history carries its full body.
+    async fn current_sequence(&self, aggregate_id: &str) -> Result<u64, DomainError> {
+        Ok(self.load_events(aggregate_id, 0).await?.len() as u64)
+    }
+
     /// Load events across all aggregates, optionally filtered by type, as a stream.
     ///
     /// Events are yielded in `global_position` order. Pass `from_global_position = 0`

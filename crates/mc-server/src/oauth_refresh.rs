@@ -56,8 +56,7 @@ pub(crate) async fn append_account_event(
         .load(&account_id)
         .await?
         .ok_or_else(|| DomainError::AccountNotFound(account_id.to_string()))?;
-    let current_events = event_store.load_events(&account_id.to_string(), 0).await?;
-    let sequence_number = current_events.len() as u64 + 1;
+    let sequence_number = event_store.current_sequence(&account_id.to_string()).await? + 1;
 
     account.apply(&event);
     account_repository.save(&account, vec![event.clone()]).await?;

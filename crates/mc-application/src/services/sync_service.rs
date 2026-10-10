@@ -283,6 +283,10 @@ impl<
 
         let remote_mailboxes = provider.list_mailboxes().await.map_err(|e| {
             error!("Failed to list mailboxes: {}", e);
+            // Typed, like fetch_bodies_bulk: the periodic loop backs off on it.
+            if matches!(e, DomainError::AuthenticationFailed(_)) {
+                return ApplicationError::Domain(e);
+            }
             ApplicationError::SyncFailed(format!("Failed to list mailboxes: {e}"))
         })?;
 
@@ -1159,21 +1163,19 @@ impl<
 
     /// Append a domain event to the event store and project it into the read model.
     ///
-    /// Loads the current aggregate sequence from the event store for optimistic
-    /// concurrency, then appends the event and immediately projects it.
+    /// Reads the aggregate's current sequence for optimistic concurrency, then
+    /// appends the event and immediately projects it.
     async fn append_and_project(
         &self,
         aggregate_id: &str,
         aggregate_type: AggregateType,
         event: DomainEvent,
     ) -> Result<(), ApplicationError> {
-        // Load current sequence for optimistic concurrency
-        let current_events = self
+        let expected_seq = self
             .event_store
-            .load_events(aggregate_id, 0)
+            .current_sequence(aggregate_id)
             .await
-            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to load events: {e}")))?;
-        let expected_seq = current_events.len() as u64;
+            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to load sequence: {e}")))?;
 
         let new_seq = self
             .event_store

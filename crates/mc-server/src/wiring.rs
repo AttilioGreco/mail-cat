@@ -94,7 +94,14 @@ impl AppContext {
         // ── Infrastructure Layer ────────────────────────────────────────────
 
         // Open sled database
-        let db = sled::open(&config.db_path).context("failed to open sled database")?;
+        // sled's default 1 GB page cache was ~90% of the server's resident memory.
+        // Reads are point lookups and short prefix scans, and the OS page cache
+        // already holds the hot file pages.
+        let db = sled::Config::new()
+            .path(&config.db_path)
+            .cache_capacity(16 * 1024 * 1024)
+            .open()
+            .context("failed to open sled database")?;
         tracing::info!("Opened sled database at {}", config.db_path);
 
         // Create event store
@@ -799,6 +806,10 @@ impl AppContext {
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
                 interval.tick().await; // skip immediate first tick (initial sync already running)
+                // A rejected credential never recovers on its own, and Gmail keeps an
+                // account throttled for as long as we keep knocking every 5 minutes.
+                let mut auth_backoff: HashMap<AccountId, (u32, tokio::time::Instant)> =
+                    HashMap::new();
                 loop {
                     tokio::select! {
                         _ = sd.cancelled() => break,
@@ -806,8 +817,38 @@ impl AppContext {
                     }
                     tracing::info!("Periodic re-sync triggered for {} account(s)", ids.len());
                     for (account_id, name) in &ids {
+                        if auth_backoff
+                            .get(account_id)
+                            .is_some_and(|&(_, retry_at)| tokio::time::Instant::now() < retry_at)
+                        {
+                            continue;
+                        }
                         match sync_periodic.start_sync(account_id).await {
+                            Err(
+                                e @ mc_application::ApplicationError::Domain(
+                                    mc_domain::DomainError::AuthenticationFailed(_),
+                                ),
+                            ) => {
+                                let failures =
+                                    auth_backoff.get(account_id).map_or(0, |&(f, _)| f) + 1;
+                                // 10, 20, 40 minutes, then hourly.
+                                let delay = tokio::time::Duration::from_secs(
+                                    ((5 * 60) << failures.min(4)).min(3600),
+                                );
+                                auth_backoff.insert(
+                                    *account_id,
+                                    (failures, tokio::time::Instant::now() + delay),
+                                );
+                                tracing::error!(
+                                    "Periodic sync for '{}' rejected credentials (attempt {}), next try in {}m: {}",
+                                    name,
+                                    failures,
+                                    delay.as_secs() / 60,
+                                    e
+                                );
+                            }
                             Ok(events) => {
+                                auth_backoff.remove(account_id);
                                 tracing::info!(
                                     "Periodic sync done for '{}': {} event(s)",
                                     name,
