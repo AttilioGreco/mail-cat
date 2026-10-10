@@ -9,6 +9,7 @@ mc-domain = { workspace = true }
 mc-shared = { workspace = true }
 tokio = { workspace = true }
 sled = { workspace = true }
+rusqlite = { workspace = true }
 tantivy = { workspace = true }
 lettre = { workspace = true }
 async-imap = { workspace = true }
