@@ -77,7 +77,7 @@ CREATE TABLE events (
   aggregate_type  INTEGER NOT NULL,
   sequence        INTEGER NOT NULL,
   event_type      TEXT    NOT NULL,             -- DomainEvent::event_name(), for filtering in SQL
-  occurred_at     INTEGER NOT NULL,             -- unix millis
+  occurred_at     INTEGER NOT NULL,             -- unix nanos: envelopes round-trip exactly
   payload         BLOB    NOT NULL,             -- serde_json of DomainEvent
   UNIQUE (aggregate_id, sequence)
 );
