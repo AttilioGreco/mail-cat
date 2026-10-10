@@ -943,9 +943,12 @@ mod tests {
 
     // ── Mock MessageReadRepository ─────────────────────────────────────
 
+    /// (message_id, body_text, body_html) as handed to `MessageBodyStore::put_body`.
+    type StoredBody = (MessageId, Option<String>, Option<String>);
+
     struct MockMessageReadRepo {
         mailboxes: Vec<mc_domain::Mailbox>,
-        stored_bodies: std::sync::Mutex<Vec<(MessageId, Option<String>, Option<String>)>>,
+        stored_bodies: std::sync::Mutex<Vec<StoredBody>>,
     }
 
     impl MockMessageReadRepo {

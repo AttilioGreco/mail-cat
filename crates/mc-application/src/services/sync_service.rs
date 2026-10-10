@@ -1070,15 +1070,13 @@ impl<
             match provider2.fetch_bodies_bulk(mailbox_path, &uids).await {
                 Ok(body_results) => {
                     for result in body_results {
-                        if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
-                            if let Err(e) = self
+                        // Search indexing owned by the search-index projection.
+                        if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value())
+                            && let Err(e) = self
                                 .store_body(message_id, result.body_text, result.body_html, vec![])
                                 .await
-                            {
-                                warn!(%message_id, error = %e, "sync_mailbox: body projection failed");
-                                continue;
-                            }
-                            // Search indexing owned by the search-index projection.
+                        {
+                            warn!(%message_id, error = %e, "sync_mailbox: body projection failed");
                         }
                     }
                 }
@@ -1675,11 +1673,14 @@ mod tests {
 
     // ── Mock Projector (ReadModelProjector + MailboxReadRepository + MessageReadRepository + ProjectionCheckpoint) ──
 
+    /// (body_text, body_html) as handed to `MessageBodyStore::put_body`.
+    type StoredBody = (Option<String>, Option<String>);
+
     struct MockProjector {
         mailboxes: Mutex<Vec<Mailbox>>,
         checkpoints: Mutex<HashMap<String, u64>>,
         projected_events: Mutex<Vec<DomainEvent>>,
-        bodies: Mutex<HashMap<MessageId, (Option<String>, Option<String>)>>,
+        bodies: Mutex<HashMap<MessageId, StoredBody>>,
     }
 
     impl MockProjector {
@@ -1692,7 +1693,7 @@ mod tests {
             }
         }
 
-        fn stored_bodies(&self) -> HashMap<MessageId, (Option<String>, Option<String>)> {
+        fn stored_bodies(&self) -> HashMap<MessageId, StoredBody> {
             self.bodies.lock().unwrap().clone()
         }
 
