@@ -1,10 +1,12 @@
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_imap::types::Seq;
 use async_trait::async_trait;
 use futures::Stream;
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
@@ -46,6 +48,40 @@ fn backoff_delay(failures: u32, auth_rejected: bool) -> std::time::Duration {
     std::time::Duration::from_secs(base_secs * factor).min(std::time::Duration::from_secs(cap_secs))
 }
 
+type ImapSession =
+    async_imap::Session<async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>;
+
+/// Simultaneous pooled connections per account. Gmail caps an account at ~15
+/// connections shared with every other client (phone, webmail); the IDLE watcher
+/// holds one more outside the pool.
+const MAX_POOLED_CONNECTIONS: usize = 4;
+
+/// Servers silently drop idle connections, so one parked longer than this gets a
+/// NOOP before reuse instead of failing the caller's first real command.
+const REVALIDATE_AFTER: Duration = Duration::from_secs(30);
+
+/// A checked-out connection. Dropping it closes the connection; only
+/// `ImapEmailProvider::release` returns it to the pool, so a session left
+/// mid-command by an error is never reused.
+struct PooledSession {
+    session: ImapSession,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Deref for PooledSession {
+    type Target = ImapSession;
+
+    fn deref(&self) -> &ImapSession {
+        &self.session
+    }
+}
+
+impl DerefMut for PooledSession {
+    fn deref_mut(&mut self) -> &mut ImapSession {
+        &mut self.session
+    }
+}
+
 /// SASL XOAUTH2 authenticator — sends the full bearer-token response
 /// immediately, ignoring the (empty) server challenge, per Google's/
 /// Microsoft's XOAUTH2 spec.
@@ -75,6 +111,8 @@ pub struct ImapEmailProvider {
     /// Pre-built SMTP sender. `None` when no SMTP config was provided for this
     /// account — sending will be rejected with a clear error.
     smtp_sender: Option<SmtpSender>,
+    idle_sessions: Mutex<Vec<(ImapSession, Instant)>>,
+    permits: Arc<Semaphore>,
 }
 
 impl ImapEmailProvider {
@@ -86,7 +124,16 @@ impl ImapEmailProvider {
         use_tls: bool,
         smtp_sender: Option<SmtpSender>,
     ) -> Self {
-        Self { host, port, username, credential, use_tls, smtp_sender }
+        Self {
+            host,
+            port,
+            username,
+            credential,
+            use_tls,
+            smtp_sender,
+            idle_sessions: Mutex::default(),
+            permits: Arc::new(Semaphore::new(MAX_POOLED_CONNECTIONS)),
+        }
     }
 
     /// Get IMAP configuration for display/debugging.
@@ -94,14 +141,34 @@ impl ImapEmailProvider {
         (&self.host, self.port, &self.username, self.use_tls)
     }
 
-    async fn create_imap_session(
-        &self,
-    ) -> Result<
-        async_imap::Session<
-            async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>,
-        >,
-        DomainError,
-    > {
+    /// Check out a pooled connection, reusing an idle one when it is still alive.
+    /// Waits while `MAX_POOLED_CONNECTIONS` are in use.
+    async fn session(&self) -> Result<PooledSession, DomainError> {
+        let permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .expect("IMAP pool semaphore is never closed");
+        // Pop in its own statement: a `while let` would hold the lock across the NOOP.
+        loop {
+            let idle = self.idle_sessions.lock().expect("IMAP pool lock poisoned").pop();
+            let Some((mut session, parked_at)) = idle else { break };
+            if parked_at.elapsed() < REVALIDATE_AFTER || session.noop().await.is_ok() {
+                return Ok(PooledSession { session, _permit: permit });
+            }
+            debug!("Dropping stale pooled IMAP connection");
+        }
+        let session = self.create_imap_session().await?;
+        Ok(PooledSession { session, _permit: permit })
+    }
+
+    fn release(&self, pooled: PooledSession) {
+        self.idle_sessions
+            .lock()
+            .expect("IMAP pool lock poisoned")
+            .push((pooled.session, Instant::now()));
+    }
+
+    async fn create_imap_session(&self) -> Result<ImapSession, DomainError> {
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         info!(
@@ -248,19 +315,14 @@ impl EmailProvider for ImapEmailProvider {
         use mc_domain::model::mailbox::MailboxId;
 
         debug!("Listing mailboxes");
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
 
         let stream = session
             .list(None, Some("*"))
             .await
             .map_err(|e| DomainError::Provider(format!("List mailboxes failed: {}", e)))?;
         let mailbox_list: Vec<Result<_, _>> = stream.collect::<Vec<_>>().await;
-
-        // Logout
-        session
-            .logout()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+        self.release(session);
 
         // Convert IMAP mailbox names to Mailbox objects
         let mut mailboxes = Vec::new();
@@ -305,7 +367,7 @@ impl EmailProvider for ImapEmailProvider {
         range: FetchRange,
     ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
         debug!("Fetching envelopes from mailbox: {:?}", mailbox);
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
 
         // Select mailbox
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
@@ -329,7 +391,7 @@ impl EmailProvider for ImapEmailProvider {
 
         if search_results.is_empty() {
             debug!("No messages found matching search criteria");
-            session.logout().await.ok();
+            self.release(session);
             return Ok(Vec::new());
         }
 
@@ -441,12 +503,7 @@ impl EmailProvider for ImapEmailProvider {
                 }
             }
         }
-
-        // Logout
-        session
-            .logout()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+        self.release(session);
 
         info!("Fetched {} envelopes total", all_envelopes.len());
         Ok(all_envelopes)
@@ -459,7 +516,7 @@ impl EmailProvider for ImapEmailProvider {
     ) -> Result<Message, DomainError> {
         use futures::TryStreamExt;
 
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
         session
             .select(&mailbox_name)
@@ -474,7 +531,7 @@ impl EmailProvider for ImapEmailProvider {
             .await
             .map_err(|e| DomainError::Provider(format!("Body stream error: {e}")))?;
 
-        session.logout().await.ok();
+        self.release(session);
 
         let item = fetched
             .into_iter()
@@ -523,7 +580,7 @@ impl EmailProvider for ImapEmailProvider {
             return Ok(vec![]);
         }
 
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
         session
             .select(&mailbox_name)
@@ -563,7 +620,7 @@ impl EmailProvider for ImapEmailProvider {
             }
         }
 
-        session.logout().await.ok();
+        self.release(session);
         Ok(results)
     }
 
@@ -574,7 +631,7 @@ impl EmailProvider for ImapEmailProvider {
     ) -> Result<Vec<u8>, DomainError> {
         use futures::TryStreamExt;
 
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
         session
             .select(&mailbox_name)
@@ -589,7 +646,7 @@ impl EmailProvider for ImapEmailProvider {
             .await
             .map_err(|e| DomainError::Provider(format!("Raw stream error: {e}")))?;
 
-        session.logout().await.ok();
+        self.release(session);
         fetched
             .into_iter()
             .next()
@@ -611,7 +668,7 @@ impl EmailProvider for ImapEmailProvider {
             mailbox_path_to_string(mailbox)
         );
 
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
 
         // Select mailbox
         let mailbox_name = mailbox_path_to_string(mailbox);
@@ -646,12 +703,7 @@ impl EmailProvider for ImapEmailProvider {
 
             debug!("Removed flags: {}", flags_query);
         }
-
-        // Logout
-        session
-            .logout()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+        self.release(session);
 
         info!("Flags updated successfully");
         Ok(())
@@ -674,7 +726,7 @@ impl EmailProvider for ImapEmailProvider {
             mailbox_path_to_string(mailbox)
         );
 
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
         let mailbox_name = mailbox_path_to_string(mailbox);
         session
             .select(&mailbox_name)
@@ -711,10 +763,7 @@ impl EmailProvider for ImapEmailProvider {
             }
         }
 
-        session
-            .logout()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+        self.release(session);
 
         info!("Bulk flags updated successfully");
         Ok(())
@@ -734,7 +783,7 @@ impl EmailProvider for ImapEmailProvider {
             mailbox_path_to_string(to)
         );
 
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
 
         // Select source mailbox
         let from_name = mailbox_path_to_string(from);
@@ -763,12 +812,7 @@ impl EmailProvider for ImapEmailProvider {
             .expunge()
             .await
             .map_err(|e| DomainError::Provider(format!("Expunge failed: {}", e)))?;
-
-        // Logout
-        session
-            .logout()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+        self.release(session);
 
         info!("Message moved successfully");
         // Note: IMAP COPY doesn't return the new UID, so we return None
@@ -790,7 +834,7 @@ impl EmailProvider for ImapEmailProvider {
             permanently
         );
 
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
 
         // Select mailbox
         let mailbox_name = mailbox_path_to_string(mailbox);
@@ -816,12 +860,7 @@ impl EmailProvider for ImapEmailProvider {
         } else {
             debug!("Message marked as deleted (soft delete)");
         }
-
-        // Logout
-        session
-            .logout()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+        self.release(session);
 
         info!("Message deleted successfully");
         Ok(())
@@ -848,7 +887,7 @@ impl EmailProvider for ImapEmailProvider {
             permanently
         );
 
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
         session
             .select(&mailbox_name)
             .await
@@ -875,10 +914,7 @@ impl EmailProvider for ImapEmailProvider {
                 .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?;
         }
 
-        session
-            .logout()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Logout failed: {e}")))?;
+        self.release(session);
 
         info!("Bulk delete of {} messages completed", uid_nums.len());
         Ok(())
@@ -901,7 +937,7 @@ impl EmailProvider for ImapEmailProvider {
         let to_name = mailbox_path_to_string(to);
         info!("Moving {} messages from {} to {}", uids.len(), from_name, to_name);
 
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
         session
             .select(&from_name)
             .await
@@ -927,10 +963,7 @@ impl EmailProvider for ImapEmailProvider {
             .await
             .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?;
 
-        session
-            .logout()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Logout failed: {e}")))?;
+        self.release(session);
 
         info!("Bulk move of {} messages completed", uid_nums.len());
         Ok(())
@@ -949,7 +982,7 @@ impl EmailProvider for ImapEmailProvider {
     async fn mailbox_status(&self, mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError> {
 
         debug!("Getting mailbox status for: {:?}", mailbox);
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
 
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
 
@@ -961,10 +994,7 @@ impl EmailProvider for ImapEmailProvider {
             .await
             .map_err(|e| DomainError::Provider(format!("Mailbox STATUS failed: {}", e)))?;
 
-        session
-            .logout()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Logout failed: {}", e)))?;
+        self.release(session);
 
         let status = MailboxStatus {
             uid_validity: mailbox_data.uid_validity.unwrap_or(0),
@@ -987,7 +1017,7 @@ impl EmailProvider for ImapEmailProvider {
         use futures::TryStreamExt;
 
         let mailbox_name = mailbox_path_to_string(mailbox);
-        let mut session = self.create_imap_session().await?;
+        let mut session = self.session().await?;
 
         session
             .select(&mailbox_name)
@@ -1024,7 +1054,7 @@ impl EmailProvider for ImapEmailProvider {
             "Fetched UID+flags for reconciliation"
         );
 
-        session.logout().await.ok();
+        self.release(session);
         Ok(entries)
     }
 
