@@ -334,7 +334,10 @@ Tracked here so later plans pick them up. Tick when done (with commit).
 - [ ] Concurrency test exercises the writer mutex, not the `IMMEDIATE` transaction — acceptable while the mutex exists; revisit if writes ever go multi-process.
 
 **From writing plan 2:**
-- [ ] Live projection never saves the `read_model` checkpoint (`append_and_project` and the bus subscriber in `wiring.rs:506` only `project`), so every post-sync `catch_up` re-projects everything since the last catch-up. Harmless on sled (idempotent), wasteful on SQLite — **address in plan 3** with the transactional batch hook.
+- [ ] Live projection never saves the `read_model` checkpoint (`append_and_project` and the bus subscriber in `wiring.rs:506` only `project`), so every boot/post-sync `catch_up` re-projects everything since the last catch-up. **Not harmless**: it erased bodies on sled once they left the event (fixed in plan 2 by a separate `message_bodies` tree, da8715d). Projector arms must stay replay-safe; **address in plan 3** with the transactional batch hook.
+- [ ] Replaying `MailboxDiscovered` (full rebuild) resets mailbox counts to 0 until the next poll (≤5 min), since counts are no longer in the log. Keep existing counts in that arm if it matters (plan 3 SQLite projector: upsert, don't overwrite counts).
+- [ ] sled `message_bodies` rows are not removed on `MessageDeleted` (orphans until sled is deleted in plan 5). SQLite uses `ON DELETE CASCADE`.
+- [ ] Stale doc comments mentioning the body in the event: `sync_service.rs` `fetch_message_body` / `fetch_message_bodies_bulk` docs, mc-domain `traits/search_index.rs:14`.
 - [ ] `AccountSyncFailed` is never emitted, so its desktop notification (`wiring.rs:698-709`) is dead. Emitting it (transient, from `start_sync`'s failure path) is a small feature, not migration work.
 
 **Out of scope of the migration, decided 2026-10-10:**
