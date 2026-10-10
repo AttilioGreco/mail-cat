@@ -180,6 +180,21 @@ pub trait BodyBackfillQueue: Send + Sync {
     async fn count_pending_backfill(&self, account_id: &AccountId) -> Result<u32, DomainError>;
 }
 
+/// Where fetched message bodies live. A body is a copy of server state, so it
+/// is stored once here rather than in the event log; `MessageBodyFetched` only
+/// records that it happened.
+#[async_trait]
+pub trait MessageBodyStore: Send + Sync {
+    /// Store the body of an already-received message. Unknown ids are ignored:
+    /// the message may have been deleted while its body was in flight.
+    async fn put_body(
+        &self,
+        message_id: &MessageId,
+        body_text: Option<String>,
+        body_html: Option<String>,
+    ) -> Result<(), DomainError>;
+}
+
 // ── Contact Repositories ─────────────────────────────────────────────────────
 
 /// Write-side repository for Contact aggregate.

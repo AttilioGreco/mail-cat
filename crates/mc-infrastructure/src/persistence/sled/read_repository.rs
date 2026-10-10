@@ -23,7 +23,7 @@ use mc_domain::{
     AccountWriteRepository, AggregateType, BackfillEntry, BodyBackfillQueue, Contact, ContactId,
     ContactReadRepository, ContactSummary, ContactWriteRepository, DomainError, DomainEvent,
     EmailAddress, EventEnvelope, EventStore, Flag, Mailbox, MailboxId, MailboxReadRepository,
-    Message, MessageId, MessageReadRepository, MessageSummary, ProjectionCheckpoint, ProviderUid,
+    Message, MessageBodyStore, MessageId, MessageReadRepository, MessageSummary, ProjectionCheckpoint, ProviderUid,
     ReadModelProjector,
 };
 
@@ -1735,6 +1735,34 @@ impl<ES: EventStore> SledRepository<ES> {
 // ── BodyBackfillQueue ──────────────────────────────────────────────────
 
 #[async_trait]
+impl<ES: EventStore> MessageBodyStore for SledRepository<ES> {
+    async fn put_body(
+        &self,
+        message_id: &MessageId,
+        body_text: Option<String>,
+        body_html: Option<String>,
+    ) -> Result<(), DomainError> {
+        let tree = self.tree(MESSAGES_TREE)?;
+        let key = message_id.to_string();
+        let Some(bytes) = tree
+            .get(key.as_bytes())
+            .map_err(|e| DomainError::Repository(e.to_string()))?
+        else {
+            return Ok(());
+        };
+        let mut message: Message = serde_json::from_slice(&bytes)
+            .map_err(|e| DomainError::Serialization(e.to_string()))?;
+        message.body_text = body_text;
+        message.body_html = body_html;
+        let json = serde_json::to_vec(&message)
+            .map_err(|e| DomainError::Serialization(e.to_string()))?;
+        tree.insert(key.as_bytes(), json)
+            .map_err(|e| DomainError::Repository(e.to_string()))?;
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl<ES: EventStore> BodyBackfillQueue for SledRepository<ES> {
     async fn list_pending_backfill(
         &self,
@@ -2061,6 +2089,18 @@ impl<ES: EventStore> AccountReadRepository for SharedSledRepository<ES> {
 
     async fn account_stats(&self, id: &AccountId) -> Result<AccountSyncStats, DomainError> {
         self.0.account_stats(id).await
+    }
+}
+
+#[async_trait]
+impl<ES: EventStore> MessageBodyStore for SharedSledRepository<ES> {
+    async fn put_body(
+        &self,
+        message_id: &MessageId,
+        body_text: Option<String>,
+        body_html: Option<String>,
+    ) -> Result<(), DomainError> {
+        self.0.put_body(message_id, body_text, body_html).await
     }
 }
 
@@ -3181,5 +3221,83 @@ mod tests {
         let thread_ids: Vec<_> = thread.iter().map(|m| m.id).collect();
         assert!(thread_ids.contains(&root_id));
         assert!(thread_ids.contains(&reply_id));
+    }
+
+    fn received_event(
+        account_id: AccountId,
+        message_id: MessageId,
+        received_at: chrono::DateTime<chrono::Utc>,
+    ) -> EventEnvelope {
+        make_event_envelope(
+            1,
+            &message_id.to_string(),
+            AggregateType::Message,
+            1,
+            DomainEvent::MessageReceived {
+                message_id,
+                account_id,
+                mailbox_id: MailboxId::new(),
+                provider_uid: ProviderUid::new(1),
+                message_rfc_id: None,
+                in_reply_to: None,
+                references: vec![],
+                envelope: mc_domain::Envelope {
+                    from: vec![],
+                    to: vec![],
+                    cc: vec![],
+                    bcc: vec![],
+                    reply_to: vec![],
+                    subject: "s".into(),
+                    date: received_at,
+                },
+                flags: vec![],
+                size_bytes: 1,
+                has_attachments: false,
+                received_at,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn put_body_sets_body_on_existing_message() {
+        let (_es, repo) = make_store_and_repo();
+        let account_id = AccountId::new();
+        let message_id = MessageId::new();
+        repo.project(&received_event(account_id, message_id, chrono::Utc::now()))
+            .await
+            .unwrap();
+
+        repo.put_body(&message_id, Some("plain".into()), Some("<p>html</p>".into()))
+            .await
+            .unwrap();
+
+        let msg = MessageReadRepository::get_message(&repo, &message_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.body_text.as_deref(), Some("plain"));
+        assert_eq!(msg.body_html.as_deref(), Some("<p>html</p>"));
+    }
+
+    #[tokio::test]
+    async fn put_body_on_unknown_message_is_a_noop() {
+        let (_es, repo) = make_store_and_repo();
+        repo.put_body(&MessageId::new(), Some("x".into()), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn put_body_alone_does_not_drain_backfill() {
+        let (_es, repo) = make_store_and_repo();
+        let account_id = AccountId::new();
+        let message_id = MessageId::new();
+        repo.project(&received_event(account_id, message_id, chrono::Utc::now()))
+            .await
+            .unwrap();
+
+        repo.put_body(&message_id, Some("plain".into()), None).await.unwrap();
+
+        // Only the appended MessageBodyFetched marks the body done; if that
+        // append failed, the message must still be fetched again.
+        assert_eq!(repo.count_pending_backfill(&account_id).await.unwrap(), 1);
     }
 }

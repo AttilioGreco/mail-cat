@@ -35,7 +35,7 @@ pub use traits::repository::{
     BodyBackfillQueue,
     ContactReadRepository, ContactSummary, ContactWriteRepository, ConversationReadRepository,
     ConversationSummary, MailboxReadRepository, MessageReadRepository, MessageSummary,
-    ProjectionCheckpoint,
+    MessageBodyStore, ProjectionCheckpoint,
 };
 pub use model::conversation::Conversation;
 pub use value_objects::thread_id::ThreadId;
