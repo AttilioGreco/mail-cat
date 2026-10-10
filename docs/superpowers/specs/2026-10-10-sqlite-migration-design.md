@@ -101,12 +101,11 @@ appended on every sync, forever, and the whole Account history is replayed by
 `AccountWriteRepository::load` (10 MB retained in the heap profile).
 `MailboxCountsUpdated` is a per-poll counter snapshot.
 
-- Sync status: published on the bus only (already consumed live by the UI via
-  progress events); not appended.
-- Mailbox counts: written straight to `mailboxes` (`total_messages`,
-  `unread_messages`, `uid_next`, `uid_validity`) through a new
-  `MailboxReadRepository::update_server_counts` — server-reported state, not a
-  domain fact.
+- Sync status and mailbox counts are **transient**: `SyncService` projects
+  them into the read model and publishes them on the bus, but does not append
+  them (plan 2, R1). The existing projector arm applies the counts; the gRPC
+  mailbox stream keeps receiving `MailboxCountsUpdated` from the bus. No new
+  repository method.
 - The migration (§7) drops these events.
 
 ## 3. Bodies: content cache, not events
@@ -247,10 +246,10 @@ missing rebuild path.
 |---|---|---|
 | root | `Cargo.toml` | add `rusqlite` (bundled), `zstd`; remove `sled` at the end |
 | mc-domain | `src/events/mod.rs` | `MessageBodyFetched` drops body fields; status events kept as bus-only variants (or moved to a progress type) |
-| mc-domain | `src/traits/repository.rs` | add `MessageBodyStore`, `MailboxReadRepository::update_server_counts`; `BodyBackfillQueue` unchanged |
+| mc-domain | `src/traits/repository.rs` | add `MessageBodyStore`; `BodyBackfillQueue` unchanged |
 | mc-domain | `src/traits/event_store.rs` | unchanged (already has `current_sequence`) |
 | mc-domain | `src/traits/search_index.rs` | `SearchHit` → id + score; `suggest` leaves the trait; `ContactIndex` trait removed |
-| mc-application | `src/services/sync_service.rs` | write body via `MessageBodyStore` before append; stop appending status events; mailbox counts via repository |
+| mc-application | `src/services/sync_service.rs` | write body via `MessageBodyStore` before append; status events projected + published, not appended |
 | mc-application | `src/projections/search_index.rs` | unchanged logic; new document shape |
 | mc-application | `src/projections/read_model.rs` | batch + checkpoint in one transaction (needs a `project_batch` or transaction hook) |
 | mc-application | `src/handlers/query.rs`, `handlers/contact.rs` | hit hydration + snippets; `suggest` and contact search → repository |
@@ -298,8 +297,8 @@ the previous binary.
 |---|---|---|---|
 | 0 | — | Commit today's fixes on main; branch `feat/sqlite-migration` | clean tree |
 | 1 | mc-infrastructure | `sqlite/schema.rs`, `SqliteEventStore`. Port the 8 event-store tests as a backend-generic conformance suite run against **both** sled and SQLite | both pass |
-| 2 | mc-domain + mc-application | `MessageBodyStore`, body out of `MessageBodyFetched`, status events bus-only, transactional batch projection hook | workspace tests pass on sled |
-| 3 | mc-infrastructure | `SqliteRepository` (all read traits + projector + checkpoints + backfill + body store). Port the 13 read-repository tests to the generic suite; add the missing ones (contacts, `rebuild_index`, `get_thread` order, `find_by_provider_uid`, `find_unread_by_mailbox`, `list_conversations` per mailbox) | suite green on both |
+| 2 | mc-domain + mc-application | `MessageBodyStore`, body out of `MessageBodyFetched`, status events transient | workspace tests pass on sled |
+| 3 | mc-infrastructure | `SqliteRepository` (all read traits + projector + checkpoints + backfill + body store) + transactional batch projection hook (moved from phase 2). Port the 13 read-repository tests to the generic suite; add the missing ones (contacts, `rebuild_index`, `get_thread` order, `find_by_provider_uid`, `find_unread_by_mailbox`, `list_conversations` per mailbox) | suite green on both |
 | 4 | mc-infrastructure + mc-application + mc-interfaces | Index-only Tantivy schema, hit hydration + snippets from SQLite, `suggest` and contacts search in SQL, drop contact index | search tests green; parity check on a fixed query set |
 | 5 | mc-server | wiring on SQLite, `migrate` subcommand, shutdown, config | server runs on a migrated copy |
 | 6 | — | Migrate a **copy** of the live DB; run report; compare RSS / disk / `list_messages` latency vs today | targets met (§Goal) |
@@ -333,6 +332,10 @@ Tracked here so later plans pick them up. Tick when done (with commit).
 - [ ] `SqliteDb::read/write` map spawn_blocking join errors to `Repository` even for the event store; consider an error-mapper parameter.
 - [ ] Test `load_all_events` paging **with** an `aggregate_type` filter (mixed types, > `STREAM_PAGE` matches).
 - [ ] Concurrency test exercises the writer mutex, not the `IMMEDIATE` transaction — acceptable while the mutex exists; revisit if writes ever go multi-process.
+
+**From writing plan 2:**
+- [ ] Live projection never saves the `read_model` checkpoint (`append_and_project` and the bus subscriber in `wiring.rs:506` only `project`), so every post-sync `catch_up` re-projects everything since the last catch-up. Harmless on sled (idempotent), wasteful on SQLite — **address in plan 3** with the transactional batch hook.
+- [ ] `AccountSyncFailed` is never emitted, so its desktop notification (`wiring.rs:698-709`) is dead. Emitting it (transient, from `start_sync`'s failure path) is a small feature, not migration work.
 
 **Out of scope of the migration, decided 2026-10-10:**
 - [ ] Search features (operators, filters, sort) — own spec; index schema ready after plan 4.
