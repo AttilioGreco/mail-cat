@@ -25,11 +25,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );",
 ];
 
+/// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its
+/// own page cache, so a read burst must not leave them all resident.
+const MAX_IDLE_READERS: usize = 4;
+
 pub struct SqliteDb {
     path: PathBuf,
     writer: Mutex<Connection>,
-    // ponytail: grows to peak read concurrency, which tokio's blocking pool
-    // bounds; cap it if idle connections ever show up in memory profiles.
     readers: Mutex<Vec<Connection>>,
 }
 
@@ -81,7 +83,10 @@ impl SqliteDb {
         tokio::task::spawn_blocking(move || {
             let conn = db.checkout_reader()?;
             let result = f(&conn);
-            db.readers.lock().unwrap_or_else(PoisonError::into_inner).push(conn);
+            let mut idle = db.readers.lock().unwrap_or_else(PoisonError::into_inner);
+            if idle.len() < MAX_IDLE_READERS {
+                idle.push(conn);
+            }
             result
         })
         .await
@@ -170,6 +175,24 @@ mod tests {
 
         let err = open_in(&dir).err().expect("newer schema must not open");
         assert!(err.to_string().contains("newer"), "got {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn read_burst_leaves_at_most_max_idle_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_in(&dir).unwrap();
+
+        let reads = (0..16).map(|_| {
+            db.read(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                Ok(())
+            })
+        });
+        for result in futures::future::join_all(reads).await {
+            result.unwrap();
+        }
+
+        assert!(db.readers.lock().unwrap().len() <= MAX_IDLE_READERS);
     }
 
     #[tokio::test]

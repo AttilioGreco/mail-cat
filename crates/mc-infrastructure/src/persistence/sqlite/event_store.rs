@@ -109,8 +109,8 @@ impl EventStore for SqliteEventStore {
             return Ok(expected_sequence);
         }
         let aggregate_id = aggregate_id.to_owned();
-        let envelopes = self
-            .db
+        let notifier = self.notifier.clone();
+        self.db
             .write(move |conn| {
                 // IMMEDIATE takes the write lock up front, so the sequence read
                 // below cannot go stale before the inserts commit.
@@ -158,16 +158,19 @@ impl EventStore for SqliteEventStore {
                     }
                 }
                 tx.commit().map_err(store_err)?;
-                Ok(envelopes)
-            })
-            .await?;
 
-        let last_sequence = envelopes.last().map_or(expected_sequence, |e| e.sequence_number);
-        for envelope in envelopes {
-            // Best-effort: no live subscriber is not an error.
-            let _ = self.notifier.send(envelope);
-        }
-        Ok(last_sequence)
+                // Broadcast while still holding the writer lock: positions are
+                // assigned under it, so subscribers (whose checkpoints skip
+                // anything at or below the last position seen) get them in
+                // order, and a caller cancelled after commit cannot swallow
+                // committed events. No live subscriber is not an error.
+                let last_sequence = envelopes.last().map_or(expected_sequence, |e| e.sequence_number);
+                for envelope in envelopes {
+                    let _ = notifier.send(envelope);
+                }
+                Ok(last_sequence)
+            })
+            .await
     }
 
     async fn current_sequence(&self, aggregate_id: &str) -> Result<u64, DomainError> {
@@ -303,6 +306,29 @@ mod tests {
             .count();
         assert_eq!((won, lost), (1, 1), "{results:?}");
         assert_eq!(store.load_events("acc-1", 0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_broadcast_in_global_position_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(open(&dir));
+        let mut live = store.subscribe();
+
+        let appends = (0..64).map(|i| {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store.append(&format!("acc-{i}"), AggregateType::Account, 0, vec![event("x")]).await
+            })
+        });
+        for result in futures::future::join_all(appends).await {
+            result.unwrap().unwrap();
+        }
+
+        let mut positions = Vec::new();
+        for _ in 0..64 {
+            positions.push(live.next().await.unwrap().global_position);
+        }
+        assert_eq!(positions, (1..=64).collect::<Vec<u64>>());
     }
 
     #[tokio::test]
