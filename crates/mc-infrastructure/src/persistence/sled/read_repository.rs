@@ -41,6 +41,10 @@ const MAILBOXES_TREE: &str = "mailboxes";
 const MAILBOXES_BY_ACCOUNT_TREE: &str = "mailboxes_by_account";
 const MESSAGES_TREE: &str = "messages";
 const MESSAGE_SUMMARIES_TREE: &str = "message_summaries";
+/// `{message_id}` → JSON `(body_text, body_html)`. Kept apart from `messages`
+/// because projector arms rewrite whole message rows (replays, the live bus
+/// subscriber), and the body now has exactly one write: `put_body`.
+const MESSAGE_BODIES_TREE: &str = "message_bodies";
 const PROJECTION_CHECKPOINTS_TREE: &str = "projection_checkpoints";
 /// Bodies awaiting download, keyed `{account}:{inverted_received_at}:{message_id}`
 /// so a prefix scan yields newest-first for free.
@@ -270,8 +274,16 @@ impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
 
         match val {
             Some(bytes) => {
-                let message: Message = serde_json::from_slice(&bytes)
+                let mut message: Message = serde_json::from_slice(&bytes)
                     .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                if let Some(body) = self
+                    .tree(MESSAGE_BODIES_TREE)?
+                    .get(id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    (message.body_text, message.body_html) = serde_json::from_slice(&body)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                }
                 Ok(Some(message))
             }
             None => Ok(None),
@@ -723,7 +735,20 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 has_attachments,
                 received_at,
             } => {
-                // Full message in messages tree.
+                let msg_tree = self.tree(MESSAGES_TREE)?;
+                // Rows written before bodies left the log carry the body inline;
+                // a replay of this event must not erase it.
+                let (body_text, body_html) = match msg_tree
+                    .get(message_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    Some(bytes) => {
+                        let existing: Message = serde_json::from_slice(&bytes)
+                            .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                        (existing.body_text, existing.body_html)
+                    }
+                    None => (None, None),
+                };
                 let message = Message {
                     id: *message_id,
                     account_id: *account_id,
@@ -737,12 +762,11 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     size_bytes: *size_bytes,
                     has_attachments: *has_attachments,
                     attachments: Vec::new(),
-                    body_text: None,
-                    body_html: None,
+                    body_text,
+                    body_html,
                     received_at: *received_at,
                     internal_date: *received_at,
                 };
-                let msg_tree = self.tree(MESSAGES_TREE)?;
                 let msg_json = serde_json::to_vec(&message)
                     .map_err(|e| DomainError::Serialization(e.to_string()))?;
                 msg_tree
@@ -1738,21 +1762,18 @@ impl<ES: EventStore> MessageBodyStore for SledRepository<ES> {
         body_text: Option<String>,
         body_html: Option<String>,
     ) -> Result<(), DomainError> {
-        let tree = self.tree(MESSAGES_TREE)?;
         let key = message_id.to_string();
-        let Some(bytes) = tree
-            .get(key.as_bytes())
-            .map_err(|e| DomainError::Repository(e.to_string()))?
-        else {
+        let known = self
+            .tree(MESSAGES_TREE)?
+            .contains_key(key.as_bytes())
+            .map_err(|e| DomainError::Repository(e.to_string()))?;
+        if !known {
             return Ok(());
-        };
-        let mut message: Message = serde_json::from_slice(&bytes)
+        }
+        let json = serde_json::to_vec(&(body_text, body_html))
             .map_err(|e| DomainError::Serialization(e.to_string()))?;
-        message.body_text = body_text;
-        message.body_html = body_html;
-        let json = serde_json::to_vec(&message)
-            .map_err(|e| DomainError::Serialization(e.to_string()))?;
-        tree.insert(key.as_bytes(), json)
+        self.tree(MESSAGE_BODIES_TREE)?
+            .insert(key.as_bytes(), json)
             .map_err(|e| DomainError::Repository(e.to_string()))?;
         Ok(())
     }
@@ -3312,5 +3333,73 @@ mod tests {
             .unwrap();
         assert_eq!(msg.body_text.as_deref(), Some("plain"));
         assert_eq!(repo.count_pending_backfill(&account_id).await.unwrap(), 0);
+    }
+
+    fn body_fetched(message_id: MessageId) -> EventEnvelope {
+        make_event_envelope(
+            2,
+            &message_id.to_string(),
+            AggregateType::Message,
+            2,
+            DomainEvent::MessageBodyFetched { message_id, attachments: vec![] },
+        )
+    }
+
+    async fn body_text(repo: &SledRepository<SledEventStore>, id: &MessageId) -> Option<String> {
+        MessageReadRepository::get_message(repo, id).await.unwrap().unwrap().body_text
+    }
+
+    #[tokio::test]
+    async fn replaying_received_and_body_fetched_keeps_stored_body() {
+        let (_es, repo) = make_store_and_repo();
+        let account_id = AccountId::new();
+        let message_id = MessageId::new();
+        let received = received_event(account_id, message_id, chrono::Utc::now());
+        repo.project(&received).await.unwrap();
+        repo.put_body(&message_id, Some("plain".into()), None).await.unwrap();
+        repo.project(&body_fetched(message_id)).await.unwrap();
+
+        // Boot catch-up replays everything since the last saved checkpoint.
+        repo.project(&received).await.unwrap();
+        repo.project(&body_fetched(message_id)).await.unwrap();
+
+        assert_eq!(body_text(&repo, &message_id).await.as_deref(), Some("plain"));
+        assert_eq!(repo.count_pending_backfill(&account_id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn replaying_received_keeps_legacy_inline_body() {
+        let (_es, repo) = make_store_and_repo();
+        let message_id = MessageId::new();
+        let received = received_event(AccountId::new(), message_id, chrono::Utc::now());
+        repo.project(&received).await.unwrap();
+        // Before bodies left the log, the projector wrote them into the row itself.
+        let tree = repo.tree(MESSAGES_TREE).unwrap();
+        let key = message_id.to_string();
+        let mut legacy: Message = serde_json::from_slice(&tree.get(&key).unwrap().unwrap()).unwrap();
+        legacy.body_text = Some("legacy".into());
+        tree.insert(&key, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        repo.project(&received).await.unwrap();
+
+        assert_eq!(body_text(&repo, &message_id).await.as_deref(), Some("legacy"));
+    }
+
+    #[tokio::test]
+    async fn body_survives_a_concurrent_row_rewrite() {
+        let (_es, repo) = make_store_and_repo();
+        let message_id = MessageId::new();
+        repo.project(&received_event(AccountId::new(), message_id, chrono::Utc::now()))
+            .await
+            .unwrap();
+        // A read-modify-write projector arm (e.g. MessageFlagged from the live
+        // bus subscriber) that read the row before put_body and writes it after.
+        let tree = repo.tree(MESSAGES_TREE).unwrap();
+        let key = message_id.to_string();
+        let stale = tree.get(&key).unwrap().unwrap();
+        repo.put_body(&message_id, Some("plain".into()), None).await.unwrap();
+        tree.insert(&key, stale).unwrap();
+
+        assert_eq!(body_text(&repo, &message_id).await.as_deref(), Some("plain"));
     }
 }
