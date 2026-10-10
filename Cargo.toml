@@ -104,3 +104,8 @@ parking_lot = "0.12"
 
 # Testing
 tempfile = "3"
+
+# Release + debug info for profiling (samply/perf); see `just install-profiling`.
+[profile.profiling]
+inherits = "release"
+debug = true

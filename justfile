@@ -106,6 +106,16 @@ ui-build:
 ui-dev:
     bun run dev
 
+# ── Profiling ─────────────────────────────────────────────────────────────────
+
+# sostituisce il server installato con una build release + simboli di debug e lo riavvia
+install-profiling:
+    cargo build -p mc-server --profile profiling
+    systemctl stop --user mail-cat-server.service
+    cp target/profiling/mail-cat-server ~/.local/bin/
+    systemctl --user restart mail-cat-server
+    @echo "✓ server di profiling attivo — es: samply record -p (pgrep -x mail-cat-server)"
+
 # ── Install ───────────────────────────────────────────────────────────────────
 
 # installa server + UI + CLI in ~/.local (no root) — per i pacchetti usa `just package`
