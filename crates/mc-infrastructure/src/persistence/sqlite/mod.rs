@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use mc_domain::DomainError;
 use rusqlite::{Connection, OpenFlags};
 
+pub mod event_store;
+
 /// Schema migrations, applied in order; `PRAGMA user_version` counts how many
 /// have run. Append only — a shipped migration is never edited.
 pub(crate) const MIGRATIONS: &[&str] = &[
