@@ -321,3 +321,22 @@ every step.
 - **D5 — Event sourcing for messages:** kept for now. Replacing message events
   with a plain state table (accounts, contacts, drafts stay event-sourced) is
   the planned **next step** after this migration, as its own spec.
+
+## 10. Deferred items
+
+Tracked here so later plans pick them up. Tick when done (with commit).
+
+**From the plan 1 final review (minor, `SqliteEventStore` / `SqliteDb`):**
+- [ ] Map `UNIQUE(aggregate_id, sequence)` violations to `ConcurrencyConflict` (§2 says so; today → `EventStore`). Only reachable with a second writer process, e.g. `migrate` against a live DB — **do in plan 5** alongside the migrator.
+- [ ] `u64 → i64` casts (`from_global_position`, `from_sequence`, `sequence`) wrap above `i64::MAX`; use `i64::try_from(..).unwrap_or(i64::MAX)`.
+- [ ] Reject a negative `PRAGMA user_version` at open (today it skips every migration).
+- [ ] `SqliteDb::read/write` map spawn_blocking join errors to `Repository` even for the event store; consider an error-mapper parameter.
+- [ ] Test `load_all_events` paging **with** an `aggregate_type` filter (mixed types, > `STREAM_PAGE` matches).
+- [ ] Concurrency test exercises the writer mutex, not the `IMMEDIATE` transaction — acceptable while the mutex exists; revisit if writes ever go multi-process.
+
+**Out of scope of the migration, decided 2026-10-10:**
+- [ ] Search features (operators, filters, sort) — own spec; index schema ready after plan 4.
+- [ ] Body retention policy (`evicted`) — decide after measuring compressed size (plan 5, step 6).
+- [ ] Event sourcing for messages → plain state table — own spec, after plan 5.
+- [ ] Gmail + 4sigma were throttled (`AUTHENTICATIONFAILED`) since 2026-10-06; periodic-sync backoff shipped 2026-10-10. Verify they recover; if not, redo OAuth login.
+- [ ] Pre-existing clippy warnings (oauth/presets.rs, sled/read_repository.rs, tantivy_index.rs, wiring.rs) — sled ones vanish in plan 5.
