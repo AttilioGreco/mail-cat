@@ -35,8 +35,20 @@ const GIT_SHA: &str = env!("BUILD_GIT_SHA");
 const BUILD_DATE: &str = env!("BUILD_DATE");
 const RUSTC: &str = env!("BUILD_RUSTC");
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // A personal mail server is I/O bound: two workers keep up with IMAP and
+    // gRPC, while the default (one per core) costs a stack and a malloc arena
+    // per thread. Blocking threads only run SQLite calls (one writer, four
+    // pooled readers) and short file work, so a small cap is plenty.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(8)
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     // --version
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE})");

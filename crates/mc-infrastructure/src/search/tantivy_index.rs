@@ -23,8 +23,15 @@ use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::message_id::MessageId;
 use mc_shared::pagination::Pagination;
 
-/// How many documents to buffer before auto-committing.
-const AUTO_COMMIT_THRESHOLD: u32 = 100;
+/// Documents buffered before an automatic commit. Every commit writes a new
+/// segment that the merge thread must later fold in, so committing often
+/// (it was 100) kept a core busy merging during sync. `search` commits
+/// whatever is pending first, so results never miss buffered writes.
+const AUTO_COMMIT_THRESHOLD: u32 = 1000;
+
+/// Tantivy's minimum per-thread arena; one indexing thread is plenty for a
+/// mailbox and keeps the writer's memory at this floor.
+const WRITER_MEMORY_BYTES: usize = 15_000_000;
 
 /// Tantivy search index for email messages (spec §5). Stores only
 /// `message_id`; everything shown to the user is hydrated from the read model.
@@ -86,7 +93,9 @@ impl TantivySearchIndex {
             .build();
         index.tokenizers().register("email_tokenizer", email_analyzer);
 
-        let writer = index.writer(50_000_000).map_err(|e| search_err("create writer", e))?;
+        let writer = index
+            .writer_with_num_threads(1, WRITER_MEMORY_BYTES)
+            .map_err(|e| search_err("create writer", e))?;
         // Manual reload: the reader is reloaded explicitly after each commit.
         let reader = index
             .reader_builder()
@@ -224,7 +233,8 @@ impl SearchIndex for TantivySearchIndex {
         debug!("Removing message: {}", message_id);
         let term = tantivy::Term::from_field_text(self.fields.message_id, &message_id.to_string());
         self.writer.lock().delete_term(term);
-        self.commit_and_reload()
+        self.pending_count.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     async fn search(

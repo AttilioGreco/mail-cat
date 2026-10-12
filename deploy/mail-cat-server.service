@@ -15,6 +15,9 @@ RestartSec=5
 # Configurazione
 # MAIL_CAT_CONFIG non è necessaria: il server cerca ~/.config/mail-cat/config.toml
 # di default (usando $HOME a runtime). Decommentare solo per sovrascrivere il path.
+# glibc gives every thread that allocates concurrently its own 64 MB arena and
+# rarely hands the memory back; two arenas are plenty for this server.
+Environment=MALLOC_ARENA_MAX=2
 # Environment=MAIL_CAT_CONFIG=/percorso/alternativo/config.toml
 
 # Standard output → journald (accessibile con: journalctl --user -u mail-cat-server)
