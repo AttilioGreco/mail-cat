@@ -372,6 +372,12 @@ Tracked here so later plans pick them up. Tick when done (with commit).
 - [x] `find_by_provider_uid` on SQLite: add `m.id DESC` tie-break for equal `received_at`
   (newest-minted wins; sled returns the older id on a tie, gone in plan 5).
 
+**From phase 4 (implemented without a written plan, 2026-10-12):**
+- [ ] Parity check of search results on a fixed query set against real data — do it on the
+  migrated copy in plan 5 (the branch has no production index to compare against).
+- [ ] sled `suggest` scans every summary per call; acceptable until sled is deleted.
+- [x] `traits/search_index.rs` doc no longer describes the body-in-event indexing (e549b76..).
+
 **Out of scope of the migration, decided 2026-10-10:**
 - [ ] Search features (operators, filters, sort) — own spec; index schema ready after plan 4.
 - [ ] Body retention policy (`evicted`) — decide after measuring compressed size (plan 5, step 6).
