@@ -1,5 +1,7 @@
 #[cfg(test)]
 pub(crate) mod event_store_conformance;
+#[cfg(test)]
+pub(crate) mod read_repository_conformance;
 pub mod sled;
 pub mod sqlite;
 
