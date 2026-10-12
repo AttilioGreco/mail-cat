@@ -368,7 +368,7 @@ fn contact_from_row(row: &Row, at: usize) -> rusqlite::Result<ContactSummary> {
 }
 
 /// `%query%` for `LIKE … ESCAPE '\\'`.
-// ponytail: LIKE folds ASCII case only (sled lowercased Unicode too); add a
+// ponytail: LIKE folds ASCII case only (no Unicode lowercasing); add a
 // lowered column if non-ASCII case-insensitive search matters.
 fn like_pattern(query: &str) -> String {
     let escaped = query
@@ -418,8 +418,8 @@ impl AccountWriteRepository for SqliteRepository {
             .append(&aggregate_id, AggregateType::Account, expected, events)
             .await?;
 
-        // Same contract as the sled repository: the summary is current when
-        // save returns, without waiting for the projector.
+        // The summary is current when save returns, without waiting for the
+        // projector.
         let (id, name, email) =
             (*account.id.as_uuid(), account.name.clone(), account.email.as_str().to_owned());
         let (provider_type, status) = (json(&account.provider_type)?, json(&account.status)?);

@@ -26,7 +26,6 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
-sled = { workspace = true }
 notify-rust = "4"
 
 # Notification actions must outlive the on-screen banner (notify-rust's

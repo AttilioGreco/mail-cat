@@ -8,7 +8,6 @@ license.workspace = true
 mc-domain = { workspace = true }
 mc-shared = { workspace = true }
 tokio = { workspace = true }
-sled = { workspace = true }
 rusqlite = { workspace = true }
 zstd = { workspace = true }
 tantivy = { workspace = true }

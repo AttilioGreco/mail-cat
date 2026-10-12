@@ -22,8 +22,8 @@ use mc_domain::model::account::{SmtpConnectionConfig, SmtpSecurity};
 use mc_infrastructure::{
     email::imap::ImapCredential,
     email::smtp::SmtpSender,
-    ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SledEventStore,
-    SledRepository, TantivySearchIndex,
+    ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SqliteDb,
+    SqliteEventStore, SqliteRepository, TantivySearchIndex,
 };
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
@@ -36,23 +36,23 @@ use crate::oauth_refresh::{self, OAuthRuntimeState};
 // Type aliases for concrete implementations
 type ProviderRegistryImpl = InMemoryProviderRegistry<ImapEmailProvider>;
 type CommandBusImpl = InProcessCommandBus<
-    SledRepository<SledEventStore>, // AW
-    SledRepository<SledEventStore>, // CW
-    SledEventStore,                 // ES
+    SqliteRepository,               // AW
+    SqliteRepository,               // CW
+    SqliteEventStore,               // ES
     ProviderRegistryImpl,           // PR
-    SledRepository<SledEventStore>, // MR
+    SqliteRepository,               // MR
     InProcessEventBus,              // B
 >;
 type QueryBusImpl = InProcessQueryBus<
-    SledRepository<SledEventStore>, // AR
-    SledRepository<SledEventStore>, // MBR
-    SledRepository<SledEventStore>, // MR
+    SqliteRepository,               // AR
+    SqliteRepository,               // MBR
+    SqliteRepository,               // MR
     TantivySearchIndex,             // SI
-    SledRepository<SledEventStore>, // CTR
-    SledRepository<SledEventStore>, // CR
+    SqliteRepository,               // CTR
+    SqliteRepository,               // CR
 >;
 type SyncServiceImpl =
-    SyncService<ProviderRegistryImpl, SledEventStore, SledRepository<SledEventStore>>;
+    SyncService<ProviderRegistryImpl, SqliteEventStore, SqliteRepository>;
 
 /// Application context with all wired dependencies.
 pub struct AppContext {
@@ -67,10 +67,6 @@ pub struct AppContext {
     pub provider_registry: Arc<ProviderRegistryImpl>,
     /// Cancel this to trigger graceful shutdown of all background tasks.
     pub shutdown: CancellationToken,
-    /// Sled handle for an explicit flush on shutdown — `std::process::exit`
-    /// skips `Drop`, so without this, sled's background flush thread can
-    /// lose its most recent writes to a SIGTERM landing mid-cycle.
-    pub db: sled::Db,
 }
 
 impl AppContext {
@@ -92,24 +88,25 @@ impl AppContext {
 
         // ── Infrastructure Layer ────────────────────────────────────────────
 
-        // Open sled database
-        // sled's default 1 GB page cache was ~90% of the server's resident memory.
-        // Reads are point lookups and short prefix scans, and the OS page cache
-        // already holds the hot file pages.
-        let db = sled::Config::new()
-            .path(&config.db_path)
-            .cache_capacity(16 * 1024 * 1024)
-            .open()
-            .context("failed to open sled database")?;
-        tracing::info!("Opened sled database at {}", config.db_path);
+        let db_path = std::path::Path::new(&config.db_path);
+        if db_path.is_dir() {
+            anyhow::bail!(
+                "db_path {} is a directory (the old sled database?); point it at a file, \
+                 e.g. {}/mail-cat.db",
+                db_path.display(),
+                db_path.parent().unwrap_or(db_path).display()
+            );
+        }
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).context("failed to create database directory")?;
+        }
+        let db = SqliteDb::open(db_path).context("failed to open SQLite database")?;
+        tracing::info!("Opened SQLite database at {}", config.db_path);
 
-        // Create event store
-        let event_store = Arc::new(SledEventStore::new(db.clone()));
-        tracing::info!("Initialized event store");
-
-        // Create repository (implements both write and read repos + projector)
-        // We create a bare version for the projector and an Arc-wrapped version for the buses
-        let bare_repository = SledRepository::new(db.clone(), event_store.clone());
+        let event_store = Arc::new(SqliteEventStore::new(db.clone()));
+        // One repository serves every read/write trait, the projector and the
+        // checkpoints; the Arc is for the buses.
+        let bare_repository = SqliteRepository::new(db, event_store.clone());
         let repository_arc = Arc::new(bare_repository.clone());
         tracing::info!("Initialized repositories");
 
@@ -496,7 +493,7 @@ impl AppContext {
         // ── Live projection subscriber ───────────────────────────────────────
         // Subscribe the read-model projector to the event bus so that domain
         // events emitted at runtime (e.g. ApplyRemoteFlagChange → MessageFlagged)
-        // are immediately reflected in the sled read model without waiting for
+        // are immediately reflected in the read model without waiting for
         // the next server restart.
         {
             let mut sub = event_bus.subscribe();
@@ -930,7 +927,7 @@ impl AppContext {
             };
 
             // Use the stored INBOX path (has the server's actual delimiter, e.g. '.')
-            // so that notifications emitted by watch_mailbox match what's in sled.
+            // so that notifications emitted by watch_mailbox match what's in the read model.
             // Fall back to MailboxPath::inbox() only if INBOX hasn't been synced yet.
             let inbox_path = local_mailboxes
                 .iter()
@@ -1153,7 +1150,6 @@ impl AppContext {
             sync_service,
             provider_registry,
             shutdown,
-            db,
         })
     }
 }
@@ -1254,11 +1250,11 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_integrated_in_app_context() {
-        // Use in-memory database paths (they will be created by sled)
+        let dir = tempfile::tempdir().unwrap();
         let config = ServerConfig {
             grpc_addr: "127.0.0.1:50051".to_string(),
-            db_path: "/tmp/test_db_sync".to_string(),
-            index_path: "/tmp/test_index_sync".to_string(),
+            db_path: dir.path().join("mail-cat.db").display().to_string(),
+            index_path: dir.path().join("index").display().to_string(),
             accounts: vec![],
             ui_bin: "mail-cat-ui".to_string(),
             body_backfill_per_minute: 30,

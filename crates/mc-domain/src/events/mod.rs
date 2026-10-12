@@ -492,19 +492,4 @@ mod tests {
         assert_eq!(event.aggregate_type(), AggregateType::Account);
         assert_eq!(event.event_name(), "AccountReauthenticated");
     }
-
-    #[test]
-    fn legacy_body_fetched_event_still_deserializes() {
-        // Shape written to sled before bodies left the log; the store and the
-        // sled → SQLite migrator still read these.
-        let legacy = r#"{"MessageBodyFetched":{
-            "message_id":"019f3880-7549-7310-8e77-f48d3b5a12e2",
-            "body_text":"hello","body_html":"<p>hello</p>","attachments":[]}}"#;
-
-        let event: DomainEvent = serde_json::from_str(legacy).unwrap();
-
-        assert!(matches!(event, DomainEvent::MessageBodyFetched { ref attachments, .. } if attachments.is_empty()));
-        let reserialized = serde_json::to_string(&event).unwrap();
-        assert!(!reserialized.contains("body_text"), "{reserialized}");
-    }
 }

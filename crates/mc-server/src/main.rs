@@ -133,30 +133,20 @@ async fn main() -> anyhow::Result<()> {
     shutdown.cancel();
 
     // Give spawned tasks a brief window to react to the cancellation token
-    // before we force-exit. Background IMAP IDLE tasks and sled's internal
-    // flush threads would otherwise keep the process alive indefinitely.
+    // before we force-exit; background IMAP IDLE tasks would otherwise keep the
+    // process alive indefinitely.
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
-    // Explicit flush: std::process::exit below skips Drop, so we can't rely on
-    // sled's background flush thread happening to have run recently. Without
-    // this, a shutdown landing between flush cycles can lose the last writes
-    // (observed as accounts/mailboxes reappearing "reset" on the next boot).
-    if let Err(e) = app_ctx.db.flush_async().await {
-        tracing::warn!(%e, "sled flush on shutdown failed");
-    }
-
     tracing::info!("👋 Server shut down gracefully");
-    // Force-exit: sled is log-structured and crash-safe, so a hard exit here
-    // is safe and avoids waiting for long-lived background threads (IMAP IDLE,
-    // sled compaction) to complete on their own.
+    // Force-exit is safe: every SQLite write is its own committed transaction
+    // (WAL), so nothing buffered is lost; an uncommitted one rolls back on open.
     std::process::exit(0);
 }
 
 /// Wait for a shutdown signal: Ctrl+C (SIGINT) when run interactively, or
 /// SIGTERM (what `systemctl stop`/`restart` actually sends). Without a SIGTERM
 /// handler, systemd stopping the service bypasses this entire graceful path —
-/// the process is killed outright, with no chance to flush sled or cancel
-/// background tasks.
+/// the process is killed outright, with no chance to cancel background tasks.
 async fn shutdown_signal() {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("failed to install SIGTERM handler");

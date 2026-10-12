@@ -10,7 +10,7 @@ pub struct ServerConfig {
     #[serde(default = "default_grpc_addr")]
     pub grpc_addr: String,
 
-    /// Path to sled database directory.
+    /// Path to the SQLite database file.
     #[serde(default = "default_db_path")]
     pub db_path: String,
 
@@ -160,7 +160,7 @@ fn default_grpc_addr() -> String {
 }
 
 fn default_db_path() -> String {
-    xdg_data_dir("db")
+    xdg_data_dir("mail-cat.db")
 }
 
 fn default_index_path() -> String {
@@ -234,7 +234,7 @@ mod tests {
     fn default_config() {
         let config = ServerConfig::default();
         assert_eq!(config.grpc_addr, "127.0.0.1:50051");
-        assert!(config.db_path.ends_with("mail-cat/db") || config.db_path.ends_with("data/db"));
+        assert!(config.db_path.ends_with("mail-cat.db"));
     }
 
     #[test]

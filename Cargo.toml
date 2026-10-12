@@ -55,7 +55,6 @@ oauth2 = { version = "4", features = ["reqwest"] }
 url = "2"
 
 # Storage
-sled = "0.34"
 rusqlite = { version = "0.40", features = ["bundled", "uuid"] }
 zstd = "0.13"
 
