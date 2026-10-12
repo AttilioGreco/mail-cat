@@ -187,7 +187,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     adjust_unread(tx, mailbox_id.as_uuid(), 1)?;
                 }
                 refresh_conversation(tx, account_id.as_uuid(), thread_id.value())?;
-                note_synced_message(tx, mailbox_id, envelope, *received_at)?;
+                note_synced_message(tx, account_id, mailbox_id, message_rfc_id.as_deref(), envelope, *received_at)?;
             }
         }
         DomainEvent::MessageBodyFetched { message_id, attachments } => {
@@ -210,6 +210,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             account_id,
             mailbox_id,
             envelope,
+            message_rfc_id,
             in_reply_to,
             references,
             body_text,
@@ -217,7 +218,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             sent_at,
         } => {
             let thread_id = Conversation::resolve_thread_id(
-                None,
+                message_rfc_id.as_deref(),
                 in_reply_to.as_deref(),
                 references,
                 &message_id.to_string(),
@@ -229,7 +230,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     account_id,
                     mailbox_id: Some(mailbox_id),
                     provider_uid: None,
-                    rfc_message_id: None,
+                    rfc_message_id: message_rfc_id.as_deref(),
                     in_reply_to: in_reply_to.as_deref(),
                     references,
                     thread_id: Some(thread_id.value()),
@@ -393,12 +394,14 @@ fn insert_message(tx: &Connection, m: &NewMessage) -> Result<bool, DomainError> 
 }
 
 /// Callers only note a message the first time its row is inserted, so replays
-/// don't recount. A message mail-cat sent is counted twice once the Sent folder
-/// syncs back (`MessageSent`, then `MessageReceived` there); that inflates
-/// every such recipient alike, so the ranking order holds.
+/// don't recount. A message mail-cat sent was counted by `MessageSent`; its
+/// server copy syncing into Sent arrives while that placeholder (no UID, same
+/// Message-ID) still exists, and is not counted again.
 fn note_synced_message(
     tx: &Connection,
+    account_id: &AccountId,
     mailbox_id: &MailboxId,
+    rfc_message_id: Option<&str>,
     envelope: &Envelope,
     at: DateTime<Utc>,
 ) -> Result<(), DomainError> {
@@ -409,7 +412,12 @@ fn note_synced_message(
         |r| r.get::<_, String>(0),
     )?;
     match mailbox_type.as_deref() {
-        Some(t) if t == json(&MailboxType::Sent)? => note_sent(tx, envelope, at),
+        Some(t) if t == json(&MailboxType::Sent)? => {
+            if sent_placeholder_exists(tx, account_id, rfc_message_id)? {
+                return Ok(());
+            }
+            note_sent(tx, envelope, at)
+        }
         Some(t) if t == json(&MailboxType::Drafts)? => Ok(()),
         _ => envelope.from.iter().try_for_each(|a| {
             exec(
@@ -422,6 +430,24 @@ fn note_synced_message(
             .map(drop)
         }),
     }
+}
+
+fn sent_placeholder_exists(
+    tx: &Connection,
+    account_id: &AccountId,
+    rfc_message_id: Option<&str>,
+) -> Result<bool, DomainError> {
+    let Some(rfc_message_id) = rfc_message_id else {
+        return Ok(false);
+    };
+    Ok(query_one(
+        tx,
+        "SELECT 1 FROM messages \
+         WHERE account_id = ?1 AND rfc_message_id = ?2 AND provider_uid IS NULL LIMIT 1",
+        params![account_id.as_uuid(), rfc_message_id],
+        |_| Ok(()),
+    )?
+    .is_some())
 }
 
 fn note_sent(tx: &Connection, envelope: &Envelope, at: DateTime<Utc>) -> Result<(), DomainError> {

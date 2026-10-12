@@ -87,6 +87,9 @@ pub struct ComposeView {
     pub quoted_html: Option<String>,
     pub signature_html: Option<String>,
     pub forwarded_attachments: Vec<ForwardedAttachment>,
+    /// A restored draft's images shown inline (`cid:` in `body_md` or the
+    /// quote), so the editor can display them; empty otherwise.
+    pub inline_images: Vec<OutgoingAttachment>,
     /// For a restored draft this is the mode it was started with, so the
     /// quote and threading are rebuilt on send.
     pub mode: ComposeMode,

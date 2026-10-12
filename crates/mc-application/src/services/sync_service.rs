@@ -17,7 +17,7 @@ use mc_domain::{
     AccountId, AggregateType, Attachment, BackfillEntry, BodyBackfillQueue, DomainError, DomainEvent,
     EmailProvider, EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath, MailboxType,
     MailboxReadRepository, Message, MessageBodyResult, MessageBodyStore, MessageId,
-    MessageEnvelopeSummary, MessageReadRepository,
+    MessageEnvelopeSummary, MessageReadRepository, MessageSummary,
     ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
 };
 use tokio_util::sync::CancellationToken;
@@ -504,9 +504,10 @@ impl<
                 if envelope_summary.flags.contains(&Flag::Deleted) {
                     continue;
                 }
-                if self.already_stored(local, envelope_summary).await {
-                    continue;
-                }
+                let placeholder = match self.local_copy(local, envelope_summary).await {
+                    Some(stored) if stored.provider_uid.is_some() => continue,
+                    other => other,
+                };
 
                 let (_message, event) = Message::receive(
                     *account_id,
@@ -526,6 +527,7 @@ impl<
                     new_messages.push((*message_id, envelope_summary.provider_uid));
                     self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
                         .await?;
+                    self.supersede(placeholder).await?;
                     messages_synced += 1;
                 }
             }
@@ -1034,9 +1036,10 @@ impl<
             if envelope_summary.flags.contains(&Flag::Deleted) {
                 continue;
             }
-            if self.already_stored(&local, envelope_summary).await {
-                continue;
-            }
+            let placeholder = match self.local_copy(&local, envelope_summary).await {
+                Some(stored) if stored.provider_uid.is_some() => continue,
+                other => other,
+            };
 
             let (_message, event) = Message::receive(
                     *account_id,
@@ -1055,6 +1058,7 @@ impl<
                 new_messages.push((*message_id, envelope_summary.provider_uid));
                 self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
                     .await?;
+                self.supersede(placeholder).await?;
                 new_count += 1;
             }
         }
@@ -1134,24 +1138,37 @@ impl<
         self.cancelled.load(Ordering::SeqCst)
     }
 
-    /// Saving a draft APPENDs it and stores it locally right away, so the next
-    /// Drafts sync meets a UID it already has. Scoped to Drafts: a per-envelope
-    /// lookup would be a needless query per message on a big initial sync.
-    async fn already_stored(&self, mailbox: &Mailbox, env: &MessageEnvelopeSummary) -> bool {
-        if mailbox.mailbox_type != MailboxType::Drafts || env.message_rfc_id.is_none() {
-            return false;
+    /// Mail we put on the server ourselves is stored locally before its
+    /// server copy syncs back: a saved draft with the UID APPEND returned, a
+    /// sent message with none (`MessageSent`). Scoped to Drafts and Sent: a
+    /// per-envelope lookup would be a needless query per message on a big
+    /// Inbox sync.
+    async fn local_copy(&self, mailbox: &Mailbox, env: &MessageEnvelopeSummary) -> Option<MessageSummary> {
+        if !matches!(mailbox.mailbox_type, MailboxType::Drafts | MailboxType::Sent) {
+            return None;
         }
-        let Ok(Some(existing)) = self
-            .projector
-            .find_by_provider_uid(&mailbox.id, env.provider_uid.value())
-            .await
-        else {
-            return false;
+        let rfc_id = env.message_rfc_id.as_deref()?;
+        let copies = self.projector.find_by_rfc_id(&mailbox.account_id, rfc_id).await.ok()?;
+        copies.into_iter().find(|m| match m.provider_uid {
+            Some(uid) => m.mailbox_id == mailbox.id && uid == env.provider_uid,
+            None => mailbox.mailbox_type == MailboxType::Sent,
+        })
+    }
+
+    /// The server copy just stored replaces the one shown at send time. Its
+    /// `MessageReceived` came first, so the projector saw the placeholder and
+    /// did not count the recipients again.
+    async fn supersede(&self, placeholder: Option<MessageSummary>) -> Result<(), ApplicationError> {
+        let Some(sent) = placeholder else {
+            return Ok(());
         };
-        matches!(
-            self.projector.get_message(&existing.id).await,
-            Ok(Some(m)) if m.message_rfc_id == env.message_rfc_id
-        )
+        let event = DomainEvent::MessageDeleted {
+            message_id: sent.id,
+            mailbox_id: sent.mailbox_id,
+            permanently: true,
+        };
+        self.append_and_project(&sent.id.to_string(), AggregateType::Message, event)
+            .await
     }
 
     /// Body first, then the event: if the append fails, the backfill queue (drained
@@ -1413,7 +1430,7 @@ mod tests {
     use futures::Stream;
     use mc_domain::{
         Address, AggregateType, DomainError, EmailAddress, Envelope, EventEnvelope, Flag,
-        MailboxStatus, MailboxType, MessageEnvelopeSummary, MessageSummary, OutgoingMessage,
+        MailboxStatus, MailboxType, MessageEnvelopeSummary, OutgoingMessage,
         ProviderNotification,
     };
     use std::pin::Pin;
@@ -1721,6 +1738,7 @@ mod tests {
         checkpoints: Mutex<HashMap<String, u64>>,
         projected_events: Mutex<Vec<DomainEvent>>,
         bodies: Mutex<HashMap<MessageId, StoredBody>>,
+        stored: Mutex<Vec<MessageSummary>>,
     }
 
     impl MockProjector {
@@ -1730,6 +1748,7 @@ mod tests {
                 checkpoints: Mutex::new(HashMap::new()),
                 projected_events: Mutex::new(vec![]),
                 bodies: Mutex::new(HashMap::new()),
+                stored: Mutex::new(vec![]),
             }
         }
 
@@ -1829,6 +1848,14 @@ mod tests {
             _provider_uid: u32,
         ) -> Result<Option<MessageSummary>, DomainError> {
             Ok(None)
+        }
+
+        async fn find_by_rfc_id(
+            &self,
+            _account_id: &AccountId,
+            _rfc_id: &str,
+        ) -> Result<Vec<MessageSummary>, DomainError> {
+            Ok(self.stored.lock().unwrap().clone())
         }
 
         async fn find_unread_by_mailbox(
@@ -2204,6 +2231,53 @@ mod tests {
             .filter(|(_, e)| matches!(e, DomainEvent::MessageReceived { .. }))
             .count();
         assert_eq!(appended_received, 2);
+    }
+
+    #[tokio::test]
+    async fn sent_copy_syncing_back_replaces_the_one_shown_at_send_time() {
+        let account_id = AccountId::new();
+        let (sent, _) = Mailbox::discover(
+            account_id,
+            MailboxPath::new(vec!["Sent".to_string()], '/').unwrap(),
+            MailboxType::Sent,
+        );
+        let placeholder = MessageSummary {
+            id: MessageId::new(),
+            account_id,
+            mailbox_id: sent.id,
+            provider_uid: None,
+            from_name: None,
+            from_email: "sender@example.com".into(),
+            to: vec![],
+            cc: vec![],
+            subject: "Test Subject".into(),
+            flags: vec![Flag::Seen],
+            size_bytes: 0,
+            has_attachments: false,
+            received_at: chrono::Utc::now(),
+        };
+        let mut server_copy = make_envelope_summary(7);
+        server_copy.message_rfc_id = Some("<sent@example.com>".into());
+
+        let projector = Arc::new(MockProjector::new());
+        projector.stored.lock().unwrap().push(placeholder.clone());
+        let provider = MockEmailProvider::new().with_mailboxes(vec![sent]).with_envelopes(vec![server_copy]);
+        let service = make_service(provider, Arc::new(MockEventStore::new()), projector.clone());
+        service.start_sync(&account_id).await.unwrap();
+
+        let message_events: Vec<_> = projector
+            .projected_events()
+            .into_iter()
+            .filter(|e| matches!(e, DomainEvent::MessageReceived { .. } | DomainEvent::MessageDeleted { .. }))
+            .collect();
+        assert!(
+            matches!(
+                message_events.as_slice(),
+                [DomainEvent::MessageReceived { .. }, DomainEvent::MessageDeleted { message_id, .. }]
+                    if *message_id == placeholder.id
+            ),
+            "server copy stored, then the placeholder dropped: {message_events:?}"
+        );
     }
 
     #[tokio::test]

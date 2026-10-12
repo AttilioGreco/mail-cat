@@ -235,6 +235,14 @@ mod tests {
         ) -> Result<Option<MessageSummary>, DomainError> {
             Ok(None)
         }
+        async fn find_by_rfc_id(
+            &self,
+            _account_id: &AccountId,
+            _rfc_id: &str,
+        ) -> Result<Vec<MessageSummary>, DomainError> {
+            Ok(vec![])
+        }
+
         async fn find_unread_by_mailbox(
             &self,
             _m: &MailboxId,

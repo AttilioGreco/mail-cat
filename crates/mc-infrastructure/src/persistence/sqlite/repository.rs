@@ -732,6 +732,24 @@ impl MessageReadRepository for SqliteRepository {
             .await
     }
 
+    async fn find_by_rfc_id(
+        &self,
+        account_id: &AccountId,
+        rfc_id: &str,
+    ) -> Result<Vec<MessageSummary>, DomainError> {
+        let (account, rfc_id) = (*account_id.as_uuid(), rfc_id.to_owned());
+        self.db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    &select_messages("WHERE m.account_id = ?1 AND m.rfc_message_id = ?2"),
+                    params![account, rfc_id],
+                    summary_from_row,
+                )
+            })
+            .await
+    }
+
     async fn find_unread_by_mailbox(
         &self,
         mailbox_id: &MailboxId,
@@ -1287,6 +1305,71 @@ mod tests {
             usage,
             [("ada@example.com".into(), 2, true, false), ("bob@example.com".into(), 0, false, true)]
         );
+    }
+
+    #[tokio::test]
+    async fn sent_message_syncing_back_is_one_message_counted_once() {
+        let (_dir, repo) = open();
+        let (account, sent) = (AccountId::new(), MailboxId::new());
+        let rfc = "<sent@example.com>";
+        let ada = vec![Address { name: None, email: EmailAddress::new("ada@example.com").unwrap() }];
+        let placeholder = MessageId::new();
+        let (server_copy, mut synced) = received(account, sent, rfc);
+        if let DomainEvent::MessageReceived { envelope, .. } = &mut synced {
+            envelope.to = ada.clone();
+        }
+        let events = [
+            DomainEvent::MailboxDiscovered {
+                mailbox_id: sent,
+                account_id: account,
+                path: MailboxPath::parse("Sent", '/').unwrap(),
+                mailbox_type: MailboxType::Sent,
+            },
+            DomainEvent::MessageSent {
+                message_id: placeholder,
+                account_id: account,
+                mailbox_id: sent,
+                envelope: Envelope {
+                    from: vec![],
+                    to: ada,
+                    cc: vec![],
+                    bcc: vec![],
+                    reply_to: vec![],
+                    subject: "s".into(),
+                    date: Utc::now(),
+                },
+                message_rfc_id: Some(rfc.into()),
+                in_reply_to: None,
+                references: vec![],
+                body_text: Some("hi".into()),
+                body_html: None,
+                sent_at: Utc::now(),
+            },
+            // What SyncService emits when the server copy reaches Sent.
+            synced,
+            DomainEvent::MessageDeleted { message_id: placeholder, mailbox_id: sent, permanently: true },
+        ];
+        for (pos, event) in (1..).zip(events) {
+            repo.project(&at_position(pos, event)).await.unwrap();
+        }
+
+        let listed = repo.list_messages(&sent, &Pagination { page: 1, page_size: 10 }).await.unwrap();
+        assert_eq!(listed.items.iter().map(|m| m.id).collect::<Vec<_>>(), [server_copy]);
+        let (sent_count, conversations): (i64, i64) = repo
+            .db
+            .read(|c| {
+                Ok((
+                    c.query_row("SELECT sent_count FROM address_usage WHERE email = 'ada@example.com'", [], |r| {
+                        r.get(0)
+                    })
+                    .map_err(repo_err)?,
+                    c.query_row("SELECT SUM(message_count) FROM conversations", [], |r| r.get(0))
+                        .map_err(repo_err)?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!((sent_count, conversations), (1, 1));
     }
 
     #[tokio::test]

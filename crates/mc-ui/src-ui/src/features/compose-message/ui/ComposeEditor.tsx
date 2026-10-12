@@ -17,7 +17,7 @@ import { v4 as uuidv4 } from 'uuid';
 interface ComposeEditorProps {
   initialMd?: string;
   onMdChange?: (md: string) => void;
-  onImagesChange?: (images: InlineImage[]) => void;
+  onImageAdd?: (image: InlineImage) => void;
   onSend?: () => void;
   onSaveDraft?: () => void;
   onAttach?: () => void;
@@ -271,7 +271,7 @@ function PreviewPane({ markdown: md, quotedHtml, signatureHtml }: {
 export function ComposeEditor({
   initialMd = '',
   onMdChange,
-  onImagesChange,
+  onImageAdd,
   onSend,
   onSaveDraft,
   onAttach = () => {},
@@ -284,7 +284,6 @@ export function ComposeEditor({
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [currentMd, setCurrentMd] = useState(initialMd);
   const cmRef = useRef<ReactCodeMirrorRef>(null);
-  const imagesRef = useRef<Map<string, InlineImage>>(new Map());
 
   // ── Helper: insert/wrap text at cursor via CodeMirror API ─────────────────
 
@@ -323,11 +322,10 @@ export function ComposeEditor({
       const cid = `${uuidv4()}@compose`;
       const result = await processImageFile(file, () => cid);
       if (result.error !== undefined) { onError?.(result.error); continue; }
-      imagesRef.current.set(result.image.cid, result.image);
-      onImagesChange?.(Array.from(imagesRef.current.values()));
+      onImageAdd?.(result.image);
       setCurrentMd((prev) => { const n = prev + '\n' + result.markdown + '\n'; onMdChange?.(n); return n; });
     }
-  }, [onMdChange, onImagesChange, onError]);
+  }, [onMdChange, onImageAdd, onError]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     const files = extractImageFiles(e.dataTransfer);

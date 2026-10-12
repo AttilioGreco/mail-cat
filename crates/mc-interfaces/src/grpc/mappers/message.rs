@@ -181,6 +181,13 @@ pub fn compose_view_to_proto(view: ComposeView) -> proto::ComposeView {
                 mime_type: a.mime_type,
             })
             .collect(),
+        inline_images: view
+            .inline_images
+            .into_iter()
+            .filter_map(|a| {
+                Some(proto::InlineImage { content_id: a.content_id?, mime_type: a.mime_type, data: a.data })
+            })
+            .collect(),
         mode: view.mode.as_str().to_owned(),
         source_message_id: view.source_message_id.map(|id| id.to_string()),
     }

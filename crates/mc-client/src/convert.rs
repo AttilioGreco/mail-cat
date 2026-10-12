@@ -281,6 +281,11 @@ pub fn compose_view_from_proto(v: pb::ComposeView) -> ComposeView {
                 mime_type: a.mime_type,
             })
             .collect(),
+        inline_images: v
+            .inline_images
+            .into_iter()
+            .map(|i| InlineImage { content_id: i.content_id, mime_type: i.mime_type, data: i.data })
+            .collect(),
         mode: v.mode,
         source_message_id: v.source_message_id,
     }

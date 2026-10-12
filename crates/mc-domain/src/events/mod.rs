@@ -224,6 +224,10 @@ pub enum DomainEvent {
         #[serde(default)]
         mailbox_id: MailboxId,
         envelope: Envelope,
+        /// The Message-ID we sent with, so the server copy that later syncs
+        /// into Sent replaces this one instead of showing up beside it.
+        #[serde(default)]
+        message_rfc_id: Option<String>,
         #[serde(default)]
         in_reply_to: Option<String>,
         #[serde(default)]

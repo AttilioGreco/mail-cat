@@ -125,6 +125,13 @@ pub trait MessageReadRepository: Send + Sync {
         provider_uid: u32,
     ) -> Result<Option<MessageSummary>, DomainError>;
 
+    /// Every copy of an RFC Message-ID (`<…>`) stored for an account.
+    async fn find_by_rfc_id(
+        &self,
+        account_id: &AccountId,
+        rfc_id: &str,
+    ) -> Result<Vec<MessageSummary>, DomainError>;
+
     /// All unread (no `Seen` flag) message summaries in a mailbox.
     async fn find_unread_by_mailbox(
         &self,

@@ -31,6 +31,8 @@ export interface ComposeDto {
   quotedHtml: string | null;
   signatureHtml: string | null;
   forwardedAttachments: ForwardedAttachment[];
+  /** A reopened draft's inline images, referenced as cid:<contentId>; empty otherwise. */
+  inlineImages: { contentId: string; mimeType: string; dataBase64: string }[];
   mode: ComposeMode;
   sourceMessageId: string | null;
 }

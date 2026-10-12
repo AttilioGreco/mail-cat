@@ -952,6 +952,14 @@ pub struct ForwardedAttachmentDto {
     pub mime_type: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineImageDto {
+    pub content_id: String,
+    pub mime_type: String,
+    pub data_base64: String,
+}
+
 /// Starting state of the compose window; every default is computed server-side.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -967,6 +975,7 @@ pub struct ComposeDto {
     pub quoted_html: Option<String>,
     pub signature_html: Option<String>,
     pub forwarded_attachments: Vec<ForwardedAttachmentDto>,
+    pub inline_images: Vec<InlineImageDto>,
     pub mode: String,
     pub source_message_id: Option<String>,
 }
@@ -1058,6 +1067,15 @@ fn compose_to_dto(v: ComposeView) -> ComposeDto {
                 filename: a.filename,
                 size: a.size,
                 mime_type: a.mime_type,
+            })
+            .collect(),
+        inline_images: v
+            .inline_images
+            .into_iter()
+            .map(|i| InlineImageDto {
+                content_id: i.content_id,
+                mime_type: i.mime_type,
+                data_base64: BASE64.encode(i.data),
             })
             .collect(),
         mode: v.mode,

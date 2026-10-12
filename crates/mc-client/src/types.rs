@@ -181,6 +181,14 @@ pub struct ForwardedAttachment {
     pub mime_type: String,
 }
 
+/// Image a restored draft shows inline, referenced as `cid:<content_id>`.
+#[derive(Debug, Clone)]
+pub struct InlineImage {
+    pub content_id: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
 /// Starting state of the compose window, computed by the server.
 #[derive(Debug, Clone)]
 pub struct ComposeView {
@@ -195,6 +203,7 @@ pub struct ComposeView {
     pub quoted_html: Option<String>,
     pub signature_html: Option<String>,
     pub forwarded_attachments: Vec<ForwardedAttachment>,
+    pub inline_images: Vec<InlineImage>,
     /// "new" | "reply" | "replyAll" | "forward" | "draft"
     pub mode: String,
     pub source_message_id: Option<String>,

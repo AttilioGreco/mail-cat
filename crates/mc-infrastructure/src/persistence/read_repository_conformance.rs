@@ -925,6 +925,7 @@ macro_rules! read_repository_conformance {
                 1,
                 DomainEvent::MessageSent {
                     message_id: reply_id,
+                    message_rfc_id: None,
                     account_id,
                     mailbox_id: sent_mailbox_id,
                     envelope: test_envelope(),
@@ -1413,6 +1414,7 @@ macro_rules! read_repository_conformance {
             };
             let send_to = |to: &str, minutes| DomainEvent::MessageSent {
                 message_id: MessageId::new(),
+                message_rfc_id: None,
                 account_id: account,
                 mailbox_id: sent,
                 envelope: mail("me@example.com", to),
@@ -1659,6 +1661,7 @@ macro_rules! read_repository_conformance {
                     DomainEvent::MessageDeleted { message_id: gone, mailbox_id: inbox, permanently: false },
                     DomainEvent::MessageSent {
                         message_id: sent,
+                        message_rfc_id: None,
                         account_id: account,
                         mailbox_id: archive,
                         envelope: test_envelope(),
@@ -1769,6 +1772,7 @@ macro_rules! read_repository_conformance {
                     DomainEvent::MessageMoved { message_id: roamer, from_mailbox_id: trash, to_mailbox_id: archive },
                     DomainEvent::MessageSent {
                         message_id: sent,
+                        message_rfc_id: None,
                         account_id: account,
                         mailbox_id: archive,
                         envelope: test_envelope(),

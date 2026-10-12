@@ -245,6 +245,13 @@ message ForwardedAttachment {
   string mime_type = 4;
 }
 
+// Image a restored draft shows inline, referenced as cid:<content_id>.
+message InlineImage {
+  string content_id = 1;
+  string mime_type = 2;
+  bytes data = 3;
+}
+
 message ComposeView {
   optional string draft_id = 1;
   string account_id = 2;
@@ -259,6 +266,7 @@ message ComposeView {
   repeated ForwardedAttachment forwarded_attachments = 11;
   string mode = 12;
   optional string source_message_id = 13;
+  repeated InlineImage inline_images = 14;
 }
 
 message ComposeAttachment {

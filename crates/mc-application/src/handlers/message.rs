@@ -550,6 +550,7 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
             quoted_html: None,
             signature_html: None,
             forwarded_attachments: vec![],
+            inline_images: vec![],
             mode,
             source_message_id: None,
         };
@@ -628,6 +629,8 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
             }
         }
         view.forwarded_attachments = compose::listable_parts(id, &parsed, &shown_html);
+        view.inline_images =
+            parsed.parts.into_iter().filter(|p| compose::referenced_inline(p, &shown_html)).collect();
         Ok(())
     }
 
@@ -670,6 +673,7 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
             account_id: account.id,
             mailbox_id: sent.map_or_else(MailboxId::new, |m| m.id),
             envelope: outgoing_envelope(&outgoing),
+            message_rfc_id: outgoing.message_rfc_id.clone(),
             in_reply_to: outgoing.in_reply_to.clone(),
             references: outgoing.references.clone(),
             body_text: outgoing.body_text.clone(),
@@ -1354,6 +1358,14 @@ mod tests {
             Ok(None)
         }
 
+        async fn find_by_rfc_id(
+            &self,
+            _account_id: &AccountId,
+            _rfc_id: &str,
+        ) -> Result<Vec<mc_domain::MessageSummary>, DomainError> {
+            Ok(vec![])
+        }
+
         async fn find_unread_by_mailbox(
             &self,
             _mailbox_id: &MailboxId,
@@ -1978,7 +1990,7 @@ mod tests {
     async fn draft_restores_markdown_recipients_and_attachments() {
         let f = fixture("imap.example.com", |account, inbox| Some(source_message(account, inbox)));
         let draft = f.seeded.clone().unwrap();
-        let headers: String = compose::draft_headers(ComposeMode::Forward, None, "**ciao**\nriga")
+        let headers: String = compose::draft_headers(ComposeMode::Forward, None, "**ciao**\n![](cid:img@x)")
             .into_iter()
             .map(|(k, v)| format!("{k}: {v}\r\n"))
             .collect();
@@ -1987,6 +1999,7 @@ mod tests {
 Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
 --M\r\nContent-Type: text/plain\r\n\r\nciao\r\n\
 --M\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\n\r\nPDF\r\n\
+--M\r\nContent-Type: image/png\r\nContent-ID: <img@x>\r\n\r\nPNG\r\n\
 --M--\r\n"
         )
         .into_bytes();
@@ -2000,13 +2013,16 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
             panic!("expected ComposePrepared");
         };
         assert_eq!(view.draft_id, Some(draft.id));
-        assert_eq!(view.body_md, "**ciao**\nriga");
+        assert_eq!(view.body_md, "**ciao**\n![](cid:img@x)");
         assert_eq!(view.to, ["Anna <anna@example.com>"]);
         assert_eq!(view.bcc, ["b@example.com"]);
         assert_eq!(view.subject, "Bozza");
         // A forward whose original is unknown carries on as a new message.
         assert_eq!(view.mode, ComposeMode::New);
         assert_eq!(view.forwarded_attachments.len(), 1);
+        let inline: Vec<_> =
+            view.inline_images.iter().map(|i| (i.content_id.as_deref(), i.data.as_slice())).collect();
+        assert_eq!(inline, [(Some("img@x"), &b"PNG"[..])]);
     }
 
     #[tokio::test]

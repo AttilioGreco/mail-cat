@@ -99,8 +99,11 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
   const [accountId, setAccountId] = useState(dto.accountId);
   const [recipients, setRecipients] = useState<Recipients>({ to: dto.to, cc: dto.cc, bcc: dto.bcc });
   const [subject, setSubject] = useState(dto.subject);
-  const [bodyMd, setBodyMd] = useState(dto.bodyMd);
-  const [images, setImages] = useState<InlineImage[]>([]);
+  // A reopened draft's images: the editor shows them via blob URLs, swapped
+  // back to the same cid: on save/send.
+  const [initial] = useState(() => restoreInlineImages(dto));
+  const [bodyMd, setBodyMd] = useState(initial.md);
+  const [images, setImages] = useState(initial.images);
   const [files, setFiles] = useState<File[]>([]);
   const [forwarded, setForwarded] = useState(dto.forwardedAttachments);
   const [confirm, setConfirm] = useState<'close' | 'subject' | null>(null);
@@ -127,7 +130,7 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
   const hasInvalid = all.some((a) => !isValidAddress(a));
   const dirty =
     !sameList(to, dto.to) || !sameList(cc, dto.cc) || !sameList(bcc, dto.bcc) ||
-    subject !== dto.subject || bodyMd !== dto.bodyMd ||
+    subject !== dto.subject || bodyMd !== initial.md ||
     files.length > 0 || forwarded.length !== dto.forwardedAttachments.length;
 
   const identity = dto.identities.find((i) => i.accountId === accountId);
@@ -314,9 +317,9 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
 
       <Suspense fallback={<div className="flex flex-1 items-center justify-center text-sm text-muted">Caricamento editor…</div>}>
         <ComposeEditor
-          initialMd={dto.bodyMd}
+          initialMd={initial.md}
           onMdChange={setBodyMd}
-          onImagesChange={setImages}
+          onImageAdd={(image) => setImages((prev) => [...prev, image])}
           onSend={() => void send()}
           onSaveDraft={() => void saveNow()}
           onAttach={() => fileInput.current?.click()}
@@ -420,6 +423,16 @@ function AttachmentChip({ icon, name, size, onRemove }: {
       </button>
     </div>
   );
+}
+
+function restoreInlineImages(dto: ComposeDto): { md: string; images: InlineImage[] } {
+  const images = dto.inlineImages.map(({ contentId, mimeType, dataBase64 }) => {
+    const bytes = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: mimeType });
+    return { cid: contentId, blob, mimeType, url: URL.createObjectURL(blob) };
+  });
+  const md = images.reduce((acc, i) => acc.split(`cid:${i.cid}`).join(i.url), dto.bodyMd);
+  return { md, images };
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((v, i) => v === b[i]);
