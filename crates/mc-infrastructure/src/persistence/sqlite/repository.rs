@@ -667,7 +667,7 @@ impl MessageReadRepository for SqliteRepository {
                 query_one(
                     conn,
                     &select_messages(
-                        "WHERE m.mailbox_id = ?1 AND m.provider_uid = ?2 ORDER BY m.received_at DESC LIMIT 1",
+                        "WHERE m.mailbox_id = ?1 AND m.provider_uid = ?2 ORDER BY m.received_at DESC, m.id DESC LIMIT 1",
                     ),
                     params![mailbox, provider_uid],
                     summary_from_row,
@@ -1107,6 +1107,24 @@ mod tests {
             .unwrap()
             .expect("the other copy still holds the thread");
         assert_eq!(conv.message_count, 1);
+    }
+
+    #[tokio::test]
+    async fn uid_lookup_breaks_received_at_ties_by_newest_id() {
+        let (_dir, repo) = open();
+        let (account, inbox, received_at) = (AccountId::new(), MailboxId::new(), Utc::now());
+        let mut ids = Vec::new();
+        for pos in 1..=2 {
+            let (id, mut event) = received(account, inbox, &format!("<{pos}@x>"));
+            if let DomainEvent::MessageReceived { received_at: at, .. } = &mut event {
+                *at = received_at;
+            }
+            repo.project(&at_position(pos, event)).await.unwrap();
+            ids.push(id);
+        }
+
+        let found = repo.find_by_provider_uid(&inbox, 1).await.unwrap().unwrap();
+        assert_eq!(found.id, ids[1]);
     }
 
     #[tokio::test]

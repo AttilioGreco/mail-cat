@@ -364,12 +364,13 @@ Tracked here so later plans pick them up. Tick when done (with commit).
 - [ ] Flag order is not replay-stable (both backends): remove-then-re-add moves a flag to
   the end, so a replay can turn `[Seen, Flagged]` into `[Flagged, Seen]`. Equal as a set;
   keep flags in a canonical order if the order ever matters.
-- [ ] Conformance replay test only replays the whole log; add an every-suffix replay
+- [x] Conformance replay test only replays the whole log; add an every-suffix replay
   (thread with remaining messages, one RFC copy deleted, double move, rename, contact
   merge/remove) before plan 5 touches wiring.
 - [ ] SQLite `ContactAdded` with no emails fails the batch (`primary_email`); sled falls back
   to `unknown@unknown`. Unreachable (domain validates since ddcd561), recheck in the plan 5 migrator.
-- [ ] `find_by_provider_uid` on SQLite: add `m.id DESC` tie-break for equal `received_at`.
+- [x] `find_by_provider_uid` on SQLite: add `m.id DESC` tie-break for equal `received_at`
+  (newest-minted wins; sled returns the older id on a tie, gone in plan 5).
 
 **Out of scope of the migration, decided 2026-10-10:**
 - [ ] Search features (operators, filters, sort) — own spec; index schema ready after plan 4.

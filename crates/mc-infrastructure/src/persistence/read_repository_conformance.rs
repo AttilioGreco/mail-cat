@@ -1624,6 +1624,114 @@ macro_rules! read_repository_conformance {
                 "replaying the received+deleted pair must not move the badge"
             );
         }
+
+        /// Catch-up starts wherever the last checkpoint was, so replaying any
+        /// suffix of the log over live state must change nothing.
+        #[tokio::test]
+        async fn replaying_any_suffix_over_live_state_changes_nothing() {
+            let (_guard, store, repo) = $make;
+            let (account, inbox, trash, archive, labels) =
+                (AccountId::new(), MailboxId::new(), MailboxId::new(), MailboxId::new(), MailboxId::new());
+            let (root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
+            let (mid, e_mid) = received(account, inbox, 2, Some("<mid@x>"), &["<root@x>"], false, at(10));
+            let (newest, e_newest) = received(account, inbox, 3, Some("<new@x>"), &["<root@x>"], false, at(20));
+            let (copy_a, e_copy_a) = received(account, inbox, 4, Some("<copy@x>"), &[], false, at(30));
+            let (_copy_b, e_copy_b) = received(account, labels, 9, Some("<copy@x>"), &[], false, at(30));
+            let (roamer, e_roamer) = received(account, inbox, 5, Some("<roam@x>"), &[], false, at(40));
+            let sent = MessageId::new();
+            let (kept, merged, removed) = (ContactId::new(), ContactId::new(), ContactId::new());
+            let contact = |id: ContactId, raw: &str| DomainEvent::ContactAdded {
+                contact_id: id,
+                display_name: raw.into(),
+                emails: vec![ContactEmail::primary(email(raw))],
+                source: ContactSource::LocalEmail,
+                external_id: None,
+                account_scope: Some(account),
+            };
+            let log = append_all(
+                store.as_ref(),
+                vec![
+                    DomainEvent::AccountAdded {
+                        account_id: account,
+                        name: "Work".into(),
+                        email: email("me@example.com"),
+                        provider_type: ProviderType::Imap,
+                    },
+                    discovered(account, inbox, "INBOX"),
+                    discovered(account, trash, "Trash"),
+                    discovered(account, archive, "Archive"),
+                    discovered(account, labels, "Labels"),
+                    DomainEvent::MailboxRenamed {
+                        mailbox_id: archive,
+                        old_path: MailboxPath::parse("Archive", '/').unwrap(),
+                        new_path: MailboxPath::parse("Old/Archive", '/').unwrap(),
+                    },
+                    e_root,
+                    e_mid,
+                    e_newest,
+                    e_copy_a,
+                    e_copy_b,
+                    e_roamer,
+                    DomainEvent::MessageBodyFetched { message_id: root, attachments: vec![] },
+                    flagged(mid, inbox, vec![Flag::Seen], vec![]),
+                    flagged(mid, inbox, vec![], vec![Flag::Seen]),
+                    flagged(mid, inbox, vec![Flag::Seen], vec![]),
+                    DomainEvent::MessageDeleted { message_id: newest, mailbox_id: inbox, permanently: false },
+                    DomainEvent::MessageDeleted { message_id: copy_a, mailbox_id: inbox, permanently: false },
+                    DomainEvent::MessageMoved { message_id: roamer, from_mailbox_id: inbox, to_mailbox_id: trash },
+                    DomainEvent::MessageMoved { message_id: roamer, from_mailbox_id: trash, to_mailbox_id: archive },
+                    DomainEvent::MessageSent {
+                        message_id: sent,
+                        account_id: account,
+                        mailbox_id: archive,
+                        envelope: test_envelope(),
+                        in_reply_to: Some("<root@x>".into()),
+                        references: vec!["<root@x>".into()],
+                        body_text: Some("thanks".into()),
+                        body_html: None,
+                        sent_at: at(50),
+                    },
+                    flagged(sent, archive, vec![], vec![Flag::Seen]),
+                    contact(kept, "ada@example.com"),
+                    contact(merged, "ada@work.example.com"),
+                    DomainEvent::ContactMerged {
+                        kept_id: kept,
+                        discarded_id: merged,
+                        merged_emails: vec![
+                            ContactEmail::primary(email("ada@example.com")),
+                            ContactEmail::new(email("ada@work.example.com"), ContactEmailLabel::Work, false),
+                        ],
+                    },
+                    contact(removed, "bob@example.com"),
+                    DomainEvent::ContactRemoved { contact_id: removed },
+                ],
+            )
+            .await;
+            for event in &log {
+                repo.project(event).await.unwrap();
+            }
+            repo.put_body(&root, Some("hello".into()), None).await.unwrap();
+            let mailboxes = [inbox, trash, archive, labels];
+            let state = || async {
+                let mut out = snapshot(&repo, &account, &mailboxes).await;
+                for id in [root, mid, roamer, sent] {
+                    out += &format!("{:?}\n", repo.get_message(&id).await.unwrap());
+                }
+                out += &format!("{:?}\n", repo.get_thread(&root).await.unwrap());
+                for raw in ["ada@example.com", "ada@work.example.com", "bob@example.com"] {
+                    out += &format!("{:?}\n", repo.find_by_email(&email(raw)).await.unwrap());
+                }
+                out
+            };
+            let live = state().await;
+
+            for from in 0..log.len() {
+                for event in &log[from..] {
+                    repo.project(event).await.unwrap();
+                }
+                assert_eq!(state().await, live, "replay from log[{from}..] changed the read model");
+            }
+        }
     };
 }
 
