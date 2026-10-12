@@ -11,7 +11,9 @@ pub mod oauth;
 
 // Re-exports for ergonomics
 pub use email::{ImapAccountEventSource, ImapEmailProvider, SmtpSender};
-pub use persistence::{SharedSledRepository, SledEventStore, SledRepository, SqliteEventStore};
+pub use persistence::{
+    SharedSledRepository, SledEventStore, SledRepository, SqliteEventStore, SqliteRepository,
+};
 pub use provider_registry::InMemoryProviderRegistry;
 pub use search::{TantivyContactIndex, TantivySearchIndex};
 pub use secret::KeyringSecretStore;

@@ -8,3 +8,4 @@ pub mod sqlite;
 pub use self::sled::event_store::SledEventStore;
 pub use self::sled::read_repository::{SharedSledRepository, SledRepository};
 pub use self::sqlite::event_store::SqliteEventStore;
+pub use self::sqlite::repository::SqliteRepository;

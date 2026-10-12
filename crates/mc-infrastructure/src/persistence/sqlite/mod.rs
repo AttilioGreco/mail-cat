@@ -7,6 +7,8 @@ use mc_domain::DomainError;
 use rusqlite::{Connection, OpenFlags};
 
 pub mod event_store;
+mod projector;
+pub mod repository;
 
 /// Schema migrations, applied in order; `PRAGMA user_version` counts how many
 /// have run. Append only — a shipped migration is never edited.
@@ -22,6 +24,96 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         occurred_at     INTEGER NOT NULL,
         payload         BLOB    NOT NULL,
         UNIQUE (aggregate_id, sequence)
+    );",
+    // 2: read model (spec §4). No FK from mailboxes to accounts and no UNIQUE
+    // (mailbox, uid): catch-up replays events over rows in any later state,
+    // and either constraint would turn a harmless replay into a boot failure.
+    "CREATE TABLE accounts (
+        id            BLOB PRIMARY KEY,
+        name          TEXT NOT NULL,
+        email         TEXT NOT NULL,
+        provider_type TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        total_unread  INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE mailboxes (
+        id              BLOB PRIMARY KEY,
+        account_id      BLOB NOT NULL,
+        path            TEXT NOT NULL,
+        delimiter       TEXT NOT NULL,
+        display_name    TEXT NOT NULL,
+        mailbox_type    TEXT NOT NULL,
+        flags           TEXT NOT NULL,
+        total_messages  INTEGER NOT NULL DEFAULT 0,
+        unread_messages INTEGER NOT NULL DEFAULT 0,
+        uid_validity    INTEGER,
+        uid_next        INTEGER
+    );
+    CREATE INDEX mailboxes_account ON mailboxes(account_id);
+    CREATE TABLE messages (
+        id              BLOB PRIMARY KEY,
+        account_id      BLOB NOT NULL,
+        mailbox_id      BLOB,
+        provider_uid    INTEGER,
+        rfc_message_id  TEXT,
+        in_reply_to     TEXT,
+        refs            TEXT NOT NULL,
+        thread_id       TEXT,
+        subject         TEXT NOT NULL,
+        from_name       TEXT,
+        from_email      TEXT NOT NULL,
+        addresses       TEXT NOT NULL,
+        flags           TEXT NOT NULL,
+        seen            INTEGER NOT NULL,
+        size_bytes      INTEGER NOT NULL,
+        has_attachments INTEGER NOT NULL,
+        attachments     TEXT NOT NULL,
+        sent_at         INTEGER NOT NULL,
+        received_at     INTEGER NOT NULL,
+        internal_date   INTEGER NOT NULL,
+        body_state      TEXT NOT NULL DEFAULT 'pending'
+    );
+    CREATE INDEX messages_mailbox_date ON messages(mailbox_id, received_at DESC);
+    CREATE INDEX messages_mailbox_uid ON messages(mailbox_id, provider_uid);
+    CREATE INDEX messages_thread ON messages(account_id, thread_id, received_at);
+    CREATE INDEX messages_rfc ON messages(account_id, rfc_message_id);
+    CREATE INDEX messages_backfill ON messages(account_id, received_at DESC) WHERE body_state = 'pending';
+    CREATE INDEX messages_unread ON messages(mailbox_id) WHERE seen = 0;
+    CREATE TABLE message_bodies (
+        message_id BLOB PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        text_zstd  BLOB,
+        html_zstd  BLOB,
+        fetched_at INTEGER NOT NULL
+    );
+    CREATE TABLE conversations (
+        account_id        BLOB NOT NULL,
+        thread_id         TEXT NOT NULL,
+        subject           TEXT NOT NULL,
+        message_count     INTEGER NOT NULL,
+        unread_count      INTEGER NOT NULL,
+        last_message_at   INTEGER NOT NULL,
+        latest_sender     TEXT NOT NULL,
+        sample_message_id BLOB NOT NULL,
+        PRIMARY KEY (account_id, thread_id)
+    );
+    CREATE INDEX conversations_recent ON conversations(account_id, last_message_at DESC);
+    CREATE TABLE contacts (
+        id            BLOB PRIMARY KEY,
+        display_name  TEXT NOT NULL,
+        primary_email TEXT NOT NULL,
+        organization  TEXT,
+        source        TEXT NOT NULL,
+        account_scope BLOB,
+        emails        TEXT NOT NULL
+    );
+    CREATE TABLE contact_emails (
+        email      TEXT NOT NULL,
+        contact_id BLOB NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+        PRIMARY KEY (email, contact_id)
+    );
+    CREATE TABLE projection_checkpoints (
+        name     TEXT PRIMARY KEY,
+        position INTEGER NOT NULL
     );",
 ];
 

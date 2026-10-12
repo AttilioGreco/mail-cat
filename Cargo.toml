@@ -56,7 +56,8 @@ url = "2"
 
 # Storage
 sled = "0.34"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "uuid"] }
+zstd = "0.13"
 
 # Search
 tantivy = "0.26"
