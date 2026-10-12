@@ -2,13 +2,15 @@
 
 macro_rules! read_repository_conformance {
     ($make:expr) => {
+        use futures::TryStreamExt;
         use mc_domain::{
             Account, AccountId, AccountReadRepository, AccountStatus, AccountSyncStats,
             AccountWriteRepository, Address, AggregateType, AuthConfig, BodyBackfillQueue,
-            ConnectionConfig, DomainEvent, EmailAddress, Envelope, EventEnvelope, Flag, Identity,
-            MailboxId, MailboxPath, MailboxReadRepository, MailboxType, MessageBodyStore,
-            MessageId, MessageReadRepository, ProjectionCheckpoint, ProviderType, ProviderUid,
-            ReadModelProjector,
+            ConnectionConfig, ContactEmail, ContactEmailLabel, ContactId, ContactReadRepository,
+            ContactSource, ConversationReadRepository, DomainEvent, EmailAddress, Envelope,
+            EventEnvelope, EventStore, Flag, Identity, MailboxId, MailboxPath,
+            MailboxReadRepository, MailboxType, MessageBodyStore, MessageId, MessageReadRepository,
+            ProjectionCheckpoint, ProviderType, ProviderUid, ReadModelProjector, ThreadId,
         };
         use mc_shared::pagination::Pagination;
 
@@ -466,11 +468,6 @@ macro_rules! read_repository_conformance {
                     path: MailboxPath::inbox(),
                     mailbox_type: MailboxType::Inbox,
                 },
-                DomainEvent::MailboxCountsUpdated {
-                    mailbox_id,
-                    total_messages: 1,
-                    unread_messages: 1,
-                },
                 DomainEvent::MessageReceived {
                     message_id,
                     account_id,
@@ -484,6 +481,11 @@ macro_rules! read_repository_conformance {
                     in_reply_to: None,
                     references: vec![],
                     received_at: chrono::Utc::now(),
+                },
+                DomainEvent::MailboxCountsUpdated {
+                    mailbox_id,
+                    total_messages: 1,
+                    unread_messages: 1,
                 },
             ]
             .into_iter()
@@ -1102,6 +1104,525 @@ macro_rules! read_repository_conformance {
 
             assert_eq!(body_text(&repo, &message_id).await.as_deref(), Some("plain"));
             assert_eq!(repo.count_pending_backfill(&account_id).await.unwrap(), 0);
+        }
+
+        /// Fixed clock: minutes after an arbitrary epoch, so orderings are exact.
+        fn at(minutes: i64) -> chrono::DateTime<chrono::Utc> {
+            chrono::DateTime::from_timestamp(1_760_000_000 + minutes * 60, 0).unwrap()
+        }
+
+        /// Projection ignores aggregate id and sequence.
+        fn env_of(event: DomainEvent) -> EventEnvelope {
+            make_event_envelope(1, "agg", event.aggregate_type(), 1, event)
+        }
+
+        async fn project_all(
+            repo: &impl ReadModelProjector,
+            events: impl IntoIterator<Item = DomainEvent>,
+        ) {
+            for event in events {
+                repo.project(&env_of(event)).await.unwrap();
+            }
+        }
+
+        /// Appends to the real store (one aggregate per type) and returns the
+        /// log as the store numbered it.
+        async fn append_all<ES: EventStore>(store: &ES, events: Vec<DomainEvent>) -> Vec<EventEnvelope> {
+            for event in events {
+                let ty = event.aggregate_type();
+                let id = ty.to_string();
+                let seq = store.current_sequence(&id).await.unwrap();
+                store.append(&id, ty, seq, vec![event]).await.unwrap();
+            }
+            store.load_all_events(None, 0).try_collect().await.unwrap()
+        }
+
+        fn received(
+            account_id: AccountId,
+            mailbox_id: MailboxId,
+            uid: u32,
+            rfc: Option<&str>,
+            references: &[&str],
+            seen: bool,
+            received_at: chrono::DateTime<chrono::Utc>,
+        ) -> (MessageId, DomainEvent) {
+            let message_id = MessageId::new();
+            let mut envelope = test_envelope();
+            envelope.date = received_at;
+            let event = DomainEvent::MessageReceived {
+                message_id,
+                account_id,
+                mailbox_id,
+                provider_uid: ProviderUid::new(uid),
+                message_rfc_id: rfc.map(str::to_owned),
+                in_reply_to: None,
+                references: references.iter().map(|r| r.to_string()).collect(),
+                envelope,
+                flags: if seen { vec![Flag::Seen] } else { vec![] },
+                size_bytes: 100,
+                has_attachments: false,
+                received_at,
+            };
+            (message_id, event)
+        }
+
+        fn discovered(account_id: AccountId, mailbox_id: MailboxId, path: &str) -> DomainEvent {
+            DomainEvent::MailboxDiscovered {
+                mailbox_id,
+                account_id,
+                path: MailboxPath::parse(path, '/').unwrap(),
+                mailbox_type: MailboxType::Custom,
+            }
+        }
+
+        fn flagged(message_id: MessageId, mailbox_id: MailboxId, add: Vec<Flag>, remove: Vec<Flag>) -> DomainEvent {
+            DomainEvent::MessageFlagged { message_id, mailbox_id, flags_added: add, flags_removed: remove }
+        }
+
+        fn email(raw: &str) -> EmailAddress {
+            EmailAddress::new(raw).unwrap()
+        }
+
+        fn first_page() -> Pagination {
+            Pagination::new(1, 200)
+        }
+
+        fn ids<T>(items: &[T], id: impl Fn(&T) -> MessageId) -> Vec<MessageId> {
+            items.iter().map(id).collect()
+        }
+
+        /// Everything a user can see of one account, rendered for equality.
+        async fn snapshot<R>(repo: &R, account_id: &AccountId, mailboxes: &[MailboxId]) -> String
+        where
+            R: AccountReadRepository
+                + MailboxReadRepository
+                + MessageReadRepository
+                + ConversationReadRepository
+                + ContactReadRepository
+                + BodyBackfillQueue,
+        {
+            let page = first_page();
+            let mut out = format!("{:?}\n", repo.list_accounts().await.unwrap());
+            for mailbox in mailboxes {
+                out += &format!("{:?}\n", repo.get_mailbox(mailbox).await.unwrap());
+                out += &format!("{:?}\n", repo.list_messages(mailbox, &page).await.unwrap().items);
+                out += &format!("{:?}\n", repo.find_unread_by_mailbox(mailbox).await.unwrap());
+                out += &format!(
+                    "{:?}\n",
+                    repo.list_conversations(account_id, Some(mailbox), &page).await.unwrap().items
+                );
+            }
+            out += &format!("{:?}\n", repo.scan_all_messages(Some(account_id)).await.unwrap());
+            out += &format!("{:?}\n", repo.list_conversations(account_id, None, &page).await.unwrap().items);
+            out += &format!("{:?}\n", repo.list_contacts(&page).await.unwrap().items);
+            out += &format!("{:?}\n", repo.count_pending_backfill(account_id).await.unwrap());
+            out
+        }
+
+        #[tokio::test]
+        async fn list_messages_pages_newest_first() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox) = (AccountId::new(), MailboxId::new());
+            let mut msgs = Vec::new();
+            for minute in 0..5 {
+                let (id, event) = received(account, inbox, minute as u32 + 1, None, &[], false, at(minute));
+                repo.project(&env_of(event)).await.unwrap();
+                msgs.push(id);
+            }
+
+            let page = repo.list_messages(&inbox, &Pagination::new(1, 2)).await.unwrap();
+            assert_eq!(page.total_count, 5);
+            assert_eq!(ids(&page.items, |m| m.id), [msgs[4], msgs[3]]);
+            let last = repo.list_messages(&inbox, &Pagination::new(3, 2)).await.unwrap();
+            assert_eq!(ids(&last.items, |m| m.id), [msgs[0]]);
+        }
+
+        #[tokio::test]
+        async fn get_thread_returns_the_whole_thread_oldest_first() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox) = (AccountId::new(), MailboxId::new());
+            let (root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
+            let (late, e_late) = received(account, inbox, 3, Some("<late@x>"), &["<root@x>"], false, at(20));
+            let (mid, e_mid) = received(account, inbox, 2, Some("<mid@x>"), &["<root@x>"], false, at(10));
+            let (_other, e_other) = received(account, inbox, 4, Some("<other@x>"), &[], false, at(5));
+            project_all(&repo, [e_root, e_late, e_mid, e_other]).await;
+
+            let thread = repo.get_thread(&late).await.unwrap();
+            assert_eq!(ids(&thread, |m| m.id), [root, mid, late]);
+            assert!(repo.get_thread(&MessageId::new()).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn find_by_provider_uid_is_scoped_and_survives_uid_reuse() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox, archive) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let (old, e_old) = received(account, inbox, 7, None, &[], false, at(0));
+            let (_elsewhere, e_elsewhere) = received(account, archive, 7, None, &[], false, at(1));
+            // UIDVALIDITY reset: the server hands out uid 7 again in the same mailbox.
+            let (new, e_new) = received(account, inbox, 7, None, &[], false, at(2));
+            project_all(&repo, [e_old, e_elsewhere, e_new]).await;
+
+            let found = repo.find_by_provider_uid(&inbox, 7).await.unwrap().unwrap();
+            assert_eq!(found.id, new);
+            assert_eq!(found.provider_uid, Some(ProviderUid::new(7)));
+            assert!(repo.find_by_provider_uid(&inbox, 8).await.unwrap().is_none());
+            assert_ne!(found.id, old);
+        }
+
+        #[tokio::test]
+        async fn find_unread_by_mailbox_skips_seen_and_other_mailboxes() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox, archive) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let (unread, e1) = received(account, inbox, 1, None, &[], false, at(0));
+            let (_read, e2) = received(account, inbox, 2, None, &[], true, at(1));
+            let (_elsewhere, e3) = received(account, archive, 3, None, &[], false, at(2));
+            project_all(&repo, [e1, e2, e3]).await;
+
+            let found = repo.find_unread_by_mailbox(&inbox).await.unwrap();
+            assert_eq!(ids(&found, |m| m.id), [unread]);
+
+            project_all(&repo, [flagged(unread, inbox, vec![Flag::Seen], vec![])]).await;
+            assert!(repo.find_unread_by_mailbox(&inbox).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn list_conversations_scoped_to_a_mailbox() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox, archive) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let (root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
+            let (reply, e_reply) = received(account, archive, 2, Some("<reply@x>"), &["<root@x>"], true, at(10));
+            let (solo, e_solo) = received(account, inbox, 3, Some("<solo@x>"), &[], true, at(5));
+            project_all(&repo, [e_root, e_reply, e_solo]).await;
+            let page = first_page();
+
+            let all = repo.list_conversations(&account, None, &page).await.unwrap();
+            assert_eq!(all.total_count, 2);
+            let stats: Vec<_> = all
+                .items
+                .iter()
+                .map(|c| (c.thread_id.clone(), c.message_count, c.unread_count, c.sample_message_id))
+                .collect();
+            assert_eq!(
+                stats,
+                [(ThreadId::new("<root@x>"), 2, 1, reply), (ThreadId::new("<solo@x>"), 1, 0, solo)]
+            );
+
+            let in_inbox = repo.list_conversations(&account, Some(&inbox), &page).await.unwrap();
+            assert_eq!(in_inbox.total_count, 2);
+            let stats: Vec<_> = in_inbox
+                .items
+                .iter()
+                .map(|c| (c.thread_id.clone(), c.message_count, c.unread_count, c.sample_message_id))
+                .collect();
+            assert_eq!(
+                stats,
+                [(ThreadId::new("<solo@x>"), 1, 0, solo), (ThreadId::new("<root@x>"), 1, 1, root)]
+            );
+            assert_eq!(in_inbox.items[1].last_message_at, at(0));
+            assert_eq!(in_inbox.items[1].subject, "Hello World");
+            assert_eq!(in_inbox.items[1].latest_sender, "Sender");
+
+            let in_archive = repo.list_conversations(&account, Some(&archive), &page).await.unwrap();
+            assert_eq!(in_archive.total_count, 1);
+            assert_eq!(in_archive.items[0].sample_message_id, reply);
+            assert_eq!(in_archive.items[0].unread_count, 0);
+        }
+
+        #[tokio::test]
+        async fn rfc_copies_count_once_per_conversation() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox, all_mail) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let (_a, e_a) = received(account, inbox, 1, Some("<same@x>"), &[], false, at(0));
+            let (_b, e_b) = received(account, all_mail, 9, Some("<same@x>"), &[], false, at(0));
+            project_all(&repo, [e_a, e_b]).await;
+
+            let conv = repo
+                .get_conversation(&ThreadId::new("<same@x>"), &account)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!((conv.message_count, conv.unread_count), (1, 1));
+        }
+
+        #[tokio::test]
+        async fn rebuild_index_restores_conversations() {
+            let (_guard, store, repo) = $make;
+            let (account, inbox) = (AccountId::new(), MailboxId::new());
+            let (_root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
+            let (reply, e_reply) = received(account, inbox, 2, Some("<reply@x>"), &["<root@x>"], false, at(10));
+            let log = append_all(
+                store.as_ref(),
+                vec![e_root, e_reply, flagged(reply, inbox, vec![Flag::Seen], vec![])],
+            )
+            .await;
+            for event in &log {
+                repo.project(event).await.unwrap();
+            }
+            let thread = ThreadId::new("<root@x>");
+            let before = repo.get_conversation(&thread, &account).await.unwrap().unwrap();
+
+            assert!(repo.rebuild_index().await.unwrap() > 0);
+
+            let after = repo.get_conversation(&thread, &account).await.unwrap().unwrap();
+            assert_eq!((after.message_count, after.unread_count), (2, 1));
+            assert_eq!(format!("{after:?}"), format!("{before:?}"));
+        }
+
+        #[tokio::test]
+        async fn drafts_stay_out_of_mailbox_views() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox, draft) = (AccountId::new(), MailboxId::new(), MessageId::new());
+            project_all(
+                &repo,
+                [DomainEvent::DraftSaved {
+                    message_id: draft,
+                    account_id: account,
+                    envelope: test_envelope(),
+                    body_text: Some("draft".into()),
+                    body_html: None,
+                }],
+            )
+            .await;
+
+            let stored = repo.get_message(&draft).await.unwrap().unwrap();
+            assert_eq!(stored.body_text.as_deref(), Some("draft"));
+            assert!(stored.flags.contains(&Flag::Draft));
+            assert_eq!(repo.list_messages(&inbox, &first_page()).await.unwrap().total_count, 0);
+            assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 0);
+
+            project_all(&repo, [DomainEvent::DraftDiscarded { message_id: draft }]).await;
+            assert!(repo.get_message(&draft).await.unwrap().is_none());
+        }
+
+        #[tokio::test]
+        async fn contact_lifecycle_and_lookup() {
+            let (_guard, _es, repo) = $make;
+            let (contact, account) = (ContactId::new(), AccountId::new());
+            project_all(
+                &repo,
+                [DomainEvent::ContactAdded {
+                    contact_id: contact,
+                    display_name: "Ada Lovelace".into(),
+                    emails: vec![
+                        ContactEmail::primary(email("ada@example.com")),
+                        ContactEmail::new(email("ada@work.example.com"), ContactEmailLabel::Work, false),
+                    ],
+                    source: ContactSource::Local,
+                    external_id: None,
+                    account_scope: Some(account),
+                }],
+            )
+            .await;
+
+            let summary = repo.get_contact(&contact).await.unwrap().unwrap();
+            assert_eq!(summary.display_name, "Ada Lovelace");
+            assert_eq!(summary.primary_email, email("ada@example.com"));
+            assert_eq!(summary.emails.len(), 2);
+            assert_eq!(summary.organization, None);
+            assert_eq!(summary.account_scope, Some(account));
+            let found = repo.find_by_email(&email("ada@work.example.com")).await.unwrap();
+            assert_eq!(found.iter().map(|c| c.id).collect::<Vec<_>>(), [contact]);
+            assert_eq!(repo.find_by_email_in_account(&email("ada@example.com"), &account).await.unwrap().len(), 1);
+            assert!(repo.find_by_email_in_account(&email("ada@example.com"), &AccountId::new()).await.unwrap().is_empty());
+            assert_eq!(repo.search_contacts("lovelace", 10).await.unwrap().len(), 1);
+            assert_eq!(repo.search_contacts("ADA@EXAMPLE", 10).await.unwrap().len(), 1);
+            assert!(repo.search_contacts("nobody", 10).await.unwrap().is_empty());
+
+            project_all(
+                &repo,
+                [DomainEvent::ContactUpdated {
+                    contact_id: contact,
+                    display_name: Some("Ada King".into()),
+                    emails: Some(vec![ContactEmail::primary(email("ada@king.example.com"))]),
+                    phones: None,
+                    organization: Some(Some("Analytical".into())),
+                    notes: None,
+                }],
+            )
+            .await;
+
+            let summary = repo.get_contact(&contact).await.unwrap().unwrap();
+            assert_eq!(summary.display_name, "Ada King");
+            assert_eq!(summary.primary_email, email("ada@king.example.com"));
+            assert_eq!(summary.organization.as_deref(), Some("Analytical"));
+            assert!(repo.find_by_email(&email("ada@work.example.com")).await.unwrap().is_empty());
+            assert_eq!(repo.find_by_email(&email("ada@king.example.com")).await.unwrap().len(), 1);
+            assert_eq!(repo.list_contacts(&first_page()).await.unwrap().total_count, 1);
+
+            project_all(&repo, [DomainEvent::ContactRemoved { contact_id: contact }]).await;
+            assert!(repo.get_contact(&contact).await.unwrap().is_none());
+            assert!(repo.find_by_email(&email("ada@king.example.com")).await.unwrap().is_empty());
+            assert_eq!(repo.list_contacts(&first_page()).await.unwrap().total_count, 0);
+        }
+
+        #[tokio::test]
+        async fn duplicate_candidates_and_merge() {
+            let (_guard, _es, repo) = $make;
+            let (account, other_account) = (AccountId::new(), AccountId::new());
+            let (c1, c2, c3) = (ContactId::new(), ContactId::new(), ContactId::new());
+            let added = |id: ContactId, emails: Vec<ContactEmail>, scope: AccountId| DomainEvent::ContactAdded {
+                contact_id: id,
+                display_name: id.to_string(),
+                emails,
+                source: ContactSource::LocalEmail,
+                external_id: None,
+                account_scope: Some(scope),
+            };
+            let shared = || ContactEmail::primary(email("shared@example.com"));
+            project_all(
+                &repo,
+                [
+                    added(c1, vec![shared(), ContactEmail::new(email("one@example.com"), ContactEmailLabel::Home, false)], account),
+                    added(c2, vec![shared()], account),
+                    added(c3, vec![shared()], other_account),
+                ],
+            )
+            .await;
+            let pair_ids = |pairs: Vec<(mc_domain::ContactSummary, mc_domain::ContactSummary)>| {
+                let mut out: Vec<(String, String)> = pairs
+                    .into_iter()
+                    .map(|(a, b)| {
+                        let (a, b) = (a.id.to_string(), b.id.to_string());
+                        if a < b { (a, b) } else { (b, a) }
+                    })
+                    .collect();
+                out.sort();
+                out
+            };
+            let sorted = |a: ContactId, b: ContactId| {
+                let (a, b) = (a.to_string(), b.to_string());
+                if a < b { (a, b) } else { (b, a) }
+            };
+
+            let scoped = pair_ids(repo.find_duplicate_candidates(Some(&account)).await.unwrap());
+            assert_eq!(scoped, [sorted(c1, c2)]);
+            let mut everywhere = vec![sorted(c1, c2), sorted(c1, c3), sorted(c2, c3)];
+            everywhere.sort();
+            assert_eq!(pair_ids(repo.find_duplicate_candidates(None).await.unwrap()), everywhere);
+
+            project_all(
+                &repo,
+                [DomainEvent::ContactMerged {
+                    kept_id: c1,
+                    discarded_id: c2,
+                    merged_emails: vec![shared(), ContactEmail::new(email("one@example.com"), ContactEmailLabel::Home, false)],
+                }],
+            )
+            .await;
+            assert!(repo.get_contact(&c2).await.unwrap().is_none());
+            let mut holders: Vec<String> = repo
+                .find_by_email(&email("shared@example.com"))
+                .await
+                .unwrap()
+                .iter()
+                .map(|c| c.id.to_string())
+                .collect();
+            holders.sort();
+            let mut expected = vec![c1.to_string(), c3.to_string()];
+            expected.sort();
+            assert_eq!(holders, expected);
+            assert!(repo.find_duplicate_candidates(Some(&account)).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn replaying_mailbox_discovered_keeps_server_counts() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox) = (AccountId::new(), MailboxId::new());
+            project_all(
+                &repo,
+                [
+                    discovered(account, inbox, "INBOX"),
+                    DomainEvent::MailboxCountsUpdated { mailbox_id: inbox, total_messages: 10, unread_messages: 4 },
+                    discovered(account, inbox, "INBOX"),
+                ],
+            )
+            .await;
+
+            let mailbox = repo.get_mailbox(&inbox).await.unwrap().unwrap();
+            assert_eq!((mailbox.total_messages, mailbox.unread_messages), (10, 4));
+        }
+
+        /// Boot and post-sync catch-up re-project everything since the last
+        /// checkpoint on top of what the live path already projected.
+        #[tokio::test]
+        async fn replaying_the_log_over_live_state_changes_nothing() {
+            let (_guard, store, repo) = $make;
+            let (account, inbox, archive) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let (root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
+            let (reply, e_reply) = received(account, inbox, 2, Some("<reply@x>"), &["<root@x>"], false, at(10));
+            let (gone, e_gone) = received(account, inbox, 3, Some("<gone@x>"), &[], false, at(20));
+            let (sent, contact) = (MessageId::new(), ContactId::new());
+            let log = append_all(
+                store.as_ref(),
+                vec![
+                    DomainEvent::AccountAdded {
+                        account_id: account,
+                        name: "Work".into(),
+                        email: email("me@example.com"),
+                        provider_type: ProviderType::Imap,
+                    },
+                    discovered(account, inbox, "INBOX"),
+                    discovered(account, archive, "Archive"),
+                    e_root,
+                    e_reply,
+                    e_gone,
+                    DomainEvent::MessageBodyFetched { message_id: root, attachments: vec![] },
+                    flagged(root, inbox, vec![Flag::Seen], vec![]),
+                    DomainEvent::MessageMoved { message_id: reply, from_mailbox_id: inbox, to_mailbox_id: archive },
+                    DomainEvent::MessageDeleted { message_id: gone, mailbox_id: inbox, permanently: false },
+                    DomainEvent::MessageSent {
+                        message_id: sent,
+                        account_id: account,
+                        mailbox_id: archive,
+                        envelope: test_envelope(),
+                        in_reply_to: Some("<root@x>".into()),
+                        references: vec!["<root@x>".into()],
+                        body_text: Some("thanks".into()),
+                        body_html: None,
+                        sent_at: at(30),
+                    },
+                    flagged(sent, archive, vec![], vec![Flag::Seen]),
+                    DomainEvent::ContactAdded {
+                        contact_id: contact,
+                        display_name: "Ada".into(),
+                        emails: vec![ContactEmail::primary(email("ada@example.com"))],
+                        source: ContactSource::LocalEmail,
+                        external_id: None,
+                        account_scope: Some(account),
+                    },
+                    DomainEvent::ContactUpdated {
+                        contact_id: contact,
+                        display_name: Some("Ada L.".into()),
+                        emails: None,
+                        phones: None,
+                        organization: Some(Some("Analytical".into())),
+                        notes: None,
+                    },
+                ],
+            )
+            .await;
+            for event in &log {
+                repo.project(event).await.unwrap();
+            }
+            repo.put_body(&root, Some("hello".into()), None).await.unwrap();
+            // Server counts are transient: they reach the read model only through project().
+            project_all(
+                &repo,
+                [DomainEvent::MailboxCountsUpdated { mailbox_id: inbox, total_messages: 10, unread_messages: 4 }],
+            )
+            .await;
+            let live = snapshot(&repo, &account, &[inbox, archive]).await;
+
+            for event in &log {
+                repo.project(event).await.unwrap();
+            }
+
+            assert_eq!(snapshot(&repo, &account, &[inbox, archive]).await, live);
+            assert_eq!(
+                repo.get_mailbox(&inbox).await.unwrap().unwrap().unread_messages,
+                4,
+                "replaying the received+deleted pair must not move the badge"
+            );
         }
     };
 }

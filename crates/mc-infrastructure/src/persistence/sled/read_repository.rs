@@ -609,19 +609,30 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 path,
                 mailbox_type,
             } => {
-                let mailbox = Mailbox {
+                let mailbox_tree = self.tree(MAILBOXES_TREE)?;
+                // Counts are transient (never in the log), so a replay must keep them.
+                let previous: Option<Mailbox> = mailbox_tree
+                    .get(mailbox_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                    .map(|bytes| serde_json::from_slice(&bytes))
+                    .transpose()
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                let mut mailbox = previous.unwrap_or_else(|| Mailbox {
                     id: *mailbox_id,
                     account_id: *account_id,
                     path: path.clone(),
-                    display_name: path.name().to_string(),
+                    display_name: String::new(),
                     mailbox_type: *mailbox_type,
                     flags: Vec::new(),
                     total_messages: 0,
                     unread_messages: 0,
                     uid_validity: None,
                     uid_next: None,
-                };
-                let mailbox_tree = self.tree(MAILBOXES_TREE)?;
+                });
+                mailbox.account_id = *account_id;
+                mailbox.path = path.clone();
+                mailbox.display_name = path.name().to_string();
+                mailbox.mailbox_type = *mailbox_type;
                 let json = serde_json::to_vec(&mailbox)
                     .map_err(|e| DomainError::Serialization(e.to_string()))?;
                 mailbox_tree
@@ -736,86 +747,95 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 received_at,
             } => {
                 let msg_tree = self.tree(MESSAGES_TREE)?;
-                // Rows written before bodies left the log carry the body inline;
-                // a replay of this event must not erase it.
-                let (body_text, body_html) = match msg_tree
+                // Message ids are minted per receipt, so an existing row means a
+                // replay: it already reflects every later event (flags, body,
+                // attachments, mailbox) and must not be reset from this one.
+                let existing: Option<Message> = msg_tree
                     .get(message_id.to_string().as_bytes())
                     .map_err(|e| DomainError::Repository(e.to_string()))?
-                {
-                    Some(bytes) => {
-                        let existing: Message = serde_json::from_slice(&bytes)
-                            .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                        (existing.body_text, existing.body_html)
+                    .map(|bytes| serde_json::from_slice(&bytes))
+                    .transpose()
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                let is_unread = match &existing {
+                    Some(message) => !message.flags.contains(&Flag::Seen),
+                    None => !flags.contains(&Flag::Seen),
+                };
+                if existing.is_none() {
+                    let message = Message {
+                        id: *message_id,
+                        account_id: *account_id,
+                        mailbox_id: *mailbox_id,
+                        provider_uid: Some(*provider_uid),
+                        message_rfc_id: message_rfc_id.clone(),
+                        in_reply_to: in_reply_to.clone(),
+                        references: references.clone(),
+                        envelope: envelope.clone(),
+                        flags: flags.clone(),
+                        size_bytes: *size_bytes,
+                        has_attachments: *has_attachments,
+                        attachments: Vec::new(),
+                        body_text: None,
+                        body_html: None,
+                        received_at: *received_at,
+                        internal_date: *received_at,
+                    };
+                    let msg_json = serde_json::to_vec(&message)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    msg_tree
+                        .insert(message_id.to_string().as_bytes(), msg_json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    // Summary in message_summaries tree.
+                    let from_addr = envelope.from.first();
+                    let from_name = from_addr.and_then(|a| a.name.clone());
+                    let from_email = from_addr
+                        .map(|a| a.email.to_string())
+                        .unwrap_or_default();
+                    let summary = MessageSummary {
+                        id: *message_id,
+                        account_id: *account_id,
+                        mailbox_id: *mailbox_id,
+                        provider_uid: Some(*provider_uid),
+                        from_name,
+                        from_email,
+                        to: envelope.to.iter().map(|a| a.email.to_string()).collect(),
+                        cc: envelope.cc.iter().map(|a| a.email.to_string()).collect(),
+                        subject: envelope.subject.clone(),
+                        flags: flags.clone(),
+                        size_bytes: *size_bytes,
+                        has_attachments: *has_attachments,
+                        received_at: *received_at,
+                    };
+                    let summary_tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
+                    let summary_key = Self::message_summary_key(mailbox_id, received_at, message_id);
+                    let summary_json = serde_json::to_vec(&summary)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    summary_tree
+                        .insert(summary_key.as_bytes(), summary_json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    // Enqueue for background body backfill (drained newest-first).
+                    // Dequeued by MessageBodyFetched — so on replay this rebuilds to
+                    // exactly "received but body not yet fetched".
+                    let backfill_tree = self.tree(BODY_BACKFILL_TREE)?;
+                    let backfill_key = Self::backfill_key(account_id, received_at, message_id);
+                    let backfill_val = serde_json::to_vec(&BackfillValue {
+                        message_id: *message_id,
+                        mailbox_id: *mailbox_id,
+                        provider_uid: provider_uid.value(),
+                    })
+                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    backfill_tree
+                        .insert(backfill_key.as_bytes(), backfill_val)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+
+                    // Symmetric with MessageDeleted's decrement, so replaying a
+                    // received+deleted pair nets zero (server counts overwrite
+                    // this after each poll anyway).
+                    if is_unread {
+                        self.adjust_mailbox_unread(mailbox_id, 1)?;
                     }
-                    None => (None, None),
-                };
-                let message = Message {
-                    id: *message_id,
-                    account_id: *account_id,
-                    mailbox_id: *mailbox_id,
-                    provider_uid: Some(*provider_uid),
-                    message_rfc_id: message_rfc_id.clone(),
-                    in_reply_to: in_reply_to.clone(),
-                    references: references.clone(),
-                    envelope: envelope.clone(),
-                    flags: flags.clone(),
-                    size_bytes: *size_bytes,
-                    has_attachments: *has_attachments,
-                    attachments: Vec::new(),
-                    body_text,
-                    body_html,
-                    received_at: *received_at,
-                    internal_date: *received_at,
-                };
-                let msg_json = serde_json::to_vec(&message)
-                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                msg_tree
-                    .insert(message_id.to_string().as_bytes(), msg_json)
-                    .map_err(|e| DomainError::Repository(e.to_string()))?;
-
-                // Summary in message_summaries tree.
-                let from_addr = envelope.from.first();
-                let from_name = from_addr.and_then(|a| a.name.clone());
-                let from_email = from_addr
-                    .map(|a| a.email.to_string())
-                    .unwrap_or_default();
-                let summary = MessageSummary {
-                    id: *message_id,
-                    account_id: *account_id,
-                    mailbox_id: *mailbox_id,
-                    provider_uid: Some(*provider_uid),
-                    from_name,
-                    from_email,
-                    to: envelope.to.iter().map(|a| a.email.to_string()).collect(),
-                    cc: envelope.cc.iter().map(|a| a.email.to_string()).collect(),
-                    subject: envelope.subject.clone(),
-                    flags: flags.clone(),
-                    size_bytes: *size_bytes,
-                    has_attachments: *has_attachments,
-                    received_at: *received_at,
-                };
-                let summary_tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
-                let summary_key = Self::message_summary_key(mailbox_id, received_at, message_id);
-                let summary_json = serde_json::to_vec(&summary)
-                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                summary_tree
-                    .insert(summary_key.as_bytes(), summary_json)
-                    .map_err(|e| DomainError::Repository(e.to_string()))?;
-
-                // Enqueue for background body backfill (drained newest-first).
-                // Dequeued by MessageBodyFetched — so on replay this rebuilds to
-                // exactly "received but body not yet fetched".
-                let backfill_tree = self.tree(BODY_BACKFILL_TREE)?;
-                let backfill_key = Self::backfill_key(account_id, received_at, message_id);
-                let backfill_val = serde_json::to_vec(&BackfillValue {
-                    message_id: *message_id,
-                    mailbox_id: *mailbox_id,
-                    provider_uid: provider_uid.value(),
-                })
-                .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                backfill_tree
-                    .insert(backfill_key.as_bytes(), backfill_val)
-                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+                }
 
                 debug!(message_id = %message_id, "projected MessageReceived");
 
@@ -839,7 +859,6 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                         &envelope.subject,
                     );
                     let latest_sender = envelope.from.first().map(sender_display).unwrap_or_default();
-                    let is_unread = !flags.contains(&Flag::Seen);
 
                     // Cross-mailbox dedup: same RFC Message-ID = same canonical message.
                     // Don't count it again if we've already seen this RFC ID for this account.
@@ -1047,7 +1066,8 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                     )?;
 
                     // An unread message carries its unread-ness to the new mailbox.
-                    if !message.flags.contains(&Flag::Seen) {
+                    // A replay finds the row already in `to`: nothing moves.
+                    if old_mailbox_id != *to_mailbox_id && !message.flags.contains(&Flag::Seen) {
                         self.adjust_mailbox_unread(&old_mailbox_id, -1)?;
                         self.adjust_mailbox_unread(to_mailbox_id, 1)?;
                     }
@@ -1117,58 +1137,65 @@ impl<ES: EventStore> ReadModelProjector for SledRepository<ES> {
                 body_html,
                 sent_at,
             } => {
-                let message = Message {
-                    id: *message_id,
-                    account_id: *account_id,
-                    mailbox_id: *mailbox_id,
-                    provider_uid: None,
-                    message_rfc_id: None,
-                    in_reply_to: in_reply_to.clone(),
-                    references: references.clone(),
-                    envelope: envelope.clone(),
-                    flags: vec![Flag::Seen],
-                    size_bytes: 0,
-                    has_attachments: false,
-                    attachments: Vec::new(),
-                    body_text: body_text.clone(),
-                    body_html: body_html.clone(),
-                    received_at: *sent_at,
-                    internal_date: *sent_at,
-                };
                 let tree = self.tree(MESSAGES_TREE)?;
-                let json = serde_json::to_vec(&message)
-                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                tree.insert(message_id.to_string().as_bytes(), json)
-                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+                // Sent ids are fresh per send; an existing row means a replay
+                // that must not reset flags changed since (e.g. marked unread).
+                if !tree
+                    .contains_key(message_id.to_string().as_bytes())
+                    .map_err(|e| DomainError::Repository(e.to_string()))?
+                {
+                    let message = Message {
+                        id: *message_id,
+                        account_id: *account_id,
+                        mailbox_id: *mailbox_id,
+                        provider_uid: None,
+                        message_rfc_id: None,
+                        in_reply_to: in_reply_to.clone(),
+                        references: references.clone(),
+                        envelope: envelope.clone(),
+                        flags: vec![Flag::Seen],
+                        size_bytes: 0,
+                        has_attachments: false,
+                        attachments: Vec::new(),
+                        body_text: body_text.clone(),
+                        body_html: body_html.clone(),
+                        received_at: *sent_at,
+                        internal_date: *sent_at,
+                    };
+                    let json = serde_json::to_vec(&message)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    tree.insert(message_id.to_string().as_bytes(), json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
 
-                // Summary in message_summaries tree — without this, a just-sent
-                // message is invisible in the plain (non-conversation) message
-                // list until the next IMAP sync rediscovers it.
-                let from_addr = envelope.from.first();
-                let from_name = from_addr.and_then(|a| a.name.clone());
-                let from_email = from_addr.map(|a| a.email.to_string()).unwrap_or_default();
-                let summary = MessageSummary {
-                    id: *message_id,
-                    account_id: *account_id,
-                    mailbox_id: *mailbox_id,
-                    provider_uid: None,
-                    from_name,
-                    from_email,
-                    to: envelope.to.iter().map(|a| a.email.to_string()).collect(),
-                    cc: envelope.cc.iter().map(|a| a.email.to_string()).collect(),
-                    subject: envelope.subject.clone(),
-                    flags: vec![Flag::Seen],
-                    size_bytes: 0,
-                    has_attachments: false,
-                    received_at: *sent_at,
-                };
-                let summary_tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
-                let summary_key = Self::message_summary_key(mailbox_id, sent_at, message_id);
-                let summary_json = serde_json::to_vec(&summary)
-                    .map_err(|e| DomainError::Serialization(e.to_string()))?;
-                summary_tree
-                    .insert(summary_key.as_bytes(), summary_json)
-                    .map_err(|e| DomainError::Repository(e.to_string()))?;
+                    // Summary in message_summaries tree — without this, a just-sent
+                    // message is invisible in the plain (non-conversation) message
+                    // list until the next IMAP sync rediscovers it.
+                    let from_addr = envelope.from.first();
+                    let from_name = from_addr.and_then(|a| a.name.clone());
+                    let from_email = from_addr.map(|a| a.email.to_string()).unwrap_or_default();
+                    let summary = MessageSummary {
+                        id: *message_id,
+                        account_id: *account_id,
+                        mailbox_id: *mailbox_id,
+                        provider_uid: None,
+                        from_name,
+                        from_email,
+                        to: envelope.to.iter().map(|a| a.email.to_string()).collect(),
+                        cc: envelope.cc.iter().map(|a| a.email.to_string()).collect(),
+                        subject: envelope.subject.clone(),
+                        flags: vec![Flag::Seen],
+                        size_bytes: 0,
+                        has_attachments: false,
+                        received_at: *sent_at,
+                    };
+                    let summary_tree = self.tree(MESSAGE_SUMMARIES_TREE)?;
+                    let summary_key = Self::message_summary_key(mailbox_id, sent_at, message_id);
+                    let summary_json = serde_json::to_vec(&summary)
+                        .map_err(|e| DomainError::Serialization(e.to_string()))?;
+                    summary_tree
+                        .insert(summary_key.as_bytes(), summary_json)
+                        .map_err(|e| DomainError::Repository(e.to_string()))?;
+                }
 
                 // ── Thread the sent message (idempotent) ──────────────────────
                 let msg_thread_tree = self.tree(MESSAGE_TO_THREAD_TREE)?;
