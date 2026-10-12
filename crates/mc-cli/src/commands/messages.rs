@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use mc_client::{MailCatClient, MessageFlag, SendMessageParams};
+use mc_client::{ComposeInput, MailCatClient, MessageFlag};
 use tabled::{Table, Tabled};
 
 #[derive(Subcommand)]
@@ -72,11 +72,8 @@ pub enum MessagesCmd {
     /// persisted, visible in the mailbox list with sender/recipient, and
     /// (if --reply-to is given) threaded with the message it replies to.
     SendTest {
-        /// Account ID to send from (see `mc accounts list`)
+        /// Account ID to send from (see `mc accounts list`); its identity is the sender
         account_id: String,
-        /// Sender identity email address
-        #[arg(long)]
-        from: String,
         /// Recipient address
         #[arg(long, default_value = "attilio.greco@4sigma.it")]
         to: String,
@@ -133,10 +130,9 @@ pub async fn run(cmd: MessagesCmd, client: MailCatClient) -> Result<()> {
         } => suggest(prefix, scope, max, client).await,
         MessagesCmd::SendTest {
             account_id,
-            from,
             to,
             reply_to,
-        } => send_test(account_id, from, to, reply_to, client).await,
+        } => send_test(account_id, to, reply_to, client).await,
     }
 }
 
@@ -406,31 +402,24 @@ async fn suggest(
 
 async fn send_test(
     account_id: String,
-    from: String,
     to: String,
     reply_to: Option<String>,
     client: MailCatClient,
 ) -> Result<()> {
-    let (in_reply_to, references) = if let Some(parent_id) = &reply_to {
-        let parent = client.get_message(parent_id).await?;
-        if parent.rfc_message_id.is_none() {
-            println!(
-                "{}",
-                "  ⚠ parent message has no RFC Message-ID yet (e.g. a locally-sent \
-                 message not yet re-synced from IMAP) — this reply will start a new thread"
-                    .yellow()
-            );
-        }
-        let mut refs = parent.references.clone();
-        refs.extend(parent.rfc_message_id.clone());
-        (parent.rfc_message_id, refs)
-    } else {
-        (None, vec![])
-    };
+    if let Some(parent_id) = &reply_to
+        && client.get_message(parent_id).await?.rfc_message_id.is_none()
+    {
+        println!(
+            "{}",
+            "  ⚠ parent message has no RFC Message-ID yet (e.g. a locally-sent \
+             message not yet re-synced from IMAP) — this reply will start a new thread"
+                .yellow()
+        );
+    }
 
     let stamp = chrono::Utc::now().to_rfc3339();
     let subject = format!("[mail-cat test] {stamp}");
-    let body_text = format!(
+    let body_md = format!(
         "Messaggio di test inviato da mail-cat CLI alle {stamp}.\n\
          Verifica: invio SMTP, persistenza del corpo, visibilità in lista, threading."
     );
@@ -438,26 +427,30 @@ async fn send_test(
     println!("{} Sending test message to {}...", "→".blue(), to.bold());
 
     let message_id = client
-        .send_message(SendMessageParams {
+        .send_compose(ComposeInput {
+            draft_id: None,
             account_id: account_id.clone(),
-            from_email: from,
-            from_name: None,
             to: vec![to],
             cc: vec![],
             bcc: vec![],
             subject,
-            body_text: Some(body_text.clone()),
-            body_html: None,
-            in_reply_to,
-            references,
+            body_md: body_md.clone(),
+            mode: if reply_to.is_some() { "reply" } else { "new" }.to_owned(),
+            source_message_id: reply_to.clone(),
+            attachments: vec![],
+            forwarded_attachment_ids: vec![],
         })
         .await?;
 
     println!("  {} sent, message_id={}", "✓".green(), message_id.bold());
 
-    // Verify (1): body round-trips instead of coming back empty.
+    // Verify (1): body round-trips instead of coming back empty. The stored
+    // text is the markdown plus signature and quote, so it starts with it.
     let fetched = client.get_message(&message_id).await?;
-    let body_ok = fetched.text_body.as_deref() == Some(body_text.as_str());
+    let body_ok = fetched
+        .text_body
+        .as_deref()
+        .is_some_and(|t| t.starts_with(body_md.as_str()));
     println!(
         "  {} body persisted correctly",
         if body_ok { "✓".green() } else { "✗".red() }

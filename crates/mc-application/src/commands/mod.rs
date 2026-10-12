@@ -5,8 +5,10 @@
 
 use mc_domain::{
     AccountId, ConnectionConfig, ContactEmail, ContactId, ContactSource, EmailAddress, Flag,
-    Identity, MailboxId, MailboxPath, MessageId, OutgoingMessage, ProviderType,
+    Identity, MailboxId, MailboxPath, MessageId, ProviderType,
 };
+
+use crate::compose::{ComposeInput, ComposeMode, ComposeView};
 pub use mc_domain::value_objects::uid::ProviderUid;
 
 /// All write-side commands in the application.
@@ -88,19 +90,22 @@ pub enum Command {
         to_mailbox_path: MailboxPath,
     },
 
-    /// Send a message via SMTP or provider API.
-    SendMessage {
-        account_id: AccountId,
-        outgoing: OutgoingMessage,
+    /// Compute the compose window's starting state (recipients, subject,
+    /// quote, sender). A command, not a query, because forwarding and draft
+    /// restore read the original's MIME parts from the provider.
+    PrepareCompose {
+        mode: ComposeMode,
+        message_id: Option<MessageId>,
+        account_id: Option<AccountId>,
     },
 
-    /// Save a draft.
-    SaveDraft {
-        account_id: AccountId,
-        outgoing: OutgoingMessage,
-    },
+    /// Build and send a composed message via SMTP or provider API.
+    SendCompose { input: ComposeInput },
 
-    /// Discard a draft.
+    /// Store a draft in the Drafts folder, replacing `input.draft_id`.
+    SaveDraft { input: ComposeInput },
+
+    /// Discard a draft (locally and on the server).
     DiscardDraft { message_id: MessageId },
 
     /// Apply a flag change that originated from a remote IMAP client (e.g. IDLE notification).
@@ -188,6 +193,7 @@ pub enum CommandResult {
     /// (already gone, no provider UID, stale search index). Partial success is
     /// normal here and must be reported, not swallowed.
     MessagesBulkChanged { succeeded: u32, failed: u32 },
+    ComposePrepared(Box<ComposeView>),
     MessageSent { message_id: MessageId },
     DraftSaved { message_id: MessageId },
     DraftDiscarded,

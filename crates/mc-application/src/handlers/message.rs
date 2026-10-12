@@ -11,15 +11,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountId, AggregateType, DomainEvent, EmailProvider, Envelope, EventEnvelope, EventStore,
-    Flag, MailboxId, MailboxPath, MailboxReadRepository, MailboxType, Message, MessageId,
-    MessageBodyStore, MessageReadRepository, OutgoingMessage, ProviderRegistry, ReadModelProjector,
-    value_objects::uid::ProviderUid,
+    Account, AccountId, AggregateType, Attachment, AttachmentId, DomainEvent, EmailProvider,
+    Envelope, EventEnvelope, EventStore, Flag, MailboxId, MailboxPath, MailboxReadRepository,
+    MailboxType, Message, MessageId, MessageBodyStore, MessageReadRepository, OutgoingMessage,
+    ProviderRegistry, ReadModelProjector, value_objects::uid::ProviderUid,
 };
 use tracing::info;
 
 use crate::bus::EventPublisher;
 use crate::commands::CommandResult;
+use crate::compose::{self, ComposeInput, ComposeMode, ComposeView, ParsedSource};
 use crate::error::ApplicationError;
 
 /// Handles Message-related commands.
@@ -523,133 +524,433 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         Ok(CommandResult::MessagesBulkChanged { succeeded, failed })
     }
 
-    pub async fn handle_send(
+    // ── Compose ────────────────────────────────────────────────────────
+
+    pub async fn handle_prepare_compose(
         &self,
-        account_id: AccountId,
-        outgoing: OutgoingMessage,
+        accounts: &[Account],
+        mode: ComposeMode,
+        message_id: Option<MessageId>,
+        account_id: Option<AccountId>,
     ) -> Result<CommandResult, ApplicationError> {
-        let provider = self.provider_registry.get_provider(&account_id)?;
+        let first = accounts
+            .first()
+            .ok_or_else(|| ApplicationError::PreconditionFailed("Nessun account configurato".into()))?;
+        let mut view = ComposeView {
+            draft_id: None,
+            account_id: account_id
+                .filter(|id| accounts.iter().any(|a| a.id == *id))
+                .unwrap_or(first.id),
+            identities: compose::identities(accounts),
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            subject: String::new(),
+            body_md: String::new(),
+            quoted_html: None,
+            signature_html: None,
+            forwarded_attachments: vec![],
+            mode,
+            source_message_id: None,
+        };
 
-        // Send via the provider (SMTP or API).
-        provider.send_message(&outgoing).await?;
-
-        // Standard client behaviour: replying marks the original message as
-        // \Answered. Best-effort — resolve the original by its RFC Message-ID and
-        // flag it on the server; the next sync/IDLE reconciles the local flag.
-        // ponytail: O(n) scan over stored messages; add an rfc_id→message index if
-        // this ever shows up in profiles.
-        if let Some(in_reply_to) = outgoing.in_reply_to.clone() {
-            let original = self
-                .message_read_repo
-                .scan_all_messages(Some(&account_id))
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .find(|m| m.message_rfc_id.as_deref() == Some(in_reply_to.as_str()));
-
-            if let Some(orig) = original
-                && let Some(uid) = orig.provider_uid
-            {
-                let mailboxes = self
-                    .message_read_repo
-                    .list_mailboxes(&account_id)
-                    .await
-                    .unwrap_or_default();
-                if let Some(path) = mailboxes
-                    .into_iter()
-                    .find(|m| m.id == orig.mailbox_id)
-                    .map(|m| m.path)
-                {
-                    let provider = Arc::clone(&provider);
-                    tokio::spawn(async move {
-                        if let Err(e) = provider
-                            .set_flags(&path, uid, &[Flag::Answered], &[])
-                            .await
-                        {
-                            tracing::warn!(%e, "Failed to set \\Answered on replied-to message");
-                        }
-                    });
+        if mode != ComposeMode::New {
+            let id = message_id.ok_or_else(|| {
+                ApplicationError::PreconditionFailed(format!("{}: manca il messaggio di partenza", mode.as_str()))
+            })?;
+            if mode == ComposeMode::Draft {
+                self.restore_draft(&mut view, id).await?;
+            } else {
+                let (source, parsed) = self.load_source(id, mode == ComposeMode::Forward).await?;
+                let envelope = &source.envelope;
+                view.account_id = compose::reply_sender(accounts, envelope, source.account_id);
+                view.source_message_id = Some(id);
+                if mode == ComposeMode::Forward {
+                    view.subject = compose::prefixed_subject("Fwd:", &envelope.subject);
+                    if let Some(parsed) = &parsed {
+                        let html = source.body_html.as_deref().unwrap_or_default();
+                        view.forwarded_attachments = compose::listable_parts(id, parsed, html);
+                    }
+                } else {
+                    let own: Vec<_> = accounts.iter().map(|a| a.identity.email.clone()).collect();
+                    (view.to, view.cc) =
+                        compose::reply_recipients(envelope, &own, mode == ComposeMode::ReplyAll);
+                    view.subject = compose::prefixed_subject("Re:", &envelope.subject);
                 }
+                view.quoted_html = compose::quote_for(mode, &source).map(|q| q.html);
             }
         }
 
-        // Resolve the account's real Sent mailbox so the message lands in the
-        // right folder immediately, instead of waiting for the next IMAP sync
-        // to reconcile it. Falls back to a placeholder id if the Sent mailbox
-        // hasn't been discovered yet (e.g. before the first sync).
-        let mailbox_id = self
+        view.signature_html = accounts
+            .iter()
+            .find(|a| a.id == view.account_id)
+            .and_then(|a| a.identity.signature_html.clone());
+        Ok(CommandResult::ComposePrepared(Box::new(view)))
+    }
+
+    async fn restore_draft(&self, view: &mut ComposeView, id: MessageId) -> Result<(), ApplicationError> {
+        let draft = self
             .message_read_repo
-            .list_mailboxes(&account_id)
+            .get_message(&id)
             .await?
-            .into_iter()
-            .find(|m| m.mailbox_type == MailboxType::Sent)
-            .map(|m| m.id)
-            .unwrap_or_else(MailboxId::new);
+            .ok_or_else(|| ApplicationError::NotFound("Message", id.to_string()))?;
+        let parsed = compose::parse_source(&self.fetch_raw(&draft).await?)?;
+        let meta = parsed.draft.clone();
 
+        view.draft_id = Some(id);
+        view.account_id = draft.account_id;
+        view.to = parsed.to.clone();
+        view.cc = parsed.cc.clone();
+        view.bcc = parsed.bcc.clone();
+        view.subject = parsed.subject.clone();
+        view.body_md = meta
+            .as_ref()
+            .and_then(|m| m.body_md.clone())
+            .or_else(|| parsed.text.clone())
+            .unwrap_or_default();
+        // Quote and threading are rebuilt from the original; without it the
+        // draft carries on as a plain new message.
+        view.mode = ComposeMode::New;
+        let mut shown_html = compose::markdown_to_html(&view.body_md);
+        if let Some(meta) = meta.filter(|m| m.mode.quotes_source())
+            && let Some(source_id) = meta.source_message_id
+        {
+            match self.load_source(source_id, false).await {
+                Ok((source, _)) => {
+                    view.mode = meta.mode;
+                    view.source_message_id = Some(source_id);
+                    if let Some(quote) = compose::quote_for(meta.mode, &source) {
+                        shown_html.push_str(&quote.html);
+                        view.quoted_html = Some(quote.html);
+                    }
+                }
+                Err(e) => tracing::warn!(%e, %source_id, "draft's original message is gone"),
+            }
+        }
+        view.forwarded_attachments = compose::listable_parts(id, &parsed, &shown_html);
+        Ok(())
+    }
+
+    pub async fn handle_send_compose(
+        &self,
+        accounts: &[Account],
+        input: ComposeInput,
+    ) -> Result<CommandResult, ApplicationError> {
+        let (account, source, outgoing) = self.build_outgoing(accounts, &input, false).await?;
+        let provider = self.provider_registry.get_provider(&account.id)?;
+        provider.send_message(&outgoing).await?;
+
+        let mailboxes = self.message_read_repo.list_mailboxes(&account.id).await?;
+        let sent = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Sent);
+
+        if let Some(sent) = sent.filter(|_| !compose::saves_sent_copy_itself(&account)) {
+            let (provider, path, copy) = (Arc::clone(&provider), sent.path.clone(), outgoing.clone());
+            tokio::spawn(async move {
+                if let Err(e) = provider.append_message(&path, &copy, &[Flag::Seen]).await {
+                    tracing::warn!(%e, "message sent, but storing the Sent copy failed");
+                }
+            });
+        }
+
+        if input.mode.is_reply()
+            && let Some(source) = &source
+            && let Some(mailbox) = mailboxes.iter().find(|m| m.id == source.mailbox_id)
+            && let Err(e) = self
+                .handle_set_flags(source.id, mailbox.path.clone(), vec![Flag::Answered], vec![])
+                .await
+        {
+            tracing::warn!(%e, "Failed to set \\Answered on replied-to message");
+        }
+
+        // Shown in Sent right away instead of after the next sync. Falls back
+        // to a placeholder id before the first sync has discovered Sent.
         let message_id = MessageId::new();
-        let envelope = Envelope {
-            from: vec![mc_domain::Address {
-                name: outgoing.from.name.clone(),
-                email: outgoing.from.email.clone(),
-            }],
-            to: outgoing
-                .to
-                .iter()
-                .map(|a| mc_domain::Address {
-                    name: a.name.clone(),
-                    email: a.email.clone(),
-                })
-                .collect(),
-            cc: outgoing
-                .cc
-                .iter()
-                .map(|a| mc_domain::Address {
-                    name: a.name.clone(),
-                    email: a.email.clone(),
-                })
-                .collect(),
-            bcc: vec![],
-            reply_to: vec![],
-            subject: outgoing.subject.clone(),
-            date: chrono::Utc::now(),
-        };
-
         let event = DomainEvent::MessageSent {
             message_id,
-            account_id,
-            mailbox_id,
-            envelope,
+            account_id: account.id,
+            mailbox_id: sent.map_or_else(MailboxId::new, |m| m.id),
+            envelope: outgoing_envelope(&outgoing),
             in_reply_to: outgoing.in_reply_to.clone(),
             references: outgoing.references.clone(),
             body_text: outgoing.body_text.clone(),
             body_html: outgoing.body_html.clone(),
             sent_at: chrono::Utc::now(),
         };
-
-        // New message — no prior events, sequence starts at 0
         self.append_and_publish(&message_id, AggregateType::Message, 0, event)
             .await?;
 
+        if let Some(draft_id) = input.draft_id
+            && let Err(e) = self.remove_draft(draft_id).await
+        {
+            tracing::warn!(%e, %draft_id, "message sent, but deleting its draft failed");
+        }
+
         info!(%message_id, "message sent");
         Ok(CommandResult::MessageSent { message_id })
+    }
+
+    /// Store the draft in the server's Drafts folder (and locally), then drop
+    /// the version it replaces.
+    pub async fn handle_save_draft(
+        &self,
+        accounts: &[Account],
+        input: ComposeInput,
+    ) -> Result<CommandResult, ApplicationError> {
+        let (account, _, outgoing) = self.build_outgoing(accounts, &input, true).await?;
+        let drafts = self
+            .message_read_repo
+            .list_mailboxes(&account.id)
+            .await?
+            .into_iter()
+            .find(|m| m.mailbox_type == MailboxType::Drafts)
+            .ok_or_else(|| {
+                ApplicationError::PreconditionFailed("Cartella Bozze non trovata: sincronizza l'account".into())
+            })?;
+
+        let uid = self
+            .provider_registry
+            .get_provider(&account.id)?
+            .append_message(&drafts.path, &outgoing, &[Flag::Draft, Flag::Seen])
+            .await?
+            .ok_or_else(|| ApplicationError::Internal("bozza salvata ma non ritrovata sul server".into()))?;
+
+        let message_id = match self
+            .message_read_repo
+            .find_by_provider_uid(&drafts.id, uid.value())
+            .await?
+        {
+            // A Drafts sync stored it first.
+            Some(existing) => existing.id,
+            None => self.store_draft_locally(account.id, drafts.id, uid, &outgoing).await?,
+        };
+
+        if let Some(old) = input.draft_id.filter(|old| *old != message_id)
+            && let Err(e) = self.remove_draft(old).await
+        {
+            tracing::warn!(%e, draft_id = %old, "new draft saved, but deleting the previous version failed");
+        }
+
+        info!(%message_id, "draft saved");
+        Ok(CommandResult::DraftSaved { message_id })
     }
 
     pub async fn handle_discard_draft(
         &self,
         message_id: MessageId,
     ) -> Result<CommandResult, ApplicationError> {
-        // Verify the message exists.
-        let (_message, seq) = self.load_message(&message_id).await?;
-
-        let event = DomainEvent::DraftDiscarded {
-            message_id,
-        };
-
-        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
-            .await?;
-
+        self.remove_draft(message_id).await?;
         info!(%message_id, "draft discarded");
         Ok(CommandResult::DraftDiscarded)
+    }
+
+    async fn build_outgoing(
+        &self,
+        accounts: &[Account],
+        input: &ComposeInput,
+        draft: bool,
+    ) -> Result<(Account, Option<Message>, OutgoingMessage), ApplicationError> {
+        let account = accounts
+            .iter()
+            .find(|a| a.id == input.account_id)
+            .ok_or_else(|| ApplicationError::NotFound("Account", input.account_id.to_string()))?;
+        let to = compose::parse_addresses(&input.to)?;
+        let cc = compose::parse_addresses(&input.cc)?;
+        let bcc = compose::parse_addresses(&input.bcc)?;
+        if !draft && to.is_empty() && cc.is_empty() && bcc.is_empty() {
+            return Err(ApplicationError::PreconditionFailed("Aggiungi almeno un destinatario".into()));
+        }
+
+        let mode = input.mode;
+        let mut sources: Vec<(MessageId, ParsedSource)> = Vec::new();
+        let source = match input.source_message_id.filter(|_| mode.quotes_source()) {
+            Some(id) => {
+                let (message, parsed) = self.load_source(id, mode == ComposeMode::Forward).await?;
+                sources.extend(parsed.map(|p| (id, p)));
+                Some(message)
+            }
+            None => None,
+        };
+        let quote = source.as_ref().and_then(|s| compose::quote_for(mode, s));
+        let body_html =
+            compose::assemble_html(&input.body_md, account.identity.signature_html.as_deref(), quote.as_ref());
+        let body_text =
+            compose::assemble_text(&input.body_md, compose::signature_text(account).as_deref(), quote.as_ref());
+
+        // The user's files, the parts of existing messages they kept, and every
+        // inline image the HTML shows (forwarded original, restored draft).
+        let kept = input
+            .forwarded_attachment_ids
+            .iter()
+            .map(|id| compose::parse_attachment_id(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut needed: Vec<MessageId> = kept.iter().map(|(id, _)| *id).collect();
+        if !kept.is_empty() || body_html.contains("cid:") {
+            needed.extend(input.draft_id);
+        }
+        for id in needed {
+            if sources.iter().any(|(s, _)| *s == id) {
+                continue;
+            }
+            // A kept part may point at a draft version an earlier save already
+            // replaced; the part lives on, identical, in the current draft.
+            let Some(message) = self.message_read_repo.get_message(&id).await? else {
+                continue;
+            };
+            sources.push((id, compose::parse_source(&self.fetch_raw(&message).await?)?));
+        }
+
+        let mut attachments = input.attachments.clone();
+        for (_, fingerprint) in kept {
+            let part = sources
+                .iter()
+                .flat_map(|(_, parsed)| &parsed.parts)
+                .find(|p| compose::part_fingerprint(p) == fingerprint)
+                .ok_or_else(|| {
+                    ApplicationError::PreconditionFailed("un allegato inoltrato non è più disponibile".into())
+                })?;
+            attachments.push(part.clone());
+        }
+        for (_, parsed) in &sources {
+            for part in &parsed.parts {
+                if compose::referenced_inline(part, &body_html)
+                    && !attachments.iter().any(|a| a.content_id == part.content_id)
+                {
+                    attachments.push(part.clone());
+                }
+            }
+        }
+
+        let (in_reply_to, references) = match &source {
+            Some(s) if mode.is_reply() => {
+                let mut refs = s.references.clone();
+                if refs.is_empty() {
+                    refs.extend(s.in_reply_to.clone());
+                }
+                refs.extend(s.message_rfc_id.clone());
+                (s.message_rfc_id.clone(), refs)
+            }
+            _ => (None, vec![]),
+        };
+
+        let from = compose::sender_address(account);
+        let outgoing = OutgoingMessage {
+            message_rfc_id: Some(compose::new_message_rfc_id(&from.email)),
+            from,
+            to,
+            cc,
+            bcc,
+            subject: input.subject.clone(),
+            body_text: Some(body_text),
+            body_html: Some(body_html),
+            in_reply_to,
+            references,
+            attachments,
+            extra_headers: if draft {
+                compose::draft_headers(mode, input.source_message_id, &input.body_md)
+            } else {
+                vec![]
+            },
+        };
+        Ok((account.clone(), source, outgoing))
+    }
+
+    /// The message being replied to / forwarded, with its body. The raw MIME
+    /// is fetched when asked for (attachments) or when no body is stored yet.
+    async fn load_source(
+        &self,
+        id: MessageId,
+        with_parts: bool,
+    ) -> Result<(Message, Option<ParsedSource>), ApplicationError> {
+        let mut message = self
+            .message_read_repo
+            .get_message(&id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("Message", id.to_string()))?;
+        if !with_parts && (message.body_text.is_some() || message.body_html.is_some()) {
+            return Ok((message, None));
+        }
+        let parsed = compose::parse_source(&self.fetch_raw(&message).await?)?;
+        message.body_text = message.body_text.or_else(|| parsed.text.clone());
+        message.body_html = message.body_html.or_else(|| parsed.html.clone());
+        Ok((message, Some(parsed)))
+    }
+
+    async fn fetch_raw(&self, message: &Message) -> Result<Vec<u8>, ApplicationError> {
+        let uid = message.provider_uid.ok_or_else(|| {
+            ApplicationError::PreconditionFailed("il messaggio non è ancora sul server".into())
+        })?;
+        let mailbox = self
+            .message_read_repo
+            .get_mailbox(&message.mailbox_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("Mailbox", message.mailbox_id.to_string()))?;
+        Ok(self
+            .provider_registry
+            .get_provider(&message.account_id)?
+            .fetch_raw_message(&mailbox.path, uid)
+            .await?)
+    }
+
+    async fn store_draft_locally(
+        &self,
+        account_id: AccountId,
+        drafts_id: MailboxId,
+        uid: ProviderUid,
+        outgoing: &OutgoingMessage,
+    ) -> Result<MessageId, ApplicationError> {
+        let attachments: Vec<Attachment> = outgoing
+            .attachments
+            .iter()
+            .map(|a| Attachment {
+                id: AttachmentId::new(),
+                filename: Some(a.filename.clone()),
+                mime_type: a.mime_type.clone(),
+                size_bytes: a.data.len() as u64,
+                content_id: a.content_id.clone(),
+                is_inline: a.content_id.is_some(),
+            })
+            .collect();
+        let (mut message, received) = Message::receive(
+            account_id,
+            drafts_id,
+            uid,
+            outgoing.message_rfc_id.clone(),
+            outgoing.in_reply_to.clone(),
+            outgoing.references.clone(),
+            outgoing_envelope(outgoing),
+            vec![Flag::Draft, Flag::Seen],
+            0,
+            !attachments.is_empty(),
+            chrono::Utc::now(),
+        );
+        let id = message.id;
+        self.append_and_publish(&id, AggregateType::Message, 0, received).await?;
+
+        let fetched = message.set_body(outgoing.body_text.clone(), outgoing.body_html.clone(), attachments);
+        // Body before the event, as in SyncService::store_body.
+        self.message_read_repo
+            .put_body(&id, outgoing.body_text.clone(), outgoing.body_html.clone())
+            .await?;
+        self.append_and_publish(&id, AggregateType::Message, 1, fetched).await?;
+        Ok(id)
+    }
+
+    /// Delete a draft locally now and on the server in the background.
+    async fn remove_draft(&self, id: MessageId) -> Result<(), ApplicationError> {
+        let (message, seq) = self.load_message(&id).await?;
+        let mailbox = self.message_read_repo.get_mailbox(&message.mailbox_id).await?;
+        self.append_and_publish(&id, AggregateType::Message, seq, message.delete(true))
+            .await?;
+
+        if let (Some(uid), Some(mailbox)) = (message.provider_uid, mailbox) {
+            let provider = self.provider_registry.get_provider(&message.account_id)?;
+            tokio::spawn(async move {
+                if let Err(e) = provider.delete_message(&mailbox.path, uid, true).await {
+                    tracing::warn!(%e, "Background IMAP draft delete failed — next sync will reconcile");
+                }
+            });
+        }
+        Ok(())
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
@@ -697,6 +998,18 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         self.event_bus.publish(envelope);
 
         Ok(())
+    }
+}
+
+fn outgoing_envelope(outgoing: &OutgoingMessage) -> Envelope {
+    Envelope {
+        from: vec![outgoing.from.clone()],
+        to: outgoing.to.clone(),
+        cc: outgoing.cc.clone(),
+        bcc: outgoing.bcc.clone(),
+        reply_to: vec![],
+        subject: outgoing.subject.clone(),
+        date: chrono::Utc::now(),
     }
 }
 
@@ -800,16 +1113,18 @@ mod tests {
 
     // ── Mock EmailProvider ─────────────────────────────────────────────
 
+    #[derive(Default)]
     struct MockEmailProvider {
         /// Message to return from fetch_message_detail.
         detail_response: RwLock<Option<Message>>,
+        sent: RwLock<Vec<OutgoingMessage>>,
+        appended: RwLock<Vec<(MailboxPath, OutgoingMessage, Vec<Flag>)>>,
+        raw: RwLock<Vec<u8>>,
     }
 
     impl MockEmailProvider {
         fn new() -> Self {
-            Self {
-                detail_response: RwLock::new(None),
-            }
+            Self::default()
         }
     }
 
@@ -841,7 +1156,7 @@ mod tests {
             _mailbox: &MailboxPath,
             _uid: ProviderUid,
         ) -> Result<Vec<u8>, DomainError> {
-            Ok(vec![])
+            Ok(self.raw.read().unwrap().clone())
         }
         async fn set_flags(
             &self,
@@ -877,8 +1192,21 @@ mod tests {
         ) -> Result<(), DomainError> {
             Ok(())
         }
-        async fn send_message(&self, _message: &OutgoingMessage) -> Result<(), DomainError> {
+        async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError> {
+            self.sent.write().unwrap().push(message.clone());
             Ok(())
+        }
+        async fn append_message(
+            &self,
+            mailbox: &MailboxPath,
+            message: &OutgoingMessage,
+            flags: &[Flag],
+        ) -> Result<Option<ProviderUid>, DomainError> {
+            self.appended
+                .write()
+                .unwrap()
+                .push((mailbox.clone(), message.clone(), flags.to_vec()));
+            Ok(Some(ProviderUid::new(7)))
         }
         async fn mailbox_status(
             &self,
@@ -946,18 +1274,20 @@ mod tests {
     /// (message_id, body_text, body_html) as handed to `MessageBodyStore::put_body`.
     type StoredBody = (MessageId, Option<String>, Option<String>);
 
+    #[derive(Default)]
     struct MockMessageReadRepo {
         mailboxes: Vec<mc_domain::Mailbox>,
+        messages: Vec<Message>,
         stored_bodies: std::sync::Mutex<Vec<StoredBody>>,
     }
 
     impl MockMessageReadRepo {
         fn new() -> Self {
-            Self { mailboxes: vec![], stored_bodies: std::sync::Mutex::new(vec![]) }
+            Self::default()
         }
 
         fn with_mailboxes(mailboxes: Vec<mc_domain::Mailbox>) -> Self {
-            Self { mailboxes, stored_bodies: std::sync::Mutex::new(vec![]) }
+            Self { mailboxes, ..Self::default() }
         }
     }
 
@@ -997,8 +1327,8 @@ mod tests {
 
     #[async_trait]
     impl MessageReadRepository for MockMessageReadRepo {
-        async fn get_message(&self, _id: &MessageId) -> Result<Option<Message>, DomainError> {
-            Ok(None)
+        async fn get_message(&self, id: &MessageId) -> Result<Option<Message>, DomainError> {
+            Ok(self.messages.iter().find(|m| m.id == *id).cloned())
         }
         async fn list_messages(
             &self,
@@ -1364,117 +1694,354 @@ mod tests {
         assert!(matches!(err, ApplicationError::NotFound(..)));
     }
 
-    #[tokio::test]
-    async fn handle_send_produces_sent_event() {
-        let account_id = AccountId::new();
-        let es = Arc::new(MockEventStore::new());
-        let registry = Arc::new(MockProviderRegistry::new(
-            Arc::new(MockEmailProvider::new()),
-        ));
-        let bus = Arc::new(MockEventBus::new());
-        let read_repo = Arc::new(MockMessageReadRepo::new());
-        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
-
-        let outgoing = OutgoingMessage {
-            from: Address {
-                name: Some("Me".into()),
-                email: EmailAddress::new("me@example.com").unwrap(),
+    fn test_account(email: &str, imap_host: &str) -> Account {
+        let email = EmailAddress::new(email).unwrap();
+        Account::create(
+            "Lavoro".into(),
+            email.clone(),
+            mc_domain::ProviderType::Imap,
+            mc_domain::ConnectionConfig {
+                imap_host: Some(imap_host.into()),
+                imap_port: Some(993),
+                use_tls: true,
+                auth: mc_domain::AuthConfig::Plain { username: "u".into(), password: String::new() },
+                smtp: None,
+                smtp_host: None,
+                smtp_port: None,
             },
-            to: vec![Address {
-                name: None,
-                email: EmailAddress::new("you@example.com").unwrap(),
-            }],
+            mc_domain::Identity {
+                display_name: "Mario Rossi".into(),
+                email,
+                signature_html: None,
+                signature_text: Some("Mario".into()),
+            },
+        )
+        .0
+    }
+
+    fn test_mailbox(account_id: AccountId, name: &str, kind: MailboxType) -> mc_domain::Mailbox {
+        mc_domain::Mailbox {
+            id: MailboxId::new(),
+            account_id,
+            path: MailboxPath::parse(name, '/').unwrap(),
+            display_name: name.into(),
+            mailbox_type: kind,
+            flags: vec![],
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        }
+    }
+
+    fn compose_input(account_id: AccountId) -> ComposeInput {
+        ComposeInput {
+            draft_id: None,
+            account_id,
+            to: vec!["Anna <anna@example.com>".into()],
             cc: vec![],
             bcc: vec![],
-            subject: "Hello".into(),
-            body_text: Some("Hi".into()),
-            body_html: None,
-            in_reply_to: None,
-            references: vec![],
-            attachments: vec![],
-        };
+            subject: "Ciao".into(),
+            body_md: "**ciao**".into(),
+            mode: ComposeMode::New,
+            source_message_id: None,
+            attachments: vec![mc_domain::OutgoingAttachment {
+                filename: "a.pdf".into(),
+                mime_type: "application/pdf".into(),
+                content_id: None,
+                data: vec![1, 2],
+            }],
+            forwarded_attachment_ids: vec![],
+        }
+    }
 
-        let result = handler.handle_send(account_id, outgoing).await.unwrap();
+    /// Let spawned fire-and-forget provider calls run.
+    async fn drain_spawned() {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
 
+    struct Fixture {
+        account: Account,
+        provider: Arc<MockEmailProvider>,
+        bus: Arc<MockEventBus>,
+        sent_box: mc_domain::Mailbox,
+        drafts_box: mc_domain::Mailbox,
+        /// A message stored in INBOX (event store + read model).
+        seeded: Option<Message>,
+        handler: MessageCommandHandler<MockEventStore, MockProviderRegistry, MockMessageReadRepo, MockEventBus>,
+    }
+
+    fn fixture(imap_host: &str, seed: impl FnOnce(AccountId, MailboxId) -> Option<Message>) -> Fixture {
+        let account = test_account("mario@example.com", imap_host);
+        let inbox = test_mailbox(account.id, "INBOX", MailboxType::Inbox);
+        let seeded = seed(account.id, inbox.id);
+        let sent_box = test_mailbox(account.id, "Sent", MailboxType::Sent);
+        let drafts_box = test_mailbox(account.id, "Drafts", MailboxType::Drafts);
+        let provider = Arc::new(MockEmailProvider::new());
+        let bus = Arc::new(MockEventBus::new());
+        let es = Arc::new(match &seeded {
+            Some(m) => MockEventStore::with_message(m),
+            None => MockEventStore::new(),
+        });
+        let mut repo = MockMessageReadRepo::with_mailboxes(vec![inbox, sent_box.clone(), drafts_box.clone()]);
+        repo.messages.extend(seeded.clone());
+        let handler = MessageCommandHandler::new(
+            es,
+            Arc::new(MockProviderRegistry::new(provider.clone())),
+            Arc::new(repo),
+            bus.clone(),
+        );
+        Fixture { account, provider, bus, sent_box, drafts_box, seeded, handler }
+    }
+
+    #[tokio::test]
+    async fn send_compose_sends_appends_to_sent_and_records_it() {
+        let f = fixture("imap.example.com", |_, _| None);
+        let result = f
+            .handler
+            .handle_send_compose(std::slice::from_ref(&f.account), compose_input(f.account.id))
+            .await
+            .unwrap();
         assert!(matches!(result, CommandResult::MessageSent { .. }));
-        assert_eq!(bus.last_event_name().unwrap(), "MessageSent");
+        drain_spawned().await;
 
-        // Regression: the sent event must carry the body, not drop it —
-        // otherwise a refetch of the sent message comes back empty.
-        let published = bus.published.read().unwrap();
+        let sent = f.provider.sent.read().unwrap();
+        let out = &sent[0];
+        assert_eq!(out.from.name.as_deref(), Some("Mario Rossi"));
+        assert_eq!(out.to[0].name.as_deref(), Some("Anna"));
+        assert_eq!(out.attachments.len(), 1, "attachments must reach SMTP");
+        assert!(out.body_html.as_deref().unwrap().contains("<strong>ciao</strong>"));
+        assert_eq!(out.body_text.as_deref(), Some("**ciao**\n\n-- \nMario"));
+
+        let appended = f.provider.appended.read().unwrap();
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].0, f.sent_box.path);
+        assert_eq!(appended[0].1.message_rfc_id, out.message_rfc_id);
+
+        // The sent event carries the body, or a refetch of the sent message comes back empty.
+        let published = f.bus.published.read().unwrap();
         let DomainEvent::MessageSent { body_text, mailbox_id, .. } = &published.last().unwrap().payload
         else {
             panic!("expected MessageSent event");
         };
-        assert_eq!(body_text.as_deref(), Some("Hi"));
-        // No Sent mailbox discovered yet — falls back to a placeholder id
-        // rather than erroring out.
-        assert_ne!(*mailbox_id, MailboxId::default());
+        assert_eq!(body_text, &out.body_text);
+        assert_eq!(*mailbox_id, f.sent_box.id);
     }
 
     #[tokio::test]
-    async fn handle_send_resolves_real_sent_mailbox() {
-        let account_id = AccountId::new();
-        let sent_mailbox = mc_domain::Mailbox {
-            id: MailboxId::new(),
-            account_id,
-            path: mc_domain::value_objects::mailbox_path::MailboxPath::parse("Sent", '/').unwrap(),
-            display_name: "Sent".into(),
-            mailbox_type: mc_domain::MailboxType::Sent,
-            flags: vec![],
-            total_messages: 0,
-            unread_messages: 0,
-            uid_validity: None,
-            uid_next: None,
-        };
-        let inbox = mc_domain::Mailbox {
-            id: MailboxId::new(),
-            account_id,
-            path: mc_domain::value_objects::mailbox_path::MailboxPath::inbox(),
-            display_name: "INBOX".into(),
-            mailbox_type: mc_domain::MailboxType::Inbox,
-            flags: vec![],
-            total_messages: 0,
-            unread_messages: 0,
-            uid_validity: None,
-            uid_next: None,
-        };
+    async fn gmail_sent_copy_is_not_appended() {
+        let f = fixture("imap.gmail.com", |_, _| None);
+        f.handler
+            .handle_send_compose(std::slice::from_ref(&f.account), compose_input(f.account.id))
+            .await
+            .unwrap();
+        drain_spawned().await;
+        assert!(f.provider.appended.read().unwrap().is_empty());
+    }
 
-        let es = Arc::new(MockEventStore::new());
-        let registry = Arc::new(MockProviderRegistry::new(Arc::new(MockEmailProvider::new())));
-        let bus = Arc::new(MockEventBus::new());
-        let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![
-            inbox,
-            sent_mailbox.clone(),
-        ]));
-        let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
+    #[tokio::test]
+    async fn send_compose_rejects_bad_or_missing_recipients() {
+        let f = fixture("imap.example.com", |_, _| None);
+        let accounts = std::slice::from_ref(&f.account);
 
-        let outgoing = OutgoingMessage {
-            from: Address {
-                name: None,
-                email: EmailAddress::new("me@example.com").unwrap(),
+        let mut input = compose_input(f.account.id);
+        input.cc = vec!["anna@".into()];
+        let err = f.handler.handle_send_compose(accounts, input).await.unwrap_err();
+        assert!(err.to_string().contains("anna@"), "{err}");
+
+        let mut input = compose_input(f.account.id);
+        input.to.clear();
+        assert!(f.handler.handle_send_compose(accounts, input).await.is_err());
+        assert!(f.provider.sent.read().unwrap().is_empty());
+    }
+
+    fn source_message(account_id: AccountId, mailbox_id: MailboxId) -> Message {
+        let (mut msg, _) = Message::receive(
+            account_id,
+            mailbox_id,
+            ProviderUid::new(42),
+            Some("<orig@example.com>".into()),
+            Some("<parent@example.com>".into()),
+            vec!["<root@example.com>".into(), "<parent@example.com>".into()],
+            Envelope {
+                from: vec![Address { name: Some("Anna".into()), email: EmailAddress::new("anna@example.com").unwrap() }],
+                to: vec![Address { name: None, email: EmailAddress::new("mario@example.com").unwrap() }],
+                cc: vec![Address { name: None, email: EmailAddress::new("bob@example.com").unwrap() }],
+                bcc: vec![],
+                reply_to: vec![],
+                subject: "R: Budget".into(),
+                date: chrono::Utc::now(),
             },
-            to: vec![Address {
-                name: None,
-                email: EmailAddress::new("you@example.com").unwrap(),
-            }],
-            cc: vec![],
-            bcc: vec![],
-            subject: "Hello".into(),
-            body_text: Some("Hi".into()),
-            body_html: None,
-            in_reply_to: None,
-            references: vec![],
+            vec![],
+            100,
+            false,
+            chrono::Utc::now(),
+        );
+        msg.body_text = Some("testo originale".into());
+        msg
+    }
+
+    #[tokio::test]
+    async fn reply_all_is_prepared_and_sent_threaded_with_quote() {
+        let f = fixture("imap.example.com", |account, inbox| Some(source_message(account, inbox)));
+        let source = f.seeded.clone().unwrap();
+        let accounts = std::slice::from_ref(&f.account);
+
+        let CommandResult::ComposePrepared(view) = f
+            .handler
+            .handle_prepare_compose(accounts, ComposeMode::ReplyAll, Some(source.id), None)
+            .await
+            .unwrap()
+        else {
+            panic!("expected ComposePrepared");
+        };
+        assert_eq!(view.subject, "Re: Budget");
+        assert_eq!(view.to, ["Anna <anna@example.com>"]);
+        assert_eq!(view.cc, ["bob@example.com"]);
+        assert!(view.quoted_html.as_deref().unwrap().contains("testo originale"));
+
+        let input = ComposeInput {
+            to: view.to.clone(),
+            cc: view.cc.clone(),
+            subject: view.subject.clone(),
+            mode: view.mode,
+            source_message_id: view.source_message_id,
             attachments: vec![],
+            ..compose_input(view.account_id)
         };
+        f.handler.handle_send_compose(accounts, input).await.unwrap();
 
-        handler.handle_send(account_id, outgoing).await.unwrap();
+        let sent = f.provider.sent.read().unwrap();
+        assert_eq!(sent[0].in_reply_to.as_deref(), Some("<orig@example.com>"));
+        assert_eq!(sent[0].references, ["<root@example.com>", "<parent@example.com>", "<orig@example.com>"]);
+        assert!(sent[0].body_text.as_deref().unwrap().ends_with("ha scritto:\n> testo originale"));
 
-        let published = bus.published.read().unwrap();
-        let DomainEvent::MessageSent { mailbox_id, .. } = &published.last().unwrap().payload else {
-            panic!("expected MessageSent event");
+        let published = f.bus.published.read().unwrap();
+        assert!(published.iter().any(|e| matches!(
+            &e.payload,
+            DomainEvent::MessageFlagged { message_id, flags_added, .. }
+                if *message_id == source.id && flags_added == &[Flag::Answered]
+        )));
+    }
+
+    #[tokio::test]
+    async fn forward_carries_kept_attachments_and_inline_images() {
+        let f = fixture("imap.example.com", |account, inbox| Some(source_message(account, inbox)));
+        let source = f.seeded.clone().unwrap();
+        *f.provider.raw.write().unwrap() = b"Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
+--M\r\nContent-Type: multipart/related; boundary=\"R\"\r\n\r\n\
+--R\r\nContent-Type: text/html\r\n\r\n<p>Ecco <img src=\"cid:logo@x\"></p>\r\n\
+--R\r\nContent-Type: image/png\r\nContent-ID: <logo@x>\r\nContent-Transfer-Encoding: base64\r\n\r\nAQID\r\n\
+--R--\r\n\
+--M\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nBAUG\r\n\
+--M--\r\n"
+            .to_vec();
+        let accounts = std::slice::from_ref(&f.account);
+
+        let CommandResult::ComposePrepared(view) = f
+            .handler
+            .handle_prepare_compose(accounts, ComposeMode::Forward, Some(source.id), None)
+            .await
+            .unwrap()
+        else {
+            panic!("expected ComposePrepared");
         };
-        assert_eq!(*mailbox_id, sent_mailbox.id);
+        assert_eq!(view.subject, "Fwd: Budget");
+        assert!(view.to.is_empty());
+        let names: Vec<_> = view.forwarded_attachments.iter().map(|a| a.filename.as_str()).collect();
+        assert_eq!(names, ["a.pdf"]);
+
+        let input = ComposeInput {
+            subject: view.subject.clone(),
+            mode: view.mode,
+            source_message_id: view.source_message_id,
+            attachments: vec![],
+            forwarded_attachment_ids: vec![view.forwarded_attachments[0].id.clone()],
+            ..compose_input(view.account_id)
+        };
+        f.handler.handle_send_compose(accounts, input).await.unwrap();
+
+        let sent = f.provider.sent.read().unwrap();
+        let parts: Vec<_> = sent[0]
+            .attachments
+            .iter()
+            .map(|a| (a.filename.as_str(), a.content_id.as_deref(), a.data.as_slice()))
+            .collect();
+        assert_eq!(parts, [("a.pdf", None, &[4u8, 5, 6][..]), ("allegato", Some("logo@x"), &[1, 2, 3][..])]);
+        assert!(sent[0].body_html.as_deref().unwrap().contains("Inizio messaggio inoltrato"));
+        assert!(sent[0].in_reply_to.is_none());
+    }
+
+    #[tokio::test]
+    async fn draft_restores_markdown_recipients_and_attachments() {
+        let f = fixture("imap.example.com", |account, inbox| Some(source_message(account, inbox)));
+        let draft = f.seeded.clone().unwrap();
+        let headers: String = compose::draft_headers(ComposeMode::Forward, None, "**ciao**\nriga")
+            .into_iter()
+            .map(|(k, v)| format!("{k}: {v}\r\n"))
+            .collect();
+        *f.provider.raw.write().unwrap() = format!(
+            "{headers}To: Anna <anna@example.com>\r\nBcc: b@example.com\r\nSubject: Bozza\r\n\
+Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
+--M\r\nContent-Type: text/plain\r\n\r\nciao\r\n\
+--M\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\n\r\nPDF\r\n\
+--M--\r\n"
+        )
+        .into_bytes();
+
+        let CommandResult::ComposePrepared(view) = f
+            .handler
+            .handle_prepare_compose(std::slice::from_ref(&f.account), ComposeMode::Draft, Some(draft.id), None)
+            .await
+            .unwrap()
+        else {
+            panic!("expected ComposePrepared");
+        };
+        assert_eq!(view.draft_id, Some(draft.id));
+        assert_eq!(view.body_md, "**ciao**\nriga");
+        assert_eq!(view.to, ["Anna <anna@example.com>"]);
+        assert_eq!(view.bcc, ["b@example.com"]);
+        assert_eq!(view.subject, "Bozza");
+        // A forward whose original is unknown carries on as a new message.
+        assert_eq!(view.mode, ComposeMode::New);
+        assert_eq!(view.forwarded_attachments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn save_draft_appends_stores_locally_and_replaces_previous() {
+        let f = fixture("imap.example.com", |account, inbox| Some(source_message(account, inbox)));
+        let old = f.seeded.clone().unwrap();
+        let mut input = compose_input(f.account.id);
+        input.draft_id = Some(old.id);
+        input.to.clear();
+
+        let CommandResult::DraftSaved { message_id } =
+            f.handler.handle_save_draft(std::slice::from_ref(&f.account), input).await.unwrap()
+        else {
+            panic!("expected DraftSaved");
+        };
+        assert_ne!(message_id, old.id);
+
+        let appended = f.provider.appended.read().unwrap();
+        let (path, draft, flags) = &appended[0];
+        assert_eq!(*path, f.drafts_box.path);
+        assert!(flags.contains(&Flag::Draft));
+        assert!(draft.extra_headers.iter().any(|(k, v)| k == "X-Mail-Cat-Mode" && v == "new"));
+        assert!(f.provider.sent.read().unwrap().is_empty());
+
+        let events: Vec<_> = f
+            .bus
+            .published
+            .read()
+            .unwrap()
+            .iter()
+            .map(|e| (e.aggregate_id.clone(), e.payload.event_name()))
+            .collect();
+        assert!(events.contains(&(message_id.to_string(), "MessageReceived")));
+        assert!(events.contains(&(message_id.to_string(), "MessageBodyFetched")));
+        assert!(events.contains(&(old.id.to_string(), "MessageDeleted")));
     }
 
     #[tokio::test]

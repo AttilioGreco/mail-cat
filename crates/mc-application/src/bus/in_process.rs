@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountReadRepository, AccountWriteRepository, ContactReadRepository,
+    Account, AccountReadRepository, AccountStatus, AccountWriteRepository, ContactReadRepository,
     ContactWriteRepository, ConversationReadRepository, EventStore, MailboxReadRepository,
     MessageBodyStore, MessageReadRepository, ProviderRegistry, ReadModelProjector, SearchIndex,
 };
@@ -28,7 +28,7 @@ use super::event_bus::EventPublisher;
 /// In-process command bus that dispatches to Account, Message, and Contact handlers.
 pub struct InProcessCommandBus<AW, CW, ES, PR, MR, B>
 where
-    AW: AccountWriteRepository,
+    AW: AccountWriteRepository + AccountReadRepository,
     CW: ContactWriteRepository + ContactReadRepository,
     ES: EventStore,
     PR: ProviderRegistry,
@@ -40,11 +40,13 @@ where
     message_handler: MessageCommandHandler<ES, PR, MR, B>,
     /// Direct access to the message repo for contact backfill scanning.
     message_repo: Arc<MR>,
+    /// Compose needs every account's identity (sender choice, own addresses).
+    account_repo: Arc<AW>,
 }
 
 impl<AW, CW, ES, PR, MR, B> InProcessCommandBus<AW, CW, ES, PR, MR, B>
 where
-    AW: AccountWriteRepository,
+    AW: AccountWriteRepository + AccountReadRepository,
     CW: ContactWriteRepository + ContactReadRepository,
     ES: EventStore,
     PR: ProviderRegistry,
@@ -60,7 +62,7 @@ where
         event_bus: Arc<B>,
     ) -> Self {
         Self {
-            account_handler: AccountCommandHandler::new(account_write_repo, event_bus.clone()),
+            account_handler: AccountCommandHandler::new(account_write_repo.clone(), event_bus.clone()),
             contact_handler: ContactCommandHandler::new(contact_write_repo, event_bus.clone()),
             message_handler: MessageCommandHandler::new(
                 event_store,
@@ -69,14 +71,27 @@ where
                 event_bus,
             ),
             message_repo: message_read_repo,
+            account_repo: account_write_repo,
         }
+    }
+
+    /// Full aggregates of the active accounts, in listing order.
+    async fn accounts(&self) -> Result<Vec<Account>, ApplicationError> {
+        let mut accounts = Vec::new();
+        for summary in self.account_repo.list_accounts().await? {
+            if summary.status == AccountStatus::Disabled {
+                continue;
+            }
+            accounts.extend(self.account_repo.load(&summary.id).await?);
+        }
+        Ok(accounts)
     }
 }
 
 #[async_trait]
 impl<AW, CW, ES, PR, MR, B> CommandBus for InProcessCommandBus<AW, CW, ES, PR, MR, B>
 where
-    AW: AccountWriteRepository,
+    AW: AccountWriteRepository + AccountReadRepository,
     CW: ContactWriteRepository + ContactReadRepository,
     ES: EventStore,
     PR: ProviderRegistry,
@@ -183,18 +198,23 @@ where
                     .handle_move_many(message_ids, to_mailbox_id, to_mailbox_path)
                     .await
             }
-            Command::SendMessage {
+            Command::PrepareCompose {
+                mode,
+                message_id,
                 account_id,
-                outgoing,
-            } => self.message_handler.handle_send(account_id, outgoing).await,
-            Command::SaveDraft {
-                account_id: _,
-                outgoing: _,
             } => {
-                // Draft saving will be implemented with full infrastructure.
-                Ok(CommandResult::DraftSaved {
-                    message_id: mc_domain::MessageId::new(),
-                })
+                let accounts = self.accounts().await?;
+                self.message_handler
+                    .handle_prepare_compose(&accounts, mode, message_id, account_id)
+                    .await
+            }
+            Command::SendCompose { input } => {
+                let accounts = self.accounts().await?;
+                self.message_handler.handle_send_compose(&accounts, input).await
+            }
+            Command::SaveDraft { input } => {
+                let accounts = self.accounts().await?;
+                self.message_handler.handle_save_draft(&accounts, input).await
             }
             Command::DiscardDraft { message_id } => {
                 self.message_handler.handle_discard_draft(message_id).await

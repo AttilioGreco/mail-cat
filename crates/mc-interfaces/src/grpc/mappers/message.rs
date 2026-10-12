@@ -2,7 +2,9 @@ use super::{
     datetime_to_timestamp, domain_address_to_proto, domain_flag_to_proto, proto_email_to_domain,
     proto_flag_to_domain, timestamp_to_datetime,
 };
-use crate::grpc::proto::{AttachmentInfo, MessageDetail, MessageEnvelope, MessageSummary};
+use crate::grpc::proto::{self, AttachmentInfo, MessageDetail, MessageEnvelope, MessageSummary};
+use mc_application::compose::{ComposeInput, ComposeMode, ComposeView};
+use mc_domain::{AccountId, MessageId, OutgoingAttachment};
 use mc_domain::model::attachment::Attachment as DomainAttachment;
 use mc_domain::model::message::{Envelope as DomainEnvelope, Message};
 use mc_domain::value_objects::flag::Flag as DomainFlag;
@@ -111,27 +113,75 @@ pub fn proto_flags_to_domain(flags: &[i32]) -> Vec<DomainFlag> {
         .collect()
 }
 
-/// Convert a SendMessageRequest into a domain OutgoingMessage.
-pub fn proto_send_request_to_outgoing(
-    req: &crate::grpc::proto::SendMessageRequest,
-) -> Result<mc_domain::model::message::OutgoingMessage, String> {
-    let from = req.from.as_ref().ok_or("from address is required")?;
-    let from = proto_email_to_domain(from)?;
+fn parse_uuid(field: &str, value: &str) -> Result<uuid::Uuid, String> {
+    uuid::Uuid::parse_str(value).map_err(|e| format!("invalid {field}: {e}"))
+}
 
-    let to: Result<Vec<_>, _> = req.to.iter().map(proto_email_to_domain).collect();
-    let cc: Result<Vec<_>, _> = req.cc.iter().map(proto_email_to_domain).collect();
-    let bcc: Result<Vec<_>, _> = req.bcc.iter().map(proto_email_to_domain).collect();
+pub fn proto_compose_mode(mode: &str) -> Result<ComposeMode, String> {
+    ComposeMode::parse(mode).ok_or_else(|| format!("invalid compose mode: {mode:?}"))
+}
 
-    Ok(mc_domain::model::message::OutgoingMessage {
-        from,
-        to: to?,
-        cc: cc?,
-        bcc: bcc?,
-        subject: req.subject.clone(),
-        body_text: req.body_text.clone(),
-        body_html: req.body_html.clone(),
-        in_reply_to: req.in_reply_to.clone(),
-        references: req.references.clone(),
-        attachments: vec![],
+/// Convert a proto ComposeInput (send / save draft) to the application one.
+pub fn proto_compose_input_to_app(input: proto::ComposeInput) -> Result<ComposeInput, String> {
+    let message_id = |field, id: Option<String>| -> Result<Option<MessageId>, String> {
+        id.map(|id| parse_uuid(field, &id).map(MessageId::from_uuid)).transpose()
+    };
+    Ok(ComposeInput {
+        draft_id: message_id("draft_id", input.draft_id)?,
+        account_id: AccountId::from_uuid(parse_uuid("account_id", &input.account_id)?),
+        to: input.to,
+        cc: input.cc,
+        bcc: input.bcc,
+        subject: input.subject,
+        body_md: input.body_md,
+        mode: proto_compose_mode(&input.mode)?,
+        source_message_id: message_id("source_message_id", input.source_message_id)?,
+        attachments: input
+            .attachments
+            .into_iter()
+            .map(|a| OutgoingAttachment {
+                filename: a.filename,
+                mime_type: a.mime_type,
+                content_id: a.content_id,
+                data: a.data,
+            })
+            .collect(),
+        forwarded_attachment_ids: input.forwarded_attachment_ids,
     })
+}
+
+pub fn compose_view_to_proto(view: ComposeView) -> proto::ComposeView {
+    proto::ComposeView {
+        draft_id: view.draft_id.map(|id| id.to_string()),
+        account_id: view.account_id.to_string(),
+        identities: view
+            .identities
+            .into_iter()
+            .map(|i| proto::ComposeIdentity {
+                account_id: i.account_id.to_string(),
+                display_name: i.display_name,
+                email: i.email,
+                signature_html: i.signature_html,
+            })
+            .collect(),
+        to: view.to,
+        cc: view.cc,
+        bcc: view.bcc,
+        subject: view.subject,
+        body_md: view.body_md,
+        quoted_html: view.quoted_html,
+        signature_html: view.signature_html,
+        forwarded_attachments: view
+            .forwarded_attachments
+            .into_iter()
+            .map(|a| proto::ForwardedAttachment {
+                id: a.id,
+                filename: a.filename,
+                size: a.size,
+                mime_type: a.mime_type,
+            })
+            .collect(),
+        mode: view.mode.as_str().to_owned(),
+        source_message_id: view.source_message_id.map(|id| id.to_string()),
+    }
 }

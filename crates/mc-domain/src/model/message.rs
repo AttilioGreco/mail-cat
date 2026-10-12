@@ -299,6 +299,11 @@ pub struct OutgoingMessage {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub attachments: Vec<OutgoingAttachment>,
+    /// RFC Message-ID (`<…>`). Set by the caller so the SMTP copy and the one
+    /// appended to Sent/Drafts share it; `None` lets the transport pick one.
+    pub message_rfc_id: Option<String>,
+    /// Extra `X-…` headers (e.g. draft metadata). Values must be ASCII.
+    pub extra_headers: Vec<(String, String)>,
 }
 
 /// Attachment for outgoing messages.
@@ -306,6 +311,8 @@ pub struct OutgoingMessage {
 pub struct OutgoingAttachment {
     pub filename: String,
     pub mime_type: String,
+    /// Set for inline images referenced from the HTML body as `cid:<content_id>`.
+    pub content_id: Option<String>,
     pub data: Vec<u8>,
 }
 

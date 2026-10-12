@@ -1,4 +1,6 @@
-use serde::Serialize;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
@@ -6,10 +8,10 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use mc_client::{
-    Account, ContactHit, ConversationSummary, ImapAccountParams, MailCatClient, Mailbox,
-    MailboxNotificationKind, MessageBody, MessageFlag, MessageSummary, OAuthLoginEvent,
-    OAuthProvider, SearchHit, SendMessageParams, Suggestion, SyncPhase, SyncProgress,
-    ThreadMessage,
+    Account, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit, ConversationSummary,
+    ImapAccountParams, MailCatClient, Mailbox, MailboxNotificationKind, MessageBody, MessageFlag,
+    MessageSummary, OAuthLoginEvent, OAuthProvider, SearchHit, Suggestion, SyncPhase,
+    SyncProgress, ThreadMessage,
 };
 
 /// Tauri managed state — single shared client instance.
@@ -932,37 +934,182 @@ pub async fn move_messages(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeIdentityDto {
+    pub account_id: String,
+    pub display_name: String,
+    pub email: String,
+    pub signature_html: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardedAttachmentDto {
+    pub id: String,
+    pub filename: String,
+    pub size: u64,
+    pub mime_type: String,
+}
+
+/// Starting state of the compose window; every default is computed server-side.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeDto {
+    pub draft_id: Option<String>,
+    pub account_id: String,
+    pub identities: Vec<ComposeIdentityDto>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub subject: String,
+    pub body_md: String,
+    pub quoted_html: Option<String>,
+    pub signature_html: Option<String>,
+    pub forwarded_attachments: Vec<ForwardedAttachmentDto>,
+    pub mode: String,
+    pub source_message_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeAttachmentInput {
+    pub filename: String,
+    pub mime_type: String,
+    pub content_id: Option<String>,
+    pub data_base64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeInputDto {
+    pub draft_id: Option<String>,
+    pub account_id: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub subject: String,
+    pub body_md: String,
+    pub mode: String,
+    pub source_message_id: Option<String>,
+    pub attachments: Vec<ComposeAttachmentInput>,
+    pub forwarded_attachment_ids: Vec<String>,
+}
+
+impl ComposeInputDto {
+    fn into_client(self) -> Result<ComposeInput, String> {
+        let attachments = self
+            .attachments
+            .into_iter()
+            .map(|a| {
+                let data = BASE64
+                    .decode(a.data_base64.as_bytes())
+                    .map_err(|e| format!("Allegato «{}» non leggibile: {e}", a.filename))?;
+                Ok(ComposeAttachment {
+                    filename: a.filename,
+                    mime_type: a.mime_type,
+                    content_id: a.content_id,
+                    data,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(ComposeInput {
+            draft_id: self.draft_id,
+            account_id: self.account_id,
+            to: self.to,
+            cc: self.cc,
+            bcc: self.bcc,
+            subject: self.subject,
+            body_md: self.body_md,
+            mode: self.mode,
+            source_message_id: self.source_message_id,
+            attachments,
+            forwarded_attachment_ids: self.forwarded_attachment_ids,
+        })
+    }
+}
+
+fn compose_to_dto(v: ComposeView) -> ComposeDto {
+    ComposeDto {
+        draft_id: v.draft_id,
+        account_id: v.account_id,
+        identities: v
+            .identities
+            .into_iter()
+            .map(|i| ComposeIdentityDto {
+                account_id: i.account_id,
+                display_name: i.display_name,
+                email: i.email,
+                signature_html: i.signature_html,
+            })
+            .collect(),
+        to: v.to,
+        cc: v.cc,
+        bcc: v.bcc,
+        subject: v.subject,
+        body_md: v.body_md,
+        quoted_html: v.quoted_html,
+        signature_html: v.signature_html,
+        forwarded_attachments: v
+            .forwarded_attachments
+            .into_iter()
+            .map(|a| ForwardedAttachmentDto {
+                id: a.id,
+                filename: a.filename,
+                size: a.size,
+                mime_type: a.mime_type,
+            })
+            .collect(),
+        mode: v.mode,
+        source_message_id: v.source_message_id,
+    }
+}
+
+/// Compose errors are shown to the user as-is ("Indirizzo non valido: «x»"),
+/// so drop the gRPC status wrapping around the server's message.
+fn compose_error(e: ClientError) -> String {
+    match e {
+        ClientError::Grpc(status) => status.message().to_owned(),
+        e => e.to_string(),
+    }
+}
+
+/// `mode`: "new" | "reply" | "replyAll" | "forward" | "draft".
 #[tauri::command]
-pub async fn send_message(
-    account_id: String,
-    from_email: String,
-    to: Vec<String>,
-    cc: Vec<String>,
-    bcc: Vec<String>,
-    subject: String,
-    body_text: Option<String>,
-    body_html: Option<String>,
-    in_reply_to: Option<String>,
-    references: Vec<String>,
+pub async fn prepare_compose(
+    mode: String,
+    message_id: Option<String>,
+    account_id: Option<String>,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<ComposeDto, String> {
     let client = get_or_connect(&state).await?;
     client
-        .send_message(SendMessageParams {
-            account_id,
-            from_email,
-            from_name: None,
-            to,
-            cc,
-            bcc,
-            subject,
-            body_text,
-            body_html,
-            in_reply_to,
-            references,
-        })
+        .prepare_compose(&mode, message_id, account_id)
         .await
-        .map_err(|e| e.to_string())
+        .map(compose_to_dto)
+        .map_err(compose_error)
+}
+
+/// Returns the id of the sent message.
+#[tauri::command]
+pub async fn send_compose(input: ComposeInputDto, state: State<'_, AppState>) -> Result<String, String> {
+    let input = input.into_client()?;
+    let client = get_or_connect(&state).await?;
+    client.send_compose(input).await.map_err(compose_error)
+}
+
+/// Returns the id of the stored draft (pass it back as `draftId` next time).
+#[tauri::command]
+pub async fn save_draft(input: ComposeInputDto, state: State<'_, AppState>) -> Result<String, String> {
+    let input = input.into_client()?;
+    let client = get_or_connect(&state).await?;
+    client.save_draft(input).await.map_err(compose_error)
+}
+
+#[tauri::command]
+pub async fn discard_draft(draft_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let client = get_or_connect(&state).await?;
+    client.discard_draft(&draft_id).await.map_err(compose_error)
 }
 
 #[tauri::command]

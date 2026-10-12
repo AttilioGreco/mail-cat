@@ -15,9 +15,9 @@ use tokio::sync::broadcast;
 
 use mc_domain::{
     AccountId, AggregateType, Attachment, BackfillEntry, BodyBackfillQueue, DomainError, DomainEvent,
-    EmailProvider, EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath,
+    EmailProvider, EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath, MailboxType,
     MailboxReadRepository, Message, MessageBodyResult, MessageBodyStore, MessageId,
-    MessageReadRepository,
+    MessageEnvelopeSummary, MessageReadRepository,
     ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
 };
 use tokio_util::sync::CancellationToken;
@@ -502,6 +502,9 @@ impl<
                 // Soft-deleted remotely (\Deleted set, not yet expunged): skip so it
                 // doesn't resurface as "new" on a mailbox with no local history of it.
                 if envelope_summary.flags.contains(&Flag::Deleted) {
+                    continue;
+                }
+                if self.already_stored(local, envelope_summary).await {
                     continue;
                 }
 
@@ -1031,6 +1034,9 @@ impl<
             if envelope_summary.flags.contains(&Flag::Deleted) {
                 continue;
             }
+            if self.already_stored(&local, envelope_summary).await {
+                continue;
+            }
 
             let (_message, event) = Message::receive(
                     *account_id,
@@ -1126,6 +1132,26 @@ impl<
     /// Check whether cancellation has been requested.
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Saving a draft APPENDs it and stores it locally right away, so the next
+    /// Drafts sync meets a UID it already has. Scoped to Drafts: a per-envelope
+    /// lookup would be a needless query per message on a big initial sync.
+    async fn already_stored(&self, mailbox: &Mailbox, env: &MessageEnvelopeSummary) -> bool {
+        if mailbox.mailbox_type != MailboxType::Drafts || env.message_rfc_id.is_none() {
+            return false;
+        }
+        let Ok(Some(existing)) = self
+            .projector
+            .find_by_provider_uid(&mailbox.id, env.provider_uid.value())
+            .await
+        else {
+            return false;
+        };
+        matches!(
+            self.projector.get_message(&existing.id).await,
+            Ok(Some(m)) if m.message_rfc_id == env.message_rfc_id
+        )
     }
 
     /// Body first, then the event: if the append fails, the backfill queue (drained
@@ -1535,6 +1561,15 @@ mod tests {
 
         async fn send_message(&self, _message: &OutgoingMessage) -> Result<(), DomainError> {
             Ok(())
+        }
+
+        async fn append_message(
+            &self,
+            _mailbox: &MailboxPath,
+            _message: &OutgoingMessage,
+            _flags: &[Flag],
+        ) -> Result<Option<ProviderUid>, DomainError> {
+            Ok(None)
         }
 
         async fn mailbox_status(

@@ -163,20 +163,66 @@ pub enum MessageFlag {
     Draft,
 }
 
-/// Parameters for sending a new email.
+/// A sender the compose window can pick.
 #[derive(Debug, Clone)]
-pub struct SendMessageParams {
+pub struct ComposeIdentity {
     pub account_id: String,
-    pub from_email: String,
-    pub from_name: Option<String>,
+    pub display_name: String,
+    pub email: String,
+    pub signature_html: Option<String>,
+}
+
+/// An attachment of an existing message (forward source, stored draft).
+#[derive(Debug, Clone)]
+pub struct ForwardedAttachment {
+    pub id: String,
+    pub filename: String,
+    pub size: u64,
+    pub mime_type: String,
+}
+
+/// Starting state of the compose window, computed by the server.
+#[derive(Debug, Clone)]
+pub struct ComposeView {
+    pub draft_id: Option<String>,
+    pub account_id: String,
+    pub identities: Vec<ComposeIdentity>,
     pub to: Vec<String>,
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
     pub subject: String,
-    pub body_text: Option<String>,
-    pub body_html: Option<String>,
-    pub in_reply_to: Option<String>,
-    pub references: Vec<String>,
+    pub body_md: String,
+    pub quoted_html: Option<String>,
+    pub signature_html: Option<String>,
+    pub forwarded_attachments: Vec<ForwardedAttachment>,
+    /// "new" | "reply" | "replyAll" | "forward" | "draft"
+    pub mode: String,
+    pub source_message_id: Option<String>,
+}
+
+/// A file attached in the compose window. `content_id` set = inline image.
+#[derive(Debug, Clone)]
+pub struct ComposeAttachment {
+    pub filename: String,
+    pub mime_type: String,
+    pub content_id: Option<String>,
+    pub data: Vec<u8>,
+}
+
+/// What the compose window sends or saves as a draft.
+#[derive(Debug, Clone)]
+pub struct ComposeInput {
+    pub draft_id: Option<String>,
+    pub account_id: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub subject: String,
+    pub body_md: String,
+    pub mode: String,
+    pub source_message_id: Option<String>,
+    pub attachments: Vec<ComposeAttachment>,
+    pub forwarded_attachment_ids: Vec<String>,
 }
 
 /// A search result hit with envelope summary.

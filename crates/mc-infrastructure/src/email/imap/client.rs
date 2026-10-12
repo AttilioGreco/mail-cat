@@ -979,6 +979,48 @@ impl EmailProvider for ImapEmailProvider {
         sender.send(message).await
     }
 
+    async fn append_message(
+        &self,
+        mailbox: &MailboxPath,
+        message: &OutgoingMessage,
+        flags: &[Flag],
+    ) -> Result<Option<ProviderUid>, DomainError> {
+        let raw = crate::email::smtp::format_for_storage(message)?;
+        let flags = format!(
+            "({})",
+            flags.iter().map(flag_to_imap).collect::<Vec<_>>().join(" ")
+        );
+
+        let mut session = self.session().await?;
+        let mailbox_name = mailbox_path_to_string(mailbox);
+        session
+            .append(&mailbox_name, Some(&flags), None, &raw)
+            .await
+            .map_err(|e| DomainError::Provider(format!("APPEND to {mailbox_name} failed: {e}")))?;
+
+        // async-imap drops the APPENDUID response code, so find the copy by its
+        // Message-ID — works on every server, UIDPLUS or not.
+        let uid = match &message.message_rfc_id {
+            Some(rfc_id) => {
+                session
+                    .select(&mailbox_name)
+                    .await
+                    .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+                let query = format!("HEADER Message-ID \"{}\"", rfc_id.replace(['"', '\\'], ""));
+                session
+                    .uid_search(query)
+                    .await
+                    .map_err(|e| DomainError::Provider(format!("UID SEARCH failed: {e}")))?
+                    .into_iter()
+                    .max()
+                    .map(ProviderUid::new)
+            }
+            None => None,
+        };
+        self.release(session);
+        Ok(uid)
+    }
+
     async fn mailbox_status(&self, mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError> {
 
         debug!("Getting mailbox status for: {:?}", mailbox);

@@ -121,6 +121,14 @@ mod tests {
         async fn send_message(&self, _message: &OutgoingMessage) -> Result<(), DomainError> {
             Ok(())
         }
+        async fn append_message(
+            &self,
+            _mailbox: &MailboxPath,
+            _message: &OutgoingMessage,
+            _flags: &[Flag],
+        ) -> Result<Option<ProviderUid>, DomainError> {
+            Ok(None)
+        }
         async fn mailbox_status(
             &self,
             _mailbox: &MailboxPath,

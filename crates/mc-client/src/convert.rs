@@ -250,6 +250,67 @@ pub(crate) fn oauth_provider_to_proto(provider: crate::types::OAuthProvider) -> 
     }
 }
 
+pub fn compose_view_from_proto(v: pb::ComposeView) -> ComposeView {
+    ComposeView {
+        draft_id: v.draft_id,
+        account_id: v.account_id,
+        identities: v
+            .identities
+            .into_iter()
+            .map(|i| ComposeIdentity {
+                account_id: i.account_id,
+                display_name: i.display_name,
+                email: i.email,
+                signature_html: i.signature_html,
+            })
+            .collect(),
+        to: v.to,
+        cc: v.cc,
+        bcc: v.bcc,
+        subject: v.subject,
+        body_md: v.body_md,
+        quoted_html: v.quoted_html,
+        signature_html: v.signature_html,
+        forwarded_attachments: v
+            .forwarded_attachments
+            .into_iter()
+            .map(|a| ForwardedAttachment {
+                id: a.id,
+                filename: a.filename,
+                size: a.size,
+                mime_type: a.mime_type,
+            })
+            .collect(),
+        mode: v.mode,
+        source_message_id: v.source_message_id,
+    }
+}
+
+pub fn compose_input_to_proto(i: ComposeInput) -> pb::ComposeInput {
+    pb::ComposeInput {
+        draft_id: i.draft_id,
+        account_id: i.account_id,
+        to: i.to,
+        cc: i.cc,
+        bcc: i.bcc,
+        subject: i.subject,
+        body_md: i.body_md,
+        mode: i.mode,
+        source_message_id: i.source_message_id,
+        attachments: i
+            .attachments
+            .into_iter()
+            .map(|a| pb::ComposeAttachment {
+                filename: a.filename,
+                mime_type: a.mime_type,
+                content_id: a.content_id,
+                data: a.data,
+            })
+            .collect(),
+        forwarded_attachment_ids: i.forwarded_attachment_ids,
+    }
+}
+
 #[cfg(test)]
 mod oauth_tests {
     use super::*;

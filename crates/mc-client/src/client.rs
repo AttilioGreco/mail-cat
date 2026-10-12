@@ -15,20 +15,9 @@ use crate::{
     types::*,
 };
 
-/// Parse an address string that may be in RFC 5322 "Display Name <email>" format.
-/// Returns a `pb::EmailAddress` with `name` and `email` split correctly.
-fn parse_address_string(s: String) -> pb::EmailAddress {
-    if let (Some(start), Some(end)) = (s.find('<'), s.rfind('>')) {
-        let name = s[..start].trim().trim_matches('"').to_string();
-        let email = s[start + 1..end].trim().to_string();
-        pb::EmailAddress {
-            email,
-            name: if name.is_empty() { None } else { Some(name) },
-        }
-    } else {
-        pb::EmailAddress { email: s, name: None }
-    }
-}
+/// Compose calls carry attachments; tonic's 4 MB default would reject them.
+/// Must match the server's limit.
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The main entry point for frontends. Wraps tonic clients and exposes clean async methods.
 #[derive(Clone)]
@@ -358,29 +347,57 @@ impl MailCatClient {
         Ok((resp.succeeded, resp.failed))
     }
 
-    /// Send a new email.
-    pub async fn send_message(&self, params: SendMessageParams) -> Result<String> {
-        let mut client = MessageServiceClient::new(self.channel.clone());
-        let resp = client
-            .send_message(pb::SendMessageRequest {
-                account_id: params.account_id,
-                from: Some(pb::EmailAddress {
-                    email: params.from_email,
-                    name: params.from_name,
-                }),
-                to: params.to.into_iter().map(parse_address_string).collect(),
-                cc: params.cc.into_iter().map(parse_address_string).collect(),
-                bcc: params.bcc.into_iter().map(parse_address_string).collect(),
-                subject: params.subject,
-                body_text: params.body_text,
-                body_html: params.body_html,
-                in_reply_to: params.in_reply_to,
-                references: params.references,
+    fn compose_client(&self) -> MessageServiceClient<Channel> {
+        MessageServiceClient::new(self.channel.clone())
+            .max_decoding_message_size(MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_MESSAGE_BYTES)
+    }
+
+    /// Starting state of the compose window. `mode` is one of
+    /// "new" | "reply" | "replyAll" | "forward" | "draft".
+    pub async fn prepare_compose(
+        &self,
+        mode: &str,
+        message_id: Option<String>,
+        account_id: Option<String>,
+    ) -> Result<ComposeView> {
+        let view = self
+            .compose_client()
+            .prepare_compose(pb::PrepareComposeRequest {
+                mode: mode.to_owned(),
+                message_id,
+                account_id,
             })
             .await?
             .into_inner();
+        Ok(compose_view_from_proto(view))
+    }
 
+    /// Send a composed message; returns the local id of the sent message.
+    pub async fn send_compose(&self, input: ComposeInput) -> Result<String> {
+        let resp = self
+            .compose_client()
+            .send_compose(compose_input_to_proto(input))
+            .await?
+            .into_inner();
         Ok(resp.message_id)
+    }
+
+    /// Save a draft (replacing `input.draft_id`); returns the new draft id.
+    pub async fn save_draft(&self, input: ComposeInput) -> Result<String> {
+        let resp = self
+            .compose_client()
+            .save_draft(compose_input_to_proto(input))
+            .await?
+            .into_inner();
+        Ok(resp.draft_id)
+    }
+
+    pub async fn discard_draft(&self, draft_id: &str) -> Result<()> {
+        self.compose_client()
+            .discard_draft(pb::DiscardDraftRequest { draft_id: draft_id.to_owned() })
+            .await?;
+        Ok(())
     }
 
     // ── Contacts ─────────────────────────────────────────────────────────────

@@ -40,11 +40,17 @@ service MessageService {
   // Move many messages to one mailbox in a single provider round-trip.
   rpc MoveMessages(MoveMessagesRequest) returns (BulkChangeResponse);
 
-  // Send a new message.
-  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  // Starting state of the compose window: recipients, subject, quote, sender.
+  rpc PrepareCompose(PrepareComposeRequest) returns (ComposeView);
 
-  // Save draft.
-  rpc SaveDraft(SaveDraftRequest) returns (SaveDraftResponse);
+  // Build (markdown, signature, quote, attachments) and send a message.
+  rpc SendCompose(ComposeInput) returns (SendComposeResponse);
+
+  // Store a draft in the Drafts folder, replacing input.draft_id if set.
+  rpc SaveDraft(ComposeInput) returns (SaveDraftResponse);
+
+  // Delete a draft locally and on the server.
+  rpc DiscardDraft(DiscardDraftRequest) returns (DiscardDraftResponse);
 
   // Watch mailbox for real-time updates (server-streaming).
   rpc WatchMailbox(WatchMailboxRequest) returns (stream MailboxEvent);
@@ -217,39 +223,78 @@ message DeleteMessageResponse {
   bool success = 1;
 }
 
-message SendMessageRequest {
-  string account_id = 1;
-  EmailAddress from = 2;
-  repeated EmailAddress to = 3;
-  repeated EmailAddress cc = 4;
-  repeated EmailAddress bcc = 5;
-  string subject = 6;
-  optional string body_text = 7;
-  optional string body_html = 8;
-  optional string in_reply_to = 9;
-  repeated string references = 10;
-  // Note: attachments would be handled separately or via streaming
+// Compose modes are strings: "new" | "reply" | "replyAll" | "forward" | "draft".
+message PrepareComposeRequest {
+  string mode = 1;
+  optional string message_id = 2;  // source message (or the draft, for "draft")
+  optional string account_id = 3;  // preferred sender for "new"
 }
 
-message SendMessageResponse {
-  string message_id = 1;  // ID of sent message in Sent folder
+message ComposeIdentity {
+  string account_id = 1;
+  string display_name = 2;
+  string email = 3;
+  optional string signature_html = 4;
 }
 
-message SaveDraftRequest {
-  string account_id = 1;
-  optional string draft_id = 2;  // If updating existing draft
-  EmailAddress from = 3;
-  repeated EmailAddress to = 4;
-  repeated EmailAddress cc = 5;
-  repeated EmailAddress bcc = 6;
+// Attachment of an existing message the user may keep ("<message id>:<index>").
+message ForwardedAttachment {
+  string id = 1;
+  string filename = 2;
+  uint64 size = 3;
+  string mime_type = 4;
+}
+
+message ComposeView {
+  optional string draft_id = 1;
+  string account_id = 2;
+  repeated ComposeIdentity identities = 3;
+  repeated string to = 4;  // "Name <email>" or bare email
+  repeated string cc = 5;
+  repeated string bcc = 6;
   string subject = 7;
-  optional string body_text = 8;
-  optional string body_html = 9;
+  string body_md = 8;
+  optional string quoted_html = 9;
+  optional string signature_html = 10;
+  repeated ForwardedAttachment forwarded_attachments = 11;
+  string mode = 12;
+  optional string source_message_id = 13;
+}
+
+message ComposeAttachment {
+  string filename = 1;
+  string mime_type = 2;
+  optional string content_id = 3;  // set = inline image referenced as cid:<content_id>
+  bytes data = 4;
+}
+
+message ComposeInput {
+  optional string draft_id = 1;
+  string account_id = 2;
+  repeated string to = 3;
+  repeated string cc = 4;
+  repeated string bcc = 5;
+  string subject = 6;
+  string body_md = 7;
+  string mode = 8;
+  optional string source_message_id = 9;
+  repeated ComposeAttachment attachments = 10;
+  repeated string forwarded_attachment_ids = 11;
+}
+
+message SendComposeResponse {
+  string message_id = 1;  // local id of the sent message (Sent folder)
 }
 
 message SaveDraftResponse {
   string draft_id = 1;
 }
+
+message DiscardDraftRequest {
+  string draft_id = 1;
+}
+
+message DiscardDraftResponse {}
 
 message WatchMailboxRequest {
   string mailbox_id = 1;

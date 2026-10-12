@@ -3141,10 +3141,13 @@ name = "mc-application"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures",
+ "mailparse",
  "mc-domain",
  "mc-shared",
+ "pulldown-cmark",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -3302,6 +3305,7 @@ name = "mc-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "futures",
  "mc-client",
  "mc-shared",
@@ -4448,8 +4452,15 @@ checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
 dependencies = [
  "bitflags 2.13.0",
  "memchr",
+ "pulldown-cmark-escape",
  "unicase",
 ]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "pulldown-cmark-to-cmark"

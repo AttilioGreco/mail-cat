@@ -35,6 +35,9 @@ const GIT_SHA: &str = env!("BUILD_GIT_SHA");
 const BUILD_DATE: &str = env!("BUILD_DATE");
 const RUSTC: &str = env!("BUILD_RUSTC");
 
+/// Largest gRPC message the message service accepts or sends (attachments).
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
 fn main() -> anyhow::Result<()> {
     // A personal mail server is I/O bound: two workers keep up with IMAP and
     // gRPC, while the default (one per core) costs a stack and a malloc arena
@@ -135,7 +138,12 @@ async fn run() -> anyhow::Result<()> {
         .add_service(AccountServiceServer::new(app_ctx.account_service))
         .add_service(ContactServiceServer::new(app_ctx.contact_service))
         .add_service(MailboxServiceServer::new(app_ctx.mailbox_service))
-        .add_service(MessageServiceServer::new(app_ctx.message_service))
+        .add_service(
+            // Compose requests carry attachments; tonic's 4 MB default would reject them.
+            MessageServiceServer::new(app_ctx.message_service)
+                .max_decoding_message_size(MAX_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_MESSAGE_BYTES),
+        )
         .add_service(SearchServiceServer::new(app_ctx.search_service))
         .serve_with_shutdown(addr, shutdown_signal())
         .await

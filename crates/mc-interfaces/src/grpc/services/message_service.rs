@@ -5,8 +5,8 @@ use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::{
     application_error_to_status, domain_message_to_detail, domain_message_to_summary,
-    paged_result_to_page_info, proto_flags_to_domain, proto_send_request_to_outgoing,
-    proto_to_domain_pagination,
+    compose_view_to_proto, paged_result_to_page_info, proto_compose_input_to_app,
+    proto_compose_mode, proto_flags_to_domain, proto_to_domain_pagination,
 };
 use crate::grpc::proto::{
     BulkChangeResponse, CountsChangedEvent, DeleteMessageRequest, DeleteMessageResponse,
@@ -17,14 +17,14 @@ use crate::grpc::proto::{
     MarkMailboxReadResponse, MessageExpungedEvent,
     MoveMessageRequest, MoveMessageResponse, NewMessageEvent,
     RebuildConversationIndexRequest, RebuildConversationIndexResponse,
-    SaveDraftRequest, SaveDraftResponse,
-    SendMessageRequest, SendMessageResponse, SetFlagsRequest, SetFlagsResponse,
+    ComposeInput, ComposeView, DiscardDraftRequest, DiscardDraftResponse, PrepareComposeRequest,
+    SaveDraftResponse, SendComposeResponse, SetFlagsRequest, SetFlagsResponse,
     WatchMailboxRequest, mailbox_event, message_service_server::MessageService,
 };
 use mc_application::{
     InProcessEventBus,
     bus::{CommandBus, QueryBus},
-    commands::Command,
+    commands::{Command, CommandResult},
     queries::Query,
 };
 use mc_domain::model::mailbox::Mailbox;
@@ -560,45 +560,78 @@ where
         Ok(Response::new(BulkChangeResponse { succeeded, failed }))
     }
 
-    async fn send_message(
+    async fn prepare_compose(
         &self,
-        request: Request<SendMessageRequest>,
-    ) -> Result<Response<SendMessageResponse>, Status> {
+        request: Request<PrepareComposeRequest>,
+    ) -> Result<Response<ComposeView>, Status> {
         let req = request.into_inner();
-
-        let account_id = AccountId::from_uuid(
-            uuid::Uuid::parse_str(&req.account_id)
-                .map_err(|e| Status::invalid_argument(format!("invalid account_id: {e}")))?,
-        );
-
-        let outgoing = proto_send_request_to_outgoing(&req).map_err(Status::invalid_argument)?;
-
-        let command = Command::SendMessage {
-            account_id,
-            outgoing,
+        let parse = |field: &str, id: Option<String>| -> Result<Option<uuid::Uuid>, Status> {
+            id.map(|id| {
+                uuid::Uuid::parse_str(&id)
+                    .map_err(|e| Status::invalid_argument(format!("invalid {field}: {e}")))
+            })
+            .transpose()
         };
+        let command = Command::PrepareCompose {
+            mode: proto_compose_mode(&req.mode).map_err(Status::invalid_argument)?,
+            message_id: parse("message_id", req.message_id)?.map(MessageId::from_uuid),
+            account_id: parse("account_id", req.account_id)?.map(AccountId::from_uuid),
+        };
+        match self.command_bus.dispatch(command).await.map_err(application_error_to_status)? {
+            CommandResult::ComposePrepared(view) => Ok(Response::new(compose_view_to_proto(*view))),
+            other => Err(Status::internal(format!("unexpected command result: {other:?}"))),
+        }
+    }
 
-        let result = self
+    async fn send_compose(
+        &self,
+        request: Request<ComposeInput>,
+    ) -> Result<Response<SendComposeResponse>, Status> {
+        let input = proto_compose_input_to_app(request.into_inner()).map_err(Status::invalid_argument)?;
+        match self
             .command_bus
-            .dispatch(command)
+            .dispatch(Command::SendCompose { input })
             .await
-            .map_err(application_error_to_status)?;
-
-        let message_id = match result {
-            mc_application::commands::CommandResult::MessageSent { message_id } => message_id,
-            _ => return Err(Status::internal("unexpected command result")),
-        };
-
-        Ok(Response::new(SendMessageResponse {
-            message_id: message_id.to_string(),
-        }))
+            .map_err(application_error_to_status)?
+        {
+            CommandResult::MessageSent { message_id } => Ok(Response::new(SendComposeResponse {
+                message_id: message_id.to_string(),
+            })),
+            other => Err(Status::internal(format!("unexpected command result: {other:?}"))),
+        }
     }
 
     async fn save_draft(
         &self,
-        _request: Request<SaveDraftRequest>,
+        request: Request<ComposeInput>,
     ) -> Result<Response<SaveDraftResponse>, Status> {
-        Err(Status::unimplemented("save_draft not yet implemented"))
+        let input = proto_compose_input_to_app(request.into_inner()).map_err(Status::invalid_argument)?;
+        match self
+            .command_bus
+            .dispatch(Command::SaveDraft { input })
+            .await
+            .map_err(application_error_to_status)?
+        {
+            CommandResult::DraftSaved { message_id } => Ok(Response::new(SaveDraftResponse {
+                draft_id: message_id.to_string(),
+            })),
+            other => Err(Status::internal(format!("unexpected command result: {other:?}"))),
+        }
+    }
+
+    async fn discard_draft(
+        &self,
+        request: Request<DiscardDraftRequest>,
+    ) -> Result<Response<DiscardDraftResponse>, Status> {
+        let message_id = MessageId::from_uuid(
+            uuid::Uuid::parse_str(&request.into_inner().draft_id)
+                .map_err(|e| Status::invalid_argument(format!("invalid draft_id: {e}")))?,
+        );
+        self.command_bus
+            .dispatch(Command::DiscardDraft { message_id })
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(DiscardDraftResponse {}))
     }
 
     type WatchMailboxStream = ReceiverStream<Result<MailboxEvent, Status>>;

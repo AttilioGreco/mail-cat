@@ -133,6 +133,15 @@ pub trait EmailProvider: Send + Sync {
     /// Send a message via the provider's send mechanism (SMTP, API, etc.).
     async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError>;
 
+    /// Store a message in a mailbox (IMAP APPEND) — the Sent copy or a draft.
+    /// Returns the UID it landed on, when the server lets us find it.
+    async fn append_message(
+        &self,
+        mailbox: &MailboxPath,
+        message: &OutgoingMessage,
+        flags: &[Flag],
+    ) -> Result<Option<ProviderUid>, DomainError>;
+
     /// Get UIDVALIDITY and UIDNEXT for a mailbox (for sync state detection).
     async fn mailbox_status(&self, mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError>;
 

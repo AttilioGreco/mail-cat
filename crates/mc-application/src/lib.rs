@@ -3,6 +3,7 @@
 
 pub mod bus;
 pub mod commands;
+pub mod compose;
 pub mod error;
 pub mod handlers;
 pub mod projections;
