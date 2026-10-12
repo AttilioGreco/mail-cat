@@ -11,7 +11,6 @@ use tokio_util::sync::CancellationToken;
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::{CommandBus, QueryBus};
 use mc_application::projections::{ProjectionEventHandler, SearchProjectionHandler};
-use mc_domain::ReadModelProjector;
 use mc_application::{OAuthLoginTrigger, SyncConfig, SyncService, SyncTrigger};
 use mc_domain::{
     Account, AccountEventSource, AccountId, AccountReadRepository, AccountWriteRepository,
@@ -291,7 +290,6 @@ impl AppContext {
         tracing::info!("Initialized sync service");
 
         // Create projection event handlers and start catching up
-        let live_projector = bare_repository.clone();
         // Search index is an event-sourced projection with its own checkpoint,
         // refreshing messages from the read model. Shared across boot catch-up,
         // the live subscriber, and post-sync catch-up.
@@ -491,13 +489,12 @@ impl AppContext {
         }
 
         // ── Live projection subscriber ───────────────────────────────────────
-        // Subscribe the read-model projector to the event bus so that domain
-        // events emitted at runtime (e.g. ApplyRemoteFlagChange → MessageFlagged)
-        // are immediately reflected in the read model without waiting for
-        // the next server restart.
+        // Every publisher has already applied its event to the read model
+        // (sync, message commands, and the repository's own save), so the bus
+        // only has to bring the search index along. A lagging subscriber
+        // skips events; the post-sync and boot catch-up re-index them.
         {
             let mut sub = event_bus.subscribe();
-            let live_projector = live_projector.clone();
             let search = search_handler.clone();
             let sd = shutdown.clone();
             tokio::spawn(async move {
@@ -506,11 +503,6 @@ impl AppContext {
                         _ = sd.cancelled() => break,
                         envelope = sub.recv() => match envelope {
                             Some(e) => {
-                                // Read model first, then search projection reads
-                                // the now-current read model for this message.
-                                if let Err(err) = live_projector.project(&e).await {
-                                    tracing::warn!("Live projection error for {}: {}", e.payload.event_name(), err);
-                                }
                                 if let Err(err) = search.apply_live(&e).await {
                                     tracing::warn!("Live search projection error for {}: {}", e.payload.event_name(), err);
                                 }
@@ -519,9 +511,9 @@ impl AppContext {
                         },
                     }
                 }
-                tracing::info!("Live projection subscriber exited");
+                tracing::info!("Live search subscriber exited");
             });
-            tracing::info!("Live projection subscriber started");
+            tracing::info!("Live search subscriber started");
         }
 
         // ── Auto-populate contacts from incoming messages ────────────────────
@@ -530,6 +522,10 @@ impl AppContext {
             let ensure_bus = command_bus.clone();
             let sd = shutdown.clone();
             tokio::spawn(async move {
+                // A sender shows up on many messages; ensure each address once
+                // per run instead of once per message. Holds only distinct
+                // addresses, so it stays small.
+                let mut ensured: HashSet<(AccountId, mc_domain::EmailAddress)> = HashSet::new();
                 loop {
                     let envelope = tokio::select! {
                         _ = sd.cancelled() => break,
@@ -548,6 +544,9 @@ impl AppContext {
                                 .map(|a| (a.email.clone(), a.name.clone()))
                                 .collect();
                         for (email, name) in addrs {
+                            if !ensured.insert((account_id, email.clone())) {
+                                continue;
+                            }
                             let cmd = mc_application::Command::EnsureContact {
                                 email,
                                 display_name: name.filter(|s| !s.is_empty()),

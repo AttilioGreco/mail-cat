@@ -17,8 +17,9 @@ use mc_domain::{
     AccountWriteRepository, Address, AggregateType, BackfillEntry, BodyBackfillQueue, Contact,
     ContactId, ContactReadRepository, ContactSummary, ContactWriteRepository, Conversation,
     ConversationReadRepository, ConversationSummary, DomainError, DomainEvent, EmailAddress,
-    Envelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message,
+    Envelope, EventEnvelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message,
     MessageBodyStore, MessageId, MessageReadRepository, MessageSummary, ProjectionCheckpoint,
+    ReadModelProjector,
     ProviderUid, SuggestScope, Suggestion, ThreadId,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
@@ -39,6 +40,28 @@ pub struct SqliteRepository {
 impl SqliteRepository {
     pub fn new(db: Arc<SqliteDb>, events: Arc<SqliteEventStore>) -> Self {
         Self { db, events }
+    }
+
+    /// Appends and applies the events to the read model before returning, so
+    /// callers see their own writes and nothing depends on the event bus
+    /// delivering them (it drops events when a subscriber lags).
+    async fn append_and_project(
+        &self,
+        aggregate_id: String,
+        aggregate_type: AggregateType,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), DomainError> {
+        let expected = self.events.current_sequence(&aggregate_id).await?;
+        let count = events.len() as u64;
+        let last = self
+            .events
+            .append(&aggregate_id, aggregate_type, expected, events.clone())
+            .await?;
+        for (sequence, event) in (last + 1 - count..).zip(events) {
+            let envelope = EventEnvelope::new(aggregate_id.clone(), aggregate_type, sequence, event);
+            ReadModelProjector::project(self, &envelope).await?;
+        }
+        Ok(())
     }
 }
 
@@ -412,30 +435,7 @@ fn page_bounds(pagination: &Pagination) -> (i64, i64) {
 #[async_trait]
 impl AccountWriteRepository for SqliteRepository {
     async fn save(&self, account: &Account, events: Vec<DomainEvent>) -> Result<(), DomainError> {
-        let aggregate_id = account.id.to_string();
-        let expected = self.events.current_sequence(&aggregate_id).await?;
-        self.events
-            .append(&aggregate_id, AggregateType::Account, expected, events)
-            .await?;
-
-        // The summary is current when save returns, without waiting for the
-        // projector.
-        let (id, name, email) =
-            (*account.id.as_uuid(), account.name.clone(), account.email.as_str().to_owned());
-        let (provider_type, status) = (json(&account.provider_type)?, json(&account.status)?);
-        self.db
-            .write(move |conn| {
-                exec(
-                    conn,
-                    "INSERT INTO accounts (id, name, email, provider_type, status) \
-                     VALUES (?1, ?2, ?3, ?4, ?5) \
-                     ON CONFLICT(id) DO UPDATE SET name = excluded.name, email = excluded.email, \
-                         provider_type = excluded.provider_type, status = excluded.status",
-                    params![id, name, email, provider_type, status],
-                )
-                .map(drop)
-            })
-            .await
+        self.append_and_project(account.id.to_string(), AggregateType::Account, events).await
     }
 
     async fn load(&self, id: &AccountId) -> Result<Option<Account>, DomainError> {
@@ -451,12 +451,7 @@ impl AccountWriteRepository for SqliteRepository {
 #[async_trait]
 impl ContactWriteRepository for SqliteRepository {
     async fn save(&self, contact: &Contact, events: Vec<DomainEvent>) -> Result<(), DomainError> {
-        let aggregate_id = contact.id.to_string();
-        let expected = self.events.current_sequence(&aggregate_id).await?;
-        self.events
-            .append(&aggregate_id, AggregateType::Contact, expected, events)
-            .await
-            .map(drop)
+        self.append_and_project(contact.id.to_string(), AggregateType::Contact, events).await
     }
 
     async fn load(&self, id: &ContactId) -> Result<Option<Contact>, DomainError> {
@@ -1189,6 +1184,28 @@ mod tests {
 
         let found = repo.find_by_provider_uid(&inbox, 1).await.unwrap().unwrap();
         assert_eq!(found.id, ids[1]);
+    }
+
+    #[tokio::test]
+    async fn saved_contact_events_reach_the_read_model_without_the_bus() {
+        let (_dir, repo) = open();
+        let (contact, added) = Contact::create(
+            "Ada".into(),
+            vec![mc_domain::ContactEmail::primary(EmailAddress::new("ada@example.com").unwrap())],
+            vec![],
+            None,
+            None,
+            mc_domain::ContactSource::Local,
+            None,
+            None,
+        )
+        .unwrap();
+
+        ContactWriteRepository::save(&repo, &contact, vec![added]).await.unwrap();
+        assert!(repo.get_contact(&contact.id).await.unwrap().is_some());
+
+        ContactWriteRepository::save(&repo, &contact, vec![contact.remove()]).await.unwrap();
+        assert!(repo.get_contact(&contact.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
