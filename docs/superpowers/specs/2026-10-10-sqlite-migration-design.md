@@ -273,6 +273,11 @@ missing rebuild path.
 
 ## 7. Data migration (sled → SQLite)
 
+> **Superseded 2026-10-12:** no migration. The server starts on an empty
+> SQLite file and re-syncs every account from IMAP; contacts are re-inferred
+> from mail. The old sled directory and index are left for the user to delete.
+> The rest of this section is kept for history only.
+
 `mail-cat-server migrate --from <sled_dir> --to <sqlite_file>`, run with the
 service stopped. Stream, never materialize.
 
@@ -377,6 +382,10 @@ Tracked here so later plans pick them up. Tick when done (with commit).
   migrated copy in plan 5 (the branch has no production index to compare against).
 - [ ] sled `suggest` scans every summary per call; acceptable until sled is deleted.
 - [x] `traits/search_index.rs` doc no longer describes the body-in-event indexing (e549b76..).
+
+**Phase 5 (2026-10-12, no migration):** server wired on SQLite, sled deleted. Items above
+that name sled or the migrator are moot. Still open from them: live projection doesn't
+save the `read_model` checkpoint (wasted catch-up work, not a correctness issue).
 
 **Out of scope of the migration, decided 2026-10-10:**
 - [ ] Search features (operators, filters, sort) — own spec; index schema ready after plan 4.
