@@ -883,7 +883,8 @@ impl ContactReadRepository for SqliteRepository {
                 query_all(
                     conn,
                     &select_contacts(
-                        "WHERE c.display_name LIKE ?1 ESCAPE '\\' OR c.primary_email LIKE ?1 ESCAPE '\\' \
+                        "WHERE c.display_name LIKE ?1 ESCAPE '\\' OR EXISTS (SELECT 1 FROM contact_emails e \
+                             WHERE e.contact_id = c.id AND e.email LIKE ?1 ESCAPE '\\') \
                          ORDER BY c.id LIMIT ?2",
                     ),
                     params![pattern, limit],

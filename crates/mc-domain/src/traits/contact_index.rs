@@ -1,48 +1,10 @@
-//! Contact search index — fast prefix/full-text search for autocomplete.
+//! Contact autocomplete result type.
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::error::DomainError;
 use crate::model::account::AccountId;
 use crate::traits::repository::ContactSummary;
 use crate::value_objects::contact_id::ContactId;
-
-/// Fast search index for contacts — used for autocomplete in the compose window.
-///
-/// The index is a projection of ContactAdded / ContactUpdated / ContactRemoved events.
-/// Re-indexing the same ContactId is idempotent (upsert semantics).
-#[async_trait]
-pub trait ContactIndex: Send + Sync {
-    /// Index (or re-index) a contact from its read-model summary.
-    async fn index_contact(&self, summary: &ContactSummary) -> Result<(), DomainError>;
-
-    /// Remove a contact from the index.
-    async fn remove_contact(&self, id: &ContactId) -> Result<(), DomainError>;
-
-    /// Autocomplete search: matches display_name prefix OR any email address prefix.
-    ///
-    /// When `requesting_account_id` is given, contacts scoped to that account are
-    /// returned first. Contacts from other accounts (cross-account) are appended at
-    /// the end of the list only if own-account results are insufficient, marked with
-    /// `is_cross_account = true`.
-    ///
-    /// Returns at most `limit` hits.
-    async fn search_contacts(
-        &self,
-        query: &str,
-        limit: usize,
-        requesting_account_id: Option<&AccountId>,
-    ) -> Result<Vec<ContactSearchHit>, DomainError>;
-
-    /// Find pairs of contacts sharing at least one email address — merge candidates.
-    ///
-    /// When `account_id` is given, only contacts scoped to that account are considered.
-    async fn find_duplicate_candidates(
-        &self,
-        account_id: Option<&AccountId>,
-    ) -> Result<Vec<(ContactSearchHit, ContactSearchHit)>, DomainError>;
-}
 
 /// A single result from contact autocomplete.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,4 +20,20 @@ pub struct ContactSearchHit {
     /// True when this hit comes from a different account than the requester.
     /// Such hits are shown greyed-out at the bottom of the suggestion list.
     pub is_cross_account: bool,
+}
+
+impl ContactSearchHit {
+    /// With a requesting account, every other scope — global included — is
+    /// cross-account.
+    pub fn from_summary(summary: ContactSummary, requesting_account: Option<&AccountId>) -> Self {
+        Self {
+            is_cross_account: requesting_account.is_some_and(|a| summary.account_scope.as_ref() != Some(a)),
+            id: summary.id,
+            display_name: summary.display_name,
+            primary_email: summary.primary_email.as_str().to_owned(),
+            all_emails: summary.emails.iter().map(|e| e.address.as_str().to_owned()).collect(),
+            organization: summary.organization,
+            account_scope: summary.account_scope,
+        }
+    }
 }

@@ -23,7 +23,7 @@ use mc_infrastructure::{
     email::imap::ImapCredential,
     email::smtp::SmtpSender,
     ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SledEventStore,
-    SledRepository, TantivyContactIndex, TantivySearchIndex,
+    SledRepository, TantivySearchIndex,
 };
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
@@ -38,7 +38,6 @@ type ProviderRegistryImpl = InMemoryProviderRegistry<ImapEmailProvider>;
 type CommandBusImpl = InProcessCommandBus<
     SledRepository<SledEventStore>, // AW
     SledRepository<SledEventStore>, // CW
-    TantivyContactIndex,            // CI
     SledEventStore,                 // ES
     ProviderRegistryImpl,           // PR
     SledRepository<SledEventStore>, // MR
@@ -49,7 +48,7 @@ type QueryBusImpl = InProcessQueryBus<
     SledRepository<SledEventStore>, // MBR
     SledRepository<SledEventStore>, // MR
     TantivySearchIndex,             // SI
-    TantivyContactIndex,            // CI
+    SledRepository<SledEventStore>, // CTR
     SledRepository<SledEventStore>, // CR
 >;
 type SyncServiceImpl =
@@ -119,14 +118,6 @@ impl AppContext {
             TantivySearchIndex::new(&config.index_path).context("failed to create search index")?,
         );
         tracing::info!("Initialized search index at {}", config.index_path);
-
-        // Create contact index
-        let contact_index_path = format!("{}/contacts", config.index_path);
-        let contact_index = Arc::new(
-            TantivyContactIndex::new(&contact_index_path)
-                .context("failed to create contact index")?,
-        );
-        tracing::info!("Initialized contact index at {contact_index_path}");
 
         // Create provider registry and build providers from config
         let provider_registry = Arc::new(InMemoryProviderRegistry::new());
@@ -263,7 +254,6 @@ impl AppContext {
         let command_bus = Arc::new(InProcessCommandBus::new(
             repository_arc.clone(),    // AW
             repository_arc.clone(),    // CW
-            contact_index.clone(),     // CI
             event_store.clone(),       // ES
             provider_registry.clone(), // PR
             repository_arc.clone(),    // MR
@@ -277,7 +267,7 @@ impl AppContext {
             repository_arc.clone(),    // MBR
             repository_arc.clone(),    // MR
             search_index.clone(),      // SI
-            contact_index.clone(),     // CI
+            repository_arc.clone(),    // CTR
             repository_arc.clone(),    // CR
         ));
         tracing::info!("Initialized query bus");

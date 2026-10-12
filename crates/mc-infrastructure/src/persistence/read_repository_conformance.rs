@@ -1426,6 +1426,8 @@ macro_rules! read_repository_conformance {
             assert!(repo.find_by_email_in_account(&email("ada@example.com"), &AccountId::new()).await.unwrap().is_empty());
             assert_eq!(repo.search_contacts("lovelace", 10).await.unwrap().len(), 1);
             assert_eq!(repo.search_contacts("ADA@EXAMPLE", 10).await.unwrap().len(), 1);
+            // Autocomplete must find a contact by any of its addresses.
+            assert_eq!(repo.search_contacts("ada@work", 10).await.unwrap().len(), 1);
             assert!(repo.search_contacts("nobody", 10).await.unwrap().is_empty());
 
             project_all(

@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountReadRepository, ContactIndex, ConversationReadRepository, MailboxReadRepository,
+    AccountId, AccountReadRepository, ContactReadRepository, ContactSearchHit,
+    ConversationReadRepository, MailboxReadRepository,
     MessageReadRepository, SearchIndex,
 };
 
@@ -14,30 +15,30 @@ use crate::queries::{Query, QueryResult};
 
 /// Handles all read-side queries by delegating to the appropriate read
 /// repositories and the search index.
-pub struct QueryHandler<AR, MBR, MR, SI, CI, CR>
+pub struct QueryHandler<AR, MBR, MR, SI, CTR, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
-    CI: ContactIndex,
+    CTR: ContactReadRepository,
     CR: ConversationReadRepository,
 {
     account_repo: Arc<AR>,
     mailbox_repo: Arc<MBR>,
     message_repo: Arc<MR>,
     search_index: Arc<SI>,
-    contact_index: Arc<CI>,
+    contact_repo: Arc<CTR>,
     conversation_repo: Arc<CR>,
 }
 
-impl<AR, MBR, MR, SI, CI, CR> QueryHandler<AR, MBR, MR, SI, CI, CR>
+impl<AR, MBR, MR, SI, CTR, CR> QueryHandler<AR, MBR, MR, SI, CTR, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
-    CI: ContactIndex,
+    CTR: ContactReadRepository,
     CR: ConversationReadRepository,
 {
     pub fn new(
@@ -45,7 +46,7 @@ where
         mailbox_repo: Arc<MBR>,
         message_repo: Arc<MR>,
         search_index: Arc<SI>,
-        contact_index: Arc<CI>,
+        contact_repo: Arc<CTR>,
         conversation_repo: Arc<CR>,
     ) -> Self {
         Self {
@@ -53,7 +54,7 @@ where
             mailbox_repo,
             message_repo,
             search_index,
-            contact_index,
+            contact_repo,
             conversation_repo,
         }
     }
@@ -131,17 +132,20 @@ where
                 Ok(QueryResult::Suggestions(suggestions))
             }
             Query::SearchContacts { query, limit, requesting_account_id } => {
-                let hits = self
-                    .contact_index
-                    .search_contacts(&query, limit, requesting_account_id.as_ref())
-                    .await?;
-                Ok(QueryResult::ContactHits(hits))
+                Ok(QueryResult::ContactHits(
+                    self.search_contacts(&query, limit, requesting_account_id.as_ref()).await?,
+                ))
             }
             Query::FindContactDuplicates { account_id } => {
                 let pairs = self
-                    .contact_index
+                    .contact_repo
                     .find_duplicate_candidates(account_id.as_ref())
-                    .await?;
+                    .await?
+                    .into_iter()
+                    .map(|(a, b)| {
+                        (ContactSearchHit::from_summary(a, None), ContactSearchHit::from_summary(b, None))
+                    })
+                    .collect();
                 Ok(QueryResult::ContactDuplicates(pairs))
             }
             Query::ListConversations { account_id, mailbox_id, pagination } => {
@@ -164,13 +168,37 @@ where
             }
         }
     }
+
+    /// Own-account contacts first; others only fill the remaining slots.
+    async fn search_contacts(
+        &self,
+        query: &str,
+        limit: usize,
+        requesting_account: Option<&AccountId>,
+    ) -> Result<Vec<ContactSearchHit>, ApplicationError> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        // Over-fetch so cross-account matches can't crowd out own-account ones.
+        let (mut own, cross): (Vec<_>, Vec<_>) = self
+            .contact_repo
+            .search_contacts(query.trim(), limit.saturating_mul(4))
+            .await?
+            .into_iter()
+            .map(|c| ContactSearchHit::from_summary(c, requesting_account))
+            .partition(|hit| !hit.is_cross_account);
+        own.truncate(limit);
+        let room = limit - own.len();
+        own.extend(cross.into_iter().take(room));
+        Ok(own)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mc_domain::{
-        AccountId, AccountStatus, AccountSummary, ContactIndex, DomainError, EmailAddress, Mailbox,
+        AccountId, AccountStatus, AccountSummary, ContactSummary, DomainError, EmailAddress, Mailbox,
         MailboxId, Message, MessageId, MessageSummary, ProviderType, SearchResults,
     };
     use mc_shared::pagination::{PagedResult, Pagination};
@@ -279,36 +307,58 @@ mod tests {
         }
     }
 
-    // ── Mock ContactIndex ─────────────────────────────────────────────
+    // ── Mock ContactReadRepository ────────────────────────────────────
 
-    struct MockContactIndex;
+    /// Returns `contacts` from every search, like a repository whose matches
+    /// are all of them.
+    #[derive(Default)]
+    struct MockContactRepo {
+        contacts: Vec<ContactSummary>,
+    }
 
     #[async_trait]
-    impl ContactIndex for MockContactIndex {
-        async fn index_contact(
+    impl ContactReadRepository for MockContactRepo {
+        async fn get_contact(
             &self,
-            _summary: &mc_domain::ContactSummary,
-        ) -> Result<(), DomainError> {
-            Ok(())
+            _id: &mc_domain::ContactId,
+        ) -> Result<Option<ContactSummary>, DomainError> {
+            Ok(None)
         }
 
-        async fn remove_contact(&self, _id: &mc_domain::ContactId) -> Result<(), DomainError> {
-            Ok(())
+        async fn list_contacts(
+            &self,
+            pagination: &Pagination,
+        ) -> Result<PagedResult<ContactSummary>, DomainError> {
+            Ok(PagedResult::new(vec![], 0, pagination))
+        }
+
+        async fn find_by_email(
+            &self,
+            _email: &EmailAddress,
+        ) -> Result<Vec<ContactSummary>, DomainError> {
+            Ok(vec![])
+        }
+
+        async fn find_by_email_in_account(
+            &self,
+            _email: &EmailAddress,
+            _account_id: &AccountId,
+        ) -> Result<Vec<ContactSummary>, DomainError> {
+            Ok(vec![])
         }
 
         async fn search_contacts(
             &self,
             _query: &str,
-            _limit: usize,
-            _requesting_account_id: Option<&mc_domain::AccountId>,
-        ) -> Result<Vec<mc_domain::ContactSearchHit>, DomainError> {
-            Ok(vec![])
+            limit: usize,
+        ) -> Result<Vec<ContactSummary>, DomainError> {
+            Ok(self.contacts.iter().take(limit).cloned().collect())
         }
 
         async fn find_duplicate_candidates(
             &self,
-            _account_id: Option<&mc_domain::AccountId>,
-        ) -> Result<Vec<(mc_domain::ContactSearchHit, mc_domain::ContactSearchHit)>, DomainError> {
+            _account_id: Option<&AccountId>,
+        ) -> Result<Vec<(ContactSummary, ContactSummary)>, DomainError> {
             Ok(vec![])
         }
     }
@@ -388,22 +438,68 @@ mod tests {
 
     // ── Tests ──────────────────────────────────────────────────────────
 
-    fn make_handler() -> QueryHandler<
+    type TestHandler = QueryHandler<
         MockAccountReadRepo,
         MockMailboxReadRepo,
         MockMessageReadRepo,
         MockSearchIndex,
-        MockContactIndex,
+        MockContactRepo,
         MockConversationRepo,
-    > {
+    >;
+
+    fn make_handler() -> TestHandler {
+        handler_with_contacts(vec![])
+    }
+
+    fn handler_with_contacts(contacts: Vec<ContactSummary>) -> TestHandler {
         QueryHandler::new(
             Arc::new(MockAccountReadRepo),
             Arc::new(MockMailboxReadRepo),
             Arc::new(MockMessageReadRepo),
             Arc::new(MockSearchIndex),
-            Arc::new(MockContactIndex),
+            Arc::new(MockContactRepo { contacts }),
             Arc::new(MockConversationRepo),
         )
+    }
+
+    fn contact(raw: &str, scope: Option<AccountId>) -> ContactSummary {
+        let email = EmailAddress::new(raw).unwrap();
+        ContactSummary {
+            id: mc_domain::ContactId::new(),
+            display_name: raw.into(),
+            primary_email: email.clone(),
+            emails: vec![mc_domain::ContactEmail::primary(email)],
+            organization: None,
+            source: mc_domain::ContactSource::Local,
+            account_scope: scope,
+        }
+    }
+
+    #[tokio::test]
+    async fn contact_search_puts_own_account_first_and_fills_with_the_rest() {
+        let (mine, other) = (AccountId::new(), AccountId::new());
+        let handler = handler_with_contacts(vec![
+            contact("x1@example.com", Some(other)),
+            contact("global@example.com", None),
+            contact("me1@example.com", Some(mine)),
+            contact("me2@example.com", Some(mine)),
+        ]);
+        let search = |limit| Query::SearchContacts {
+            query: "e".into(),
+            limit,
+            requesting_account_id: Some(mine),
+        };
+
+        let QueryResult::ContactHits(hits) = handler.dispatch(search(3)).await.unwrap() else {
+            panic!("expected contact hits");
+        };
+        let shown: Vec<_> = hits.iter().map(|h| (h.primary_email.as_str(), h.is_cross_account)).collect();
+        assert_eq!(shown, [("me1@example.com", false), ("me2@example.com", false), ("x1@example.com", true)]);
+
+        let QueryResult::ContactHits(hits) = handler.dispatch(search(1)).await.unwrap() else {
+            panic!("expected contact hits");
+        };
+        assert_eq!(hits[0].primary_email, "me1@example.com");
     }
 
     #[tokio::test]

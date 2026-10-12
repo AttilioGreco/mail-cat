@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountReadRepository, AccountWriteRepository, ContactIndex, ContactReadRepository,
+    AccountReadRepository, AccountWriteRepository, ContactReadRepository,
     ContactWriteRepository, ConversationReadRepository, EventStore, MailboxReadRepository,
     MessageBodyStore, MessageReadRepository, ProviderRegistry, ReadModelProjector, SearchIndex,
 };
@@ -26,28 +26,26 @@ use super::QueryBus;
 use super::event_bus::EventPublisher;
 
 /// In-process command bus that dispatches to Account, Message, and Contact handlers.
-pub struct InProcessCommandBus<AW, CW, CI, ES, PR, MR, B>
+pub struct InProcessCommandBus<AW, CW, ES, PR, MR, B>
 where
     AW: AccountWriteRepository,
     CW: ContactWriteRepository + ContactReadRepository,
-    CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
     MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
     B: EventPublisher,
 {
     account_handler: AccountCommandHandler<AW, B>,
-    contact_handler: ContactCommandHandler<CW, CI, B>,
+    contact_handler: ContactCommandHandler<CW, B>,
     message_handler: MessageCommandHandler<ES, PR, MR, B>,
     /// Direct access to the message repo for contact backfill scanning.
     message_repo: Arc<MR>,
 }
 
-impl<AW, CW, CI, ES, PR, MR, B> InProcessCommandBus<AW, CW, CI, ES, PR, MR, B>
+impl<AW, CW, ES, PR, MR, B> InProcessCommandBus<AW, CW, ES, PR, MR, B>
 where
     AW: AccountWriteRepository,
     CW: ContactWriteRepository + ContactReadRepository,
-    CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
     MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
@@ -56,7 +54,6 @@ where
     pub fn new(
         account_write_repo: Arc<AW>,
         contact_write_repo: Arc<CW>,
-        contact_index: Arc<CI>,
         event_store: Arc<ES>,
         provider_registry: Arc<PR>,
         message_read_repo: Arc<MR>,
@@ -64,11 +61,7 @@ where
     ) -> Self {
         Self {
             account_handler: AccountCommandHandler::new(account_write_repo, event_bus.clone()),
-            contact_handler: ContactCommandHandler::new(
-                contact_write_repo,
-                contact_index,
-                event_bus.clone(),
-            ),
+            contact_handler: ContactCommandHandler::new(contact_write_repo, event_bus.clone()),
             message_handler: MessageCommandHandler::new(
                 event_store,
                 provider_registry,
@@ -81,11 +74,10 @@ where
 }
 
 #[async_trait]
-impl<AW, CW, CI, ES, PR, MR, B> CommandBus for InProcessCommandBus<AW, CW, CI, ES, PR, MR, B>
+impl<AW, CW, ES, PR, MR, B> CommandBus for InProcessCommandBus<AW, CW, ES, PR, MR, B>
 where
     AW: AccountWriteRepository,
     CW: ContactWriteRepository + ContactReadRepository,
-    CI: ContactIndex,
     ES: EventStore,
     PR: ProviderRegistry,
     MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
@@ -318,25 +310,25 @@ where
 }
 
 /// In-process query bus that dispatches to the query handler.
-pub struct InProcessQueryBus<AR, MBR, MR, SI, CI, CR>
+pub struct InProcessQueryBus<AR, MBR, MR, SI, CTR, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
-    CI: ContactIndex,
+    CTR: ContactReadRepository,
     CR: ConversationReadRepository,
 {
-    query_handler: QueryHandler<AR, MBR, MR, SI, CI, CR>,
+    query_handler: QueryHandler<AR, MBR, MR, SI, CTR, CR>,
 }
 
-impl<AR, MBR, MR, SI, CI, CR> InProcessQueryBus<AR, MBR, MR, SI, CI, CR>
+impl<AR, MBR, MR, SI, CTR, CR> InProcessQueryBus<AR, MBR, MR, SI, CTR, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
-    CI: ContactIndex,
+    CTR: ContactReadRepository,
     CR: ConversationReadRepository,
 {
     pub fn new(
@@ -344,7 +336,7 @@ where
         mailbox_repo: Arc<MBR>,
         message_repo: Arc<MR>,
         search_index: Arc<SI>,
-        contact_index: Arc<CI>,
+        contact_repo: Arc<CTR>,
         conversation_repo: Arc<CR>,
     ) -> Self {
         Self {
@@ -353,7 +345,7 @@ where
                 mailbox_repo,
                 message_repo,
                 search_index,
-                contact_index,
+                contact_repo,
                 conversation_repo,
             ),
         }
@@ -361,13 +353,13 @@ where
 }
 
 #[async_trait]
-impl<AR, MBR, MR, SI, CI, CR> QueryBus for InProcessQueryBus<AR, MBR, MR, SI, CI, CR>
+impl<AR, MBR, MR, SI, CTR, CR> QueryBus for InProcessQueryBus<AR, MBR, MR, SI, CTR, CR>
 where
     AR: AccountReadRepository,
     MBR: MailboxReadRepository,
     MR: MessageReadRepository,
     SI: SearchIndex,
-    CI: ContactIndex,
+    CTR: ContactReadRepository,
     CR: ConversationReadRepository,
 {
     async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError> {

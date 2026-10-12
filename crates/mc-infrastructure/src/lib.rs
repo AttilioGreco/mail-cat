@@ -15,5 +15,5 @@ pub use persistence::{
     SharedSledRepository, SledEventStore, SledRepository, SqliteEventStore, SqliteRepository,
 };
 pub use provider_registry::InMemoryProviderRegistry;
-pub use search::{TantivyContactIndex, TantivySearchIndex};
+pub use search::TantivySearchIndex;
 pub use secret::KeyringSecretStore;

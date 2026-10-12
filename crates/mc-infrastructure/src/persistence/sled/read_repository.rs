@@ -1984,7 +1984,10 @@ impl<ES: EventStore> ContactReadRepository for SledRepository<ES> {
             let s: ContactSummary = serde_json::from_slice(&v)
                 .map_err(|e| DomainError::Serialization(e.to_string()))?;
             let name_match = s.display_name.to_lowercase().contains(&query_lower);
-            let email_match = s.primary_email.as_str().to_lowercase().contains(&query_lower);
+            let email_match = s
+                .emails
+                .iter()
+                .any(|e| e.address.as_str().to_lowercase().contains(&query_lower));
             if name_match || email_match {
                 results.push(s);
             }

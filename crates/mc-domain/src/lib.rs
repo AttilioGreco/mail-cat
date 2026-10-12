@@ -41,5 +41,5 @@ pub use model::conversation::Conversation;
 pub use value_objects::thread_id::ThreadId;
 pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource};
 pub use value_objects::contact_id::ContactId;
-pub use traits::contact_index::{ContactIndex, ContactSearchHit};
+pub use traits::contact_index::ContactSearchHit;
 pub use traits::search_index::{SearchHit, SearchIndex, SearchResults, SuggestScope, Suggestion};

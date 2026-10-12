@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountId, AggregateType, Contact, ContactEmail, ContactEmailLabel, ContactId, ContactIndex,
-    ContactReadRepository, ContactSource, ContactSummary, ContactWriteRepository,
-    DomainEvent, EmailAddress, EventEnvelope,
+    AccountId, AggregateType, Contact, ContactEmail, ContactEmailLabel, ContactId,
+    ContactReadRepository, ContactSource, ContactWriteRepository, DomainEvent, EmailAddress,
+    EventEnvelope,
 };
 use mc_shared::pagination::Pagination;
 use tracing::info;
@@ -18,25 +18,22 @@ use crate::error::ApplicationError;
 ///
 /// `W` must implement both read and write repository traits so that
 /// `EnsureContact` can check for existence before creating.
-pub struct ContactCommandHandler<W, CI, B>
+pub struct ContactCommandHandler<W, B>
 where
     W: ContactWriteRepository + ContactReadRepository,
-    CI: ContactIndex,
     B: EventPublisher,
 {
     write_repo: Arc<W>,
-    contact_index: Arc<CI>,
     event_bus: Arc<B>,
 }
 
-impl<W, CI, B> ContactCommandHandler<W, CI, B>
+impl<W, B> ContactCommandHandler<W, B>
 where
     W: ContactWriteRepository + ContactReadRepository,
-    CI: ContactIndex,
     B: EventPublisher,
 {
-    pub fn new(write_repo: Arc<W>, contact_index: Arc<CI>, event_bus: Arc<B>) -> Self {
-        Self { write_repo, contact_index, event_bus }
+    pub fn new(write_repo: Arc<W>, event_bus: Arc<B>) -> Self {
+        Self { write_repo, event_bus }
     }
 
     pub async fn handle_add(
@@ -66,10 +63,6 @@ where
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
 
-        let summary = contact_to_summary(&contact);
-        if let Err(e) = self.contact_index.index_contact(&summary).await {
-            tracing::warn!(%contact_id, "contact index update failed: {e}");
-        }
 
         info!(%contact_id, "contact added");
         Ok(CommandResult::ContactAdded { contact_id })
@@ -115,10 +108,6 @@ where
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
 
-        let summary = contact_to_summary(&contact);
-        if let Err(e) = self.contact_index.index_contact(&summary).await {
-            tracing::warn!(%contact_id, "contact index update (ensure) failed: {e}");
-        }
 
         info!(%contact_id, "contact auto-created from email activity");
         Ok(CommandResult::ContactEnsured { created: true, contact_id })
@@ -141,10 +130,6 @@ where
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
 
-        let summary = contact_to_summary(&contact);
-        if let Err(e) = self.contact_index.index_contact(&summary).await {
-            tracing::warn!(%contact_id, "contact index update failed: {e}");
-        }
 
         info!(%contact_id, "contact updated");
         Ok(CommandResult::ContactUpdated)
@@ -160,9 +145,6 @@ where
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
 
-        if let Err(e) = self.contact_index.remove_contact(&contact_id).await {
-            tracing::warn!(%contact_id, "contact index remove failed: {e}");
-        }
 
         info!(%contact_id, "contact removed");
         Ok(CommandResult::ContactRemoved)
@@ -189,57 +171,19 @@ where
         self.publish_event(keep_id.to_string(), merge_event);
         self.publish_event(discard_id.to_string(), remove_event);
 
-        // Update index: re-index kept, remove discarded
-        let summary = contact_to_summary(&kept);
-        if let Err(e) = self.contact_index.index_contact(&summary).await {
-            tracing::warn!(%keep_id, "contact index re-index after merge failed: {e}");
-        }
-        if let Err(e) = self.contact_index.remove_contact(&discard_id).await {
-            tracing::warn!(%discard_id, "contact index remove after merge failed: {e}");
-        }
 
         info!(%keep_id, %discard_id, "contacts merged");
         Ok(CommandResult::ContactsMerged)
     }
 
-    /// Rebuild the Tantivy contact index from the stored contact read models.
-    ///
-    /// Pages through all contacts in the read repository, optionally filtering
-    /// by `account_id`, and re-indexes each one. Returns the number of contacts
-    /// that were indexed.
+    /// Contact search reads the read model directly, so there is no index
+    /// left to rebuild; kept so existing clients get a count, not an error.
     pub async fn handle_rebuild_index(
         &self,
-        account_id: Option<AccountId>,
+        _account_id: Option<AccountId>,
     ) -> Result<CommandResult, ApplicationError> {
-        const PAGE_SIZE: u32 = 100;
-        let mut page = 1u32;
-        let mut indexed_count = 0u32;
-
-        loop {
-            let pagination = Pagination::new(page, PAGE_SIZE);
-            let paged = self.write_repo.list_contacts(&pagination).await?;
-
-            for summary in &paged.items {
-                // Apply account filter when requested
-                if let Some(ref aid) = account_id
-                    && summary.account_scope.as_ref() != Some(aid) {
-                        continue;
-                    }
-                if let Err(e) = self.contact_index.index_contact(summary).await {
-                    tracing::warn!(contact_id = %summary.id, "rebuild index: failed to index contact: {e}");
-                } else {
-                    indexed_count += 1;
-                }
-            }
-
-            if !paged.has_next_page() {
-                break;
-            }
-            page += 1;
-        }
-
-        info!(indexed_count, "contact index rebuilt");
-        Ok(CommandResult::ContactIndexRebuilt { indexed_count })
+        let total = self.write_repo.list_contacts(&Pagination::new(1, 1)).await?.total_count;
+        Ok(CommandResult::ContactIndexRebuilt { indexed_count: u32::try_from(total).unwrap_or(u32::MAX) })
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -254,23 +198,5 @@ where
     fn publish_event(&self, aggregate_id: String, event: DomainEvent) {
         let envelope = EventEnvelope::new(aggregate_id, AggregateType::Contact, 0, event);
         self.event_bus.publish(envelope);
-    }
-}
-
-/// Build a `ContactSummary` from a fully-loaded `Contact` aggregate.
-fn contact_to_summary(c: &Contact) -> ContactSummary {
-    let primary_email = c
-        .primary_email()
-        .cloned()
-        .unwrap_or_else(|| c.emails.first().map(|e| e.address.clone()).unwrap());
-
-    ContactSummary {
-        id: c.id,
-        display_name: c.display_name.clone(),
-        primary_email,
-        emails: c.emails.clone(),
-        organization: c.organization.clone(),
-        source: c.source.clone(),
-        account_scope: c.account_scope,
     }
 }
