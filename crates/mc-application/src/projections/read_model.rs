@@ -6,7 +6,7 @@
 
 #[allow(unused_imports)]
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::TryStreamExt;
 use tracing::{debug, info};
 
 use mc_domain::{EventEnvelope, EventStore, ProjectionCheckpoint, ReadModelProjector};
@@ -15,6 +15,9 @@ use crate::error::ApplicationError;
 
 /// Name used for the read-model projection checkpoint.
 const PROJECTION_NAME: &str = "read_model";
+
+/// Events per transaction during catch-up and rebuild (spec §4).
+const BATCH_SIZE: usize = 1000;
 
 /// Handles projection of domain events into read models.
 ///
@@ -66,15 +69,7 @@ where
             return Ok(());
         }
 
-        self.projector
-            .project(envelope)
-            .await
-            .map_err(ApplicationError::Domain)?;
-
-        self.checkpoint
-            .save_checkpoint(PROJECTION_NAME, envelope.global_position)
-            .await
-            .map_err(ApplicationError::Domain)?;
+        self.project_and_checkpoint(vec![envelope.clone()]).await?;
 
         debug!(
             global_position = envelope.global_position,
@@ -92,33 +87,11 @@ where
     pub async fn rebuild<ES: EventStore>(&self, store: &ES) -> Result<u64, ApplicationError> {
         info!("starting read-model rebuild from event store");
 
-        // Reset checkpoint so we replay everything.
         self.checkpoint
             .save_checkpoint(PROJECTION_NAME, 0)
             .await
             .map_err(ApplicationError::Domain)?;
-
-        let mut stream = store.load_all_events(None, 0);
-        let mut count = 0u64;
-
-        while let Some(envelope) = stream.next().await {
-            let envelope = envelope.map_err(ApplicationError::Domain)?;
-
-            self.projector
-                .project(&envelope)
-                .await
-                .map_err(ApplicationError::Domain)?;
-
-            self.checkpoint
-                .save_checkpoint(PROJECTION_NAME, envelope.global_position)
-                .await
-                .map_err(ApplicationError::Domain)?;
-
-            count += 1;
-            if count.is_multiple_of(1000) {
-                info!(progress = count, "rebuild progress");
-            }
-        }
+        let count = self.project_from(store, 0).await?;
 
         info!(count, "read-model rebuild complete");
         Ok(count)
@@ -136,27 +109,52 @@ where
             .map_err(ApplicationError::Domain)?;
 
         debug!(from_position = last_pos + 1, "catching up on missed events");
-
-        let mut stream = store.load_all_events(None, last_pos + 1);
-        let mut count = 0u64;
-        while let Some(envelope) = stream.next().await {
-            let envelope = envelope.map_err(ApplicationError::Domain)?;
-
-            self.projector
-                .project(&envelope)
-                .await
-                .map_err(ApplicationError::Domain)?;
-
-            self.checkpoint
-                .save_checkpoint(PROJECTION_NAME, envelope.global_position)
-                .await
-                .map_err(ApplicationError::Domain)?;
-
-            count += 1;
-        }
+        let count = self.project_from(store, last_pos + 1).await?;
 
         info!(count, "catch-up complete");
         Ok(count)
+    }
+
+    async fn project_from<ES: EventStore>(
+        &self,
+        store: &ES,
+        from: u64,
+    ) -> Result<u64, ApplicationError> {
+        let mut batches = store.load_all_events(None, from).try_chunks(BATCH_SIZE);
+        let mut count = 0u64;
+        while let Some(batch) = batches
+            .try_next()
+            .await
+            .map_err(|e| ApplicationError::Domain(e.1))?
+        {
+            count += batch.len() as u64;
+            self.project_and_checkpoint(batch).await?;
+            info!(progress = count, "projection progress");
+        }
+        Ok(count)
+    }
+
+    /// Projects `events` and advances the checkpoint to the last one — in the
+    /// same transaction when the projector supports it.
+    async fn project_and_checkpoint(
+        &self,
+        events: Vec<EventEnvelope>,
+    ) -> Result<(), ApplicationError> {
+        let Some(last) = events.last().map(|e| e.global_position) else {
+            return Ok(());
+        };
+        let committed = self
+            .projector
+            .project_batch(PROJECTION_NAME, events)
+            .await
+            .map_err(ApplicationError::Domain)?;
+        if !committed {
+            self.checkpoint
+                .save_checkpoint(PROJECTION_NAME, last)
+                .await
+                .map_err(ApplicationError::Domain)?;
+        }
+        Ok(())
     }
 }
 
@@ -392,5 +390,60 @@ mod tests {
         assert_eq!(count, 2); // only positions 3 and 4
         assert_eq!(projector.projected_events().len(), 2);
         assert_eq!(checkpoint.get_position(), 4);
+    }
+
+    #[tokio::test]
+    async fn catch_up_checkpoints_after_each_batch() {
+        let projector = MockProjector::new();
+        let checkpoint = MockCheckpoint::new();
+        let handler = ProjectionEventHandler::new(projector.clone(), checkpoint.clone());
+        let store = MockEventStore::new(
+            (1..=2500).map(|p| make_envelope(p, account_added_event())).collect(),
+        );
+
+        assert_eq!(handler.catch_up(&store).await.unwrap(), 2500);
+        assert_eq!(projector.projected_events().len(), 2500);
+        assert_eq!(checkpoint.get_position(), 2500);
+    }
+
+    /// Stores the checkpoint itself, like the SQLite repository.
+    #[derive(Clone, Default)]
+    struct TxProjector {
+        batches: Arc<Mutex<Vec<(String, usize, u64)>>>,
+    }
+
+    #[async_trait]
+    impl ReadModelProjector for TxProjector {
+        async fn project(&self, _envelope: &EventEnvelope) -> Result<(), DomainError> {
+            unreachable!("catch-up must go through project_batch")
+        }
+
+        async fn project_batch(
+            &self,
+            checkpoint: &str,
+            events: Vec<EventEnvelope>,
+        ) -> Result<bool, DomainError> {
+            let last = events.last().unwrap().global_position;
+            self.batches.lock().unwrap().push((checkpoint.to_owned(), events.len(), last));
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn catch_up_hands_batches_to_a_transactional_projector() {
+        let projector = TxProjector::default();
+        let checkpoint = MockCheckpoint::new();
+        checkpoint.set_position(2);
+        let handler = ProjectionEventHandler::new(projector.clone(), checkpoint.clone());
+        let store = MockEventStore::new(
+            (1..=2002).map(|p| make_envelope(p, account_added_event())).collect(),
+        );
+
+        assert_eq!(handler.catch_up(&store).await.unwrap(), 2000);
+        assert_eq!(
+            *projector.batches.lock().unwrap(),
+            [("read_model".to_owned(), 1000, 1002), ("read_model".to_owned(), 1000, 2002)]
+        );
+        assert_eq!(checkpoint.get_position(), 2, "the projector owns the checkpoint");
     }
 }

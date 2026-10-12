@@ -15,4 +15,20 @@ pub trait ReadModelProjector: Send + Sync {
     /// The projector inspects `envelope.payload` and updates the appropriate
     /// read model stores. Unknown or irrelevant events are silently ignored.
     async fn project(&self, envelope: &EventEnvelope) -> Result<(), DomainError>;
+
+    /// Projects a catch-up batch in global order. Returns `true` when the
+    /// backend also stored `checkpoint` = the last event's position in the
+    /// same transaction, so a crash can never leave the two out of step. The
+    /// default projects event by event and leaves the checkpoint to the
+    /// caller (`false`).
+    async fn project_batch(
+        &self,
+        _checkpoint: &str,
+        events: Vec<EventEnvelope>,
+    ) -> Result<bool, DomainError> {
+        for event in &events {
+            self.project(event).await?;
+        }
+        Ok(false)
+    }
 }
