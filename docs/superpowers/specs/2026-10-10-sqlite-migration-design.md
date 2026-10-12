@@ -360,6 +360,17 @@ Tracked here so later plans pick them up. Tick when done (with commit).
   the number of conversations. Reword the trait doc when sled is deleted.
 - [ ] `search_contacts` on SQLite folds ASCII case only (`LIKE`); sled lowercased Unicode.
 
+**From the plan 3 final review (minor):**
+- [ ] Flag order is not replay-stable (both backends): remove-then-re-add moves a flag to
+  the end, so a replay can turn `[Seen, Flagged]` into `[Flagged, Seen]`. Equal as a set;
+  keep flags in a canonical order if the order ever matters.
+- [ ] Conformance replay test only replays the whole log; add an every-suffix replay
+  (thread with remaining messages, one RFC copy deleted, double move, rename, contact
+  merge/remove) before plan 5 touches wiring.
+- [ ] SQLite `ContactAdded` with no emails fails the batch (`primary_email`); sled falls back
+  to `unknown@unknown`. Unreachable (domain validates since ddcd561), recheck in the plan 5 migrator.
+- [ ] `find_by_provider_uid` on SQLite: add `m.id DESC` tie-break for equal `received_at`.
+
 **Out of scope of the migration, decided 2026-10-10:**
 - [ ] Search features (operators, filters, sort) — own spec; index schema ready after plan 4.
 - [ ] Body retention policy (`evicted`) — decide after measuring compressed size (plan 5, step 6).
