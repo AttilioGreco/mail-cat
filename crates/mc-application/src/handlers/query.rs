@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use mc_domain::{
     AccountId, AccountReadRepository, ContactReadRepository, ContactSearchHit,
-    ConversationReadRepository, MailboxReadRepository,
-    MessageReadRepository, SearchIndex,
+    ConversationReadRepository, IndexHit, MailboxReadRepository, Message, MessageReadRepository,
+    SearchHit, SearchIndex, SearchResults,
 };
 
 use crate::error::ApplicationError;
@@ -109,26 +109,27 @@ where
                 mailbox_id,
                 pagination,
             } => {
-                let results = self
+                let found = self
                     .search_index
-                    .search(
-                        &query,
-                        account_id.as_ref(),
-                        mailbox_id.as_ref(),
-                        &pagination,
-                    )
+                    .search(&query, account_id.as_ref(), mailbox_id.as_ref(), &pagination)
                     .await?;
-                Ok(QueryResult::SearchResults(results))
+                let mut hits = Vec::with_capacity(found.hits.len());
+                for IndexHit { message_id, score } in found.hits {
+                    // The index lags the read model; a message deleted since is skipped.
+                    let Some(message) = self.message_repo.get_message(&message_id).await? else {
+                        continue;
+                    };
+                    let snippet = self.search_index.snippet(&query, &message);
+                    hits.push(search_hit(&message, score, snippet));
+                }
+                Ok(QueryResult::SearchResults(SearchResults { hits, total_count: found.total_count }))
             }
             Query::SuggestMessages {
                 prefix,
                 scope,
                 max_per_field,
             } => {
-                let suggestions = self
-                    .search_index
-                    .suggest(&prefix, scope, max_per_field)
-                    .await?;
+                let suggestions = self.message_repo.suggest(&prefix, scope, max_per_field).await?;
                 Ok(QueryResult::Suggestions(suggestions))
             }
             Query::SearchContacts { query, limit, requesting_account_id } => {
@@ -194,12 +195,26 @@ where
     }
 }
 
+fn search_hit(message: &Message, score: f32, snippet: Option<String>) -> SearchHit {
+    let from = &message.envelope.from;
+    let names: Vec<&str> = from.iter().filter_map(|a| a.name.as_deref()).collect();
+    SearchHit {
+        message_id: message.id,
+        score,
+        snippet,
+        subject: message.envelope.subject.clone(),
+        from_name: (!names.is_empty()).then(|| names.join(" ")),
+        from_email: from.iter().map(|a| a.email.as_str()).collect::<Vec<_>>().join(" "),
+        date: message.envelope.date.timestamp(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mc_domain::{
         AccountId, AccountStatus, AccountSummary, ContactSummary, DomainError, EmailAddress, Mailbox,
-        MailboxId, Message, MessageId, MessageSummary, ProviderType, SearchResults,
+        MailboxId, Message, MessageId, MessageSummary, ProviderType,
     };
     use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -259,12 +274,15 @@ mod tests {
 
     // ── Mock MessageReadRepository ────────────────────────────────────
 
-    struct MockMessageReadRepo;
+    #[derive(Default)]
+    struct MockMessageReadRepo {
+        messages: Vec<Message>,
+    }
 
     #[async_trait]
     impl MessageReadRepository for MockMessageReadRepo {
-        async fn get_message(&self, _id: &MessageId) -> Result<Option<Message>, DomainError> {
-            Ok(None)
+        async fn get_message(&self, id: &MessageId) -> Result<Option<Message>, DomainError> {
+            Ok(self.messages.iter().find(|m| m.id == *id).cloned())
         }
 
         async fn list_messages(
@@ -303,6 +321,15 @@ mod tests {
             &self,
             _account_id: Option<&mc_domain::AccountId>,
         ) -> Result<Vec<mc_domain::Message>, DomainError> {
+            Ok(vec![])
+        }
+
+        async fn suggest(
+            &self,
+            _prefix: &str,
+            _scope: Option<mc_domain::SuggestScope>,
+            _max_per_field: usize,
+        ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
             Ok(vec![])
         }
     }
@@ -365,7 +392,11 @@ mod tests {
 
     // ── Mock SearchIndex ──────────────────────────────────────────────
 
-    struct MockSearchIndex;
+    /// Returns `hits` for every query, best first.
+    #[derive(Default)]
+    struct MockSearchIndex {
+        hits: Vec<MessageId>,
+    }
 
     #[async_trait]
     impl SearchIndex for MockSearchIndex {
@@ -383,24 +414,19 @@ mod tests {
             _account_id: Option<&AccountId>,
             _mailbox_id: Option<&MailboxId>,
             _pagination: &Pagination,
-        ) -> Result<SearchResults, DomainError> {
-            Ok(SearchResults {
-                hits: vec![],
-                total_count: 0,
+        ) -> Result<mc_domain::IndexResults, DomainError> {
+            Ok(mc_domain::IndexResults {
+                hits: self
+                    .hits
+                    .iter()
+                    .map(|&message_id| mc_domain::IndexHit { message_id, score: 1.0 })
+                    .collect(),
+                total_count: self.hits.len() as u64,
             })
         }
 
-        async fn suggest(
-            &self,
-            _prefix: &str,
-            _scope: Option<mc_domain::SuggestScope>,
-            _max_per_field: usize,
-        ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
-            Ok(vec![])
-        }
-
-        async fn rebuild(&self, _messages: Vec<Message>) -> Result<u64, DomainError> {
-            Ok(0)
+        fn snippet(&self, query: &str, message: &Message) -> Option<String> {
+            message.body_text.as_ref().map(|_| format!("<b>{query}</b>"))
         }
 
         async fn flush(&self) -> Result<(), DomainError> {
@@ -452,14 +478,82 @@ mod tests {
     }
 
     fn handler_with_contacts(contacts: Vec<ContactSummary>) -> TestHandler {
+        handler(MockMessageReadRepo::default(), MockSearchIndex::default(), contacts)
+    }
+
+    fn handler(
+        messages: MockMessageReadRepo,
+        index: MockSearchIndex,
+        contacts: Vec<ContactSummary>,
+    ) -> TestHandler {
         QueryHandler::new(
             Arc::new(MockAccountReadRepo),
             Arc::new(MockMailboxReadRepo),
-            Arc::new(MockMessageReadRepo),
-            Arc::new(MockSearchIndex),
+            Arc::new(messages),
+            Arc::new(index),
             Arc::new(MockContactRepo { contacts }),
             Arc::new(MockConversationRepo),
         )
+    }
+
+    #[tokio::test]
+    async fn search_hydrates_hits_from_the_read_model_and_skips_stale_ones() {
+        let date = chrono::DateTime::from_timestamp(1_760_000_000, 0).unwrap();
+        let message = Message {
+            id: MessageId::new(),
+            account_id: AccountId::new(),
+            mailbox_id: MailboxId::new(),
+            provider_uid: None,
+            message_rfc_id: None,
+            in_reply_to: None,
+            references: vec![],
+            envelope: mc_domain::Envelope {
+                from: vec![mc_domain::Address {
+                    name: Some("Ada".into()),
+                    email: EmailAddress::new("ada@example.com").unwrap(),
+                }],
+                to: vec![],
+                cc: vec![],
+                bcc: vec![],
+                reply_to: vec![],
+                subject: "Quarterly report".into(),
+                date,
+            },
+            flags: vec![],
+            size_bytes: 1,
+            has_attachments: false,
+            attachments: vec![],
+            body_text: Some("the quarterly numbers".into()),
+            body_html: None,
+            received_at: date,
+            internal_date: date,
+        };
+        let (id, gone) = (message.id, MessageId::new());
+        let handler = handler(
+            MockMessageReadRepo { messages: vec![message] },
+            MockSearchIndex { hits: vec![gone, id] },
+            vec![],
+        );
+
+        let result = handler
+            .dispatch(Query::SearchMessages {
+                query: "quarterly".into(),
+                account_id: None,
+                mailbox_id: None,
+                pagination: Pagination::new(1, 20),
+            })
+            .await
+            .unwrap();
+
+        let results = result.into_search_results().unwrap();
+        assert_eq!(results.hits.len(), 1);
+        let hit = &results.hits[0];
+        assert_eq!(hit.message_id, id);
+        assert_eq!(hit.subject, "Quarterly report");
+        assert_eq!(hit.from_name.as_deref(), Some("Ada"));
+        assert_eq!(hit.from_email, "ada@example.com");
+        assert_eq!(hit.date, 1_760_000_000);
+        assert_eq!(hit.snippet.as_deref(), Some("<b>quarterly</b>"));
     }
 
     fn contact(raw: &str, scope: Option<AccountId>) -> ContactSummary {

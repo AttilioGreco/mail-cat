@@ -1809,6 +1809,15 @@ mod tests {
         ) -> Result<Vec<Message>, DomainError> {
             Ok(vec![])
         }
+
+        async fn suggest(
+            &self,
+            _prefix: &str,
+            _scope: Option<mc_domain::SuggestScope>,
+            _max_per_field: usize,
+        ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
+            Ok(vec![])
+        }
     }
 
     #[async_trait]

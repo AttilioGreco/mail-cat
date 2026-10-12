@@ -314,6 +314,12 @@ impl AppContext {
             .catch_up(event_store.as_ref())
             .await
             .context("failed to catch up projections")?;
+        if search_index.was_recreated() {
+            search_handler
+                .reset()
+                .await
+                .context("failed to reset search index checkpoint")?;
+        }
         search_handler
             .catch_up(event_store.as_ref())
             .await

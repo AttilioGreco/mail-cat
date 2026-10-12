@@ -102,6 +102,15 @@ where
         self.project(envelope).await
     }
 
+    /// Forget the checkpoint so the next `catch_up` re-indexes the whole log —
+    /// for an index that was just created empty.
+    pub async fn reset(&self) -> Result<(), ApplicationError> {
+        self.checkpoint
+            .save_checkpoint(PROJECTION_NAME, 0)
+            .await
+            .map_err(ApplicationError::Domain)
+    }
+
     /// Replay events after the checkpoint from the event store. On a fresh index
     /// (checkpoint 0) this indexes everything once; thereafter it's incremental.
     /// Commits and advances the checkpoint in batches so a crash replays at most
@@ -161,7 +170,7 @@ mod tests {
     use async_trait::async_trait;
     use mc_domain::{
         AccountId, AggregateType, DomainError, Envelope, MailboxId, Message, MessageId,
-        MessageSummary, SuggestScope, Suggestion,
+        MessageSummary,
     };
     use mc_shared::pagination::{PagedResult, Pagination};
     use std::collections::{HashMap, HashSet};
@@ -188,19 +197,11 @@ mod tests {
             _a: Option<&AccountId>,
             _mb: Option<&MailboxId>,
             _p: &Pagination,
-        ) -> Result<mc_domain::traits::search_index::SearchResults, DomainError> {
+        ) -> Result<mc_domain::IndexResults, DomainError> {
             unimplemented!()
         }
-        async fn suggest(
-            &self,
-            _p: &str,
-            _s: Option<SuggestScope>,
-            _m: usize,
-        ) -> Result<Vec<Suggestion>, DomainError> {
-            Ok(vec![])
-        }
-        async fn rebuild(&self, _m: Vec<Message>) -> Result<u64, DomainError> {
-            Ok(0)
+        fn snippet(&self, _q: &str, _m: &Message) -> Option<String> {
+            None
         }
         async fn flush(&self) -> Result<(), DomainError> {
             Ok(())
@@ -244,6 +245,15 @@ mod tests {
             &self,
             _a: Option<&AccountId>,
         ) -> Result<Vec<Message>, DomainError> {
+            Ok(vec![])
+        }
+
+        async fn suggest(
+            &self,
+            _prefix: &str,
+            _scope: Option<mc_domain::SuggestScope>,
+            _max_per_field: usize,
+        ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
             Ok(vec![])
         }
     }

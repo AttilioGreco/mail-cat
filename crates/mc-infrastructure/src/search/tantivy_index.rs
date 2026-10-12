@@ -1,250 +1,203 @@
+use std::borrow::Cow;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
-use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, QueryParser, RegexQuery};
-use tantivy::schema::{Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value};
+use tantivy::collector::{Count, TopDocs};
+use tantivy::query::{Query, QueryParser};
+use tantivy::schema::{
+    FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing,
+    TextOptions, Value,
+};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
 use mc_domain::model::account::AccountId;
 use mc_domain::model::mailbox::MailboxId;
 use mc_domain::model::message::Message;
-use mc_domain::traits::search_index::{SearchHit, SearchIndex, SearchResults};
+use mc_domain::traits::search_index::{IndexHit, IndexResults, SearchIndex};
+use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::message_id::MessageId;
 use mc_shared::pagination::Pagination;
 
 /// How many documents to buffer before auto-committing.
 const AUTO_COMMIT_THRESHOLD: u32 = 100;
 
-/// Tantivy-based search index for email messages.
-///
-/// Schema fields:
-/// - message_id: UUID (stored, exact match)
-/// - account_id: UUID (stored, exact match for filtering)
-/// - mailbox_id: UUID (stored, exact match for filtering)
-/// - subject: text (full-text with stemming, stored for display)
-/// - from_name: text (full-text with stemming, stored)
-/// - from_email: text (full-text, stored)
-/// - to: text (full-text, stored)
-/// - body_text: text (full-text with stemming, stored for snippets)
-/// - body_html: text (full-text with stemming, not stored)
-/// - date: i64 timestamp (stored, for sorting)
+/// Tantivy search index for email messages (spec §5). Stores only
+/// `message_id`; everything shown to the user is hydrated from the read model.
+/// The FAST fields (scope, date, flags, attachments) are columnar index data
+/// for filters and sorting, not content.
 pub struct TantivySearchIndex {
-    index: Arc<Index>,
+    index: Index,
     reader: IndexReader,
-    writer: Arc<parking_lot::Mutex<IndexWriter>>,
+    writer: parking_lot::Mutex<IndexWriter>,
     fields: IndexFields,
     pending_count: AtomicU32,
+    recreated: bool,
 }
 
-#[derive(Clone)]
 struct IndexFields {
     message_id: Field,
     account_id: Field,
     mailbox_id: Field,
+    date: Field,
+    flags: Field,
+    has_attachment: Field,
     subject: Field,
     from_name: Field,
+    body: Field,
     from_email: Field,
     to: Field,
-    body_text: Field,
-    body_html: Field,
-    date: Field,
+    cc: Field,
 }
 
 impl TantivySearchIndex {
-    /// Create a new Tantivy search index at the given path.
+    /// Opens the index at `index_path`, creating it — or recreating it when it
+    /// was built with another schema. Check [`Self::was_recreated`] afterwards:
+    /// a new index is empty and must be refilled from the event log.
     pub fn new<P: AsRef<Path>>(index_path: P) -> Result<Self, DomainError> {
+        let path = index_path.as_ref();
         let schema = Self::build_schema();
-
-        // Check if index already exists (meta.json is the marker file)
-        let meta_path = index_path.as_ref().join("meta.json");
-        let index = if meta_path.exists() {
-            Index::open_in_dir(index_path)
-                .map_err(|e| DomainError::SearchIndex(format!("Failed to open index: {}", e)))?
+        let existing = if path.join("meta.json").exists() {
+            Some(Index::open_in_dir(path).map_err(|e| search_err("open index", e))?)
         } else {
-            std::fs::create_dir_all(&index_path).map_err(|e| {
-                DomainError::SearchIndex(format!("Failed to create index dir: {}", e))
-            })?;
-            Index::create_in_dir(index_path, schema.clone())
-                .map_err(|e| DomainError::SearchIndex(format!("Failed to create index: {}", e)))?
+            None
+        };
+        let (index, recreated) = match existing {
+            Some(index) if index.schema() == schema => (index, false),
+            stale => {
+                if stale.is_some() {
+                    warn!(path = %path.display(), "search index schema changed, recreating it");
+                    std::fs::remove_dir_all(path).map_err(|e| search_err("remove stale index", e))?;
+                }
+                std::fs::create_dir_all(path).map_err(|e| search_err("create index dir", e))?;
+                let index = Index::create_in_dir(path, schema.clone())
+                    .map_err(|e| search_err("create index", e))?;
+                (index, true)
+            }
         };
 
-        // Register the custom "email_tokenizer" for indexing email-like content
-        Self::register_tokenizers(&index);
-
-        // Create writer with 50MB heap
-        let writer = index
-            .writer(50_000_000)
-            .map_err(|e| DomainError::SearchIndex(format!("Failed to create writer: {}", e)))?;
-
-        // Create reader with manual reload (we'll reload explicitly after commits)
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|e| DomainError::SearchIndex(format!("Failed to create reader: {}", e)))?;
-
-        let fields = IndexFields {
-            message_id: schema.get_field("message_id").unwrap(),
-            account_id: schema.get_field("account_id").unwrap(),
-            mailbox_id: schema.get_field("mailbox_id").unwrap(),
-            subject: schema.get_field("subject").unwrap(),
-            from_name: schema.get_field("from_name").unwrap(),
-            from_email: schema.get_field("from_email").unwrap(),
-            to: schema.get_field("to").unwrap(),
-            body_text: schema.get_field("body_text").unwrap(),
-            body_html: schema.get_field("body_html").unwrap(),
-            date: schema.get_field("date").unwrap(),
-        };
-
-        info!("TantivySearchIndex initialized");
-
-        Ok(Self {
-            index: Arc::new(index),
-            reader,
-            writer: Arc::new(parking_lot::Mutex::new(writer)),
-            fields,
-            pending_count: AtomicU32::new(0),
-        })
-    }
-
-    /// Register custom tokenizers on the index.
-    fn register_tokenizers(index: &Index) {
         // "email_tokenizer": splits on @, dots, whitespace — good for email addresses
         let email_analyzer = TextAnalyzer::builder(tantivy::tokenizer::SimpleTokenizer::default())
             .filter(tantivy::tokenizer::LowerCaser)
             .build();
-        index
-            .tokenizers()
-            .register("email_tokenizer", email_analyzer);
+        index.tokenizers().register("email_tokenizer", email_analyzer);
+
+        let writer = index.writer(50_000_000).map_err(|e| search_err("create writer", e))?;
+        // Manual reload: the reader is reloaded explicitly after each commit.
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(|e| search_err("create reader", e))?;
+        let field = |name| schema.get_field(name).expect("field is in build_schema");
+        let fields = IndexFields {
+            message_id: field("message_id"),
+            account_id: field("account_id"),
+            mailbox_id: field("mailbox_id"),
+            date: field("date"),
+            flags: field("flags"),
+            has_attachment: field("has_attachment"),
+            subject: field("subject"),
+            from_name: field("from_name"),
+            body: field("body"),
+            from_email: field("from_email"),
+            to: field("to"),
+            cc: field("cc"),
+        };
+
+        info!(recreated, "TantivySearchIndex initialized");
+        Ok(Self {
+            index,
+            reader,
+            writer: parking_lot::Mutex::new(writer),
+            fields,
+            pending_count: AtomicU32::new(0),
+            recreated,
+        })
     }
 
-    /// Build the Tantivy schema for email messages.
+    /// True when [`Self::new`] created an empty index.
+    pub fn was_recreated(&self) -> bool {
+        self.recreated
+    }
+
     fn build_schema() -> Schema {
-        let mut schema_builder = Schema::builder();
-
-        // IDs — stored and indexed as exact (non-tokenized) strings for filtering
-        schema_builder.add_text_field("message_id", STRING | STORED);
-        schema_builder.add_text_field("account_id", STRING | STORED);
-        schema_builder.add_text_field("mailbox_id", STRING | STORED);
-
-        // Subject — full text search with default tokenizer (lowercase + stemming via en_stem)
-        let text_opts = TextOptions::default()
-            .set_indexing_options(
+        let mut builder = Schema::builder();
+        let text = |tokenizer| {
+            TextOptions::default().set_indexing_options(
                 TextFieldIndexing::default()
-                    .set_tokenizer("en_stem")
+                    .set_tokenizer(tokenizer)
                     .set_index_option(IndexRecordOption::WithFreqsAndPositions),
             )
-            .set_stored();
-        schema_builder.add_text_field("subject", text_opts.clone());
+        };
 
-        // From name — full text search with stemming, stored
-        schema_builder.add_text_field("from_name", text_opts.clone());
-
-        // From email — tokenized for email-style search, stored
-        let email_opts = TextOptions::default()
-            .set_indexing_options(
-                TextFieldIndexing::default()
-                    .set_tokenizer("email_tokenizer")
-                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-            )
-            .set_stored();
-        schema_builder.add_text_field("from_email", email_opts.clone());
-
-        // To — email addresses
-        schema_builder.add_text_field("to", email_opts);
-
-        // Body text — full text with stemming, STORED for snippet generation
-        schema_builder.add_text_field("body_text", text_opts.clone());
-
-        // Body HTML — full text with stemming, NOT stored (just searchable)
-        let text_not_stored = TextOptions::default().set_indexing_options(
-            TextFieldIndexing::default()
-                .set_tokenizer("en_stem")
-                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-        );
-        schema_builder.add_text_field("body_html", text_not_stored);
-
-        // Date for sorting
-        schema_builder.add_i64_field("date", STORED);
-
-        schema_builder.build()
+        builder.add_text_field("message_id", STRING | STORED);
+        builder.add_text_field("account_id", STRING | FAST);
+        builder.add_text_field("mailbox_id", STRING | FAST);
+        builder.add_i64_field("date", INDEXED | FAST);
+        builder.add_u64_field("flags", FAST);
+        builder.add_bool_field("has_attachment", FAST);
+        for name in ["subject", "from_name", "body"] {
+            builder.add_text_field(name, text("en_stem"));
+        }
+        for name in ["from_email", "to", "cc"] {
+            builder.add_text_field(name, text("email_tokenizer"));
+        }
+        builder.build()
     }
 
-    /// Convert a Message to a Tantivy document.
     fn message_to_document(&self, message: &Message) -> TantivyDocument {
+        let f = &self.fields;
+        let e = &message.envelope;
+        let join = |names: Vec<&str>| names.join(" ");
         let mut doc = TantivyDocument::new();
-
-        // IDs
-        doc.add_text(self.fields.message_id, message.id.to_string());
-        doc.add_text(self.fields.account_id, message.account_id.to_string());
-        doc.add_text(self.fields.mailbox_id, message.mailbox_id.to_string());
-
-        // Subject
-        doc.add_text(self.fields.subject, &message.envelope.subject);
-
-        // From — name and email separately for better search
-        let from_names: Vec<String> = message
-            .envelope
-            .from
-            .iter()
-            .filter_map(|addr| addr.name.clone())
-            .collect();
-        doc.add_text(self.fields.from_name, from_names.join(" "));
-
-        let from_emails: Vec<&str> = message
-            .envelope
-            .from
-            .iter()
-            .map(|addr| addr.email.as_str())
-            .collect();
-        doc.add_text(self.fields.from_email, from_emails.join(" "));
-
-        // To
-        let to_text: Vec<&str> = message
-            .envelope
-            .to
-            .iter()
-            .map(|addr| addr.email.as_str())
-            .collect();
-        doc.add_text(self.fields.to, to_text.join(" "));
-
-        // Body
-        if let Some(ref body_text) = message.body_text {
-            doc.add_text(self.fields.body_text, body_text);
+        doc.add_text(f.message_id, message.id.to_string());
+        doc.add_text(f.account_id, message.account_id.to_string());
+        doc.add_text(f.mailbox_id, message.mailbox_id.to_string());
+        doc.add_i64(f.date, e.date.timestamp());
+        doc.add_u64(f.flags, flag_bits(&message.flags));
+        doc.add_bool(f.has_attachment, message.has_attachments);
+        doc.add_text(f.subject, &e.subject);
+        doc.add_text(f.from_name, join(e.from.iter().filter_map(|a| a.name.as_deref()).collect()));
+        doc.add_text(f.from_email, join(e.from.iter().map(|a| a.email.as_str()).collect()));
+        doc.add_text(f.to, join(e.to.iter().map(|a| a.email.as_str()).collect()));
+        doc.add_text(f.cc, join(e.cc.iter().map(|a| a.email.as_str()).collect()));
+        if let Some(body) = body_of(message) {
+            doc.add_text(f.body, body);
         }
-        if let Some(ref body_html) = message.body_html {
-            // Strip HTML tags before indexing for cleaner full-text search
-            let stripped = strip_html_for_index(body_html);
-            doc.add_text(self.fields.body_html, stripped);
-        }
-
-        // Date
-        doc.add_i64(self.fields.date, message.envelope.date.timestamp());
-
         doc
     }
 
-    /// Commit pending changes and reload reader.
+    fn parse_query(
+        &self,
+        query: &str,
+        account_id: Option<&AccountId>,
+        mailbox_id: Option<&MailboxId>,
+    ) -> Result<Box<dyn Query>, DomainError> {
+        let f = &self.fields;
+        let parser = QueryParser::for_index(
+            &self.index,
+            vec![f.subject, f.from_name, f.from_email, f.to, f.cc, f.body],
+        );
+        // Parentheses keep the user's ORs from swallowing the scope filters.
+        let mut query = format!("({})", rewrite_scoped_query(query));
+        if let Some(account_id) = account_id {
+            query.push_str(&format!(" AND account_id:\"{account_id}\""));
+        }
+        if let Some(mailbox_id) = mailbox_id {
+            query.push_str(&format!(" AND mailbox_id:\"{mailbox_id}\""));
+        }
+        parser.parse_query(&query).map_err(|e| search_err("parse query", e))
+    }
+
     fn commit_and_reload(&self) -> Result<(), DomainError> {
-        let mut writer = self.writer.lock();
-        writer
-            .commit()
-            .map_err(|e| DomainError::SearchIndex(format!("Commit failed: {}", e)))?;
-        drop(writer);
-
+        self.writer.lock().commit().map_err(|e| search_err("commit", e))?;
         self.pending_count.store(0, Ordering::Relaxed);
-
-        self.reader
-            .reload()
-            .map_err(|e| DomainError::SearchIndex(format!("Reader reload failed: {}", e)))?;
-        Ok(())
+        self.reader.reload().map_err(|e| search_err("reload reader", e))
     }
 }
 
@@ -252,43 +205,26 @@ impl TantivySearchIndex {
 impl SearchIndex for TantivySearchIndex {
     async fn index_message(&self, message: &Message) -> Result<(), DomainError> {
         debug!("Indexing message: {}", message.id);
-
-        // Delete existing document (if any) for idempotency
         let term = tantivy::Term::from_field_text(self.fields.message_id, &message.id.to_string());
-
-        let writer = self.writer.lock();
-        writer.delete_term(term);
-
-        // Add new document
-        let doc = self.message_to_document(message);
-        writer
-            .add_document(doc)
-            .map_err(|e| DomainError::SearchIndex(format!("Add document failed: {}", e)))?;
-        drop(writer);
-
-        // Auto-commit every N documents for batching efficiency during sync
-        let pending = self.pending_count.fetch_add(1, Ordering::Relaxed) + 1;
-        if pending >= AUTO_COMMIT_THRESHOLD {
-            self.commit_and_reload()?;
-            debug!("Auto-committed after {} documents", pending);
+        {
+            let writer = self.writer.lock();
+            writer.delete_term(term);
+            writer
+                .add_document(self.message_to_document(message))
+                .map_err(|e| search_err("add document", e))?;
         }
-
+        // Batch commits during sync.
+        if self.pending_count.fetch_add(1, Ordering::Relaxed) + 1 >= AUTO_COMMIT_THRESHOLD {
+            self.commit_and_reload()?;
+        }
         Ok(())
     }
 
     async fn remove_message(&self, message_id: &MessageId) -> Result<(), DomainError> {
         debug!("Removing message: {}", message_id);
-        let mut writer = self.writer.lock();
         let term = tantivy::Term::from_field_text(self.fields.message_id, &message_id.to_string());
-        writer.delete_term(term);
-        writer
-            .commit()
-            .map_err(|e| DomainError::SearchIndex(format!("Commit failed: {}", e)))?;
-        drop(writer);
-        self.reader
-            .reload()
-            .map_err(|e| DomainError::SearchIndex(format!("Reader reload failed: {}", e)))?;
-        Ok(())
+        self.writer.lock().delete_term(term);
+        self.commit_and_reload()
     }
 
     async fn search(
@@ -297,330 +233,77 @@ impl SearchIndex for TantivySearchIndex {
         account_id: Option<&AccountId>,
         mailbox_id: Option<&MailboxId>,
         pagination: &Pagination,
-    ) -> Result<SearchResults, DomainError> {
-        // Flush any pending documents before searching
+    ) -> Result<IndexResults, DomainError> {
         if self.pending_count.load(Ordering::Relaxed) > 0 {
             self.commit_and_reload()?;
         }
-
-        info!(
-            "Searching: query='{}', account_id={:?}, mailbox_id={:?}",
-            query, account_id, mailbox_id
-        );
+        info!(query, ?account_id, ?mailbox_id, "searching");
 
         let searcher = self.reader.searcher();
-
-        // Rewrite user-facing scope prefixes (from:, to:, sbj:) into Tantivy field names.
-        // "from: foo" → search from_email AND from_name for "foo"
-        // "to: foo"   → search to for "foo"
-        // "sbj: foo"  → search subject for "foo"
-        // No prefix   → search all default fields
-        let rewritten = rewrite_scoped_query(query);
-
-        // Build query parser for searchable fields
-        let query_parser = QueryParser::for_index(
-            &self.index,
-            vec![
-                self.fields.subject,
-                self.fields.from_name,
-                self.fields.from_email,
-                self.fields.to,
-                self.fields.body_text,
-                self.fields.body_html,
-            ],
-        );
-
-        // Build query with optional account/mailbox filters.
-        // Wrap the user query in parentheses to preserve OR precedence
-        // e.g. (from_email:"x" OR from_name:"x") AND account_id:"y"
-        let query_str = if account_id.is_some() || mailbox_id.is_some() {
-            let mut q = format!("({})", rewritten);
-            if let Some(account_id) = account_id {
-                q.push_str(&format!(" AND account_id:\"{}\"", account_id));
-            }
-            if let Some(mailbox_id) = mailbox_id {
-                q.push_str(&format!(" AND mailbox_id:\"{}\"", mailbox_id));
-            }
-            q
-        } else {
-            rewritten
-        };
-
-        let parsed_query = query_parser
-            .parse_query(&query_str)
-            .map_err(|e| DomainError::SearchIndex(format!("Query parse failed: {}", e)))?;
-
-        // Calculate offset and limit
-        let offset = ((pagination.page - 1) * pagination.page_size) as usize;
+        let parsed = self.parse_query(query, account_id, mailbox_id)?;
+        let offset = ((pagination.page.max(1) - 1) * pagination.page_size) as usize;
         let limit = pagination.page_size as usize;
+        let (top_docs, total) = searcher
+            .search(&parsed, &(TopDocs::with_limit(offset + limit).order_by_score(), Count))
+            .map_err(|e| search_err("search", e))?;
 
-        // Search with TopDocs collector
-        let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(offset + limit).order_by_score())
-            .map_err(|e| DomainError::SearchIndex(format!("Search failed: {}", e)))?;
-
-        // Count total hits
-        let total_count = searcher
-            .search(&parsed_query, &tantivy::collector::Count)
-            .map_err(|e| DomainError::SearchIndex(format!("Count failed: {}", e)))?;
-
-        // Create snippet generator from body_text field
-        let snippet_generator =
-            SnippetGenerator::create(&searcher, &parsed_query, self.fields.body_text)
-                .ok();
-
-        // Extract results with pagination
-        let hits: Vec<SearchHit> = top_docs
-            .iter()
+        let hits = top_docs
+            .into_iter()
             .skip(offset)
-            .take(limit)
-            .filter_map(|(score, doc_address)| {
-                let doc: TantivyDocument = searcher.doc(*doc_address).ok()?;
-
-                let message_id_str = doc.get_first(self.fields.message_id)?.as_str()?;
-                let uuid = uuid::Uuid::parse_str(message_id_str).ok()?;
-                let message_id = MessageId::from_uuid(uuid);
-
-                // Read stored envelope fields
-                let subject = doc.get_first(self.fields.subject)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let from_name = doc.get_first(self.fields.from_name)
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
-                let from_email = doc.get_first(self.fields.from_email)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let date = doc.get_first(self.fields.date)
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-
-                // Generate snippet from body_text
-                let snippet = snippet_generator
-                    .as_ref()
-                    .and_then(|sg| {
-                        let s = sg.snippet_from_doc(&doc);
-                        let html = s.to_html();
-                        if html.trim().is_empty() { None } else { Some(html) }
-                    });
-
-                Some(SearchHit {
-                    message_id,
-                    score: *score,
-                    snippet,
-                    subject,
-                    from_name,
-                    from_email,
-                    date,
-                })
+            .filter_map(|(score, address)| {
+                let doc: TantivyDocument = searcher.doc(address).ok()?;
+                let id = doc.get_first(self.fields.message_id)?.as_str()?;
+                let message_id = MessageId::from_uuid(uuid::Uuid::parse_str(id).ok()?);
+                Some(IndexHit { message_id, score })
             })
             .collect();
-
-        info!(
-            "Search returned {} hits (total: {})",
-            hits.len(),
-            total_count
-        );
-
-        Ok(SearchResults {
-            hits,
-            total_count: total_count as u64,
-        })
+        Ok(IndexResults { hits, total_count: total as u64 })
     }
 
-    async fn suggest(
-        &self,
-        prefix: &str,
-        scope: Option<mc_domain::SuggestScope>,
-        max_per_field: usize,
-    ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
-        use mc_domain::SuggestScope;
-        use std::collections::HashMap;
-
-        if prefix.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Flush pending writes
-        if self.pending_count.load(Ordering::Relaxed) > 0 {
-            self.commit_and_reload()?;
-        }
-
-        let searcher = self.reader.searcher();
-        let prefix_lower = prefix.to_lowercase();
-
-        // Determine which fields to scan based on scope
-        let fields_to_scan: Vec<(&str, Field)> = match scope {
-            Some(SuggestScope::From) => vec![
-                ("from_email", self.fields.from_email),
-                ("from_name", self.fields.from_name),
-            ],
-            Some(SuggestScope::To) => vec![("to", self.fields.to)],
-            Some(SuggestScope::Subject) => vec![("subject", self.fields.subject)],
-            Some(SuggestScope::Body) => vec![("body_text", self.fields.body_text)],
-            None => vec![
-                ("from_email", self.fields.from_email),
-                ("from_name", self.fields.from_name),
-                ("to", self.fields.to),
-                ("subject", self.fields.subject),
-            ],
-        };
-
-        // Build a bool prefix query (like Elasticsearch match_bool_prefix):
-        // For each field, create a RegexQuery matching terms that start with the prefix.
-        // The tokenizers split emails into tokens ("meroni", "virgilio", "gmail", "com")
-        // so the regex matches against individual tokens in the term dictionary.
-        let escaped = regex_escape_prefix(&prefix_lower);
-        let mut subqueries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
-
-        for (_, field) in &fields_to_scan {
-            if let Ok(rq) = RegexQuery::from_pattern(&format!("{escaped}.*"), *field) {
-                subqueries.push((Occur::Should, Box::new(rq)));
-            }
-        }
-
-        if subqueries.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let bool_query = BooleanQuery::new(subqueries);
-
-        // Fetch top N docs matching the prefix
-        let top_docs = searcher
-            .search(&bool_query, &TopDocs::with_limit(200).order_by_score())
-            .map_err(|e| DomainError::SearchIndex(format!("Suggest search failed: {}", e)))?;
-
-        // Aggregate individual values (not full stored text) from matching docs.
-        // Email fields (from_email, to) store space-joined addresses — split them.
-        // Subject is a single value per doc — keep as-is.
-        // Body text is too long for suggestions — skip unless explicitly scoped.
-        // key: (field_label, individual_value) → doc count
-        let mut aggregations: HashMap<(String, String), u32> = HashMap::new();
-
-        for (_score, doc_address) in &top_docs {
-            let doc: TantivyDocument = searcher
-                .doc(*doc_address)
-                .map_err(|e| DomainError::SearchIndex(format!("Doc fetch failed: {}", e)))?;
-
-            for (label, field) in &fields_to_scan {
-                for value in doc.get_all(*field) {
-                    if let Some(text) = value.as_str() {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
-
-                        // Extract individual values depending on field type
-                        let individual_values: Vec<&str> = match *label {
-                            // Email fields: stored as "a@b.com c@d.com" — split on whitespace
-                            "from_email" | "to" => text.split_whitespace().collect(),
-                            // Name field: stored as "John Doe Jane Smith" — but names
-                            // contain spaces so we can't split. Keep the whole value.
-                            // Each doc typically has one sender anyway.
-                            "from_name" => vec![text],
-                            // Subject: single value per doc, keep as-is
-                            "subject" => vec![text],
-                            // Body: too long. Extract nothing for aggregation
-                            // (body search works via full-text, not autocomplete)
-                            "body_text" => continue,
-                            _ => vec![text],
-                        };
-
-                        for val in individual_values {
-                            let val_trimmed = val.trim();
-                            if val_trimmed.is_empty() {
-                                continue;
-                            }
-                            let val_lower = val_trimmed.to_lowercase();
-                            if val_lower.contains(&prefix_lower) {
-                                let key = (label.to_string(), val_trimmed.to_string());
-                                *aggregations.entry(key).or_insert(0) += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Convert to Suggestion vec, sorted by count desc, limited per field
-        let mut by_field: HashMap<String, Vec<mc_domain::Suggestion>> = HashMap::new();
-        let mut all: Vec<((String, String), u32)> = aggregations.into_iter().collect();
-        all.sort_by(|a, b| b.1.cmp(&a.1));
-
-        for ((field, value), count) in all {
-            let group = by_field.entry(field.clone()).or_default();
-            if group.len() < max_per_field {
-                group.push(mc_domain::Suggestion {
-                    field,
-                    value,
-                    doc_count: count,
-                });
-            }
-        }
-
-        // Flatten in display order
-        let field_order = ["from_email", "from_name", "to", "subject", "body_text"];
-        let mut result = Vec::new();
-        for f in &field_order {
-            if let Some(mut suggestions) = by_field.remove(*f) {
-                result.append(&mut suggestions);
-            }
-        }
-
-        debug!("Suggest '{}': {} suggestions", prefix, result.len());
-        Ok(result)
+    // ponytail: parses the query and builds a generator per message; batch it
+    // if result pages grow past a few dozen hits.
+    fn snippet(&self, query: &str, message: &Message) -> Option<String> {
+        let body = body_of(message)?;
+        let parsed = self.parse_query(query, None, None).ok()?;
+        let generator =
+            SnippetGenerator::create(&self.reader.searcher(), &*parsed, self.fields.body).ok()?;
+        let html = generator.snippet(&body).to_html();
+        (!html.trim().is_empty()).then_some(html)
     }
 
     async fn flush(&self) -> Result<(), DomainError> {
         self.commit_and_reload()
     }
+}
 
-    async fn rebuild(&self, messages: Vec<Message>) -> Result<u64, DomainError> {
-        info!("Rebuilding index with {} messages", messages.len());
+fn search_err(what: &str, e: impl std::fmt::Display) -> DomainError {
+    DomainError::SearchIndex(format!("{what} failed: {e}"))
+}
 
-        let mut writer = self.writer.lock();
-
-        // Delete all documents
-        writer
-            .delete_all_documents()
-            .map_err(|e| DomainError::SearchIndex(format!("Delete all failed: {}", e)))?;
-
-        // Add all messages
-        let mut count = 0u64;
-        for message in messages {
-            let doc = self.message_to_document(&message);
-            writer
-                .add_document(doc)
-                .map_err(|e| DomainError::SearchIndex(format!("Add document failed: {}", e)))?;
-            count += 1;
-
-            // Commit every 1000 documents
-            if count.is_multiple_of(1000) {
-                writer
-                    .commit()
-                    .map_err(|e| DomainError::SearchIndex(format!("Commit failed: {}", e)))?;
-                debug!("Indexed {} messages", count);
-            }
-        }
-
-        // Final commit
-        writer
-            .commit()
-            .map_err(|e| DomainError::SearchIndex(format!("Final commit failed: {}", e)))?;
-
-        // Release lock before reloading reader
-        drop(writer);
-
-        // Force reader reload
-        self.reader
-            .reload()
-            .map_err(|e| DomainError::SearchIndex(format!("Reader reload failed: {}", e)))?;
-
-        info!("Rebuild complete: {} messages indexed", count);
-        Ok(count)
+/// The searchable body: the text part, or the tag-stripped HTML part when the
+/// message has no text part (spec §5: one field instead of two).
+fn body_of(message: &Message) -> Option<Cow<'_, str>> {
+    match (&message.body_text, &message.body_html) {
+        (Some(text), _) => Some(Cow::Borrowed(text)),
+        (None, Some(html)) => Some(Cow::Owned(strip_html_for_index(html))),
+        (None, None) => None,
     }
+}
+
+/// System flags as bits for the `flags` FAST field (`is:unread`, …). IMAP
+/// keywords have no bit; filter on them in the read model if ever needed.
+fn flag_bits(flags: &[Flag]) -> u64 {
+    flags.iter().fold(0, |bits, flag| {
+        bits | match flag {
+            Flag::Seen => 1,
+            Flag::Answered => 1 << 1,
+            Flag::Flagged => 1 << 2,
+            Flag::Deleted => 1 << 3,
+            Flag::Draft => 1 << 4,
+            Flag::Recent => 1 << 5,
+            Flag::Custom(_) => 0,
+        }
+    })
 }
 
 /// Rewrite user-facing scope prefixes into Tantivy field queries.
@@ -660,19 +343,6 @@ fn rewrite_scoped_query(query: &str) -> String {
 
     // No known prefix — return as-is for full-text across all default fields
     trimmed.to_string()
-}
-
-/// Escape regex metacharacters in a user-provided prefix so it can be
-/// safely embedded in a `RegexQuery` pattern like `{prefix}.*`.
-fn regex_escape_prefix(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for ch in s.chars() {
-        if "\\^$.|?*+()[]{}".contains(ch) {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 /// Strip HTML tags for indexing (simple tag removal).
@@ -858,202 +528,56 @@ mod tests {
         assert_eq!(results.hits[0].message_id, msg2.id);
     }
 
-    fn create_test_message_full(
-        id: &str,
-        subject: &str,
-        from_name: &str,
-        from_email: &str,
-        to_emails: &[&str],
-        body: &str,
-    ) -> Message {
-        let uuid = uuid::Uuid::parse_str(id).unwrap();
-        Message {
-            id: MessageId::from_uuid(uuid),
-            account_id: AccountId::new(),
-            mailbox_id: MailboxId::new(),
-            provider_uid: None,
-            message_rfc_id: None,
-            in_reply_to: None,
-            references: vec![],
-            envelope: Envelope {
-                subject: subject.to_string(),
-                from: vec![Address {
-                    name: Some(from_name.to_string()),
-                    email: EmailAddress::new(from_email).unwrap(),
-                }],
-                to: to_emails
-                    .iter()
-                    .map(|e| Address {
-                        name: None,
-                        email: EmailAddress::new(e).unwrap(),
-                    })
-                    .collect(),
-                cc: vec![],
-                bcc: vec![],
-                date: Utc::now(),
-                reply_to: vec![],
-            },
-            body_text: Some(body.to_string()),
-            body_html: None,
-            flags: vec![],
-            size_bytes: 1024,
-            has_attachments: false,
-            attachments: vec![],
-            received_at: Utc::now(),
-            internal_date: Utc::now(),
-        }
-    }
-
     #[tokio::test]
-    async fn test_suggest_aggregates_individual_emails() {
-        let temp_dir = TempDir::new().unwrap();
-        let index = TantivySearchIndex::new(temp_dir.path()).unwrap();
-
-        // 3 messages from meroni, 1 from another person
-        let msg1 = create_test_message_full(
+    async fn search_matches_cc_and_html_only_bodies_and_snippets_them() {
+        let dir = TempDir::new().unwrap();
+        let index = TantivySearchIndex::new(dir.path()).unwrap();
+        let mut msg = create_test_message(
             "01234567-89ab-cdef-0123-456789abcdef",
-            "Fattura di gennaio",
-            "Virgilio Meroni",
-            "meroni.virgilio@gmail.com",
-            &["me@example.com"],
-            "In allegato la fattura",
+            "Hello",
+            "john@example.com",
+            "",
         );
-        let msg2 = create_test_message_full(
-            "11234567-89ab-cdef-0123-456789abcdef",
-            "Re: Fattura di gennaio",
-            "Virgilio Meroni",
-            "meroni.virgilio@gmail.com",
-            &["me@example.com"],
-            "Confermo ricezione",
-        );
-        let msg3 = create_test_message_full(
-            "21234567-89ab-cdef-0123-456789abcdef",
-            "Meeting domani",
-            "Virgilio Meroni",
-            "meroni.virgilio@gmail.com",
-            &["me@example.com", "altro@azienda.it"],
-            "Ci vediamo domani alle 10",
-        );
-        let msg4 = create_test_message_full(
-            "31234567-89ab-cdef-0123-456789abcdef",
-            "Progetto nuovo",
-            "Marco Rossi",
-            "marco.rossi@company.com",
-            &["meroni.virgilio@gmail.com"],
-            "Ciao Virgilio, ti scrivo per il progetto",
-        );
+        msg.body_text = None;
+        msg.body_html = Some("<p>The <b>quarterly</b> report is attached</p>".into());
+        msg.envelope.cc = vec![Address { name: None, email: EmailAddress::new("boss@corp.example").unwrap() }];
+        index.index_message(&msg).await.unwrap();
 
-        for msg in [&msg1, &msg2, &msg3, &msg4] {
-            index.index_message(msg).await.unwrap();
+        for query in ["quarterly", "boss"] {
+            let results = index.search(query, None, None, &Pagination::default()).await.unwrap();
+            assert_eq!(results.total_count, 1, "{query}");
         }
-
-        // Search "mero" — should find meroni.virgilio@gmail.com as a single suggestion
-        let suggestions = index.suggest("mero", None, 5).await.unwrap();
-
-        // Should have from_email suggestion for "meroni.virgilio@gmail.com"
-        let from_emails: Vec<_> = suggestions
-            .iter()
-            .filter(|s| s.field == "from_email")
-            .collect();
-        assert!(
-            !from_emails.is_empty(),
-            "Should have from_email suggestions, got: {:?}",
-            suggestions
-        );
-        assert_eq!(from_emails[0].value, "meroni.virgilio@gmail.com");
-        assert_eq!(from_emails[0].doc_count, 3); // 3 messages from meroni
-
-        // Should also find it in "to" field (msg4 sends TO meroni)
-        let to_results: Vec<_> = suggestions.iter().filter(|s| s.field == "to").collect();
-        assert!(
-            !to_results.is_empty(),
-            "Should have 'to' suggestions, got: {:?}",
-            suggestions
-        );
-        assert_eq!(to_results[0].value, "meroni.virgilio@gmail.com");
-        assert_eq!(to_results[0].doc_count, 1);
-
-        // Should have from_name suggestion for "Virgilio Meroni"
-        let from_names: Vec<_> = suggestions
-            .iter()
-            .filter(|s| s.field == "from_name")
-            .collect();
-        assert!(
-            !from_names.is_empty(),
-            "Should have from_name suggestions, got: {:?}",
-            suggestions
-        );
-        assert_eq!(from_names[0].value, "Virgilio Meroni");
+        let snippet = index.snippet("quarterly", &msg).unwrap();
+        assert!(snippet.contains("<b>quarterly</b>"), "{snippet}");
+        assert!(index.snippet("hello", &msg).is_none(), "subject-only match has no body excerpt");
     }
 
     #[tokio::test]
-    async fn test_suggest_scoped_to_subject() {
-        let temp_dir = TempDir::new().unwrap();
-        let index = TantivySearchIndex::new(temp_dir.path()).unwrap();
+    async fn scope_filters_restrict_hits() {
+        let dir = TempDir::new().unwrap();
+        let index = TantivySearchIndex::new(dir.path()).unwrap();
+        let a = create_test_message("01234567-89ab-cdef-0123-456789abcdef", "Invoice", "a@example.com", "x");
+        let b = create_test_message("11234567-89ab-cdef-0123-456789abcdef", "Invoice", "b@example.com", "x");
+        index.index_message(&a).await.unwrap();
+        index.index_message(&b).await.unwrap();
 
-        let msg1 = create_test_message_full(
-            "01234567-89ab-cdef-0123-456789abcdef",
-            "Fattura di gennaio",
-            "Test User",
-            "test@example.com",
-            &["me@example.com"],
-            "body content",
-        );
-        let msg2 = create_test_message_full(
-            "11234567-89ab-cdef-0123-456789abcdef",
-            "Fattura di febbraio",
-            "Test User",
-            "test@example.com",
-            &["me@example.com"],
-            "body content",
-        );
-
-        index.index_message(&msg1).await.unwrap();
-        index.index_message(&msg2).await.unwrap();
-
-        // Scoped to subject: "fattur" should find both subject lines
-        let suggestions = index
-            .suggest("fattur", Some(mc_domain::SuggestScope::Subject), 5)
-            .await
-            .unwrap();
-
-        assert_eq!(suggestions.len(), 2, "Should find 2 subject suggestions: {:?}", suggestions);
-        assert!(suggestions.iter().all(|s| s.field == "subject"));
+        let page = Pagination::default();
+        let by_account = index.search("invoice", Some(&a.account_id), None, &page).await.unwrap();
+        assert_eq!(by_account.hits.iter().map(|h| h.message_id).collect::<Vec<_>>(), [a.id]);
+        let by_mailbox = index.search("invoice", None, Some(&b.mailbox_id), &page).await.unwrap();
+        assert_eq!(by_mailbox.hits.iter().map(|h| h.message_id).collect::<Vec<_>>(), [b.id]);
     }
 
-    #[tokio::test]
-    async fn test_rebuild_index() {
-        let temp_dir = TempDir::new().unwrap();
-        let index = TantivySearchIndex::new(temp_dir.path()).unwrap();
+    #[test]
+    fn an_index_with_another_schema_is_recreated() {
+        let dir = TempDir::new().unwrap();
+        let mut old = Schema::builder();
+        old.add_text_field("message_id", STRING | STORED);
+        Index::create_in_dir(dir.path(), old.build()).unwrap();
 
-        let messages = vec![
-            create_test_message(
-                "01234567-89ab-cdef-0123-456789abcdef",
-                "First",
-                "test1@example.com",
-                "Body 1",
-            ),
-            create_test_message(
-                "11234567-89ab-cdef-0123-456789abcdef",
-                "Second",
-                "test2@example.com",
-                "Body 2",
-            ),
-            create_test_message(
-                "21234567-89ab-cdef-0123-456789abcdef",
-                "Third",
-                "test3@example.com",
-                "Body 3",
-            ),
-        ];
-
-        let count = index.rebuild(messages).await.unwrap();
-        assert_eq!(count, 3);
-
-        let results = index
-            .search("Body", None, None, &Pagination::default())
-            .await
-            .unwrap();
-        assert_eq!(results.total_count, 3);
+        let index = TantivySearchIndex::new(dir.path()).unwrap();
+        assert!(index.was_recreated());
+        drop(index);
+        assert!(!TantivySearchIndex::new(dir.path()).unwrap().was_recreated());
     }
 }

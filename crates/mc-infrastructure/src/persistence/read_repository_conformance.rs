@@ -10,7 +10,7 @@ macro_rules! read_repository_conformance {
             ContactSource, ConversationReadRepository, DomainEvent, EmailAddress, Envelope,
             EventEnvelope, EventStore, Flag, Identity, MailboxId, MailboxPath,
             MailboxReadRepository, MailboxType, MessageBodyStore, MessageId, MessageReadRepository,
-            ProjectionCheckpoint, ProviderType, ProviderUid, ReadModelProjector, ThreadId,
+            ProjectionCheckpoint, ProviderType, ProviderUid, ReadModelProjector, SuggestScope, ThreadId,
         };
         use mc_shared::pagination::Pagination;
 
@@ -1733,6 +1733,56 @@ macro_rules! read_repository_conformance {
                 }
                 assert_eq!(state().await, live, "replay from log[{from}..] changed the read model");
             }
+        }
+
+        #[tokio::test]
+        async fn suggest_groups_matching_values_by_field_most_frequent_first() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox) = (AccountId::new(), MailboxId::new());
+            let addr = |name: Option<&str>, raw: &str| Address { name: name.map(str::to_owned), email: email(raw) };
+            let mail = |uid: u32, from: Address, to: &str, subject: &str| {
+                let (_, mut event) = received(account, inbox, uid, None, &[], false, at(uid as i64));
+                if let DomainEvent::MessageReceived { envelope, .. } = &mut event {
+                    envelope.from = vec![from];
+                    envelope.to = vec![addr(None, to)];
+                    envelope.subject = subject.into();
+                }
+                event
+            };
+            project_all(
+                &repo,
+                [
+                    mail(1, addr(Some("Ada Lovelace"), "ada@example.com"), "me@example.com", "Notes"),
+                    mail(2, addr(Some("Ada Lovelace"), "ada@example.com"), "me@example.com", "More notes"),
+                    mail(3, addr(Some("Bob"), "bob@example.com"), "adam@example.com", "Adaptive design"),
+                    mail(4, addr(None, "carol@example.com"), "me@example.com", "Lunch"),
+                ],
+            )
+            .await;
+            let found = |s: Vec<mc_domain::Suggestion>| {
+                s.into_iter().map(|s| (s.field, s.value, s.doc_count)).collect::<Vec<_>>()
+            };
+            let row = |field: &str, value: &str, n: u32| (field.to_owned(), value.to_owned(), n);
+
+            assert_eq!(
+                found(repo.suggest("AD", None, 5).await.unwrap()),
+                [
+                    row("from_email", "ada@example.com", 2),
+                    row("from_name", "Ada Lovelace", 2),
+                    row("to", "adam@example.com", 1),
+                    row("subject", "Adaptive design", 1),
+                ]
+            );
+            assert_eq!(
+                found(repo.suggest("example", Some(SuggestScope::From), 2).await.unwrap()),
+                [row("from_email", "ada@example.com", 2), row("from_email", "bob@example.com", 1)]
+            );
+            assert_eq!(
+                found(repo.suggest("me@", Some(SuggestScope::To), 5).await.unwrap()),
+                [row("to", "me@example.com", 3)]
+            );
+            assert!(repo.suggest("notes", Some(SuggestScope::Body), 5).await.unwrap().is_empty());
+            assert!(repo.suggest("", None, 5).await.unwrap().is_empty());
         }
     };
 }

@@ -8,6 +8,7 @@ use crate::model::account::{AccountId, AccountStatus, ProviderType};
 use crate::model::contact::{Contact, ContactEmail, ContactSource};
 use crate::model::mailbox::{Mailbox, MailboxId};
 use crate::model::message::Message;
+use crate::traits::search_index::{SuggestScope, Suggestion};
 use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
@@ -139,6 +140,17 @@ pub trait MessageReadRepository: Send + Sync {
         &self,
         account_id: Option<&AccountId>,
     ) -> Result<Vec<Message>, DomainError>;
+
+    /// Search-as-you-type: sender, recipient and subject values containing
+    /// `prefix` (case-insensitive), most frequent first, at most
+    /// `max_per_field` per field, grouped in the order from_email, from_name,
+    /// to, subject. `Body` scope yields nothing (bodies are too long to suggest).
+    async fn suggest(
+        &self,
+        prefix: &str,
+        scope: Option<SuggestScope>,
+        max_per_field: usize,
+    ) -> Result<Vec<Suggestion>, DomainError>;
 }
 
 /// Checkpoint store for projections — tracks last processed global_position.

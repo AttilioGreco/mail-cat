@@ -10,14 +10,9 @@ use crate::value_objects::message_id::MessageId;
 
 /// Full-text search index for email messages.
 ///
-/// The search index is treated as a **projection** of domain events:
-/// - Indexed on `MessageBodyFetched` (subject + from/to are indexed immediately
-///   on `MessageReceived` for basic searchability before body fetch).
-/// - Removed on `MessageDeleted`.
-/// - Fully rebuildable from the event store.
-///
-/// Implementations should batch commits for performance (e.g., commit every N
-/// documents or every M milliseconds).
+/// A projection of the read model that stores no content: `search` returns
+/// message ids, and the caller hydrates them from the read model. Rebuildable
+/// by replaying the event log (see `SearchProjectionHandler`).
 #[async_trait]
 pub trait SearchIndex: Send + Sync {
     /// Index a message for full-text search.
@@ -27,31 +22,18 @@ pub trait SearchIndex: Send + Sync {
     /// Remove a message from the index.
     async fn remove_message(&self, message_id: &MessageId) -> Result<(), DomainError>;
 
-    /// Full-text search across indexed messages.
+    /// Full-text search across indexed messages, best match first.
     async fn search(
         &self,
         query: &str,
         account_id: Option<&AccountId>,
         mailbox_id: Option<&MailboxId>,
         pagination: &Pagination,
-    ) -> Result<SearchResults, DomainError>;
+    ) -> Result<IndexResults, DomainError>;
 
-    /// Suggest completions for search-as-you-type.
-    ///
-    /// Given a prefix and an optional field scope, returns matching values
-    /// grouped by field with document frequency.
-    async fn suggest(
-        &self,
-        prefix: &str,
-        scope: Option<SuggestScope>,
-        max_per_field: usize,
-    ) -> Result<Vec<Suggestion>, DomainError>;
-
-    /// Rebuild the entire index from scratch.
-    ///
-    /// The caller provides an iterator of messages. Returns the number of
-    /// documents indexed.
-    async fn rebuild(&self, messages: Vec<Message>) -> Result<u64, DomainError>;
+    /// Highlighted excerpt of `message`'s body for `query`, as HTML. The index
+    /// keeps no bodies, so the caller passes the hydrated message.
+    fn snippet(&self, query: &str, message: &Message) -> Option<String>;
 
     /// Commit any pending writes and reload the reader so they become durable
     /// and visible. Used by the search-index projection to bound the checkpoint
@@ -75,23 +57,28 @@ impl<T: SearchIndex + ?Sized> SearchIndex for std::sync::Arc<T> {
         account_id: Option<&AccountId>,
         mailbox_id: Option<&MailboxId>,
         pagination: &Pagination,
-    ) -> Result<SearchResults, DomainError> {
+    ) -> Result<IndexResults, DomainError> {
         (**self).search(query, account_id, mailbox_id, pagination).await
     }
-    async fn suggest(
-        &self,
-        prefix: &str,
-        scope: Option<SuggestScope>,
-        max_per_field: usize,
-    ) -> Result<Vec<Suggestion>, DomainError> {
-        (**self).suggest(prefix, scope, max_per_field).await
-    }
-    async fn rebuild(&self, messages: Vec<Message>) -> Result<u64, DomainError> {
-        (**self).rebuild(messages).await
+    fn snippet(&self, query: &str, message: &Message) -> Option<String> {
+        (**self).snippet(query, message)
     }
     async fn flush(&self) -> Result<(), DomainError> {
         (**self).flush().await
     }
+}
+
+/// What the index returns: ids only, the read model has the content.
+#[derive(Debug, Clone, Default)]
+pub struct IndexResults {
+    pub hits: Vec<IndexHit>,
+    pub total_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexHit {
+    pub message_id: MessageId,
+    pub score: f32,
 }
 
 /// Which field(s) to scope suggestions to.
@@ -122,7 +109,7 @@ pub struct SearchHit {
     pub date: i64,
 }
 
-/// A single suggestion from the search index.
+/// A search-as-you-type completion drawn from stored messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Suggestion {
     /// Which field this suggestion came from.

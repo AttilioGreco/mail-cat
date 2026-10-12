@@ -42,4 +42,6 @@ pub use value_objects::thread_id::ThreadId;
 pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource};
 pub use value_objects::contact_id::ContactId;
 pub use traits::contact_index::ContactSearchHit;
-pub use traits::search_index::{SearchHit, SearchIndex, SearchResults, SuggestScope, Suggestion};
+pub use traits::search_index::{
+    IndexHit, IndexResults, SearchHit, SearchIndex, SearchResults, SuggestScope, Suggestion,
+};

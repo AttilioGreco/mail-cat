@@ -416,6 +416,67 @@ impl<ES: EventStore> MessageReadRepository for SledRepository<ES> {
         }
         Ok(messages)
     }
+
+    // ponytail: full scan of message_summaries per call; sled is replaced by
+    // SQLite in plan 5.
+    async fn suggest(
+        &self,
+        prefix: &str,
+        scope: Option<mc_domain::SuggestScope>,
+        max_per_field: usize,
+    ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
+        use mc_domain::SuggestScope;
+        use std::collections::HashMap;
+
+        let fields: &[&str] = match scope {
+            _ if prefix.is_empty() => &[],
+            None => &["from_email", "from_name", "to", "subject"],
+            Some(SuggestScope::From) => &["from_email", "from_name"],
+            Some(SuggestScope::To) => &["to"],
+            Some(SuggestScope::Subject) => &["subject"],
+            Some(SuggestScope::Body) => &[],
+        };
+        if fields.is_empty() {
+            return Ok(Vec::new());
+        }
+        let needle = prefix.to_lowercase();
+        let mut counts: HashMap<(&str, String), u32> = HashMap::new();
+        for item in self.tree(MESSAGE_SUMMARIES_TREE)?.iter() {
+            let (_, value) = item.map_err(|e| DomainError::Repository(e.to_string()))?;
+            let m: MessageSummary = serde_json::from_slice(&value)
+                .map_err(|e| DomainError::Serialization(e.to_string()))?;
+            for &field in fields {
+                let values: Vec<&str> = match field {
+                    "from_email" => vec![m.from_email.as_str()],
+                    "from_name" => m.from_name.as_deref().into_iter().collect(),
+                    "to" => m.to.iter().map(String::as_str).collect(),
+                    _ => vec![m.subject.as_str()],
+                };
+                for v in values.into_iter().filter(|v| v.to_lowercase().contains(&needle)) {
+                    *counts.entry((field, v.to_owned())).or_default() += 1;
+                }
+            }
+        }
+        let mut ranked: Vec<_> = counts.into_iter().collect();
+        ranked.sort_by(|((fa, va), ca), ((fb, vb), cb)| {
+            let pos = |f: &str| fields.iter().position(|x| *x == f);
+            pos(fa).cmp(&pos(fb)).then(cb.cmp(ca)).then(va.cmp(vb))
+        });
+        let mut per_field: HashMap<&str, usize> = HashMap::new();
+        Ok(ranked
+            .into_iter()
+            .filter(|((field, _), _)| {
+                let n = per_field.entry(field).or_default();
+                *n += 1;
+                *n <= max_per_field
+            })
+            .map(|((field, value), doc_count)| mc_domain::Suggestion {
+                field: field.to_owned(),
+                value,
+                doc_count,
+            })
+            .collect())
+    }
 }
 
 // ── ConversationReadRepository ────────────────────────────────────────
@@ -2255,6 +2316,15 @@ impl<ES: EventStore> MessageReadRepository for SharedSledRepository<ES> {
         account_id: Option<&AccountId>,
     ) -> Result<Vec<Message>, DomainError> {
         self.0.scan_all_messages(account_id).await
+    }
+
+    async fn suggest(
+        &self,
+        prefix: &str,
+        scope: Option<mc_domain::SuggestScope>,
+        max_per_field: usize,
+    ) -> Result<Vec<mc_domain::Suggestion>, DomainError> {
+        self.0.suggest(prefix, scope, max_per_field).await
     }
 }
 

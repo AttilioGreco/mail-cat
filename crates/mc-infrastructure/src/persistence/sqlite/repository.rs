@@ -19,7 +19,7 @@ use mc_domain::{
     ConversationReadRepository, ConversationSummary, DomainError, DomainEvent, EmailAddress,
     Envelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message,
     MessageBodyStore, MessageId, MessageReadRepository, MessageSummary, ProjectionCheckpoint,
-    ProviderUid, ThreadId,
+    ProviderUid, SuggestScope, Suggestion, ThreadId,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -367,6 +367,42 @@ fn contact_from_row(row: &Row, at: usize) -> rusqlite::Result<ContactSummary> {
     })
 }
 
+/// `%query%` for `LIKE … ESCAPE '\\'`.
+// ponytail: LIKE folds ASCII case only (sled lowercased Unicode too); add a
+// lowered column if non-ASCII case-insensitive search matters.
+fn like_pattern(query: &str) -> String {
+    let escaped = query
+        .to_lowercase()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+/// Per suggest field: its label and a query yielding `(value, count)` rows for
+/// `?1` = LIKE pattern, `?2` = limit.
+const SUGGEST_FROM_EMAIL: (&str, &str) = (
+    "from_email",
+    "SELECT from_email, COUNT(*) FROM messages WHERE from_email LIKE ?1 ESCAPE '\\' \
+     GROUP BY from_email ORDER BY 2 DESC, 1 LIMIT ?2",
+);
+const SUGGEST_FROM_NAME: (&str, &str) = (
+    "from_name",
+    "SELECT from_name, COUNT(*) FROM messages WHERE from_name LIKE ?1 ESCAPE '\\' \
+     GROUP BY from_name ORDER BY 2 DESC, 1 LIMIT ?2",
+);
+const SUGGEST_TO: (&str, &str) = (
+    "to",
+    "SELECT json_extract(t.value, '$.email') AS v, COUNT(*) \
+     FROM messages m, json_each(m.addresses, '$.to') t \
+     WHERE v LIKE ?1 ESCAPE '\\' GROUP BY v ORDER BY 2 DESC, 1 LIMIT ?2",
+);
+const SUGGEST_SUBJECT: (&str, &str) = (
+    "subject",
+    "SELECT subject, COUNT(*) FROM messages WHERE subject LIKE ?1 ESCAPE '\\' \
+     GROUP BY subject ORDER BY 2 DESC, 1 LIMIT ?2",
+);
+
 fn page_bounds(pagination: &Pagination) -> (i64, i64) {
     (i64::from(pagination.page_size), sql_int(pagination.offset()))
 }
@@ -709,6 +745,40 @@ impl MessageReadRepository for SqliteRepository {
             })
             .await
     }
+
+    // ponytail: full scan of `messages` per keystroke (a few ms per 10k rows);
+    // add an FTS5 prefix table if it shows up in latency.
+    async fn suggest(
+        &self,
+        prefix: &str,
+        scope: Option<SuggestScope>,
+        max_per_field: usize,
+    ) -> Result<Vec<Suggestion>, DomainError> {
+        let fields: &[(&str, &str)] = match scope {
+            _ if prefix.is_empty() => &[],
+            None => &[SUGGEST_FROM_EMAIL, SUGGEST_FROM_NAME, SUGGEST_TO, SUGGEST_SUBJECT],
+            Some(SuggestScope::From) => &[SUGGEST_FROM_EMAIL, SUGGEST_FROM_NAME],
+            Some(SuggestScope::To) => &[SUGGEST_TO],
+            Some(SuggestScope::Subject) => &[SUGGEST_SUBJECT],
+            Some(SuggestScope::Body) => &[],
+        };
+        let (pattern, limit) = (like_pattern(prefix), sql_int(max_per_field as u64));
+        self.db
+            .read(move |conn| {
+                let mut out = Vec::new();
+                for (field, sql) in fields {
+                    out.extend(query_all(conn, sql, params![pattern, limit], |r| {
+                        Ok(Suggestion {
+                            field: (*field).to_owned(),
+                            value: r.get(0)?,
+                            doc_count: r.get(1)?,
+                        })
+                    })?);
+                }
+                Ok(out)
+            })
+            .await
+    }
 }
 
 #[async_trait]
@@ -870,14 +940,7 @@ impl ContactReadRepository for SqliteRepository {
         query: &str,
         limit: usize,
     ) -> Result<Vec<ContactSummary>, DomainError> {
-        // ponytail: LIKE folds ASCII case only (sled lowercased Unicode too);
-        // add a lowered column if non-ASCII case-insensitive search matters.
-        let escaped = query
-            .to_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let (pattern, limit) = (format!("%{escaped}%"), sql_int(limit as u64));
+        let (pattern, limit) = (like_pattern(query), sql_int(limit as u64));
         self.db
             .read(move |conn| {
                 query_all(
