@@ -394,13 +394,38 @@ fn contact_from_row(row: &Row, at: usize) -> rusqlite::Result<ContactSummary> {
 // ponytail: LIKE folds ASCII case only (no Unicode lowercasing); add a
 // lowered column if non-ASCII case-insensitive search matters.
 fn like_pattern(query: &str) -> String {
-    let escaped = query
+    format!("%{}%", like_escape(query))
+}
+
+fn like_escape(query: &str) -> String {
+    query
         .to_lowercase()
         .replace('\\', "\\\\")
         .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("%{escaped}%")
+        .replace('_', "\\_")
 }
+
+/// Autocomplete ranking, Apple Mail style: name-word / address / domain
+/// prefix hits before mere substrings, then people you write to (frecency),
+/// then people who write to you, then name. `?1` = escaped query, `?2` = now
+/// (ns). Sent frecency = count × 30/(30 + days since last send): a contact
+/// written to daily last month still beats a one-off from yesterday, but
+/// recency wins between similar counts.
+const SEARCH_CONTACTS_SQL: &str = r"
+    JOIN contact_emails e ON e.contact_id = c.id
+    LEFT JOIN address_usage u ON u.email = e.email
+    GROUP BY c.id
+    HAVING MAX(c.display_name LIKE '%' || ?1 || '%' ESCAPE '\'
+            OR e.email LIKE '%' || ?1 || '%' ESCAPE '\')
+    ORDER BY
+        MAX(c.display_name LIKE ?1 || '%' ESCAPE '\'
+            OR c.display_name LIKE '% ' || ?1 || '%' ESCAPE '\'
+            OR e.email LIKE ?1 || '%' ESCAPE '\'
+            OR e.email LIKE '%@' || ?1 || '%' ESCAPE '\') DESC,
+        MAX(u.sent_count * 30.0 / (30.0 + MAX(?2 - u.last_sent_at, 0) / 86400e9)) DESC,
+        MAX(u.last_received_at) DESC,
+        c.display_name COLLATE NOCASE, c.id
+    LIMIT ?3";
 
 /// Per suggest field: its label and a query yielding `(value, count)` rows for
 /// `?1` = LIKE pattern, `?2` = limit.
@@ -935,17 +960,14 @@ impl ContactReadRepository for SqliteRepository {
         query: &str,
         limit: usize,
     ) -> Result<Vec<ContactSummary>, DomainError> {
-        let (pattern, limit) = (like_pattern(query), sql_int(limit as u64));
+        let (query, limit) = (like_escape(query), sql_int(limit as u64));
+        let now = nanos(Utc::now());
         self.db
             .read(move |conn| {
                 query_all(
                     conn,
-                    &select_contacts(
-                        "WHERE c.display_name LIKE ?1 ESCAPE '\\' OR EXISTS (SELECT 1 FROM contact_emails e \
-                             WHERE e.contact_id = c.id AND e.email LIKE ?1 ESCAPE '\\') \
-                         ORDER BY c.id LIMIT ?2",
-                    ),
-                    params![pattern, limit],
+                    &select_contacts(SEARCH_CONTACTS_SQL),
+                    params![query, now, limit],
                     |r| contact_from_row(r, 0),
                 )
             })
@@ -1206,6 +1228,65 @@ mod tests {
 
         ContactWriteRepository::save(&repo, &contact, vec![contact.remove()]).await.unwrap();
         assert!(repo.get_contact(&contact.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn address_usage_migration_seeds_from_stored_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail-cat.db");
+        let db = SqliteDb::open(&path).unwrap();
+        let repo = SqliteRepository::new(db.clone(), Arc::new(SqliteEventStore::new(db)));
+        let (account, inbox, sent) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+        let addr = |raw: &str| vec![Address { name: None, email: EmailAddress::new(raw).unwrap() }];
+        let mut events = vec![];
+        for (mailbox_id, mailbox_type) in [(inbox, MailboxType::Inbox), (sent, MailboxType::Sent)] {
+            events.push(DomainEvent::MailboxDiscovered {
+                mailbox_id,
+                account_id: account,
+                path: MailboxPath::parse(&format!("{mailbox_type:?}"), '/').unwrap(),
+                mailbox_type,
+            });
+        }
+        for (mailbox, from, to) in [
+            (sent, "me@example.com", "ada@example.com"),
+            (sent, "me@example.com", "ada@example.com"),
+            (inbox, "bob@example.com", "me@example.com"),
+        ] {
+            let (_, mut event) = received(account, mailbox, "<x@y>");
+            if let DomainEvent::MessageReceived { envelope, .. } = &mut event {
+                envelope.from = addr(from);
+                envelope.to = addr(to);
+                envelope.cc = addr(to);
+            }
+            events.push(event);
+        }
+        for (pos, event) in (1..).zip(events) {
+            repo.project(&at_position(pos, event)).await.unwrap();
+        }
+        // Back to a pre-usage database holding the same messages.
+        repo.db
+            .write(|c| c.execute_batch("DROP TABLE address_usage; PRAGMA user_version = 2;").map_err(repo_err))
+            .await
+            .unwrap();
+        drop(repo);
+
+        let usage: Vec<(String, i64, bool, bool)> = SqliteDb::open(&path)
+            .unwrap()
+            .read(|c| {
+                query_all(
+                    c,
+                    "SELECT email, sent_count, last_sent_at IS NOT NULL, last_received_at IS NOT NULL \
+                     FROM address_usage ORDER BY email",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            usage,
+            [("ada@example.com".into(), 2, true, false), ("bob@example.com".into(), 0, false, true)]
+        );
     }
 
     #[tokio::test]

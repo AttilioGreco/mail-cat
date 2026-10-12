@@ -256,7 +256,7 @@ pub trait ContactReadRepository: Send + Sync {
         account_id: &AccountId,
     ) -> Result<Vec<ContactSummary>, DomainError>;
 
-    /// Search contacts by display name or email prefix.
+    /// Search contacts by display name or email, best autocomplete match first.
     async fn search_contacts(
         &self,
         query: &str,

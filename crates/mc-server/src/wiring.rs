@@ -516,7 +516,7 @@ impl AppContext {
             tracing::info!("Live search subscriber started");
         }
 
-        // ── Auto-populate contacts from incoming messages ────────────────────
+        // ── Auto-populate contacts from received and sent messages ───────────
         {
             let mut sub = event_bus.subscribe();
             let ensure_bus = command_bus.clone();
@@ -531,30 +531,27 @@ impl AppContext {
                         _ = sd.cancelled() => break,
                         e = sub.recv() => match e { Some(v) => v, None => break },
                     };
-                    if let mc_domain::DomainEvent::MessageReceived {
-                        account_id,
-                        envelope: mail_envelope,
-                        ..
-                    } = envelope.payload
-                    {
-                        let addrs: Vec<(mc_domain::EmailAddress, Option<String>)> =
-                            mail_envelope.from.iter()
-                                .chain(mail_envelope.to.iter())
-                                .chain(mail_envelope.cc.iter())
-                                .map(|a| (a.email.clone(), a.name.clone()))
-                                .collect();
-                        for (email, name) in addrs {
-                            if !ensured.insert((account_id, email.clone())) {
-                                continue;
-                            }
-                            let cmd = mc_application::Command::EnsureContact {
-                                email,
-                                display_name: name.filter(|s| !s.is_empty()),
-                                account_id,
-                            };
-                            if let Err(e) = ensure_bus.dispatch(cmd).await {
-                                tracing::warn!("EnsureContact from message failed: {e}");
-                            }
+                    let (account_id, addrs) = match envelope.payload {
+                        mc_domain::DomainEvent::MessageReceived { account_id, envelope: mail, .. } => {
+                            (account_id, [mail.from, mail.to, mail.cc].concat())
+                        }
+                        // The people you write to are the ones autocomplete most needs.
+                        mc_domain::DomainEvent::MessageSent { account_id, envelope: mail, .. } => {
+                            (account_id, [mail.to, mail.cc, mail.bcc].concat())
+                        }
+                        _ => continue,
+                    };
+                    for addr in addrs {
+                        if !ensured.insert((account_id, addr.email.clone())) {
+                            continue;
+                        }
+                        let cmd = mc_application::Command::EnsureContact {
+                            email: addr.email,
+                            display_name: addr.name.filter(|s| !s.is_empty()),
+                            account_id,
+                        };
+                        if let Err(e) = ensure_bus.dispatch(cmd).await {
+                            tracing::warn!("EnsureContact from message failed: {e}");
                         }
                     }
                 }

@@ -115,6 +115,29 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         name     TEXT PRIMARY KEY,
         position INTEGER NOT NULL
     );",
+    // 3: per-address correspondence, ranking recipient autocomplete. Keyed by
+    // address, not contact: it outlives contact edits and merges. Seeded from
+    // the messages already stored so existing databases rank immediately.
+    r#"CREATE TABLE address_usage (
+        email            TEXT PRIMARY KEY,
+        sent_count       INTEGER NOT NULL DEFAULT 0,
+        last_sent_at     INTEGER,
+        last_received_at INTEGER
+    ) WITHOUT ROWID;
+    INSERT INTO address_usage (email, sent_count, last_sent_at)
+        SELECT json_extract(a.value, '$.email'), COUNT(DISTINCT m.id), MAX(m.received_at)
+        FROM messages m
+        JOIN mailboxes b ON b.id = m.mailbox_id AND b.mailbox_type = '"Sent"',
+             json_each(m.addresses) k, json_each(k.value) a
+        WHERE k.key IN ('to', 'cc', 'bcc')
+        GROUP BY 1;
+    INSERT INTO address_usage (email, last_received_at)
+        SELECT m.from_email, MAX(m.received_at)
+        FROM messages m
+        JOIN mailboxes b ON b.id = m.mailbox_id AND b.mailbox_type NOT IN ('"Sent"', '"Drafts"')
+        WHERE m.from_email != ''
+        GROUP BY 1
+        ON CONFLICT(email) DO UPDATE SET last_received_at = excluded.last_received_at;"#,
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

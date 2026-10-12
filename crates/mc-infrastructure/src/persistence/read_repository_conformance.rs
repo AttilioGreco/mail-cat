@@ -1395,6 +1395,91 @@ macro_rules! read_repository_conformance {
         }
 
         #[tokio::test]
+        async fn contact_search_ranks_prefix_hits_then_correspondence() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox, sent) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let mail = |from: &str, to: &str| Envelope {
+                from: vec![Address { name: None, email: email(from) }],
+                to: vec![Address { name: None, email: email(to) }],
+                ..test_envelope()
+            };
+            let contact = |name: &str, addr: &str| DomainEvent::ContactAdded {
+                contact_id: ContactId::new(),
+                display_name: name.into(),
+                emails: vec![ContactEmail::primary(email(addr))],
+                source: ContactSource::LocalEmail,
+                external_id: None,
+                account_scope: Some(account),
+            };
+            let send_to = |to: &str, minutes| DomainEvent::MessageSent {
+                message_id: MessageId::new(),
+                account_id: account,
+                mailbox_id: sent,
+                envelope: mail("me@example.com", to),
+                in_reply_to: None,
+                references: vec![],
+                body_text: None,
+                body_html: None,
+                sent_at: at(minutes),
+            };
+            let synced = |mailbox_id, from: &str, to: &str| DomainEvent::MessageReceived {
+                message_id: MessageId::new(),
+                account_id: account,
+                mailbox_id,
+                provider_uid: ProviderUid::new(1),
+                message_rfc_id: None,
+                in_reply_to: None,
+                references: vec![],
+                envelope: mail(from, to),
+                flags: vec![],
+                size_bytes: 1,
+                has_attachments: false,
+                received_at: at(5),
+            };
+            // Sent from another client, then synced from the Sent folder.
+            let rare = synced(sent, "me@example.com", "ann.rare@example.com");
+            project_all(
+                &repo,
+                [
+                    DomainEvent::MailboxDiscovered {
+                        mailbox_id: inbox,
+                        account_id: account,
+                        path: MailboxPath::parse("INBOX", '/').unwrap(),
+                        mailbox_type: MailboxType::Inbox,
+                    },
+                    DomainEvent::MailboxDiscovered {
+                        mailbox_id: sent,
+                        account_id: account,
+                        path: MailboxPath::parse("Sent", '/').unwrap(),
+                        mailbox_type: MailboxType::Sent,
+                    },
+                    contact("Joanna", "joanna@example.com"),
+                    contact("Zed", "zed@annex.org"),
+                    contact("Bob Ann", "bob@example.com"),
+                    contact("Zoe Annabel", "annabel@example.com"),
+                    contact("Ann Vega", "ann.rare@example.com"),
+                    contact("Anne Wu", "ann.often@example.com"),
+                    send_to("ann.often@example.com", 1),
+                    send_to("ann.often@example.com", 2),
+                    rare.clone(),
+                    synced(inbox, "annabel@example.com", "me@example.com"),
+                ],
+            )
+            .await;
+            // Catch-up replay must not inflate Ann Vega past Anne Wu.
+            project_all(&repo, [rare.clone(), rare]).await;
+
+            let names = |hits: Vec<mc_domain::ContactSummary>| {
+                hits.into_iter().map(|c| c.display_name).collect::<Vec<_>>()
+            };
+            assert_eq!(
+                names(repo.search_contacts("ANN", 10).await.unwrap()),
+                ["Anne Wu", "Ann Vega", "Zoe Annabel", "Bob Ann", "Zed", "Joanna"],
+            );
+            assert_eq!(names(repo.search_contacts("ann", 2).await.unwrap()), ["Anne Wu", "Ann Vega"]);
+        }
+
+        #[tokio::test]
         async fn contact_lifecycle_and_lookup() {
             let (_guard, _es, repo) = $make;
             let (contact, account) = (ContactId::new(), AccountId::new());

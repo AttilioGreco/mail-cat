@@ -2,6 +2,8 @@
 //! the caller's transaction and must be replay-safe: boot and post-sync
 //! catch-up re-project events the live path already applied (spec §10).
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -9,7 +11,7 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AccountStatus, ContactEmail, ContactId, Conversation, DomainError, DomainEvent,
-    Envelope, EventEnvelope, Flag, MailboxId, MessageId, ReadModelProjector,
+    Envelope, EventEnvelope, Flag, MailboxId, MailboxType, MessageId, ReadModelProjector,
 };
 
 use super::repo_err;
@@ -185,6 +187,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     adjust_unread(tx, mailbox_id.as_uuid(), 1)?;
                 }
                 refresh_conversation(tx, account_id.as_uuid(), thread_id.value())?;
+                note_synced_message(tx, mailbox_id, envelope, *received_at)?;
             }
         }
         DomainEvent::MessageBodyFetched { message_id, attachments } => {
@@ -241,6 +244,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             if inserted {
                 store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), *sent_at)?;
                 refresh_conversation(tx, account_id.as_uuid(), thread_id.value())?;
+                note_sent(tx, envelope, *sent_at)?;
             }
         }
         DomainEvent::DraftSaved { message_id, account_id, envelope, body_text, body_html } => {
@@ -386,6 +390,53 @@ fn insert_message(tx: &Connection, m: &NewMessage) -> Result<bool, DomainError> 
         ],
     )?;
     Ok(inserted == 1)
+}
+
+/// Callers only note a message the first time its row is inserted, so replays
+/// don't recount. A message mail-cat sent is counted twice once the Sent folder
+/// syncs back (`MessageSent`, then `MessageReceived` there); that inflates
+/// every such recipient alike, so the ranking order holds.
+fn note_synced_message(
+    tx: &Connection,
+    mailbox_id: &MailboxId,
+    envelope: &Envelope,
+    at: DateTime<Utc>,
+) -> Result<(), DomainError> {
+    let mailbox_type = query_one(
+        tx,
+        "SELECT mailbox_type FROM mailboxes WHERE id = ?1",
+        [mailbox_id.as_uuid()],
+        |r| r.get::<_, String>(0),
+    )?;
+    match mailbox_type.as_deref() {
+        Some(t) if t == json(&MailboxType::Sent)? => note_sent(tx, envelope, at),
+        Some(t) if t == json(&MailboxType::Drafts)? => Ok(()),
+        _ => envelope.from.iter().try_for_each(|a| {
+            exec(
+                tx,
+                "INSERT INTO address_usage (email, last_received_at) VALUES (?1, ?2) \
+                 ON CONFLICT(email) DO UPDATE SET \
+                     last_received_at = MAX(IFNULL(last_received_at, ?2), ?2)",
+                params![a.email.as_str(), nanos(at)],
+            )
+            .map(drop)
+        }),
+    }
+}
+
+fn note_sent(tx: &Connection, envelope: &Envelope, at: DateTime<Utc>) -> Result<(), DomainError> {
+    let recipients: BTreeSet<&str> =
+        envelope.to.iter().chain(&envelope.cc).chain(&envelope.bcc).map(|a| a.email.as_str()).collect();
+    for email in recipients {
+        exec(
+            tx,
+            "INSERT INTO address_usage (email, sent_count, last_sent_at) VALUES (?1, 1, ?2) \
+             ON CONFLICT(email) DO UPDATE SET sent_count = sent_count + 1, \
+                 last_sent_at = MAX(IFNULL(last_sent_at, ?2), ?2)",
+            params![email, nanos(at)],
+        )?;
+    }
+    Ok(())
 }
 
 fn adjust_unread(tx: &Connection, mailbox_id: &Uuid, delta: i64) -> Result<(), DomainError> {
