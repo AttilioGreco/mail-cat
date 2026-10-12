@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   RefreshCw, Paperclip, Reply, ReplyAll, Forward, Trash2, Mail, MailOpen,
-  MoreHorizontal, Archive, Ban, Star, Flame,
+  MoreHorizontal, Archive, Ban, Star, Flame, Pencil,
 } from 'lucide-react';
 import { cn, formatDate } from '@/shared/lib/utils';
 import { useMessageBody, type MessageEnvelope } from '@/entities/message';
@@ -12,8 +12,7 @@ import { useMailboxes } from '@/entities/mailbox';
 import { useKeymap, type ShortcutBinding } from '@/features/keyboard-shortcuts';
 import { formatForDisplay } from '@tanstack/react-hotkeys';
 import { useSessionStore, mailboxKey } from '@/entities/session';
-import { useComposeStore } from '@/features/compose-message';
-import { useAccounts } from '@/entities/account';
+import { useComposeStore, type ComposeMode } from '@/features/compose-message';
 import { useShortcuts } from '@/features/keyboard-shortcuts';
 import { EmailContent } from './EmailContent';
 
@@ -31,13 +30,9 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { selectedAccountId, selectedMailboxId } = useSessionStore();
   const openCompose = useComposeStore((s) => s.openCompose);
-  const { data: accounts = [] } = useAccounts();
   const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
   const mbKey = mailboxKey(selectedAccountId, selectedMailboxId);
   const keymap = useKeymap();
-
-  // The account that received this message — drives identity pre-selection and chip search scope.
-  const currentAccount = accounts.find((a) => a.id === selectedAccountId);
 
   // Auto-mark as read when opening an unread message.
   // Guard with a ref so switching between unread messages doesn't cause loops.
@@ -56,44 +51,9 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [envelope.uid]); // only fire when the selected message changes, not on isRead flip
 
-  const senderAddress = envelope.fromName
-    ? `${envelope.fromName} <${envelope.fromEmail}>`
-    : envelope.fromEmail;
-
-  /** Shared by the toolbar and the keyboard shortcut. `all` also keeps the
-   *  original recipients, minus this account's own address. */
-  const replyTo = (all: boolean) => {
-    if (!all) return [senderAddress];
-    const others = envelope.toAddresses.filter(
-      (a) => !currentAccount?.email || !a.toLowerCase().includes(currentAccount.email.toLowerCase()),
-    );
-    return [senderAddress, ...others];
-  };
-
-  const openReply = (all: boolean) =>
-    openCompose({
-      mode: 'reply',
-      from: currentAccount?.email,
-      accountId: selectedAccountId ?? undefined,
-      to: replyTo(all),
-      subject: envelope.subject.startsWith('Re:') ? envelope.subject : `Re: ${envelope.subject}`,
-      // References = this message's own ancestor chain + its own id, so the
-      // backend can thread the reply past just the immediate parent.
-      inReplyTo: body?.rfcMessageId ?? undefined,
-      references: body
-        ? [...body.references, ...(body.rfcMessageId ? [body.rfcMessageId] : [])]
-        : undefined,
-      identities: [],
-    });
-
-  const openForward = () =>
-    openCompose({
-      mode: 'forward',
-      from: currentAccount?.email,
-      accountId: selectedAccountId ?? undefined,
-      subject: envelope.subject.startsWith('Fwd:') ? envelope.subject : `Fwd: ${envelope.subject}`,
-      identities: [],
-    });
+  const isDraft = mailboxes.find((m) => m.id === selectedMailboxId)?.kind === 'drafts';
+  const open = (mode: ComposeMode) =>
+    openCompose({ mode, messageId: envelope.uid, accountId: selectedAccountId });
 
   /** Gmail has no \\Archive; its All Mail doubles as the archive target. */
   const archiveMailbox =
@@ -109,9 +69,9 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
   };
 
   useShortcuts({
-    reply: () => openReply(false),
-    replyAll: () => openReply(true),
-    forward: openForward,
+    reply: () => open('reply'),
+    replyAll: () => open('replyAll'),
+    forward: () => open('forward'),
   });
 
   const handleDelete = () => {
@@ -140,20 +100,27 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex items-center gap-1 border-b border-border px-4 py-2">
+        {isDraft && (
+          <ToolbarButton
+            icon={<Pencil size={15} />}
+            label="Modifica bozza"
+            onClick={() => open('draft')}
+          />
+        )}
         <ToolbarButton
           icon={<Reply size={15} />}
           label="Rispondi"
-          onClick={() => openReply(false)}
+          onClick={() => open('reply')}
         />
         <ToolbarButton
           icon={<ReplyAll size={15} />}
           label="Rispondi a tutti"
-          onClick={() => openReply(true)}
+          onClick={() => open('replyAll')}
         />
         <ToolbarButton
           icon={<Forward size={15} />}
           label="Inoltra"
-          onClick={openForward}
+          onClick={() => open('forward')}
         />
         <div className="mx-2 h-4 w-px bg-border" />
         <ToolbarButton

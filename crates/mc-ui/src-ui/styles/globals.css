@@ -1,5 +1,9 @@
 @import 'tailwindcss';
+@import 'tw-animate-css';
 @config '../tailwind.config.ts';
+
+/* The app themes via html[data-theme], not a .dark class: shadcn's dark: variants must follow it. */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
 
 @layer base {
   :root {
@@ -23,6 +27,8 @@
     --badge: 217 91% 50%;
 
     --destructive: 0 72% 51%;
+
+    --radius: 0.625rem;
   }
 
   html[data-theme='dark'] {

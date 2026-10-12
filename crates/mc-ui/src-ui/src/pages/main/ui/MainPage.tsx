@@ -1,7 +1,7 @@
 import { Sidebar } from '@/widgets/sidebar';
 import { MessageList } from '@/widgets/message-list';
 import { MessagePane } from '@/widgets/message-pane';
-import { ComposeWindow, useComposeStore } from '@/features/compose-message';
+import { ComposeWindow } from '@/features/compose-message';
 import { useDeepLink } from '@/features/open-deep-link';
 
 /**
@@ -9,8 +9,6 @@ import { useDeepLink } from '@/features/open-deep-link';
  *   [Sidebar 220px] | [MessageList 320px] | [MessagePane flex-1]
  */
 export function MainPage() {
-  const { composeOpen, composeData, closeCompose } = useComposeStore();
-
   // Notification click → jump to that message.
   useDeepLink();
 
@@ -26,11 +24,7 @@ export function MainPage() {
         </main>
       </div>
 
-      <ComposeWindow
-        open={composeOpen}
-        onClose={closeCompose}
-        initialData={composeData}
-      />
+      <ComposeWindow />
     </div>
   );
 }

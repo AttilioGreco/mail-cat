@@ -7,6 +7,7 @@ import { useComposeStore } from '@/features/compose-message';
 import { useSyncNow } from '@/features/manage-accounts';
 import { useSessionStore } from '@/entities/session';
 import { useSyncProgress } from '@/entities/account';
+import { Toaster } from '@/shared/ui/sonner';
 import { QueryProvider } from './providers/QueryProvider';
 import { ThemeProvider } from './providers/ThemeProvider';
 
@@ -40,7 +41,7 @@ function Router() {
   // Only the shortcuts that need no list context — the rest are bound where
   // their data lives (message list, message viewer).
   useShortcuts({
-    compose: () => openCompose({ mode: 'new', identities: [] }),
+    compose: () => openCompose({ mode: 'new', accountId: selectedAccountId }),
     openSettings,
     syncNow: () => {
       if (selectedAccountId) syncNow.mutate(selectedAccountId);
@@ -52,6 +53,7 @@ function Router() {
       {settingsOpen ? <SettingsPage onClose={closeSettings} /> : <MainPage />}
       {/* Above both screens: the list of what's bound must be reachable anywhere. */}
       <ShortcutsOverlay />
+      <Toaster position="bottom-right" />
     </>
   );
 }

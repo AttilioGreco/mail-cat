@@ -7,6 +7,8 @@ import { useConversations, ConversationRow, type ConversationSummary } from '@/e
 import { useMailboxWatcher } from '@/features/watch-mailbox';
 import { SearchBar, SearchResults, useSearchStore } from '@/features/search-messages';
 import { useShortcuts } from '@/features/keyboard-shortcuts';
+import { useComposeStore } from '@/features/compose-message';
+import { useHotkey } from '@tanstack/react-hotkeys';
 import {
   useMarkAsRead,
   useMarkAsUnread,
@@ -15,6 +17,7 @@ import {
   useMoveMessage,
   useMarkMailboxRead,
   useSelectNeighbour,
+  useDeleteMessages,
 } from '@/features/message-actions';
 
 const MESSAGE_ROW_HEIGHT = 76;
@@ -33,6 +36,11 @@ export function MessageList() {
 
   const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
   const selectedMailbox = mailboxes.find((m) => m.id === selectedMailboxId) ?? null;
+  const openCompose = useComposeStore((s) => s.openCompose);
+  // Apple Mail: opening a draft resumes editing it rather than reading it.
+  const openDraft = selectedMailbox?.kind === 'drafts'
+    ? (messageId: string) => openCompose({ mode: 'draft', messageId, accountId: selectedAccountId })
+    : undefined;
 
   const key = mailboxKey(selectedAccountId, selectedMailboxId);
 
@@ -69,6 +77,7 @@ export function MessageList() {
   const moveMessage = useMoveMessage();
   const markFolderRead = useMarkMailboxRead();
   const selectNeighbour = useSelectNeighbour();
+  const deleteMany = useDeleteMessages();
 
   const selected = messages.find((m) => m.uid === selectedMessageId) ?? null;
 
@@ -111,6 +120,10 @@ export function MessageList() {
   /** The folder an "archive" lands in: Gmail has no \\Archive, its All Mail doubles as one. */
   const archiveMailbox =
     mailboxes.find((m) => m.kind === 'archive') ?? mailboxes.find((m) => m.kind === 'all');
+
+  useHotkey('Enter', () => {
+    if (selectedMessageId) openDraft?.(selectedMessageId);
+  }, { enabled: !!openDraft && !conversationMode });
 
   useShortcuts({
     nextMessage: () => step(1),
@@ -216,7 +229,7 @@ export function MessageList() {
       )}
 
       {isSearching ? (
-        <SearchResults />
+        <SearchResults deleteMany={deleteMany} />
       ) : !hasContent ? (
         <EmptyState icon={<Inbox size={32} className="text-muted" />} text="Select an account" />
       ) : isLoading ? (
@@ -254,7 +267,7 @@ export function MessageList() {
               rowComponent={MsgRow}
               rowCount={messages.length}
               rowHeight={MESSAGE_ROW_HEIGHT}
-              rowProps={{ messages, selectedMessageId, selectMessage }}
+              rowProps={{ messages, selectedMessageId, selectMessage, openDraft }}
             />
           </div>
         )
@@ -290,15 +303,17 @@ interface MsgRowData {
   messages: MessageEnvelope[];
   selectedMessageId: string | null;
   selectMessage: (id: string | null) => void;
+  openDraft?: (id: string) => void;
 }
 
-function MsgRow({ index, style, messages, selectedMessageId, selectMessage }: RowComponentProps<MsgRowData>) {
+function MsgRow({ index, style, messages, selectedMessageId, selectMessage, openDraft }: RowComponentProps<MsgRowData>) {
   const message = messages[index];
   return (
     <MessageRow
       message={message}
       isSelected={selectedMessageId === message.uid}
       onSelect={() => selectMessage(message.uid)}
+      onOpen={openDraft && (() => openDraft(message.uid))}
       style={style}
     />
   );

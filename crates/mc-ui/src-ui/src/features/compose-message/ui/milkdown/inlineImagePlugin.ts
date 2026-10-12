@@ -59,6 +59,6 @@ export async function processImageFile(
 
   return {
     markdown: `![${file.name}](${objectUrl})`,
-    image: { cid, blob: file, mimeType: file.type },
+    image: { cid, blob: file, mimeType: file.type, url: objectUrl },
   };
 }

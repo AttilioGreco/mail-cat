@@ -1,17 +1,20 @@
 import { useState } from 'react';
+import type { UseMutationResult } from '@tanstack/react-query';
 import { RefreshCw, SearchX, Trash2 } from 'lucide-react';
 import { useSearchMessages } from '../model/useSearch';
 import { useSearchStore } from '../model/search-store';
 import { useSessionStore } from '@/entities/session';
-import { useDeleteMessages } from '@/features/message-actions';
 import { cn, formatDate } from '@/shared/lib/utils';
 import type { SearchHit } from '../model/types';
 
-export function SearchResults() {
+/** `deleteMany` is message-actions' bulk delete, handed in by the widget:
+ *  features may not import each other. */
+export function SearchResults({ deleteMany }: {
+  deleteMany: UseMutationResult<[number, number], Error, { messageIds: string[] }>;
+}) {
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const { selectedAccountId, selectedMessageId, selectMessage } = useSessionStore();
   const { data: hits = [], isLoading } = useSearchMessages(searchQuery, selectedAccountId);
-  const deleteMany = useDeleteMessages();
   const [outcome, setOutcome] = useState<string | null>(null);
 
   // Group action over the whole result set: the query *is* the selection.

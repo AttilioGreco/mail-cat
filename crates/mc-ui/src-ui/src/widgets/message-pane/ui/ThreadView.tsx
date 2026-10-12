@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { Archive, ChevronDown, Forward, MailOpen, Reply, ReplyAll, Send, Trash2, X } from 'lucide-react';
+import { Archive, ChevronDown, Forward, MailOpen, Reply, ReplyAll, Trash2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useThread, type ThreadMessage } from '@/entities/conversation';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { formatDate } from '@/shared/lib/utils';
-import { useAccounts } from '@/entities/account';
 import { useSetFlags, useDeleteMessage, useMoveMessage, useToggleStar } from '@/features/message-actions';
 import { useMailboxes } from '@/entities/mailbox';
 import { useShortcuts } from '@/features/keyboard-shortcuts';
-import { useSendMessage } from '@/features/compose-message';
+import { useComposeStore, type ComposeMode } from '@/features/compose-message';
 import { EmailContent } from './EmailContent';
 
 // ── Main component ─────────────────────────────────────────────────────────
@@ -22,7 +21,7 @@ export function ThreadView() {
   } = useSessionStore();
 
   const { data: messages, isLoading, error } = useThread(selectedThreadMessageId);
-  const { data: accounts = [] } = useAccounts();
+  const openCompose = useComposeStore((s) => s.openCompose);
   const setFlags = useSetFlags();
   const deleteMsg = useDeleteMessage();
   const moveMsg = useMoveMessage();
@@ -30,13 +29,10 @@ export function ThreadView() {
   const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
   const qc = useQueryClient();
 
-  const currentAccount = accounts.find((a) => a.id === selectedAccountId) ?? null;
   const mailboxCacheKey = mailboxKey(selectedAccountId, selectedMailboxId) ?? undefined;
 
   // Which messages are expanded
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
-  // Which message has the inline reply open, and in which mode
-  const [replyingTo, setReplyingTo] = useState<{ id: string; mode: 'reply' | 'replyAll' | 'forward' } | null>(null);
 
   // Ref to scroll the expanded message into view on load
   const expandedRef = useRef<HTMLDivElement>(null);
@@ -47,7 +43,6 @@ export function ThreadView() {
     if (!messages?.length) return;
     const lastId = messages[messages.length - 1].id;
     setExpandedIds(new Set([lastId]));
-    setReplyingTo(null);
   }, [selectedThreadMessageId, messages]);
 
   // Auto-mark-as-read the newest (auto-expanded) message when the thread opens.
@@ -119,17 +114,18 @@ export function ThreadView() {
       const newest = messages?.[messages.length - 1];
       if (newest) toggleStar.star(newest.id);
     },
-    reply: () => openReplyOnNewest('reply'),
-    replyAll: () => openReplyOnNewest('replyAll'),
-    forward: () => openReplyOnNewest('forward'),
+    reply: () => openOnNewest('reply'),
+    replyAll: () => openOnNewest('replyAll'),
+    forward: () => openOnNewest('forward'),
   });
 
-  /** Reply to the newest message in the thread — the one auto-expanded on open. */
-  function openReplyOnNewest(mode: 'reply' | 'replyAll' | 'forward') {
+  const openOn = (messageId: string, mode: ComposeMode) =>
+    openCompose({ mode, messageId, accountId: selectedAccountId });
+
+  /** Shortcuts act on the newest message — the one auto-expanded on open. */
+  function openOnNewest(mode: ComposeMode) {
     const newest = messages?.[messages.length - 1];
-    if (!newest) return;
-    setExpandedIds((prev) => new Set(prev).add(newest.id));
-    setReplyingTo({ id: newest.id, mode });
+    if (newest) openOn(newest.id, mode);
   }
 
   if (!selectedThreadMessageId) return null;
@@ -163,9 +159,7 @@ export function ThreadView() {
       return next;
     });
 
-    if (isExpanded) {
-      if (replyingTo?.id === id) setReplyingTo(null);
-    } else {
+    if (!isExpanded) {
       // Auto-mark-as-read when expanding an unread message, like Gmail
       const msg = messages!.find((m) => m.id === id);
       if (msg && !msg.isRead) {
@@ -246,14 +240,6 @@ export function ThreadView() {
             const isExpanded = expandedIds.has(message.id);
             const isLast = idx === messages.length - 1;
 
-            // Compute reply-all recipients: sender + To (minus self) → To; CC (minus self) → CC
-            const ownEmail = currentAccount?.email?.toLowerCase() ?? '';
-            const replyAllTo = [
-              message.fromEmail,
-              ...message.to.filter((addr) => addr.toLowerCase() !== ownEmail),
-            ];
-            const replyAllCc = message.cc.filter((addr) => addr.toLowerCase() !== ownEmail);
-
             return (
               <div key={message.id} ref={isLast ? expandedRef : undefined}>
                 {/* Separator between messages (not before first) */}
@@ -264,23 +250,11 @@ export function ThreadView() {
                 {isExpanded ? (
                   <ExpandedMessage
                     message={message}
-                    isReplying={replyingTo?.id === message.id}
-                    accountId={selectedAccountId}
-                    fromEmail={currentAccount?.email ?? ''}
                     onCollapse={() => toggleExpanded(message.id)}
-                    onReply={() => setReplyingTo({ id: message.id, mode: 'reply' })}
-                    onReplyAll={() => setReplyingTo({ id: message.id, mode: 'replyAll' })}
-                    onForward={() => setReplyingTo({ id: message.id, mode: 'forward' })}
+                    onReply={() => openOn(message.id, 'reply')}
+                    onReplyAll={() => openOn(message.id, 'replyAll')}
+                    onForward={() => openOn(message.id, 'forward')}
                     onDelete={() => void deleteMessages([message.id])}
-                    onCloseReply={() => setReplyingTo(null)}
-                    replyMode={replyingTo?.id === message.id ? replyingTo.mode : null}
-                    replyAllTo={replyAllTo}
-                    replyAllCc={replyAllCc}
-                    inReplyToRfcId={message.rfcMessageId}
-                    referencesChain={[
-                      ...message.references,
-                      ...(message.rfcMessageId ? [message.rfcMessageId] : []),
-                    ]}
                   />
                 ) : (
                   <CollapsedMessage
@@ -350,38 +324,20 @@ function CollapsedMessage({
 
 interface ExpandedProps {
   message: ThreadMessage;
-  isReplying: boolean;
-  accountId: string | null;
-  fromEmail: string;
-  replyMode: 'reply' | 'replyAll' | 'forward' | null;
-  replyAllTo: string[];
-  replyAllCc: string[];
-  inReplyToRfcId: string | null;
-  referencesChain: string[];
   onCollapse: () => void;
   onReply: () => void;
   onReplyAll: () => void;
   onForward: () => void;
   onDelete: () => void;
-  onCloseReply: () => void;
 }
 
 function ExpandedMessage({
   message,
-  isReplying,
-  accountId,
-  fromEmail,
-  replyMode,
-  replyAllTo,
-  replyAllCc,
-  inReplyToRfcId,
-  referencesChain,
   onCollapse,
   onReply,
   onReplyAll,
   onForward,
   onDelete,
-  onCloseReply,
 }: ExpandedProps) {
   return (
     <div className="px-6 py-3">
@@ -426,141 +382,6 @@ function ExpandedMessage({
         <ActionBtn icon={<ReplyAll size={13} />} label="Rispondi a tutti" onClick={onReplyAll} />
         <ActionBtn icon={<Forward size={13} />} label="Inoltra" onClick={onForward} />
         <ActionBtn icon={<Trash2 size={13} />} label="Elimina" onClick={onDelete} />
-      </div>
-
-      {/* Inline reply box */}
-      {isReplying && replyMode !== null && (
-        <div className="ml-11 mt-3">
-          <InlineReply
-            to={replyMode === 'replyAll' ? replyAllTo : replyMode === 'forward' ? [] : [message.fromEmail]}
-            cc={replyMode === 'replyAll' ? replyAllCc : []}
-            subject={message.subject}
-            mode={replyMode}
-            accountId={accountId}
-            fromEmail={fromEmail}
-            inReplyToRfcId={replyMode !== 'forward' ? inReplyToRfcId : null}
-            referencesChain={replyMode !== 'forward' ? referencesChain : []}
-            onClose={onCloseReply}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Inline reply compose ───────────────────────────────────────────────────
-
-interface InlineReplyProps {
-  to: string[];
-  cc: string[];
-  subject: string;
-  mode: 'reply' | 'replyAll' | 'forward';
-  accountId: string | null;
-  fromEmail: string;
-  inReplyToRfcId: string | null;
-  referencesChain: string[];
-  onClose: () => void;
-}
-
-function InlineReply({ to, cc, subject, mode, accountId, fromEmail, inReplyToRfcId, referencesChain, onClose }: InlineReplyProps) {
-  const [body, setBody] = useState('');
-  const [toInput, setToInput] = useState(to.join(', '));
-  const [ccInput, setCcInput] = useState(cc.join(', '));
-  const send = useSendMessage();
-
-  const isForward = mode === 'forward';
-  const subjectPrefix = isForward ? 'Fwd: ' : 'Re: ';
-  const replySubject = subject.startsWith(subjectPrefix) ? subject : `${subjectPrefix}${subject}`;
-  const hasCc = ccInput.trim().length > 0;
-
-  async function handleSend() {
-    if (!body.trim() || !accountId) return;
-    const recipients = toInput.split(',').map((s) => s.trim()).filter(Boolean);
-    if (!recipients.length) return;
-    const ccRecipients = ccInput.split(',').map((s) => s.trim()).filter(Boolean);
-    await send.mutateAsync({
-      accountId,
-      fromEmail,
-      to: recipients,
-      cc: ccRecipients,
-      subject: replySubject,
-      bodyText: body,
-      inReplyTo: inReplyToRfcId ?? undefined,
-      references: referencesChain,
-    });
-    onClose();
-  }
-
-  return (
-    <div className="rounded-xl border border-border bg-background shadow-[0_2px_12px_0_rgba(0,0,0,0.10)] dark:shadow-[0_2px_12px_0_rgba(0,0,0,0.30)]">
-      {/* Mini header — editable To field */}
-      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-        <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <span className="shrink-0 text-xs font-medium text-foreground">A:</span>
-          <input
-            type="text"
-            value={toInput}
-            onChange={(e) => setToInput(e.target.value)}
-            className="min-w-0 flex-1 bg-transparent text-xs text-muted-foreground focus:outline-none focus:text-foreground"
-            placeholder="destinatario@example.com"
-          />
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="ml-2 shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <X size={13} />
-        </button>
-      </div>
-
-      {/* CC row — shown when there are CC recipients or in replyAll mode */}
-      {(hasCc || mode === 'replyAll') && (
-        <div className="flex items-center gap-1.5 border-b border-border px-4 py-2.5">
-          <span className="shrink-0 text-xs font-medium text-foreground">CC:</span>
-          <input
-            type="text"
-            value={ccInput}
-            onChange={(e) => setCcInput(e.target.value)}
-            className="min-w-0 flex-1 bg-transparent text-xs text-muted-foreground focus:outline-none focus:text-foreground"
-            placeholder="cc@example.com"
-          />
-        </div>
-      )}
-
-      {/* Subject */}
-      <div className="border-b border-border px-4 py-2">
-        <span className="text-xs text-muted-foreground">{replySubject}</span>
-      </div>
-
-      {/* Textarea */}
-      <textarea
-        autoFocus
-        value={body}
-        onChange={(e) => setBody(e.target.value)}
-        placeholder="Scrivi una risposta…"
-        rows={5}
-        className="w-full resize-none bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
-      />
-
-      {/* Footer actions */}
-      <div className="flex items-center justify-between border-t border-border px-4 py-2.5">
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-xs text-muted-foreground transition-colors hover:text-foreground"
-        >
-          Annulla
-        </button>
-        <button
-          type="button"
-          onClick={() => void handleSend()}
-          disabled={!body.trim() || !toInput.trim() || send.isPending}
-          className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground transition-opacity disabled:opacity-50"
-        >
-          <Send size={12} />
-          {send.isPending ? 'Invio…' : 'Invia'}
-        </button>
       </div>
     </div>
   );

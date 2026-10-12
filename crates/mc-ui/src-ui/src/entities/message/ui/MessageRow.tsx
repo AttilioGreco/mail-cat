@@ -6,14 +6,16 @@ interface MessageRowProps {
   message: MessageEnvelope;
   isSelected: boolean;
   onSelect: () => void;
+  onOpen?: () => void;
   style?: React.CSSProperties;
 }
 
-export function MessageRow({ message, isSelected, onSelect, style }: MessageRowProps) {
+export function MessageRow({ message, isSelected, onSelect, onOpen, style }: MessageRowProps) {
   return (
     <div
       style={style}
       onClick={onSelect}
+      onDoubleClick={onOpen}
       className={cn(
         'flex cursor-pointer flex-col gap-0.5 border-b border-border-subtle px-4 py-3 transition-colors',
         isSelected

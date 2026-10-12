@@ -41,7 +41,7 @@ export function Sidebar() {
       <div className="border-b border-border p-2">
         <button
           type="button"
-          onClick={() => openCompose({ mode: 'new', identities: [] })}
+          onClick={() => openCompose({ mode: 'new', accountId: selectedAccountId })}
           className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent/90 mb-2"
         >
           <Pencil size={14} />

@@ -1,71 +1,66 @@
-// ── Identità mittente ────────────────────────────────────────────────────────
-// Derivata dagli account configurati — vedi useIdentities.ts. Non è una entity
-// a sé stante: è usata solo qui, dentro compose-message.
+// Mirrors the backend compose contract (prepare_compose / send_compose /
+// save_draft): the backend owns recipients, subject, quoting and identity
+// choice, the UI only edits what it is handed.
+
+export type ComposeMode = 'new' | 'reply' | 'replyAll' | 'forward' | 'draft';
 
 export interface Identity {
-  id: string;
+  accountId: string;
   displayName: string;
   email: string;
-  signatureHtml?: string;
+  signatureHtml: string | null;
 }
 
-// ── Stato header compositore ─────────────────────────────────────────────────
+export interface ForwardedAttachment {
+  id: string;
+  filename: string;
+  size: number;
+  mimeType: string;
+}
 
-export interface HeaderState {
-  from: Identity;
+export interface ComposeDto {
+  draftId: string | null;
+  accountId: string;
+  identities: Identity[];
+  /** "Name <email>" or bare email. */
   to: string[];
   cc: string[];
   bcc: string[];
   subject: string;
+  bodyMd: string;
+  quotedHtml: string | null;
+  signatureHtml: string | null;
+  forwardedAttachments: ForwardedAttachment[];
+  mode: ComposeMode;
+  sourceMessageId: string | null;
 }
 
-// ── Dati iniziali passati alla modale ────────────────────────────────────────
-
-export interface ComposeInitialData {
-  mode: 'new' | 'reply' | 'forward';
-  /** Bare email of the sender identity to pre-select. */
-  from?: string;
-  /** Account ID owning this compose session — drives chip search scope. */
-  accountId?: string;
-  to?: string[];
-  cc?: string[];
-  bcc?: string[];
-  subject?: string;
-  quotedHtml?: string;
-  inReplyTo?: string;
-  references?: string[];
-  identities: Identity[];
+export interface ComposeAttachment {
+  filename: string;
+  mimeType: string;
+  /** Set for inline images, referenced as cid:<contentId> in bodyMd. */
+  contentId: string | null;
+  dataBase64: string;
 }
 
-// ── Immagini inline CID ──────────────────────────────────────────────────────
+export interface ComposeInput {
+  draftId: string | null;
+  accountId: string;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  bodyMd: string;
+  mode: ComposeMode;
+  sourceMessageId: string | null;
+  attachments: ComposeAttachment[];
+  forwardedAttachmentIds: string[];
+}
 
 export interface InlineImage {
   cid: string;
   blob: Blob;
   mimeType: string;
-}
-
-// ── Bozza persistita ─────────────────────────────────────────────────────────
-
-export interface Draft {
-  id: string;
-  savedAt: string;
-  header: HeaderState;
-  bodyMd: string;
-  inlineImages: Array<{
-    cid: string;
-    filePath: string;
-    mimeType: string;
-  }>;
-}
-
-// ── Payload invio ────────────────────────────────────────────────────────────
-
-export interface SendPayload {
-  header: HeaderState;
-  bodyMd: string;
-  quotedHtml?: string;
-  signatureHtml?: string;
-  inlineImages: InlineImage[];
-  attachments: File[];
+  /** Object URL the editor's markdown points at until it is swapped for cid: on send. */
+  url: string;
 }

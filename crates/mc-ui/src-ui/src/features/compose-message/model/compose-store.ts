@@ -1,16 +1,23 @@
 import { create } from 'zustand';
-import type { ComposeInitialData } from './composeTypes';
+import type { ComposeMode } from './composeTypes';
+
+export interface ComposeRequest {
+  mode: ComposeMode;
+  messageId: string | null;
+  accountId: string | null;
+}
 
 interface ComposeState {
-  composeOpen: boolean;
-  composeData: ComposeInitialData | null;
-  openCompose: (data: ComposeInitialData) => void;
+  request: ComposeRequest | null;
+  openCompose: (req: { mode: ComposeMode; messageId?: string | null; accountId?: string | null }) => void;
   closeCompose: () => void;
 }
 
 export const useComposeStore = create<ComposeState>((set) => ({
-  composeOpen: false,
-  composeData: null,
-  openCompose: (data) => set({ composeOpen: true, composeData: data }),
-  closeCompose: () => set({ composeOpen: false, composeData: null }),
+  request: null,
+  // A second open while composing is ignored: there is one compose window, and
+  // replacing its session would silently drop what is being written.
+  openCompose: ({ mode, messageId = null, accountId = null }) =>
+    set((s) => (s.request ? s : { request: { mode, messageId, accountId } })),
+  closeCompose: () => set({ request: null }),
 }));

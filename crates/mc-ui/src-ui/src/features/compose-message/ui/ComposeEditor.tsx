@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import DOMPurify from 'dompurify';
 import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { EditorView } from '@codemirror/view';
 import {
   Bold, Italic, Code, Link, List, Minus,
-  Paperclip, PenLine, CommandIcon, Eye, FileCode,
-  ChevronRight, ChevronDown, X as XIcon,
+  Paperclip, CommandIcon, Eye, FileCode,
+  ChevronRight, ChevronDown,
 } from 'lucide-react';
 import { cn } from '@/shared/lib/utils';
 import { markdownToPreviewHtml } from '@/shared/lib/markdownPreview';
@@ -20,12 +21,16 @@ interface ComposeEditorProps {
   onSend?: () => void;
   onSaveDraft?: () => void;
   onAttach?: () => void;
-  onToast?: (msg: string, type?: 'error' | 'info') => void;
-  signatureHtml?: string;
-  quotedHtml?: string;
-  attachments?: File[];
-  onAttachmentRemove?: (idx: number) => void;
+  onError?: (msg: string) => void;
+  signatureHtml?: string | null;
+  quotedHtml?: string | null;
+  autoFocus?: boolean;
 }
+
+// Quote and signature come from other people's mail and account settings:
+// never trusted. blob: is allowed so inline images still show in the preview.
+const sanitize = (html: string) =>
+  DOMPurify.sanitize(html, { ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|cid:|blob:|data:image\/|#)/i });
 
 type ViewMode = 'write' | 'preview';
 
@@ -71,19 +76,24 @@ const mailCatTheme = EditorView.theme({
   '.cm-placeholder': { color: 'hsl(var(--muted))' },
 }, { dark: true });
 
-const EXTENSIONS = [markdown(), mailCatTheme];
+// CodeMirror's default drop handler pastes dropped files in as text. Claim
+// file drops so they reach React instead: images become inline images here,
+// anything else bubbles up to ComposeWindow as an attachment.
+const fileDrops = EditorView.domEventHandlers({
+  drop: (e) => !!e.dataTransfer?.files.length,
+});
+
+const EXTENSIONS = [markdown(), mailCatTheme, fileDrops];
 
 // ── Toolbar ──────────────────────────────────────────────────────────────────
 
 function Toolbar({
-  viewMode, onViewMode, showSignature, onToggleSignature,
+  viewMode, onViewMode,
   onAttach, onOpenPalette,
   onBold, onItalic, onCode, onLink, onList, onHr,
 }: {
   viewMode: ViewMode;
   onViewMode: (m: ViewMode) => void;
-  showSignature: boolean;
-  onToggleSignature: () => void;
   onAttach: () => void;
   onOpenPalette: () => void;
   onBold: () => void; onItalic: () => void; onCode: () => void;
@@ -114,8 +124,6 @@ function Toolbar({
       )}
 
       <ToolBtn icon={<Paperclip size={14} />} label="Allega file" onClick={onAttach} />
-      <ToolBtn icon={<PenLine size={14} />}   label="Toggle firma"
-        active={showSignature} onClick={onToggleSignature} />
       <ToolBtn icon={<CommandIcon size={14} />} label="Command palette (Ctrl+Shift+K)"
         onClick={onOpenPalette} />
     </div>
@@ -142,35 +150,6 @@ function ToolBtn({ icon, label, active, onClick, className }: {
   );
 }
 
-// ── Attachment bar ────────────────────────────────────────────────────────────
-
-function AttachmentBar({ files, onRemove }: {
-  files: File[];
-  onRemove: (idx: number) => void;
-}) {
-  if (files.length === 0) return null;
-  return (
-    <div className="flex flex-wrap gap-1.5 border-t border-border px-4 py-2 shrink-0">
-      {files.map((file, idx) => (
-        <div
-          key={idx}
-          className="flex items-center gap-1.5 rounded border border-border bg-surface px-2 py-1 text-xs text-foreground"
-        >
-          <Paperclip size={11} className="shrink-0 text-muted" />
-          <span className="max-w-[140px] truncate">{file.name}</span>
-          <button
-            type="button"
-            onMouseDown={(e) => { e.preventDefault(); onRemove(idx); }}
-            className="text-muted hover:text-foreground"
-          >
-            <XIcon size={11} />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // ── Quoted block panel ────────────────────────────────────────────────────────
 
 function QuotedBlockPanel({ html }: { html: string }) {
@@ -188,7 +167,7 @@ function QuotedBlockPanel({ html }: { html: string }) {
       {!collapsed && (
         <div
           className="border-t border-border px-3 py-2 text-xs text-muted-foreground [&_*]:pointer-events-none overflow-hidden"
-          dangerouslySetInnerHTML={{ __html: html }}
+          dangerouslySetInnerHTML={{ __html: sanitize(html) }}
         />
       )}
     </div>
@@ -203,7 +182,7 @@ function SignatureBlockPanel({ html }: { html: string }) {
       <div className="mb-1 text-xs text-muted">Firma</div>
       <div
         className="text-sm text-muted-foreground [&_*]:pointer-events-none overflow-hidden"
-        dangerouslySetInnerHTML={{ __html: html }}
+        dangerouslySetInnerHTML={{ __html: sanitize(html) }}
       />
     </div>
   );
@@ -214,7 +193,6 @@ function SignatureBlockPanel({ html }: { html: string }) {
 const PALETTE_ITEMS = [
   'Invia', 'Salva bozza', 'Allega file',
   'Inserisci tabella', 'Inserisci blocco codice',
-  'Toggle firma', 'Cambia mittente',
 ] as const;
 
 function CommandPalette({ onClose, onSelect }: {
@@ -244,7 +222,8 @@ function CommandPalette({ onClose, onSelect }: {
           if (e.key === 'ArrowDown') { e.preventDefault(); setCursor((c) => Math.min(c + 1, filtered.length - 1)); }
           else if (e.key === 'ArrowUp') { e.preventDefault(); setCursor((c) => Math.max(c - 1, 0)); }
           else if (e.key === 'Enter') { if (filtered[cursor]) onSelect(filtered[cursor]); }
-          else if (e.key === 'Escape') onClose();
+          // Stopped here so Escape closes the palette, not the compose window.
+          else if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
         }}
         placeholder="Cerca comando..."
         className="w-full border-b border-border bg-transparent px-4 py-3 text-sm text-foreground outline-none placeholder:text-muted"
@@ -265,19 +244,20 @@ function CommandPalette({ onClose, onSelect }: {
 
 // ── Preview ───────────────────────────────────────────────────────────────────
 
-function PreviewPane({ markdown: md, quotedHtml, signatureHtml, showSignature }: {
+function PreviewPane({ markdown: md, quotedHtml, signatureHtml }: {
   markdown: string;
-  quotedHtml?: string;
-  signatureHtml?: string;
-  showSignature: boolean;
+  quotedHtml?: string | null;
+  signatureHtml?: string | null;
 }) {
   const [html, setHtml] = useState('');
   useEffect(() => {
     let fullMd = md;
-    if (quotedHtml) fullMd += `\n<!-- quoted-block: ${btoa(quotedHtml)} -->`;
-    if (showSignature && signatureHtml) fullMd += `\n<!-- signature-block: ${btoa(signatureHtml)} -->`;
-    markdownToPreviewHtml(fullMd).then(setHtml);
-  }, [md, quotedHtml, signatureHtml, showSignature]);
+    // btoa only takes Latin-1: go through UTF-8 bytes first.
+    const b64 = (h: string) => btoa(String.fromCharCode(...new TextEncoder().encode(h)));
+    if (signatureHtml) fullMd += `\n<!-- signature-block: ${b64(signatureHtml)} -->`;
+    if (quotedHtml) fullMd += `\n<!-- quoted-block: ${b64(quotedHtml)} -->`;
+    markdownToPreviewHtml(fullMd).then((out) => setHtml(sanitize(out)));
+  }, [md, quotedHtml, signatureHtml]);
   return (
     <div
       className="flex-1 overflow-y-auto px-6 py-5 prose prose-sm max-w-none text-foreground [&_a]:text-accent [&_a]:underline"
@@ -295,24 +275,16 @@ export function ComposeEditor({
   onSend,
   onSaveDraft,
   onAttach = () => {},
-  onToast,
+  onError,
   signatureHtml,
   quotedHtml,
-  attachments = [],
-  onAttachmentRemove,
+  autoFocus,
 }: ComposeEditorProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('write');
-  const [showSignature, setShowSignature] = useState(!!signatureHtml);
-  const [prevSignatureHtml, setPrevSignatureHtml] = useState(signatureHtml);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [currentMd, setCurrentMd] = useState(initialMd);
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const imagesRef = useRef<Map<string, InlineImage>>(new Map());
-
-  if (signatureHtml !== prevSignatureHtml) {
-    setPrevSignatureHtml(signatureHtml);
-    setShowSignature(!!signatureHtml);
-  }
 
   // ── Helper: insert/wrap text at cursor via CodeMirror API ─────────────────
 
@@ -332,20 +304,17 @@ export function ComposeEditor({
     view.focus();
   }, []);
 
-  // ── Global keyboard shortcuts ─────────────────────────────────────────────
-
+  // Send and save shortcuts live in ComposeWindow: they must work before this
+  // lazy chunk has loaded and outside the editor too.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key === 'Enter')           { e.preventDefault(); onSend?.(); }
-      else if (mod && e.key === 's')          { e.preventDefault(); onSaveDraft?.(); }
-      else if (mod && e.shiftKey && e.key.toLowerCase() === 'k') {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'k') {
         e.preventDefault(); setPaletteOpen((p) => !p);
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [onSend, onSaveDraft]);
+  }, []);
 
   // ── Inline images ─────────────────────────────────────────────────────────
 
@@ -353,12 +322,12 @@ export function ComposeEditor({
     for (const file of files) {
       const cid = `${uuidv4()}@compose`;
       const result = await processImageFile(file, () => cid);
-      if ('error' in result) { onToast?.(result.error ?? 'Errore sconosciuto', 'error'); continue; }
+      if (result.error !== undefined) { onError?.(result.error); continue; }
       imagesRef.current.set(result.image.cid, result.image);
       onImagesChange?.(Array.from(imagesRef.current.values()));
       setCurrentMd((prev) => { const n = prev + '\n' + result.markdown + '\n'; onMdChange?.(n); return n; });
     }
-  }, [onMdChange, onImagesChange, onToast]);
+  }, [onMdChange, onImagesChange, onError]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     const files = extractImageFiles(e.dataTransfer);
@@ -374,7 +343,6 @@ export function ComposeEditor({
     if (item === 'Invia') onSend?.();
     else if (item === 'Salva bozza') onSaveDraft?.();
     else if (item === 'Allega file') onAttach();
-    else if (item === 'Toggle firma') setShowSignature((s) => !s);
     else if (item === 'Inserisci blocco codice') insertMarkdown('```\n', '\n```', 'codice');
     else if (item === 'Inserisci tabella') {
       insertMarkdown('\n| Colonna 1 | Colonna 2 |\n|-----------|----------|\n| cella     | cella     |\n', '', '');
@@ -390,7 +358,6 @@ export function ComposeEditor({
     >
       <Toolbar
         viewMode={viewMode} onViewMode={setViewMode}
-        showSignature={showSignature} onToggleSignature={() => setShowSignature((s) => !s)}
         onAttach={onAttach} onOpenPalette={() => setPaletteOpen((p) => !p)}
         onBold={() => insertMarkdown('**', '**', 'grassetto')}
         onItalic={() => insertMarkdown('*', '*', 'corsivo')}
@@ -417,7 +384,7 @@ export function ComposeEditor({
               onChange={(val) => { setCurrentMd(val); onMdChange?.(val); }}
               extensions={EXTENSIONS}
               placeholder="Scrivi il tuo messaggio..."
-              autoFocus
+              autoFocus={autoFocus}
               height="100%"
               basicSetup={{
                 lineNumbers: false,
@@ -438,17 +405,17 @@ export function ComposeEditor({
             />
           </div>
 
+          {/* Signature block — above the quote, as Apple Mail places it */}
+          {signatureHtml && (
+            <div className="shrink-0 max-h-24 overflow-y-auto border-t border-border">
+              <SignatureBlockPanel html={signatureHtml} />
+            </div>
+          )}
+
           {/* Quoted block — pinned below editor */}
           {quotedHtml && (
             <div className="shrink-0 max-h-32 overflow-y-auto border-t border-border">
               <QuotedBlockPanel html={quotedHtml} />
-            </div>
-          )}
-
-          {/* Signature block — pinned at bottom */}
-          {showSignature && signatureHtml && (
-            <div className="shrink-0 max-h-24 overflow-y-auto border-t border-border">
-              <SignatureBlockPanel html={signatureHtml} />
             </div>
           )}
         </div>
@@ -457,14 +424,8 @@ export function ComposeEditor({
           markdown={currentMd}
           quotedHtml={quotedHtml}
           signatureHtml={signatureHtml}
-          showSignature={showSignature}
         />
       )}
-
-      <AttachmentBar
-        files={attachments}
-        onRemove={(idx) => onAttachmentRemove?.(idx)}
-      />
 
       {/* Drop zone overlay */}
       <div
