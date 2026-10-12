@@ -116,7 +116,7 @@ pub struct SyncService<
 }
 
 /// What makes one progress event distinguishable from the previous one.
-type ProgressKey = (u8, u8, String);
+type ProgressKey = (u8, u32, String);
 
 fn phase_rank(state: &SyncState) -> u8 {
     match state {
@@ -176,11 +176,14 @@ impl<
     /// states always pass. Returns the event when it passed the gate.
     fn publish(&self, event: SyncProgressEvent) -> Option<SyncProgressEvent> {
         let terminal = matches!(event.state, SyncState::Completed | SyncState::Failed);
-        let key: ProgressKey = (
-            phase_rank(&event.state),
-            percent(event.processed, event.total),
-            event.message.clone(),
-        );
+        // Body backfill is already rate-limited to one batch per minute, and a
+        // batch is a fraction of a percent of a large backlog: gating it on whole
+        // percentages froze the bar for minutes at a time.
+        let step = match event.state {
+            SyncState::FetchingMessageBody => event.processed,
+            _ => u32::from(percent(event.processed, event.total)),
+        };
+        let key: ProgressKey = (phase_rank(&event.state), step, event.message.clone());
 
         {
             let mut last = self
@@ -2018,6 +2021,33 @@ mod tests {
         service.emit(&mut published, completed.clone());
         service.emit(&mut published, completed);
         assert_eq!(published.len(), 102, "Completed is never debounced away");
+    }
+
+    #[test]
+    fn progress_gate_lets_every_body_batch_through() {
+        let service = make_service(
+            MockEmailProvider::new(),
+            Arc::new(MockEventStore::new()),
+            Arc::new(MockProjector::new()),
+        );
+        let account_id = AccountId::new();
+        let mut published = Vec::new();
+
+        // 30-body batches against a 20k backlog never cross a whole percent.
+        for batch in 1..=5u32 {
+            service.emit(
+                &mut published,
+                SyncProgressEvent {
+                    account_id,
+                    state: SyncState::FetchingMessageBody,
+                    processed: batch * 30,
+                    total: 20_000,
+                    message: "Downloading message bodies".to_string(),
+                },
+            );
+        }
+
+        assert_eq!(published.len(), 5, "one event per downloaded batch");
     }
 
     #[tokio::test]

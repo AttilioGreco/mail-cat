@@ -20,16 +20,38 @@ export interface SyncProgressPayload {
   message: string | null;
 }
 
+/** The last body batch that actually landed, for the "+N · 12s fa" line. */
+export interface BodyBatch {
+  added: number;
+  at: number;
+}
+
 interface SyncState {
   /** Latest progress event per account. */
   byAccount: Record<string, SyncProgressPayload>;
+  lastBodyBatch: Record<string, BodyBatch>;
   record: (event: SyncProgressPayload) => void;
 }
 
 export const useSyncStore = create<SyncState>((set) => ({
   byAccount: {},
+  lastBodyBatch: {},
   record: (event) =>
-    set((s) => ({ byAccount: { ...s.byAccount, [event.account_id]: event } })),
+    set((s) => {
+      const prev = s.byAccount[event.account_id];
+      // `processed` restarts from 0 with every drain pass (it is measured against
+      // that pass's backlog). With no previous event we can't tell a batch from
+      // the pass so far, so the first event after opening the app counts nothing.
+      const sameRun = event.phase === 'fetching_bodies' && prev?.phase === 'fetching_bodies';
+      const added = !sameRun ? 0 : event.total === prev.total ? event.processed - prev.processed : event.processed;
+      return {
+        byAccount: { ...s.byAccount, [event.account_id]: event },
+        lastBodyBatch:
+          added > 0
+            ? { ...s.lastBodyBatch, [event.account_id]: { added, at: Date.now() } }
+            : s.lastBodyBatch,
+      };
+    }),
 }));
 
 /**
@@ -52,10 +74,10 @@ export function useSyncProgress() {
     let unlisten: (() => void) | null = null;
     listen<SyncProgressPayload>('sync:progress', (event) => {
       record(event.payload);
-      // Body downloads move the stored counts too, and the worker emits at most
-      // one event per percentage point (~1/min), so refreshing on them is cheap
-      // and keeps the counters honest instead of only after a full sync.
-      if (event.payload.phase === 'complete' || event.payload.phase === 'fetching_bodies') {
+      // Envelope events are gated to one per percentage point and body events to
+      // one per batch (~1/min), so refreshing the counters on each is cheap and
+      // is what makes the bars in Settings move live.
+      if (event.payload.phase !== 'discovering_mailboxes') {
         queryClient.invalidateQueries({ queryKey: ['account-stats', event.payload.account_id] });
       }
       if (event.payload.phase === 'complete') {

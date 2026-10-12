@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, RefreshCw, Trash2, AlertCircle, KeyRound, CheckCircle2, RotateCw } from 'lucide-react';
 import {
   useAccounts,
@@ -7,6 +7,7 @@ import {
   useSyncStore,
   type Account,
   type AccountStatus,
+  type BodyBatch,
 } from '@/entities/account';
 import { useRemoveAccount, useRestartServer, useSyncNow } from '../model/useAccountMutations';
 import { AddAccountDialog } from './AddAccountDialog';
@@ -102,6 +103,7 @@ export function AccountsSection() {
 function AccountCard({ account, onRemoved }: { account: Account; onRemoved: () => void }) {
   const { data: stats } = useAccountStats(account.id);
   const progress = useSyncStore((s) => s.byAccount[account.id]);
+  const lastBatch = useSyncStore((s) => s.lastBodyBatch[account.id]);
   const syncNow = useSyncNow();
   const removeAccount = useRemoveAccount();
   const [confirming, setConfirming] = useState(false);
@@ -165,6 +167,7 @@ function AccountCard({ account, onRemoved }: { account: Account; onRemoved: () =
             total={stats.syncedMessages}
             missingLabel={`${stats.pendingBodies.toLocaleString()} in coda`}
           />
+          {lastBatch && stats.pendingBodies > 0 && <BodyBatchLine batch={lastBatch} />}
         </div>
       )}
 
@@ -218,6 +221,27 @@ function AccountCard({ account, onRemoved }: { account: Account; onRemoved: () =
   );
 }
 
+/** Bodies arrive in one batch a minute; a ticking "how long ago" shows the
+ *  worker is alive between batches instead of looking stuck. */
+function BodyBatchLine({ batch }: { batch: BodyBatch }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const seconds = Math.max(0, Math.round((now - batch.at) / 1000));
+
+  return (
+    <p className="flex items-center gap-1.5 text-[11px] text-muted">
+      <span className="relative flex h-1.5 w-1.5">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
+        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" />
+      </span>
+      ultimo lotto +{batch.added.toLocaleString()} · {seconds < 60 ? `${seconds}s fa` : `${Math.floor(seconds / 60)} min fa`}
+    </p>
+  );
+}
+
 function ProgressRow({
   label,
   done,
@@ -240,7 +264,7 @@ function ProgressRow({
         </span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-background">
-        <div className="h-full rounded-full bg-accent transition-all" style={{ width: `${percent}%` }} />
+        <div className="h-full rounded-full bg-accent transition-[width] duration-700 ease-out" style={{ width: `${percent}%` }} />
       </div>
       <p className="mt-0.5 text-[11px] text-muted">{missingLabel}</p>
     </div>

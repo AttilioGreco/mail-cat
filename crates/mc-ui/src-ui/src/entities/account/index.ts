@@ -4,6 +4,7 @@ export {
   useSyncProgress,
   useSyncStore,
   progressPercent,
+  type BodyBatch,
   type SyncPhase,
   type SyncProgressPayload,
 } from './model/sync-progress';
