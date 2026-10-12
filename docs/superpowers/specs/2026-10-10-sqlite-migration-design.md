@@ -197,6 +197,13 @@ Notes:
   with `NULL`; every mailbox-scoped query already filters by `mailbox_id`, so
   drafts stay out of lists exactly as today. Covered by a conformance test.
 - IDs as 16-byte BLOBs (uuid), not TEXT: halves index size.
+- Plan 3 rulings: `messages.flags` is JSON `Vec<Flag>` plus a `seen` column
+  (IMAP keywords don't fit a bitset; `messages_unread` is `WHERE seen = 0`).
+  No FK `mailboxes → accounts` and `messages_mailbox_uid` is not UNIQUE:
+  catch-up replays over later state, and either constraint would turn a
+  replay or a UIDVALIDITY reset into a boot failure. Conversations are
+  recomputed from `messages` on every change to a thread; `rebuild_index`
+  recomputes all of them. Timestamps are unix nanos.
 
 ## 5. Full-text search: Tantivy, index-only
 
@@ -334,11 +341,24 @@ Tracked here so later plans pick them up. Tick when done (with commit).
 - [ ] Concurrency test exercises the writer mutex, not the `IMMEDIATE` transaction — acceptable while the mutex exists; revisit if writes ever go multi-process.
 
 **From writing plan 2:**
-- [ ] Live projection never saves the `read_model` checkpoint (`append_and_project` and the bus subscriber in `wiring.rs:506` only `project`), so every boot/post-sync `catch_up` re-projects everything since the last catch-up. **Not harmless**: it erased bodies on sled once they left the event (fixed in plan 2 by a separate `message_bodies` tree, da8715d). Projector arms must stay replay-safe; **address in plan 3** with the transactional batch hook.
-- [ ] Replaying `MailboxDiscovered` (full rebuild) resets mailbox counts to 0 until the next poll (≤5 min), since counts are no longer in the log. Keep existing counts in that arm if it matters (plan 3 SQLite projector: upsert, don't overwrite counts).
+- [x] Projector arms are replay-safe on both backends, proven by the conformance test
+  `replaying_the_log_over_live_state_changes_nothing` (plan 3, 28a5dd8). Catch-up batches
+  commit with their checkpoint on SQLite (plan 3, ed7af72).
+- [ ] Live projection (`append_and_project`, bus subscriber `wiring.rs:506`) still doesn't
+  checkpoint, so catch-up re-projects since the last catch-up — harmless now, wasted work.
+  **Plan 5** (wiring).
+- [x] Replaying `MailboxDiscovered` (full rebuild) resets mailbox counts to 0 until the next poll (plan 3, 28a5dd8: both backends keep counts on replay).
 - [ ] sled `message_bodies` rows are not removed on `MessageDeleted` (orphans until sled is deleted in plan 5). SQLite uses `ON DELETE CASCADE`.
 - [ ] Stale doc comments mentioning the body in the event: `sync_service.rs` `fetch_message_body` / `fetch_message_bodies_bulk` docs, mc-domain `traits/search_index.rs:14`.
 - [ ] `AccountSyncFailed` is never emitted, so its desktop notification (`wiring.rs:698-709`) is dead. Emitting it (transient, from `start_sync`'s failure path) is a small feature, not migration work.
+
+**From writing plan 3:**
+- [ ] sled `MessageDeleted` leaves the `body_backfill` entry and drops the `rfc_id_seen`
+  marker even if another copy exists (conversation undercount). SQLite is correct;
+  vanishes with sled in plan 5.
+- [ ] `ConversationReadRepository::rebuild_index` doc says "events replayed"; SQLite returns
+  the number of conversations. Reword the trait doc when sled is deleted.
+- [ ] `search_contacts` on SQLite folds ASCII case only (`LIKE`); sled lowercased Unicode.
 
 **Out of scope of the migration, decided 2026-10-10:**
 - [ ] Search features (operators, filters, sort) — own spec; index schema ready after plan 4.
