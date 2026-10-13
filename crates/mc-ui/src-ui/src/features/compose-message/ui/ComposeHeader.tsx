@@ -10,12 +10,17 @@ export interface Recipients {
   bcc: string[];
 }
 
+/** Text typed in each recipient field but not yet a chip. */
+export type PendingRecipients = Record<keyof Recipients, string>;
+
 interface ComposeHeaderProps {
   identities: Identity[];
   accountId: string;
   onAccountChange: (accountId: string) => void;
   recipients: Recipients;
   onRecipientsChange: (recipients: Recipients) => void;
+  pending: PendingRecipients;
+  onPendingChange: (update: (prev: PendingRecipients) => PendingRecipients) => void;
   subject: string;
   onSubjectChange: (subject: string) => void;
   focusRecipients: boolean;
@@ -25,12 +30,19 @@ const identityLabel = (i: Identity) => `${i.displayName} <${i.email}>`;
 
 export function ComposeHeader({
   identities, accountId, onAccountChange,
-  recipients, onRecipientsChange,
+  recipients, onRecipientsChange, pending, onPendingChange,
   subject, onSubjectChange, focusRecipients,
 }: ComposeHeaderProps) {
   const [showCcBcc, setShowCcBcc] = useState(recipients.cc.length > 0 || recipients.bcc.length > 0);
   const set = (field: keyof Recipients) => (values: string[]) =>
     onRecipientsChange({ ...recipients, [field]: values });
+  const field = (name: keyof Recipients) => ({
+    values: recipients[name],
+    onChange: set(name),
+    query: pending[name],
+    onQueryChange: (query: string) => onPendingChange((prev) => ({ ...prev, [name]: query })),
+    accountId,
+  });
 
   return (
     <div className="flex shrink-0 flex-col border-b border-border">
@@ -54,12 +66,12 @@ export function ComposeHeader({
         </Select>
       </div>
 
-      <RecipientField label="A" values={recipients.to} onChange={set('to')} accountId={accountId} autoFocus={focusRecipients} />
+      <RecipientField label="A" {...field('to')} autoFocus={focusRecipients} />
 
       {showCcBcc ? (
         <>
-          <RecipientField label="Cc" values={recipients.cc} onChange={set('cc')} accountId={accountId} />
-          <RecipientField label="Ccn" values={recipients.bcc} onChange={set('bcc')} accountId={accountId} />
+          <RecipientField label="Cc" {...field('cc')} />
+          <RecipientField label="Ccn" {...field('bcc')} />
         </>
       ) : (
         <div className="border-b border-border px-4 py-1.5">

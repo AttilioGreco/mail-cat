@@ -174,7 +174,10 @@ pub fn strip_subject_prefixes(subject: &str) -> &str {
 }
 
 pub fn prefixed_subject(prefix: &str, subject: &str) -> String {
-    format!("{prefix} {}", strip_subject_prefixes(subject))
+    match strip_subject_prefixes(subject).trim_end() {
+        "" => prefix.to_owned(),
+        base => format!("{prefix} {base}"),
+    }
 }
 
 // ── Addresses ────────────────────────────────────────────────────────────────
@@ -187,8 +190,10 @@ pub fn format_address(a: &Address) -> String {
         .map(str::trim)
         .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(a.email.as_str()));
     match name {
-        Some(n) if n.contains([',', ';', '<', '>', '"', '@', ':']) => {
-            format!("\"{}\" <{}>", n.replace('"', ""), a.email)
+        // RFC 5322 specials can't appear in a bare phrase; '.' is tolerated
+        // there (obs-phrase) and every parser accepts "J. Smith".
+        Some(n) if n.contains(['(', ')', '<', '>', '[', ']', ':', ';', '@', '\\', ',', '"']) => {
+            format!("\"{}\" <{}>", n.replace('\\', "\\\\").replace('"', "\\\""), a.email)
         }
         Some(n) => format!("{n} <{}>", a.email),
         None => a.email.to_string(),
@@ -235,15 +240,18 @@ pub fn reply_sender(accounts: &[Account], original: &Envelope, fallback: Account
 pub fn reply_recipients(original: &Envelope, own: &[EmailAddress], all: bool) -> (Vec<String>, Vec<String>) {
     let primary = if original.reply_to.is_empty() { &original.from } else { &original.reply_to };
     // Replying to something we sent goes back to the people we sent it to.
+    let sender = primary;
     let primary = if primary.iter().all(|a| own.contains(&a.email)) { &original.to } else { primary };
-    if !all {
-        return (format_addresses(primary), vec![]);
-    }
 
     let mut seen = HashSet::new();
     let mut keep = |a: &&Address| !own.contains(&a.email) && seen.insert(a.email.clone());
-    let to: Vec<Address> = primary.iter().chain(&original.to).filter(&mut keep).cloned().collect();
-    let cc: Vec<Address> = original.cc.iter().filter(&mut keep).cloned().collect();
+    let others: &[Address] = if all { &original.to } else { &[] };
+    let to: Vec<Address> = primary.iter().chain(others).filter(&mut keep).cloned().collect();
+    let cc: Vec<Address> = if all { original.cc.iter().filter(&mut keep).cloned().collect() } else { vec![] };
+    if to.is_empty() && cc.is_empty() {
+        // A note to self: Apple Mail replies to ourselves rather than to nobody.
+        return (format_addresses(sender), vec![]);
+    }
     (format_addresses(&to), format_addresses(&cc))
 }
 
@@ -380,17 +388,38 @@ pub fn body_inner_html(html: &str) -> String {
     strip_elements(&html[start..end], &["script"])
 }
 
+/// Drops `<tag ...>...</tag>` for each tag (to the end when unclosed).
 fn strip_elements(html: &str, tags: &[&str]) -> String {
     let mut out = html.to_owned();
     for tag in tags {
-        let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
-        while let Some(start) = out.to_ascii_lowercase().find(&open) {
+        let (open, close) = (format!("<{tag}"), format!("</{tag}"));
+        loop {
+            // ASCII lowercasing keeps byte offsets valid for `out`.
             let lower = out.to_ascii_lowercase();
-            let end = lower[start..].find(&close).map_or(out.len(), |e| start + e + close.len());
+            let Some(start) = find_tag(&lower, 0, &open) else { break };
+            let tag_end = |at: usize| lower[at..].find('>').map_or(out.len(), |gt| at + gt + 1);
+            let open_end = tag_end(start);
+            let end = if lower[..open_end].ends_with("/>") {
+                open_end
+            } else {
+                find_tag(&lower, open_end, &close).map_or(out.len(), tag_end)
+            };
             out.replace_range(start..end, "");
         }
     }
     out
+}
+
+/// First `prefix` at or after `from` that is a whole tag name: `<style` but
+/// not `<styled-x>`, so `<header>` never passes for `<head>`.
+fn find_tag(lower: &str, from: usize, prefix: &str) -> Option<usize> {
+    lower[from..]
+        .match_indices(prefix)
+        .map(|(i, _)| from + i)
+        .find(|&i| match lower.as_bytes().get(i + prefix.len()) {
+            Some(&c) => c == b'>' || c == b'/' || c.is_ascii_whitespace(),
+            None => true,
+        })
 }
 
 /// Readable text from an HTML body, for the text/plain quote of HTML-only mail.
@@ -717,7 +746,8 @@ mod tests {
         assert_eq!(prefixed_subject("Fwd:", "Re : Budget"), "Fwd: Budget");
         assert_eq!(prefixed_subject("Re:", "Ordine: 12"), "Re: Ordine: 12");
         assert_eq!(prefixed_subject("Re:", "Ire: fumo"), "Re: Ire: fumo");
-        assert_eq!(prefixed_subject("Re:", ""), "Re: ");
+        assert_eq!(prefixed_subject("Re:", ""), "Re:");
+        assert_eq!(prefixed_subject("Fwd:", " Re: "), "Fwd:");
     }
 
     #[test]
@@ -735,7 +765,19 @@ mod tests {
         let mut env = envelope();
         env.from = vec![addr(None, "me@example.com")];
         let own = [EmailAddress::new("me@example.com").unwrap()];
-        assert_eq!(reply_recipients(&env, &own, false).0, ["me@example.com", "Bob <bob@example.com>"]);
+        assert_eq!(reply_recipients(&env, &own, false).0, ["Bob <bob@example.com>"]);
+    }
+
+    #[test]
+    fn reply_to_a_note_to_self_goes_to_self() {
+        let mut env = envelope();
+        env.from = vec![addr(Some("Me"), "me@example.com")];
+        env.to = vec![addr(None, "ME@example.com")];
+        env.cc.clear();
+        let own = [EmailAddress::new("me@example.com").unwrap()];
+        for all in [false, true] {
+            assert_eq!(reply_recipients(&env, &own, all), (vec!["Me <me@example.com>".to_owned()], vec![]));
+        }
     }
 
     #[test]
@@ -778,6 +820,11 @@ mod tests {
         assert_eq!(parsed.name.as_deref(), Some("Rossi, Mario"));
         assert_eq!(format_address(&parsed), "\"Rossi, Mario\" <mario@example.com>");
         assert_eq!(format_address(&parse_address("bob@example.com").unwrap()), "bob@example.com");
+        for name in ["Smith (Work)", "O\"Neil", "a\\b", "J. Smith"] {
+            let formatted = format_address(&addr(Some(name), "x@example.com"));
+            assert_eq!(parse_address(&formatted).unwrap().name.as_deref(), Some(name), "{formatted}");
+        }
+        assert_eq!(format_address(&addr(Some("O\"Neil"), "x@example.com")), r#""O\"Neil" <x@example.com>"#);
 
         let err = parse_address("not an address").unwrap_err().to_string();
         assert!(err.contains("not an address"), "{err}");
@@ -832,6 +879,14 @@ mod tests {
         assert_eq!(
             html_to_text("<html><body><p>Uno &amp; due</p><div>tre<br>quattro</div></body></html>"),
             "Uno & due\n\ntre\nquattro"
+        );
+        assert_eq!(
+            html_to_text("<body><p>Ciao</p><header>Top</header><p>Middle</p><p>End</p></body>"),
+            "Ciao\nTop\nMiddle\n\nEnd"
+        );
+        assert_eq!(
+            html_to_text("<STYLE type=x>p{}</Style ><styled-x>A</styled-x><scripts>B</scripts><head/>C"),
+            "ABC"
         );
     }
 

@@ -36,7 +36,8 @@ interface Suggestion {
 export function parseAddress(value: string): { name: string | null; email: string } {
   const match = value.match(/^(.*?)\s*<([^>]+)>\s*$/);
   if (!match) return { name: null, email: value.trim() };
-  const name = match[1].trim().replace(/^"|"$/g, '');
+  const raw = match[1].trim();
+  const name = /^".*"$/.test(raw) ? raw.slice(1, -1).replace(/\\(.)/g, '$1') : raw;
   return { name: name || null, email: match[2].trim() };
 }
 
@@ -44,27 +45,33 @@ export const isValidAddress = (value: string) => EMAIL_RE.test(parseAddress(valu
 
 const addressKey = (value: string) => parseAddress(value).email.toLowerCase();
 
-/** Splits "a@x.it, B <b@y.it>; c@z" on , ; and newlines, but not inside quotes
- *  or angle brackets ("Rossi, Mario" <m@x.it> stays one address). */
-export function splitAddresses(text: string): string[] {
-  const out: string[] = [];
+/** Cuts "a@x.it, B <b@y.it>; c@z" at , ; and newlines, but not inside quotes
+ *  or angle brackets ("Rossi, Mario" <m@x.it> stays one address). `open` is
+ *  whether the text ends inside one, so a separator typed next belongs to it. */
+function scanAddresses(text: string): { parts: string[]; open: boolean } {
+  const parts: string[] = [];
   let current = '';
   let quoted = false;
+  let escaped = false;
   let angled = false;
   for (const ch of text) {
-    if (ch === '"') quoted = !quoted;
+    if (escaped) escaped = false;
+    else if (ch === '\\' && quoted) escaped = true;
+    else if (ch === '"') quoted = !quoted;
     else if (ch === '<' && !quoted) angled = true;
     else if (ch === '>' && !quoted) angled = false;
-    if (!quoted && !angled && (ch === ',' || ch === ';' || ch === '\n')) {
-      out.push(current);
+    else if (!quoted && !angled && (ch === ',' || ch === ';' || ch === '\n')) {
+      parts.push(current.trim());
       current = '';
-    } else {
-      current += ch;
+      continue;
     }
+    current += ch;
   }
-  out.push(current);
-  return out.map((s) => s.trim()).filter(Boolean);
+  parts.push(current.trim());
+  return { parts, open: quoted || angled };
 }
+
+export const splitAddresses = (text: string): string[] => scanAddresses(text).parts.filter(Boolean);
 
 /** Appends `added`, skipping addresses (case-insensitive) already present. */
 export function mergeAddresses(values: string[], added: string[]): string[] {
@@ -83,13 +90,17 @@ interface RecipientFieldProps {
   label: string;
   values: string[];
   onChange: (values: string[]) => void;
+  /** Typed text not yet turned into a chip; the window commits it before send/save. */
+  query: string;
+  onQueryChange: (query: string) => void;
   /** Scopes the contact search to the sending account. */
   accountId: string;
   autoFocus?: boolean;
 }
 
-export function RecipientField({ label, values, onChange, accountId, autoFocus }: RecipientFieldProps) {
-  const [query, setQuery] = useState('');
+export function RecipientField({
+  label, values, onChange, query, onQueryChange, accountId, autoFocus,
+}: RecipientFieldProps) {
   const [open, setOpen] = useState(false);
   // Tagged with the query they answer: Enter must not pick a suggestion that
   // belongs to what was typed 150ms ago.
@@ -123,7 +134,7 @@ export function RecipientField({ label, values, onChange, accountId, autoFocus }
 
   const add = (added: string[]) => {
     onChange(mergeAddresses(values, added));
-    setQuery('');
+    onQueryChange('');
   };
 
   return (
@@ -137,7 +148,7 @@ export function RecipientField({ label, values, onChange, accountId, autoFocus }
         value={values}
         onValueChange={(next: string[]) => onChange(mergeAddresses([], next))}
         inputValue={query}
-        onInputValueChange={setQuery}
+        onInputValueChange={onQueryChange}
         open={popupOpen}
         onOpenChange={setOpen}
         onItemHighlighted={(value: string | undefined) => {
@@ -170,9 +181,11 @@ export function RecipientField({ label, values, onChange, accountId, autoFocus }
                 chips?.[chips.length - 1]?.focus();
                 return;
               }
+              // A separator inside "Rossi, Mario" is part of the name.
+              const separator = (e.key === ',' || e.key === ';') && !scanAddresses(query).open;
               const pick = (e.key === 'Enter' || e.key === 'Tab') && highlighted.current && byValue.has(highlighted.current)
                 ? [highlighted.current]
-                : ['Enter', 'Tab', ',', ';'].includes(e.key) && text
+                : (e.key === 'Enter' || e.key === 'Tab' || separator) && text
                   ? splitAddresses(text)
                   : null;
               if (!pick) return;
@@ -181,10 +194,10 @@ export function RecipientField({ label, values, onChange, accountId, autoFocus }
               add(pick);
             }}
             onPaste={(e) => {
-              const pasted = e.clipboardData.getData('text');
-              if (!/[,;\n]/.test(pasted)) return;
+              const { parts } = scanAddresses(query + e.clipboardData.getData('text'));
+              if (parts.length < 2) return;
               e.preventDefault();
-              add(splitAddresses(query + pasted));
+              add(parts.filter(Boolean));
             }}
             onBlur={(e) => {
               if (e.relatedTarget?.closest('[data-slot=combobox-content]')) return;

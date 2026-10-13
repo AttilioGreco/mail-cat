@@ -11,8 +11,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/shared/ui/tooltip';
 import { useComposeStore, type ComposeRequest } from '../model/compose-store';
 import { usePrepareCompose, useSendCompose, useSaveDraft, useDiscardDraft } from '../model/compose-api';
 import type { ComposeDto, ComposeInput, ComposeMode, InlineImage } from '../model/composeTypes';
-import { ComposeHeader, type Recipients } from './ComposeHeader';
-import { isValidAddress } from './RecipientField';
+import { ComposeHeader, type PendingRecipients, type Recipients } from './ComposeHeader';
+import { isValidAddress, mergeAddresses, splitAddresses } from './RecipientField';
 
 // ponytail: split out, pulls in CodeMirror + remark (~5.7MB source) that's
 // dead weight until the user actually opens compose.
@@ -29,6 +29,7 @@ const TITLES: Record<ComposeMode, string> = {
 };
 
 const AUTOSAVE_MS = 3000;
+const NO_PENDING: PendingRecipients = { to: '', cc: '', bcc: '' };
 const SIZE_WARNING_BYTES = 25 * 1024 * 1024;
 
 export function ComposeWindow() {
@@ -98,6 +99,7 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
 
   const [accountId, setAccountId] = useState(dto.accountId);
   const [recipients, setRecipients] = useState<Recipients>({ to: dto.to, cc: dto.cc, bcc: dto.bcc });
+  const [pending, setPending] = useState(NO_PENDING);
   const [subject, setSubject] = useState(dto.subject);
   // A reopened draft's images: the editor shows them via blob URLs, swapped
   // back to the same cid: on save/send.
@@ -113,6 +115,7 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
   // Read when a queued job runs, not when it was queued: a save that started
   // before the previous one returned must still reuse its draft id.
   const draftId = useRef(dto.draftId);
+  const reopened = dto.draftId !== null;
   // Set once the message is sent or thrown away, so an autosave timer that
   // fires meanwhile can't resurrect it as a draft.
   const finished = useRef(false);
@@ -126,17 +129,33 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
   };
 
   const { to, cc, bcc } = recipients;
-  const all = [...to, ...cc, ...bcc];
-  const hasInvalid = all.some((a) => !isValidAddress(a));
-  const dirty =
+  const hasInvalid = [...to, ...cc, ...bcc].some((a) => !isValidAddress(a));
+  const hasPending = Object.values(pending).some((text) => text.trim() !== '');
+  const changed =
+    accountId !== dto.accountId ||
     !sameList(to, dto.to) || !sameList(cc, dto.cc) || !sameList(bcc, dto.bcc) ||
     subject !== dto.subject || bodyMd !== initial.md ||
     files.length > 0 || forwarded.length !== dto.forwardedAttachments.length;
+  const dirty = changed || hasPending;
+
+  // Shortcuts fire before a recipient field sees the key, so text still being
+  // typed there is turned into chips here, exactly as Enter would.
+  const commitPending = (): Recipients => {
+    if (!hasPending) return recipients;
+    const next = {
+      to: mergeAddresses(to, splitAddresses(pending.to)),
+      cc: mergeAddresses(cc, splitAddresses(pending.cc)),
+      bcc: mergeAddresses(bcc, splitAddresses(pending.bcc)),
+    };
+    setRecipients(next);
+    setPending(NO_PENDING);
+    return next;
+  };
 
   const identity = dto.identities.find((i) => i.accountId === accountId);
   const signatureHtml = accountId === dto.accountId ? dto.signatureHtml : (identity?.signatureHtml ?? null);
 
-  const buildInput = async (): Promise<ComposeInput> => {
+  const buildInput = async (r: Recipients): Promise<ComposeInput> => {
     const used = images.filter((i) => bodyMd.includes(i.url));
     const md = used.reduce((acc, i) => acc.split(i.url).join(`cid:${i.cid}`), bodyMd);
     const attachments = await Promise.all([
@@ -155,7 +174,7 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
     ]);
     return {
       draftId: draftId.current,
-      accountId, to, cc, bcc, subject,
+      accountId, ...r, subject,
       bodyMd: md,
       mode: dto.mode,
       sourceMessageId: dto.sourceMessageId,
@@ -164,24 +183,51 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
     };
   };
 
-  const save = () => queue(async () => {
+  // Autosave leaves text still being typed in a recipient field alone: it is
+  // usually half an address, and committing it would turn it into a chip
+  // under the user's fingers.
+  const save = (r = recipients) => queue(async () => {
     if (finished.current) return;
-    draftId.current = await saveDraft.mutateAsync(await buildInput());
+    draftId.current = await saveDraft.mutateAsync(await buildInput(r));
     setSaved(true);
   });
 
-  // Only a draft this window created goes away: a reopened draft the user
-  // decides not to change must survive "Non salvare".
-  const discard = () => queue(async () => {
-    if (draftId.current && draftId.current !== dto.draftId) await discardDraft.mutateAsync(draftId.current);
+  // The reopened draft exactly as it was stored when this window opened.
+  const originalInput = (): ComposeInput => ({
+    draftId: draftId.current,
+    accountId: dto.accountId,
+    to: dto.to, cc: dto.cc, bcc: dto.bcc,
+    subject: dto.subject,
+    bodyMd: dto.bodyMd,
+    mode: dto.mode,
+    sourceMessageId: dto.sourceMessageId,
+    attachments: dto.inlineImages
+      .filter((i) => dto.bodyMd.includes(`cid:${i.contentId}`))
+      .map((i) => ({ filename: i.contentId, mimeType: i.mimeType, contentId: i.contentId, dataBase64: i.dataBase64 })),
+    forwardedAttachmentIds: dto.forwardedAttachments.map((a) => a.id),
   });
 
-  const close = () => {
-    if (dirty) return setConfirm('close');
-    // Edited and then reverted: the autosaved copy is now an orphan.
-    void discard().catch(() => {});
+  // Throwing the changes away: a draft this window created goes; a reopened
+  // one is never lost, so if an autosave already replaced it, it is saved
+  // back as it was opened.
+  const discard = () => queue(async () => {
+    if (!draftId.current || draftId.current === dto.draftId) return;
+    if (reopened) draftId.current = await saveDraft.mutateAsync(originalInput());
+    else await discardDraft.mutateAsync(draftId.current);
+  });
+
+  const discardAndClose = () => {
+    setConfirm(null);
+    finished.current = true;
+    void discard().catch((err) => toast.error(
+      `${reopened ? 'Ripristino bozza non riuscito' : 'Eliminazione bozza non riuscita'}: ${String(err)}`,
+    ));
     closeCompose();
   };
+
+  // Not dirty means what is on screen is what the window opened with, so
+  // undoing back to it is the same as "Non salvare".
+  const close = () => (dirty ? setConfirm('close') : discardAndClose());
 
   useEffect(() => {
     requestCloseRef.current = close;
@@ -190,12 +236,20 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
     requestCloseRef.current = closeCompose;
   }, [requestCloseRef, closeCompose]);
 
-  const canSend = all.length > 0 && !hasInvalid && !sendCompose.isPending;
+  // Pending text counts as a recipient here; it is validated when it is
+  // committed, on send.
+  const canSend = (to.length + cc.length + bcc.length > 0 || hasPending) && !hasInvalid && !sendCompose.isPending;
 
   const send = async (skipSubjectCheck = false) => {
-    if (!canSend) {
-      if (hasInvalid) toast.error('Correggi gli indirizzi non validi prima di inviare.');
-      else if (all.length === 0) toast.error('Aggiungi almeno un destinatario.');
+    if (sendCompose.isPending) return;
+    const r = commitPending();
+    const all = [...r.to, ...r.cc, ...r.bcc];
+    if (all.some((a) => !isValidAddress(a))) {
+      toast.error('Correggi gli indirizzi non validi prima di inviare.');
+      return;
+    }
+    if (all.length === 0) {
+      toast.error('Aggiungi almeno un destinatario.');
       return;
     }
     if (!skipSubjectCheck && !subject.trim()) return setConfirm('subject');
@@ -205,7 +259,7 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
     // latest content and the id of the last draft that did get saved.
     finished.current = true;
     try {
-      await queue(async () => sendCompose.mutateAsync(await buildInput()));
+      await queue(async () => sendCompose.mutateAsync(await buildInput(r)));
       toast.success('Messaggio inviato');
       closeCompose();
     } catch (err) {
@@ -216,7 +270,7 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
 
   const saveNow = async () => {
     try {
-      await save();
+      await save(commitPending());
       toast.success('Bozza salvata');
     } catch (err) {
       toast.error(`Salvataggio bozza non riuscito: ${String(err)}`);
@@ -226,28 +280,21 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
   const saveAndClose = async () => {
     setConfirm(null);
     try {
-      await save();
+      await save(commitPending());
       closeCompose();
     } catch (err) {
       toast.error(`Salvataggio bozza non riuscito: ${String(err)}`);
     }
   };
 
-  const discardAndClose = () => {
-    setConfirm(null);
-    finished.current = true;
-    void discard().catch((err) => toast.error(`Eliminazione bozza non riuscita: ${String(err)}`));
-    closeCompose();
-  };
-
   const autosave = useEffectEvent(() => {
     save().catch((err) => toast.error(`Salvataggio automatico non riuscito: ${String(err)}`));
   });
   useEffect(() => {
-    if (!dirty) return;
+    if (!changed) return;
     const timer = setTimeout(autosave, AUTOSAVE_MS);
     return () => clearTimeout(timer);
-  }, [dirty, accountId, recipients, subject, bodyMd, images, files, forwarded]);
+  }, [changed, accountId, recipients, subject, bodyMd, images, files, forwarded]);
 
   const onShortcut = useEffectEvent((e: KeyboardEvent) => {
     if (!(e.metaKey || e.ctrlKey) || confirm) return;
@@ -310,6 +357,8 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
         onAccountChange={setAccountId}
         recipients={recipients}
         onRecipientsChange={setRecipients}
+        pending={pending}
+        onPendingChange={setPending}
         subject={subject}
         onSubjectChange={setSubject}
         focusRecipients={!replying}
