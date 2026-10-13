@@ -646,6 +646,27 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
         let mailboxes = self.message_read_repo.list_mailboxes(&account.id).await?;
         let sent = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Sent);
 
+        // Shown in Sent right away instead of after the next sync. Falls back
+        // to a placeholder id before the first sync has discovered Sent.
+        // Projected before the Sent APPEND starts, so a sync storing the
+        // server copy always finds the placeholder to supersede.
+        let message_id = MessageId::new();
+        let event = DomainEvent::MessageSent {
+            message_id,
+            account_id: account.id,
+            mailbox_id: sent.map_or_else(MailboxId::new, |m| m.id),
+            envelope: outgoing_envelope(&outgoing),
+            message_rfc_id: outgoing.message_rfc_id.clone(),
+            in_reply_to: outgoing.in_reply_to.clone(),
+            references: outgoing.references.clone(),
+            body_text: outgoing.body_text.clone(),
+            body_html: outgoing.body_html.clone(),
+            sent_at: chrono::Utc::now(),
+        };
+        // The message is out either way: still file the Sent copy and clean
+        // up before reporting a failed record.
+        let recorded = self.append_and_publish(&message_id, AggregateType::Message, 0, event).await;
+
         if let Some(sent) = sent.filter(|_| !compose::saves_sent_copy_itself(&account)) {
             let (provider, path, copy) = (Arc::clone(&provider), sent.path.clone(), outgoing.clone());
             tokio::spawn(async move {
@@ -665,30 +686,13 @@ impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModel
             tracing::warn!(%e, "Failed to set \\Answered on replied-to message");
         }
 
-        // Shown in Sent right away instead of after the next sync. Falls back
-        // to a placeholder id before the first sync has discovered Sent.
-        let message_id = MessageId::new();
-        let event = DomainEvent::MessageSent {
-            message_id,
-            account_id: account.id,
-            mailbox_id: sent.map_or_else(MailboxId::new, |m| m.id),
-            envelope: outgoing_envelope(&outgoing),
-            message_rfc_id: outgoing.message_rfc_id.clone(),
-            in_reply_to: outgoing.in_reply_to.clone(),
-            references: outgoing.references.clone(),
-            body_text: outgoing.body_text.clone(),
-            body_html: outgoing.body_html.clone(),
-            sent_at: chrono::Utc::now(),
-        };
-        self.append_and_publish(&message_id, AggregateType::Message, 0, event)
-            .await?;
-
         if let Some(draft_id) = input.draft_id
             && let Err(e) = self.remove_draft(draft_id).await
         {
             tracing::warn!(%e, %draft_id, "message sent, but deleting its draft failed");
         }
 
+        recorded?;
         info!(%message_id, "message sent");
         Ok(CommandResult::MessageSent { message_id })
     }

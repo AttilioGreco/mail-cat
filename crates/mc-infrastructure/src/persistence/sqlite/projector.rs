@@ -16,7 +16,7 @@ use mc_domain::{
 
 use super::repo_err;
 use super::repository::{
-    Addresses, SqliteRepository, exec, json, nanos, query_one, save_checkpoint_in,
+    Addresses, SqliteRepository, exec, json, nanos, query_all, query_one, save_checkpoint_in,
     sender_display, sql_int, store_body,
 };
 
@@ -187,7 +187,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     adjust_unread(tx, mailbox_id.as_uuid(), 1)?;
                 }
                 refresh_conversation(tx, account_id.as_uuid(), thread_id.value())?;
-                note_synced_message(tx, account_id, mailbox_id, message_rfc_id.as_deref(), envelope, *received_at)?;
+                note_synced_message(tx, account_id, mailbox_id, message_id, message_rfc_id.as_deref(), envelope, *received_at)?;
             }
         }
         DomainEvent::MessageBodyFetched { message_id, attachments } => {
@@ -223,7 +223,11 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 references,
                 &message_id.to_string(),
             );
-            let inserted = insert_message(
+            // The server copy can sync into Sent before this lands (Gmail files
+            // it during SMTP): it already is the message, a placeholder would
+            // only duplicate it.
+            let inserted = !server_copy_exists(tx, account_id, mailbox_id, message_rfc_id.as_deref())?
+                && insert_message(
                 tx,
                 &NewMessage {
                     id: message_id,
@@ -245,8 +249,8 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             if inserted {
                 store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), *sent_at)?;
                 refresh_conversation(tx, account_id.as_uuid(), thread_id.value())?;
-                note_sent(tx, envelope, *sent_at)?;
             }
+            note_sent_once(tx, account_id, message_id, message_rfc_id.as_deref(), envelope, *sent_at)?;
         }
         DomainEvent::DraftSaved { message_id, account_id, envelope, body_text, body_html } => {
             // Each save replaces the draft; the event's own time keeps replays deterministic.
@@ -393,14 +397,13 @@ fn insert_message(tx: &Connection, m: &NewMessage) -> Result<bool, DomainError> 
     Ok(inserted == 1)
 }
 
-/// Callers only note a message the first time its row is inserted, so replays
-/// don't recount. A message mail-cat sent was counted by `MessageSent`; its
-/// server copy syncing into Sent arrives while that placeholder (no UID, same
-/// Message-ID) still exists, and is not counted again.
+/// Received-side usage is a MAX, so replays are harmless; sent-side counting
+/// goes through `note_sent_once`.
 fn note_synced_message(
     tx: &Connection,
     account_id: &AccountId,
     mailbox_id: &MailboxId,
+    message_id: &MessageId,
     rfc_message_id: Option<&str>,
     envelope: &Envelope,
     at: DateTime<Utc>,
@@ -413,10 +416,8 @@ fn note_synced_message(
     )?;
     match mailbox_type.as_deref() {
         Some(t) if t == json(&MailboxType::Sent)? => {
-            if sent_placeholder_exists(tx, account_id, rfc_message_id)? {
-                return Ok(());
-            }
-            note_sent(tx, envelope, at)
+            drop_sent_placeholders(tx, account_id, rfc_message_id)?;
+            note_sent_once(tx, account_id, message_id, rfc_message_id, envelope, at)
         }
         Some(t) if t == json(&MailboxType::Drafts)? => Ok(()),
         _ => envelope.from.iter().try_for_each(|a| {
@@ -432,9 +433,10 @@ fn note_synced_message(
     }
 }
 
-fn sent_placeholder_exists(
+fn server_copy_exists(
     tx: &Connection,
     account_id: &AccountId,
+    mailbox_id: &MailboxId,
     rfc_message_id: Option<&str>,
 ) -> Result<bool, DomainError> {
     let Some(rfc_message_id) = rfc_message_id else {
@@ -442,15 +444,53 @@ fn sent_placeholder_exists(
     };
     Ok(query_one(
         tx,
-        "SELECT 1 FROM messages \
-         WHERE account_id = ?1 AND rfc_message_id = ?2 AND provider_uid IS NULL LIMIT 1",
-        params![account_id.as_uuid(), rfc_message_id],
+        "SELECT 1 FROM messages WHERE account_id = ?1 AND rfc_message_id = ?2 \
+             AND mailbox_id = ?3 AND provider_uid IS NOT NULL LIMIT 1",
+        params![account_id.as_uuid(), rfc_message_id, mailbox_id.as_uuid()],
         |_| Ok(()),
     )?
     .is_some())
 }
 
-fn note_sent(tx: &Connection, envelope: &Envelope, at: DateTime<Utc>) -> Result<(), DomainError> {
+/// The server copy of a message we sent replaces its `MessageSent`
+/// placeholder. SyncService supersedes it with an event, but a sync that
+/// looked before the placeholder existed can't; this closes that window.
+fn drop_sent_placeholders(
+    tx: &Connection,
+    account_id: &AccountId,
+    rfc_message_id: Option<&str>,
+) -> Result<(), DomainError> {
+    let Some(rfc_message_id) = rfc_message_id else {
+        return Ok(());
+    };
+    let placeholders = query_all(
+        tx,
+        "SELECT id FROM messages \
+         WHERE account_id = ?1 AND rfc_message_id = ?2 AND provider_uid IS NULL",
+        params![account_id.as_uuid(), rfc_message_id],
+        |r| r.get::<_, Uuid>(0),
+    )?;
+    placeholders.into_iter().try_for_each(|id| delete_message(tx, &MessageId::from_uuid(id)))
+}
+
+/// Counts a sent message's recipients once per Message-ID, however many
+/// times its placeholder or server copy is (re)projected.
+fn note_sent_once(
+    tx: &Connection,
+    account_id: &AccountId,
+    message_id: &MessageId,
+    rfc_message_id: Option<&str>,
+    envelope: &Envelope,
+    at: DateTime<Utc>,
+) -> Result<(), DomainError> {
+    let first = exec(
+        tx,
+        "INSERT OR IGNORE INTO sent_counted (account_id, message_key) VALUES (?1, COALESCE(?2, hex(?3)))",
+        params![account_id.as_uuid(), rfc_message_id, message_id.as_uuid()],
+    )?;
+    if first == 0 {
+        return Ok(());
+    }
     let recipients: BTreeSet<&str> =
         envelope.to.iter().chain(&envelope.cc).chain(&envelope.bcc).map(|a| a.email.as_str()).collect();
     for email in recipients {

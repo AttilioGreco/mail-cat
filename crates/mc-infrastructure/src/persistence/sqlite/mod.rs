@@ -138,6 +138,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         WHERE m.from_email != ''
         GROUP BY 1
         ON CONFLICT(email) DO UPDATE SET last_received_at = excluded.last_received_at;"#,
+    // 4: the sent messages address_usage has counted, keyed by Message-ID
+    // (row id when there is none). Outlives the rows: replaying a superseded
+    // Sent placeholder's MessageSent re-inserts a deleted row, and the server
+    // copy shares its Message-ID, so neither may count again.
+    r#"CREATE TABLE sent_counted (
+        account_id  BLOB NOT NULL,
+        message_key TEXT NOT NULL,
+        PRIMARY KEY (account_id, message_key)
+    ) WITHOUT ROWID;
+    INSERT OR IGNORE INTO sent_counted (account_id, message_key)
+        SELECT m.account_id, COALESCE(m.rfc_message_id, hex(m.id))
+        FROM messages m
+        JOIN mailboxes b ON b.id = m.mailbox_id AND b.mailbox_type = '"Sent"';"#,
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

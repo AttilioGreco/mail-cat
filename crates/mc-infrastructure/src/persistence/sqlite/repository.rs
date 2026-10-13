@@ -167,7 +167,7 @@ pub(super) fn query_one<T>(
         .map_err(repo_err)
 }
 
-fn query_all<T>(
+pub(super) fn query_all<T>(
     conn: &Connection,
     sql: &str,
     params: impl Params,
@@ -1283,7 +1283,7 @@ mod tests {
         }
         // Back to a pre-usage database holding the same messages.
         repo.db
-            .write(|c| c.execute_batch("DROP TABLE address_usage; PRAGMA user_version = 2;").map_err(repo_err))
+            .write(|c| c.execute_batch("DROP TABLE address_usage; DROP TABLE sent_counted; PRAGMA user_version = 2;").map_err(repo_err))
             .await
             .unwrap();
         drop(repo);
@@ -1349,13 +1349,75 @@ mod tests {
             synced,
             DomainEvent::MessageDeleted { message_id: placeholder, mailbox_id: sent, permanently: true },
         ];
+        let events: Vec<_> = (1..).zip(events).map(|(pos, event)| at_position(pos, event)).collect();
+        for event in &events {
+            repo.project(event).await.unwrap();
+        }
+        assert_eq!(sent_state(&repo, sent).await, (vec![server_copy], 1, 1));
+
+        // Boot catch-up replays what the live path already projected.
+        repo.project_batch("read_model", events).await.unwrap();
+        assert_eq!(sent_state(&repo, sent).await, (vec![server_copy], 1, 1));
+    }
+
+    #[tokio::test]
+    async fn sent_placeholder_arriving_after_its_server_copy_is_not_shown() {
+        let (_dir, repo) = open();
+        let (account, sent) = (AccountId::new(), MailboxId::new());
+        let rfc = "<gmail@example.com>";
+        let ada = vec![Address { name: None, email: EmailAddress::new("ada@example.com").unwrap() }];
+        let (server_copy, mut synced) = received(account, sent, rfc);
+        if let DomainEvent::MessageReceived { envelope, .. } = &mut synced {
+            envelope.to = ada.clone();
+        }
+        let placeholder = MessageId::new();
+        let sent_event = |message_id| DomainEvent::MessageSent {
+            message_id,
+            account_id: account,
+            mailbox_id: sent,
+            envelope: Envelope {
+                from: vec![],
+                to: ada.clone(),
+                cc: vec![],
+                bcc: vec![],
+                reply_to: vec![],
+                subject: "s".into(),
+                date: Utc::now(),
+            },
+            message_rfc_id: Some(rfc.into()),
+            in_reply_to: None,
+            references: vec![],
+            body_text: Some("hi".into()),
+            body_html: None,
+            sent_at: Utc::now(),
+        };
+        let discovered = DomainEvent::MailboxDiscovered {
+            mailbox_id: sent,
+            account_id: account,
+            path: MailboxPath::parse("Sent", '/').unwrap(),
+            mailbox_type: MailboxType::Sent,
+        };
+
+        // Gmail files the copy during SMTP; a sync can store it first.
+        let events = [discovered.clone(), synced.clone(), sent_event(placeholder)];
         for (pos, event) in (1..).zip(events) {
             repo.project(&at_position(pos, event)).await.unwrap();
         }
+        assert_eq!(sent_state(&repo, sent).await, (vec![server_copy], 1, 1));
 
+        // A sync that looked before the placeholder existed stores the copy after it.
+        let (_dir, repo) = open();
+        let events = [discovered, sent_event(placeholder), synced];
+        for (pos, event) in (1..).zip(events) {
+            repo.project(&at_position(pos, event)).await.unwrap();
+        }
+        assert_eq!(sent_state(&repo, sent).await, (vec![server_copy], 1, 1));
+    }
+
+    /// Messages listed in Sent, ada's sent_count, total conversation messages.
+    async fn sent_state(repo: &SqliteRepository, sent: MailboxId) -> (Vec<MessageId>, i64, i64) {
         let listed = repo.list_messages(&sent, &Pagination { page: 1, page_size: 10 }).await.unwrap();
-        assert_eq!(listed.items.iter().map(|m| m.id).collect::<Vec<_>>(), [server_copy]);
-        let (sent_count, conversations): (i64, i64) = repo
+        let (sent_count, conversations) = repo
             .db
             .read(|c| {
                 Ok((
@@ -1369,7 +1431,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!((sent_count, conversations), (1, 1));
+        (listed.items.iter().map(|m| m.id).collect(), sent_count, conversations)
     }
 
     #[tokio::test]

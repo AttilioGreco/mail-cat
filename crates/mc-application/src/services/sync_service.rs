@@ -1158,9 +1158,9 @@ impl<
         })
     }
 
-    /// The server copy just stored replaces the one shown at send time. Its
-    /// `MessageReceived` came first, so the projector saw the placeholder and
-    /// did not count the recipients again.
+    /// The server copy just stored replaces the one shown at send time. The
+    /// projector counts recipients once per Message-ID, so the copy is not
+    /// counted again.
     async fn supersede(&self, placeholder: Option<MessageSummary>) -> Result<(), ApplicationError> {
         let Some(sent) = placeholder else {
             return Ok(());
