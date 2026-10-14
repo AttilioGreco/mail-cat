@@ -263,7 +263,9 @@ pub trait ContactReadRepository: Send + Sync {
         account_id: &AccountId,
     ) -> Result<Vec<ContactSummary>, DomainError>;
 
-    /// Search contacts by display name or email, best autocomplete match first.
+    /// Autocomplete by display name or email, best match first: one summary
+    /// per matching address, carrying it as `primary_email` and sole `emails`
+    /// entry. An address appears at most once per account scope.
     async fn search_contacts(
         &self,
         query: &str,

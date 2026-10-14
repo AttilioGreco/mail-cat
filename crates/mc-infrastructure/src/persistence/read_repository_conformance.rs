@@ -1461,6 +1461,8 @@ macro_rules! read_repository_conformance {
                     contact("Zoe Annabel", "annabel@example.com"),
                     contact("Ann Vega", "ann.rare@example.com"),
                     contact("Anne Wu", "ann.often@example.com"),
+                    // An auto-created duplicate collapses onto the named copy.
+                    contact("", "ann.often@example.com"),
                     send_to("ann.often@example.com", 1),
                     send_to("ann.often@example.com", 2),
                     rare.clone(),
@@ -1511,10 +1513,17 @@ macro_rules! read_repository_conformance {
             assert_eq!(found.iter().map(|c| c.id).collect::<Vec<_>>(), [contact]);
             assert_eq!(repo.find_by_email_in_account(&email("ada@example.com"), &account).await.unwrap().len(), 1);
             assert!(repo.find_by_email_in_account(&email("ada@example.com"), &AccountId::new()).await.unwrap().is_empty());
-            assert_eq!(repo.search_contacts("lovelace", 10).await.unwrap().len(), 1);
+            // A name match suggests each of the person's addresses.
+            let addresses = |hits: Vec<mc_domain::ContactSummary>| {
+                hits.into_iter().map(|c| c.primary_email.as_str().to_owned()).collect::<Vec<_>>()
+            };
+            assert_eq!(
+                addresses(repo.search_contacts("lovelace", 10).await.unwrap()),
+                ["ada@example.com", "ada@work.example.com"],
+            );
             assert_eq!(repo.search_contacts("ADA@EXAMPLE", 10).await.unwrap().len(), 1);
             // Autocomplete must find a contact by any of its addresses.
-            assert_eq!(repo.search_contacts("ada@work", 10).await.unwrap().len(), 1);
+            assert_eq!(addresses(repo.search_contacts("ada@work", 10).await.unwrap()), ["ada@work.example.com"]);
             assert!(repo.search_contacts("nobody", 10).await.unwrap().is_empty());
 
             project_all(

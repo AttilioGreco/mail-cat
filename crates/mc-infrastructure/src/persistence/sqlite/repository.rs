@@ -405,26 +405,37 @@ fn like_escape(query: &str) -> String {
         .replace('_', "\\_")
 }
 
-/// Autocomplete ranking, Apple Mail style: name-word / address / domain
-/// prefix hits before mere substrings, then people you write to (frecency),
-/// then people who write to you, then name. `?1` = escaped query, `?2` = now
-/// (ns). Sent frecency = count × 30/(30 + days since last send): a contact
-/// written to daily last month still beats a one-off from yesterday, but
-/// recency wins between similar counts.
+/// Autocomplete, one row per address: a person is picked by address, so a
+/// name match yields each of their addresses, an address match only that one.
+/// Copies of an address in one account (auto-created duplicates) collapse
+/// onto the named one. Ranking, Apple Mail style: name-word / address /
+/// domain prefix hits before mere substrings, then addresses you write to
+/// (frecency), then ones that write to you, then name. `?1` = escaped query,
+/// `?2` = now (ns). Sent frecency = count × 30/(30 + days since last send):
+/// an address written to daily last month still beats a one-off from
+/// yesterday, but recency wins between similar counts.
 const SEARCH_CONTACTS_SQL: &str = r"
-    JOIN contact_emails e ON e.contact_id = c.id
-    LEFT JOIN address_usage u ON u.email = e.email
-    GROUP BY c.id
-    HAVING MAX(c.display_name LIKE '%' || ?1 || '%' ESCAPE '\'
-            OR e.email LIKE '%' || ?1 || '%' ESCAPE '\')
+    SELECT h.id, h.display_name, h.address, h.emails, h.organization, h.source, h.account_scope
+    FROM (
+        SELECT c.*, e.email AS address,
+            c.display_name LIKE ?1 || '%' ESCAPE '\'
+                OR c.display_name LIKE '% ' || ?1 || '%' ESCAPE '\'
+                OR e.email LIKE ?1 || '%' ESCAPE '\'
+                OR e.email LIKE '%@' || ?1 || '%' ESCAPE '\' AS prefix_hit,
+            ROW_NUMBER() OVER (PARTITION BY e.email, c.account_scope
+                ORDER BY c.display_name = '', c.id) AS copy
+        FROM contacts c
+        JOIN contact_emails e ON e.contact_id = c.id
+        WHERE c.display_name LIKE '%' || ?1 || '%' ESCAPE '\'
+            OR e.email LIKE '%' || ?1 || '%' ESCAPE '\'
+    ) h
+    LEFT JOIN address_usage u ON u.email = h.address
+    WHERE h.copy = 1
     ORDER BY
-        MAX(c.display_name LIKE ?1 || '%' ESCAPE '\'
-            OR c.display_name LIKE '% ' || ?1 || '%' ESCAPE '\'
-            OR e.email LIKE ?1 || '%' ESCAPE '\'
-            OR e.email LIKE '%@' || ?1 || '%' ESCAPE '\') DESC,
-        MAX(u.sent_count * 30.0 / (30.0 + MAX(?2 - u.last_sent_at, 0) / 86400e9)) DESC,
-        MAX(u.last_received_at) DESC,
-        c.display_name COLLATE NOCASE, c.id
+        h.prefix_hit DESC,
+        u.sent_count * 30.0 / (30.0 + MAX(?2 - u.last_sent_at, 0) / 86400e9) DESC,
+        u.last_received_at DESC,
+        h.display_name COLLATE NOCASE, h.id, h.address
     LIMIT ?3";
 
 /// Per suggest field: its label and a query yielding `(value, count)` rows for
@@ -982,12 +993,12 @@ impl ContactReadRepository for SqliteRepository {
         let now = nanos(Utc::now());
         self.db
             .read(move |conn| {
-                query_all(
-                    conn,
-                    &select_contacts(SEARCH_CONTACTS_SQL),
-                    params![query, now, limit],
-                    |r| contact_from_row(r, 0),
-                )
+                query_all(conn, SEARCH_CONTACTS_SQL, params![query, now, limit], |r| {
+                    // The row's primary_email column is the matched address.
+                    let mut hit = contact_from_row(r, 0)?;
+                    hit.emails.retain(|e| e.address == hit.primary_email);
+                    Ok(hit)
+                })
             })
             .await
     }

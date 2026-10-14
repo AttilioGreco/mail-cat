@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use mc_domain::{
@@ -170,7 +171,8 @@ where
         }
     }
 
-    /// Own-account contacts first; others only fill the remaining slots.
+    /// Own-account addresses first; others only fill the remaining slots, and
+    /// never repeat an address already suggested.
     async fn search_contacts(
         &self,
         query: &str,
@@ -181,17 +183,20 @@ where
             return Ok(Vec::new());
         }
         // Over-fetch so cross-account matches can't crowd out own-account ones.
-        let (mut own, cross): (Vec<_>, Vec<_>) = self
+        let (own, cross): (Vec<_>, Vec<_>) = self
             .contact_repo
             .search_contacts(query.trim(), limit.saturating_mul(4))
             .await?
             .into_iter()
             .map(|c| ContactSearchHit::from_summary(c, requesting_account))
             .partition(|hit| !hit.is_cross_account);
-        own.truncate(limit);
-        let room = limit - own.len();
-        own.extend(cross.into_iter().take(room));
-        Ok(own)
+        let mut seen = HashSet::new();
+        Ok(own
+            .into_iter()
+            .chain(cross)
+            .filter(|hit| seen.insert(hit.primary_email.to_lowercase()))
+            .take(limit)
+            .collect())
     }
 }
 
@@ -582,6 +587,7 @@ mod tests {
         let (mine, other) = (AccountId::new(), AccountId::new());
         let handler = handler_with_contacts(vec![
             contact("x1@example.com", Some(other)),
+            contact("ME1@example.com", Some(other)),
             contact("global@example.com", None),
             contact("me1@example.com", Some(mine)),
             contact("me2@example.com", Some(mine)),
@@ -597,6 +603,13 @@ mod tests {
         };
         let shown: Vec<_> = hits.iter().map(|h| (h.primary_email.as_str(), h.is_cross_account)).collect();
         assert_eq!(shown, [("me1@example.com", false), ("me2@example.com", false), ("x1@example.com", true)]);
+
+        // An address both accounts know is suggested once, as the own one.
+        let QueryResult::ContactHits(hits) = handler.dispatch(search(10)).await.unwrap() else {
+            panic!("expected contact hits");
+        };
+        let emails: Vec<_> = hits.iter().map(|h| h.primary_email.as_str()).collect();
+        assert_eq!(emails, ["me1@example.com", "me2@example.com", "x1@example.com", "global@example.com"]);
 
         let QueryResult::ContactHits(hits) = handler.dispatch(search(1)).await.unwrap() else {
             panic!("expected contact hits");
