@@ -151,6 +151,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         SELECT m.account_id, COALESCE(m.rfc_message_id, hex(m.id))
         FROM messages m
         JOIN mailboxes b ON b.id = m.mailbox_id AND b.mailbox_type = '"Sent"';"#,
+    // 5: bytes pulled from each account's server, for its daily download cap
+    // (Gmail: 2.5 GB/day). Keyed by address: the provider meters before the
+    // account id exists. Operational data, not event-sourced; rows older
+    // than the window are pruned as new ones arrive.
+    "CREATE TABLE downloads (
+        account_email TEXT NOT NULL,
+        at            INTEGER NOT NULL,
+        bytes         INTEGER NOT NULL
+    );
+    CREATE INDEX downloads_recent ON downloads(account_email, at);",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

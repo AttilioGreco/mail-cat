@@ -28,22 +28,11 @@ pub struct ServerConfig {
     #[serde(default = "default_ui_bin")]
     pub ui_bin: String,
 
-    /// Max message bodies the background backfill worker downloads per minute,
-    /// per account. `0` disables backfill (bodies load lazily on open). Keep it
-    /// low for Gmail — the initial sync only pulls envelopes, then bodies trickle
-    /// in newest-first at this rate to avoid the daily bandwidth cap.
-    #[serde(default = "default_body_backfill_per_minute")]
-    pub body_backfill_per_minute: u32,
-
     /// `tracing_subscriber::EnvFilter` directive, e.g. `"info"` or
     /// `"mc_server=debug,tower=warn"`. Overridden by the `RUST_LOG` env var
     /// when set. Defaults to `mc_server=info,mc_application=debug,mc_infrastructure=debug`.
     #[serde(default)]
     pub log_level: Option<String>,
-}
-
-fn default_body_backfill_per_minute() -> u32 {
-    30
 }
 
 /// SMTP security mode in the config file.
@@ -101,10 +90,20 @@ pub struct AccountConfig {
     /// send messages.
     #[serde(default)]
     pub smtp: Option<SmtpAccountConfig>,
-    /// Per-account override of the top-level `body_backfill_per_minute`.
-    /// Absent means "use the global default".
+    /// Megabytes this account may download per 24 h; the background body
+    /// download paces itself to stay under it. Absent: 2000 for Gmail, whose
+    /// cap is 2.5 GB/day, unlimited elsewhere. `0` = unlimited.
     #[serde(default)]
-    pub body_backfill_per_minute: Option<u32>,
+    pub daily_download_mb: Option<u32>,
+}
+
+impl AccountConfig {
+    /// Daily download cap in bytes, `None` when unlimited.
+    pub fn daily_download_limit(&self) -> Option<u64> {
+        let gmail = self.imap_host.eq_ignore_ascii_case("imap.gmail.com");
+        let mb = self.daily_download_mb.or(gmail.then_some(2000))?;
+        (mb > 0).then(|| u64::from(mb) << 20)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -149,7 +148,6 @@ impl Default for ServerConfig {
             index_path: default_index_path(),
             accounts: vec![],
             ui_bin: default_ui_bin(),
-            body_backfill_per_minute: default_body_backfill_per_minute(),
             log_level: None,
         }
     }
@@ -286,10 +284,9 @@ security = "start_tls"
                     password: None,
                 }),
                 oauth_provider: None,
-                body_backfill_per_minute: Some(10),
+                daily_download_mb: Some(10),
             }],
             ui_bin: "/usr/local/bin/mail-cat-ui".into(),
-            body_backfill_per_minute: 30,
             log_level: Some("debug".into()),
         };
 

@@ -28,16 +28,6 @@ grpc_addr = "127.0.0.1:50051"
 # Default: mc_server=info,mc_application=debug,mc_infrastructure=debug
 # log_level = "info"
 
-# Messaggi (corpo) scaricati al minuto dal worker di backfill in background,
-# per account. La sync iniziale scarica solo gli envelope; i corpi arrivano
-# dopo, dal più recente al più vecchio, a questo ritmo — per non superare il
-# tetto giornaliero di banda imposto da provider come Gmail su mailbox grandi.
-# `0` disabilita il backfill (i corpi si caricano solo all'apertura del messaggio).
-# Puoi anche impostarlo per singolo account (vedi sotto `[[accounts]]`),
-# utile se un account ha una mailbox enorme e un altro no.
-# Default: 30 (= 30 corpi/minuto, ~1 ogni 2 secondi)
-# body_backfill_per_minute = 30
-
 # ── Account email ────────────────────────────────────────────────────────────
 # Aggiungere un blocco [[accounts]] per ogni casella da sincronizzare.
 
@@ -56,9 +46,13 @@ smtp_port   = 587
 username    = "tuo@indirizzo.it"
 password    = "password_o_app_password"
 
-# Override del body_backfill_per_minute globale solo per questo account.
-# Se assente usa il valore globale definito sopra.
-# body_backfill_per_minute = 5
+# Megabyte che questo account può scaricare in 24 ore. La sync iniziale
+# scarica solo gli envelope; i corpi (solo il testo, mai gli allegati, che si
+# scaricano quando servono) arrivano dopo, dal più recente: la prima metà
+# del tetto a velocità piena, il resto distribuito sulla giornata.
+# Default: 2000 per Gmail (tetto 2,5 GB/giorno, oltre blocca l'account),
+# illimitato per gli altri. `0` = illimitato.
+# daily_download_mb = 2000
 
 # [[accounts]]
 # name      = "Work"

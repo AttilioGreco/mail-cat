@@ -197,6 +197,15 @@ pub trait BodyBackfillQueue: Send + Sync {
     /// How many bodies are still queued for this account — the "N messages
     /// left to download" number, unbounded by any page size.
     async fn count_pending_backfill(&self, account_id: &AccountId) -> Result<u32, DomainError>;
+
+    /// Bytes downloaded from this account's server since `since`, whatever
+    /// asked for them (backfill, an opened message, a forward) — what the
+    /// provider's daily download cap counts.
+    async fn downloaded_since(
+        &self,
+        account_id: &AccountId,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Where fetched message bodies live. A body is a copy of server state, so it

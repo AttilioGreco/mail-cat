@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use async_imap::imap_proto::types::{BodyStructure, ContentEncoding, SectionPath};
 use async_imap::types::Seq;
 use async_trait::async_trait;
 use futures::Stream;
@@ -13,14 +15,15 @@ use mc_domain::error::DomainError;
 use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::{Message, OutgoingMessage};
 use mc_domain::traits::email_provider::{
-    EmailProvider, FetchRange, MailboxStatus, MessageEnvelopeSummary, ProviderNotification,
-    UidFlagEntry,
+    EmailProvider, FetchRange, MailboxStatus, MessageBodyResult, MessageEnvelopeSummary,
+    ProviderNotification, UidFlagEntry,
 };
 use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::mailbox_path::MailboxPath;
 use mc_domain::value_objects::uid::ProviderUid;
 
 use crate::email::smtp::SmtpSender;
+use crate::persistence::DownloadMeter;
 
 use super::mapper::{flag_to_imap, mailbox_path_to_string};
 
@@ -113,6 +116,7 @@ pub struct ImapEmailProvider {
     smtp_sender: Option<SmtpSender>,
     idle_sessions: Mutex<Vec<(ImapSession, Instant)>>,
     permits: Arc<Semaphore>,
+    meter: Option<DownloadMeter>,
 }
 
 impl ImapEmailProvider {
@@ -133,7 +137,149 @@ impl ImapEmailProvider {
             smtp_sender,
             idle_sessions: Mutex::default(),
             permits: Arc::new(Semaphore::new(MAX_POOLED_CONNECTIONS)),
+            meter: None,
         }
+    }
+
+    /// Count every message download against the account's daily cap.
+    #[must_use]
+    pub fn with_download_meter(mut self, meter: DownloadMeter) -> Self {
+        self.meter = Some(meter);
+        self
+    }
+
+    async fn metered(&self, bytes: u64) {
+        if let Some(meter) = &self.meter {
+            meter.record(bytes).await;
+        }
+    }
+
+    /// Downloads only the text a body needs — its first non-attachment
+    /// text/plain and text/html parts — never attachments: one BODYSTRUCTURE
+    /// round trip, then one fetch per distinct part layout. Every UID that
+    /// came back gets a result (bodiless if it has no text), so it dequeues.
+    async fn fetch_text_bodies(
+        &self,
+        session: &mut ImapSession,
+        uids: &[u32],
+    ) -> Result<Vec<MessageBodyResult>, DomainError> {
+        use futures::TryStreamExt;
+
+        let structures: Vec<async_imap::types::Fetch> = session
+            .uid_fetch(Self::compress_uid_ranges(uids), "(UID BODYSTRUCTURE)")
+            .await
+            .map_err(|e| DomainError::Provider(format!("Body structure fetch failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| DomainError::Provider(format!("Body structure stream error: {e}")))?;
+
+        let parts_by_uid: HashMap<u32, Vec<TextPart>> = structures
+            .iter()
+            // An unsolicited FLAGS update for the same UID carries no structure:
+            // skipping it keeps the real one. A UID with none comes back missing.
+            .filter_map(|item| Some((item.uid?, text_parts(item.bodystructure()?))))
+            .collect();
+        // Messages laid out alike share one FETCH of the same sections.
+        let mut layouts: HashMap<Vec<Vec<u32>>, Vec<u32>> = HashMap::new();
+        for (uid, parts) in &parts_by_uid {
+            layouts.entry(parts.iter().map(|p| p.section.clone()).collect()).or_default().push(*uid);
+        }
+        // ponytail: a BODYSTRUCTURE reply's size isn't exposed; 1 KiB is a typical one.
+        let mut bytes = structures.len() as u64 * 1024;
+
+        let mut results = Vec::with_capacity(structures.len());
+        for (sections, message_uids) in layouts {
+            if sections.is_empty() {
+                results.extend(message_uids.into_iter().map(|uid| MessageBodyResult {
+                    provider_uid: ProviderUid::new(uid),
+                    body_text: None,
+                    body_html: None,
+                }));
+                continue;
+            }
+            let wanted: Vec<String> = sections
+                .iter()
+                .map(|s| format!("BODY.PEEK[{}]", s.iter().map(u32::to_string).collect::<Vec<_>>().join(".")))
+                .collect();
+            let fetched: Vec<async_imap::types::Fetch> = session
+                .uid_fetch(Self::compress_uid_ranges(&message_uids), format!("(UID {})", wanted.join(" ")))
+                .await
+                .map_err(|e| DomainError::Provider(format!("Body fetch failed: {e}")))?
+                .try_collect()
+                .await
+                .map_err(|e| DomainError::Provider(format!("Body stream error: {e}")))?;
+            for item in &fetched {
+                let Some((uid, parts)) = item.uid.and_then(|uid| Some((uid, parts_by_uid.get(&uid)?))) else {
+                    continue;
+                };
+                let mut result = MessageBodyResult {
+                    provider_uid: ProviderUid::new(uid),
+                    body_text: None,
+                    body_html: None,
+                };
+                for part in parts {
+                    let Some(data) = item.section(&SectionPath::Part(part.section.clone(), None)) else {
+                        continue;
+                    };
+                    bytes += data.len() as u64;
+                    let text = part.decode(data);
+                    if part.html {
+                        result.body_html = text;
+                    } else {
+                        result.body_text = text;
+                    }
+                }
+                results.push(result);
+            }
+        }
+        self.metered(bytes).await;
+        Ok(results)
+    }
+
+    async fn selected(&self, mailbox_name: &str) -> Result<PooledSession, DomainError> {
+        let mut session = self.session().await?;
+        session
+            .select(mailbox_name)
+            .await
+            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+        Ok(session)
+    }
+
+    /// One message's text, on fresh connections: the text parts if its
+    /// BODYSTRUCTURE parses, else the whole message. Some servers send
+    /// structures the parser rejects; without this such a message would never
+    /// get a body and would block the backfill behind it for good.
+    async fn fetch_one_body(
+        &self,
+        mailbox_name: &str,
+        uid: u32,
+    ) -> Result<Option<MessageBodyResult>, DomainError> {
+        let mut session = self.selected(mailbox_name).await?;
+        if let Ok(found) = self.fetch_text_bodies(&mut session, &[uid]).await {
+            self.release(session);
+            return Ok(found.into_iter().next());
+        }
+        // The failed response may be half-read: that connection is dropped.
+        let mut session = self.selected(mailbox_name).await?;
+        let raw = Self::fetch_whole(&mut session, uid).await?;
+        self.release(session);
+        let Some(raw) = raw else { return Ok(None) };
+        self.metered(raw.len() as u64).await;
+        let (body_text, body_html) = whole_message_text(&raw);
+        Ok(Some(MessageBodyResult { provider_uid: ProviderUid::new(uid), body_text, body_html }))
+    }
+
+    async fn fetch_whole(session: &mut ImapSession, uid: u32) -> Result<Option<Vec<u8>>, DomainError> {
+        use futures::TryStreamExt;
+
+        let fetched: Vec<async_imap::types::Fetch> = session
+            .uid_fetch(uid.to_string(), "BODY.PEEK[]")
+            .await
+            .map_err(|e| DomainError::Provider(format!("Raw fetch failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| DomainError::Provider(format!("Raw stream error: {e}")))?;
+        Ok(fetched.into_iter().find_map(|f| f.body().map(<[u8]>::to_vec)))
     }
 
     /// Get IMAP configuration for display/debugging.
@@ -430,6 +576,10 @@ impl EmailProvider for ImapEmailProvider {
                 })?;
 
             debug!("Batch {}: fetched {} envelopes", batch_idx, batch_results.len());
+            // ponytail: the ENVELOPE structure repeats the header, so it costs
+            // about as much again; counted as the header bytes twice.
+            let header_bytes: usize = batch_results.iter().filter_map(|f| f.header()).map(<[u8]>::len).sum();
+            self.metered(2 * header_bytes as u64).await;
 
             for fetch_data in &batch_results {
                 if let Some(envelope_data) = fetch_data.envelope() {
@@ -514,31 +664,11 @@ impl EmailProvider for ImapEmailProvider {
         mailbox: &MailboxPath,
         uid: ProviderUid,
     ) -> Result<Message, DomainError> {
-        use futures::TryStreamExt;
-
-        let mut session = self.session().await?;
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
-        session
-            .select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
-
-        let fetched: Vec<async_imap::types::Fetch> = session
-            .uid_fetch(uid.value().to_string(), "BODY.PEEK[]")
-            .await
-            .map_err(|e| DomainError::Provider(format!("Body fetch failed: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Body stream error: {e}")))?;
-
-        self.release(session);
-
-        let item = fetched
-            .into_iter()
-            .next()
+        let MessageBodyResult { body_text, body_html, .. } = self
+            .fetch_one_body(&mailbox_name, uid.value())
+            .await?
             .ok_or_else(|| DomainError::Provider("Message not found".into()))?;
-
-        let (body_text, body_html) = item.body().map(parse_mime_body).unwrap_or((None, None));
 
         // Produce a minimal Message with only body fields populated.
         // SyncService::fetch_message_body only reads body_text / body_html / attachments.
@@ -572,51 +702,28 @@ impl EmailProvider for ImapEmailProvider {
         &self,
         mailbox: &MailboxPath,
         uids: &[ProviderUid],
-    ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError> {
-        use futures::TryStreamExt;
-        use mc_domain::traits::email_provider::MessageBodyResult;
-
+    ) -> Result<Vec<MessageBodyResult>, DomainError> {
         if uids.is_empty() {
             return Ok(vec![]);
         }
 
-        let mut session = self.session().await?;
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
-        session
-            .select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+        let mut session = self.selected(&mailbox_name).await?;
 
         let uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
         let mut results = Vec::with_capacity(uids.len());
-
         for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
-            let query = Self::compress_uid_ranges(chunk);
-            debug!(
-                "Bulk body fetch: {} UIDs (query: {}…)",
-                chunk.len(),
-                &query[..query.len().min(60)]
-            );
-
-            let fetched: Vec<async_imap::types::Fetch> = session
-                .uid_fetch(&query, "BODY.PEEK[]")
-                .await
-                .map_err(|e| DomainError::Provider(format!("Body fetch failed: {e}")))?
-                .try_collect()
-                .await
-                .map_err(|e| DomainError::Provider(format!("Body stream error: {e}")))?;
-
-            for item in &fetched {
-                let provider_uid = match item.uid {
-                    Some(u) => ProviderUid::new(u),
-                    None => continue,
-                };
-                let (body_text, body_html) = item
-                    .body()
-                    .map(parse_mime_body)
-                    .unwrap_or((None, None));
-
-                results.push(MessageBodyResult { provider_uid, body_text, body_html });
+            debug!("Bulk body fetch: {} UIDs", chunk.len());
+            match self.fetch_text_bodies(&mut session, chunk).await {
+                Ok(found) => results.extend(found),
+                // One message the parser rejects fails its whole chunk: go one by one.
+                Err(e) => {
+                    warn!(mailbox = %mailbox_name, error = %e, "bulk text fetch failed, retrying message by message");
+                    for &uid in chunk {
+                        results.extend(self.fetch_one_body(&mailbox_name, uid).await?);
+                    }
+                    session = self.selected(&mailbox_name).await?;
+                }
             }
         }
 
@@ -629,29 +736,13 @@ impl EmailProvider for ImapEmailProvider {
         mailbox: &MailboxPath,
         uid: ProviderUid,
     ) -> Result<Vec<u8>, DomainError> {
-        use futures::TryStreamExt;
-
-        let mut session = self.session().await?;
-        let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
-        session
-            .select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
-
-        let fetched: Vec<async_imap::types::Fetch> = session
-            .uid_fetch(uid.value().to_string(), "BODY.PEEK[]")
-            .await
-            .map_err(|e| DomainError::Provider(format!("Raw fetch failed: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Raw stream error: {e}")))?;
-
+        let mut session = self.selected(&super::mapper::mailbox_path_to_string(mailbox)).await?;
+        let raw = Self::fetch_whole(&mut session, uid.value())
+            .await?
+            .ok_or_else(|| DomainError::Provider("Message not found".into()))?;
         self.release(session);
-        fetched
-            .into_iter()
-            .next()
-            .and_then(|f| f.body().map(|b| b.to_vec()))
-            .ok_or_else(|| DomainError::Provider("Message not found".into()))
+        self.metered(raw.len() as u64).await;
+        Ok(raw)
     }
 
     async fn set_flags(
@@ -1075,6 +1166,8 @@ impl EmailProvider for ImapEmailProvider {
             .await
             .map_err(|e| DomainError::Provider(format!("UID FETCH FLAGS stream error: {e}")))?;
 
+        // ponytail: `* n FETCH (UID u FLAGS (...))` is about 40 bytes a message.
+        self.metered(fetches.len() as u64 * 40).await;
         let entries: Vec<UidFlagEntry> = fetches
             .iter()
             .filter_map(|f| {
@@ -1316,15 +1409,6 @@ impl EmailProvider for ImapEmailProvider {
     }
 }
 
-/// Parse a raw RFC 2822 message and extract plain-text and HTML body parts.
-fn parse_mime_body(raw: &[u8]) -> (Option<String>, Option<String>) {
-    let parsed = match mailparse::parse_mail(raw) {
-        Ok(p) => p,
-        Err(_) => return (None, None),
-    };
-    extract_body_parts(&parsed)
-}
-
 /// Parse RFC threading headers (Message-ID, In-Reply-To, References) from raw
 /// header bytes returned by `BODY.PEEK[HEADER]`.
 ///
@@ -1408,28 +1492,101 @@ fn extract_all_msgids(value: &str) -> Vec<String> {
     ids
 }
 
-fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<String>) {
-    let mut text: Option<String> = None;
-    let mut html: Option<String> = None;
+/// A text part of a message, downloaded on its own instead of the whole
+/// message, and what it takes to decode it.
+#[derive(Debug, PartialEq)]
+struct TextPart {
+    /// IMAP part number, `[1, 2]` = `BODY[1.2]`.
+    section: Vec<u32>,
+    html: bool,
+    /// MIME headers rebuilt from BODYSTRUCTURE, so mailparse can undo the
+    /// transfer encoding and charset.
+    headers: String,
+}
 
-    if mail.subparts.is_empty() {
-        match mail.ctype.mimetype.as_str() {
-            "text/plain" => text = mail.get_body().ok(),
-            "text/html" => html = mail.get_body().ok(),
+impl TextPart {
+    fn decode(&self, data: &[u8]) -> Option<String> {
+        let part = [self.headers.as_bytes(), data].concat();
+        mailparse::parse_mail(&part).ok()?.get_body().ok()
+    }
+}
+
+/// The first text/plain and text/html parts that aren't attachments, in
+/// MIME order — what a reader shows of a whole message.
+/// Encapsulated messages (forwarded as attachment) are not descended into.
+fn text_parts(structure: &BodyStructure) -> Vec<TextPart> {
+    fn walk(node: &BodyStructure, path: &mut Vec<u32>, found: &mut Vec<TextPart>) {
+        match node {
+            BodyStructure::Multipart { bodies, .. } => {
+                for (n, body) in (1..).zip(bodies) {
+                    path.push(n);
+                    walk(body, path, found);
+                    path.pop();
+                }
+            }
+            BodyStructure::Text { common, other, .. } => {
+                let attachment = common
+                    .disposition
+                    .as_ref()
+                    .is_some_and(|d| d.ty.eq_ignore_ascii_case("attachment"));
+                let html = match common.ty.subtype.to_ascii_lowercase().as_str() {
+                    "plain" => false,
+                    "html" => true,
+                    _ => return,
+                };
+                if attachment || found.iter().any(|p| p.html == html) {
+                    return;
+                }
+                let charset = common
+                    .ty
+                    .params
+                    .iter()
+                    .flatten()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("charset"))
+                    .map_or("us-ascii", |(_, v)| v);
+                let encoding = match &other.transfer_encoding {
+                    ContentEncoding::SevenBit => "7bit",
+                    ContentEncoding::EightBit => "8bit",
+                    ContentEncoding::Binary => "binary",
+                    ContentEncoding::Base64 => "base64",
+                    ContentEncoding::QuotedPrintable => "quoted-printable",
+                    ContentEncoding::Other(other) => other,
+                };
+                found.push(TextPart {
+                    // A single-part message's body is part 1 (RFC 3501 §6.4.5).
+                    section: if path.is_empty() { vec![1] } else { path.clone() },
+                    html,
+                    headers: format!(
+                        "Content-Type: text/{}; charset=\"{charset}\"\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n",
+                        common.ty.subtype
+                    ),
+                });
+            }
             _ => {}
         }
-    } else {
-        for part in &mail.subparts {
-            let (t, h) = extract_body_parts(part);
-            if text.is_none() {
-                text = t;
-            }
-            if html.is_none() {
-                html = h;
-            }
+    }
+    let mut found = Vec::new();
+    walk(structure, &mut Vec::new(), &mut found);
+    found
+}
+
+/// First non-attachment text/plain and text/html of a whole message — the
+/// fallback when its BODYSTRUCTURE can't be parsed.
+fn whole_message_text(raw: &[u8]) -> (Option<String>, Option<String>) {
+    let Ok(mail) = mailparse::parse_mail(raw) else { return (None, None) };
+    let (mut text, mut html) = (None, None);
+    for part in mail.parts().filter(|p| {
+        p.subparts.is_empty() && p.get_content_disposition().disposition != mailparse::DispositionType::Attachment
+    }) {
+        let slot = match part.ctype.mimetype.as_str() {
+            "text/plain" => &mut text,
+            "text/html" => &mut html,
+            _ => continue,
+        };
+        if slot.is_none() {
+            *slot = part.get_body().ok();
         }
     }
-
     (text, html)
 }
 
@@ -1447,6 +1604,57 @@ fn decode_rfc2047_header(raw: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn structure_of(response: &[u8]) -> Vec<TextPart> {
+        use async_imap::imap_proto::types::{AttributeValue, Response};
+        let (_, Response::Fetch(_, attrs)) = async_imap::imap_proto::parser::parse_response(response).unwrap()
+        else {
+            panic!("not a FETCH response")
+        };
+        let structure = attrs
+            .iter()
+            .find_map(|a| match a {
+                AttributeValue::BodyStructure(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        text_parts(structure)
+    }
+
+    #[test]
+    fn text_parts_skip_attachments_and_keep_the_first_of_each_kind() {
+        // mixed( alternative(plain qp, html base64), plain attachment, pdf )
+        let parts = structure_of(
+            b"* 1 FETCH (UID 7 BODYSTRUCTURE (((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"iso-8859-1\") NIL NIL \"QUOTED-PRINTABLE\" 12 1 NIL NIL NIL)\
+(\"TEXT\" \"HTML\" (\"CHARSET\" \"utf-8\") NIL NIL \"BASE64\" 40 1 NIL NIL NIL) \"ALTERNATIVE\" (\"BOUNDARY\" \"b2\") NIL NIL)\
+(\"TEXT\" \"PLAIN\" (\"NAME\" \"notes.txt\") NIL NIL \"7BIT\" 5000 80 NIL (\"ATTACHMENT\" (\"FILENAME\" \"notes.txt\")) NIL)\
+(\"APPLICATION\" \"PDF\" (\"NAME\" \"big.pdf\") NIL NIL \"BASE64\" 9000000 NIL (\"ATTACHMENT\" (\"FILENAME\" \"big.pdf\")) NIL) \"MIXED\" (\"BOUNDARY\" \"b1\") NIL NIL))\r\n",
+        );
+        let sections: Vec<_> = parts.iter().map(|p| (p.section.clone(), p.html)).collect();
+        assert_eq!(sections, [(vec![1, 1], false), (vec![1, 2], true)]);
+
+        assert_eq!(parts[0].decode(b"caff=E8 =\r\nok").as_deref(), Some("caff\u{e8} ok"));
+        assert_eq!(parts[1].decode(b"PHA+Y2lhbzwvcD4=").as_deref(), Some("<p>ciao</p>"));
+    }
+
+    #[test]
+    fn whole_message_fallback_skips_text_attachments() {
+        let raw = b"Content-Type: multipart/mixed; boundary=b\r\n\r\n\
+--b\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=log.txt\r\n\r\nlog\r\n\
+--b\r\nContent-Type: text/plain\r\n\r\nciao\r\n\
+--b\r\nContent-Type: text/html\r\n\r\n<p>ciao</p>\r\n--b--\r\n";
+        let (text, html) = whole_message_text(raw);
+        assert_eq!(text.as_deref().map(str::trim), Some("ciao"));
+        assert_eq!(html.as_deref().map(str::trim), Some("<p>ciao</p>"));
+    }
+
+    #[test]
+    fn a_single_part_message_is_part_one() {
+        let parts = structure_of(
+            b"* 1 FETCH (UID 8 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"utf-8\") NIL NIL \"7BIT\" 3 1 NIL NIL NIL))\r\n",
+        );
+        assert_eq!(parts.iter().map(|p| p.section.clone()).collect::<Vec<_>>(), [vec![1]]);
+    }
 
     #[test]
     fn backoff_grows_and_caps_per_failure_kind() {

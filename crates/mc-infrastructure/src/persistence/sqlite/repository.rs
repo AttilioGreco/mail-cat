@@ -587,6 +587,69 @@ impl BodyBackfillQueue for SqliteRepository {
             })
             .await
     }
+
+    async fn downloaded_since(
+        &self,
+        account_id: &AccountId,
+        since: DateTime<Utc>,
+    ) -> Result<u64, DomainError> {
+        let (account, since) = (*account_id.as_uuid(), nanos(since));
+        self.db
+            .read(move |conn| {
+                count_rows(
+                    conn,
+                    "SELECT COALESCE(SUM(d.bytes), 0) FROM downloads d \
+                     JOIN accounts a ON a.email = d.account_email \
+                     WHERE a.id = ?1 AND d.at >= ?2",
+                    params![account, since],
+                )
+            })
+            .await
+    }
+}
+
+/// Records what one account downloads from its server, read back through
+/// `BodyBackfillQueue::downloaded_since`.
+#[derive(Clone)]
+pub struct DownloadMeter {
+    db: Arc<SqliteDb>,
+    account_email: String,
+}
+
+impl DownloadMeter {
+    /// Kept a little past the 24 h window the cap is checked against.
+    const RETENTION: chrono::TimeDelta = chrono::TimeDelta::hours(48);
+
+    /// Keyed like the stored account, which `EmailAddress` lowercases.
+    pub fn new(db: Arc<SqliteDb>, account_email: &str) -> Self {
+        Self { db, account_email: account_email.trim().to_lowercase() }
+    }
+
+    /// Never fails the download it measures: a lost row only under-counts.
+    pub async fn record(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let (email, now) = (self.account_email.clone(), Utc::now());
+        let result = self
+            .db
+            .write(move |conn| {
+                exec(
+                    conn,
+                    "INSERT INTO downloads (account_email, at, bytes) VALUES (?1, ?2, ?3)",
+                    params![email, nanos(now), sql_int(bytes)],
+                )?;
+                exec(
+                    conn,
+                    "DELETE FROM downloads WHERE account_email = ?1 AND at < ?2",
+                    params![email, nanos(now - Self::RETENTION)],
+                )
+            })
+            .await;
+        if let Err(e) = result {
+            tracing::warn!(account = %self.account_email, error = %e, "download meter write failed");
+        }
+    }
 }
 
 // ── Read side ───────────────────────────────────────────────────────────
@@ -1133,6 +1196,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downloads_count_per_account_within_the_window() {
+        let (_dir, repo) = open();
+        let added = account_added();
+        let DomainEvent::AccountAdded { account_id, .. } = added else { unreachable!() };
+        repo.project(&at_position(1, added)).await.unwrap();
+        let meter = DownloadMeter::new(repo.db.clone(), " Me@Example.com");
+        let stranger = DownloadMeter::new(repo.db.clone(), "other@example.com");
+
+        let before = Utc::now();
+        meter.record(700).await;
+        meter.record(300).await;
+        stranger.record(5_000).await;
+
+        let day_ago = before - chrono::TimeDelta::hours(24);
+        assert_eq!(repo.downloaded_since(&account_id, day_ago).await.unwrap(), 1_000);
+        let later = Utc::now() + chrono::TimeDelta::seconds(1);
+        assert_eq!(repo.downloaded_since(&account_id, later).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn deleting_a_message_takes_its_body_along() {
         let (_dir, repo) = open();
         let (id, event) = received(AccountId::new(), MailboxId::new(), "<a@x>");
@@ -1294,7 +1377,7 @@ mod tests {
         }
         // Back to a pre-usage database holding the same messages.
         repo.db
-            .write(|c| c.execute_batch("DROP TABLE address_usage; DROP TABLE sent_counted; PRAGMA user_version = 2;").map_err(repo_err))
+            .write(|c| c.execute_batch("DROP TABLE address_usage; DROP TABLE sent_counted; DROP TABLE downloads; PRAGMA user_version = 2;").map_err(repo_err))
             .await
             .unwrap();
         drop(repo);

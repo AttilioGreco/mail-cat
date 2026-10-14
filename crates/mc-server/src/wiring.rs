@@ -21,7 +21,7 @@ use mc_domain::model::account::{SmtpConnectionConfig, SmtpSecurity};
 use mc_infrastructure::{
     email::imap::ImapCredential,
     email::smtp::SmtpSender,
-    ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SqliteDb,
+    DownloadMeter, ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SqliteDb,
     SqliteEventStore, SqliteRepository, TantivySearchIndex,
 };
 use mc_interfaces::grpc::services::{
@@ -105,7 +105,7 @@ impl AppContext {
         let event_store = Arc::new(SqliteEventStore::new(db.clone()));
         // One repository serves every read/write trait, the projector and the
         // checkpoints; the Arc is for the buses.
-        let bare_repository = SqliteRepository::new(db, event_store.clone());
+        let bare_repository = SqliteRepository::new(db.clone(), event_store.clone());
         let repository_arc = Arc::new(bare_repository.clone());
         tracing::info!("Initialized repositories");
 
@@ -232,7 +232,8 @@ impl AppContext {
                 credential,
                 account_config.use_tls,
                 smtp_sender,
-            ));
+            )
+            .with_download_meter(DownloadMeter::new(db.clone(), &account_config.email)));
             providers_by_email.insert(account_config.email.clone(), provider);
         }
         tracing::info!(
@@ -276,7 +277,6 @@ impl AppContext {
             // (newest-first), not inline during the initial envelope sync — so
             // a 30k-message account doesn't burst Gmail's daily bandwidth cap.
             eager_body_fetch: false,
-            body_backfill_per_minute: config.body_backfill_per_minute,
         };
         let sync_service = Arc::new(
             SyncService::new(
@@ -338,7 +338,7 @@ impl AppContext {
         let mut oauth_states: Vec<OAuthRuntimeState> = Vec::new();
         let mut created_new = false;
         // Per-account backfill rate override (falls back to the global default).
-        let mut backfill_rates: HashMap<AccountId, u32> = HashMap::new();
+        let mut download_limits: HashMap<AccountId, Option<u64>> = HashMap::new();
 
         for account_config in &config.accounts {
             let provider = providers_by_email
@@ -374,12 +374,7 @@ impl AppContext {
                         )),
                     });
                 }
-                backfill_rates.insert(
-                    summary.id,
-                    account_config
-                        .body_backfill_per_minute
-                        .unwrap_or(config.body_backfill_per_minute),
-                );
+                download_limits.insert(summary.id, account_config.daily_download_limit());
             } else {
                 // Not in DB — create via aggregate + save
                 let email =
@@ -451,12 +446,7 @@ impl AppContext {
                         needs_reauth: Arc::new(RwLock::new(false)),
                     });
                 }
-                backfill_rates.insert(
-                    account_id,
-                    account_config
-                        .body_backfill_per_minute
-                        .unwrap_or(config.body_backfill_per_minute),
-                );
+                download_limits.insert(account_id, account_config.daily_download_limit());
                 created_new = true;
             }
         }
@@ -876,19 +866,16 @@ impl AppContext {
 
         // ── Background body backfill ─────────────────────────────────────────
         // The initial sync only pulls envelopes; message bodies are downloaded
-        // here, newest-first, throttled to `body_backfill_per_minute` per account
-        // so a large mailbox doesn't burst the IMAP server / Gmail's daily cap.
+        // here, newest-first, text only, paced by bytes against each account's
+        // daily download cap (Gmail locks an account out past 2.5 GB/day).
         // Each fetch indexes the body for search and dequeues itself.
         for (account_id, _name) in &registered_ids {
             let sync = Arc::clone(&sync_service);
             let id = *account_id;
             let sd = shutdown.clone();
-            let rate = backfill_rates
-                .get(account_id)
-                .copied()
-                .unwrap_or(config.body_backfill_per_minute);
+            let limit = download_limits.get(account_id).copied().flatten();
             tokio::spawn(async move {
-                sync.run_backfill(id, rate, sd).await;
+                sync.run_backfill(id, limit, sd).await;
             });
         }
 
@@ -1253,7 +1240,6 @@ mod tests {
             index_path: dir.path().join("index").display().to_string(),
             accounts: vec![],
             ui_bin: "mail-cat-ui".to_string(),
-            body_backfill_per_minute: 30,
             log_level: None,
         };
 

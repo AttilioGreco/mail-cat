@@ -35,6 +35,35 @@ fn auth_backoff(failures: u32) -> std::time::Duration {
     std::time::Duration::from_secs(300 * factor).min(std::time::Duration::from_secs(3600))
 }
 
+/// Bodies the backfill downloads between two pauses at the fast rate. Once
+/// throttled it takes one at a time: the pause scales with the bytes, so the
+/// rate is the same, but progress moves per message instead of per minute.
+const BACKFILL_BATCH: usize = 50;
+
+/// Bytes per second the backfill never exceeds, capped account or not: a
+/// mailbox's text arrives in minutes without hammering the server.
+const BACKFILL_FAST_RATE: u64 = 1 << 20;
+
+/// Pause after a backfill batch that cost `batch_bytes`, given `spent` bytes
+/// downloaded in the last 24 h. Under a daily cap the first half of it goes
+/// at the fast rate and the second half is spread across the day, so the
+/// sliding 24 h total stays near the cap without crossing it; at the cap,
+/// wait for old downloads to leave the window.
+fn backfill_pause(spent: u64, batch_bytes: u64, daily_limit: Option<u64>) -> std::time::Duration {
+    let rate = match daily_limit {
+        Some(limit) if spent >= limit => return std::time::Duration::from_secs(15 * 60),
+        Some(limit) if throttled(spent, daily_limit) => (limit / 2 / 86_400).max(1),
+        _ => BACKFILL_FAST_RATE,
+    };
+    std::time::Duration::from_secs_f64(batch_bytes as f64 / rate as f64)
+        .max(std::time::Duration::from_secs(1))
+}
+
+/// Past the first half of the daily cap, downloads are spread across the day.
+fn throttled(spent: u64, daily_limit: Option<u64>) -> bool {
+    daily_limit.is_some_and(|limit| spent >= limit / 2)
+}
+
 /// Tracks the state of a sync operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncState {
@@ -71,10 +100,6 @@ pub struct SyncConfig {
     pub max_concurrent_bodies: usize,
     /// Whether to eagerly fetch all message bodies or lazy-load on demand.
     pub eager_body_fetch: bool,
-    /// Max message bodies the background backfill worker downloads per minute.
-    /// `0` disables backfill (pure lazy-on-open). Throttles to avoid bursting
-    /// the IMAP server / hitting Gmail's daily bandwidth cap.
-    pub body_backfill_per_minute: u32,
 }
 
 impl Default for SyncConfig {
@@ -83,7 +108,6 @@ impl Default for SyncConfig {
             batch_size: 50,
             max_concurrent_bodies: 4,
             eager_body_fetch: false,
-            body_backfill_per_minute: 30,
         }
     }
 }
@@ -176,9 +200,8 @@ impl<
     /// states always pass. Returns the event when it passed the gate.
     fn publish(&self, event: SyncProgressEvent) -> Option<SyncProgressEvent> {
         let terminal = matches!(event.state, SyncState::Completed | SyncState::Failed);
-        // Body backfill is already rate-limited to one batch per minute, and a
-        // batch is a fraction of a percent of a large backlog: gating it on whole
-        // percentages froze the bar for minutes at a time.
+        // A body batch is a fraction of a percent of a large backlog: gating it
+        // on whole percentages froze the bar for minutes at a time.
         let step = match event.state {
             SyncState::FetchingMessageBody => event.processed,
             _ => u32::from(percent(event.processed, event.total)),
@@ -759,40 +782,39 @@ impl<
 
     /// Background body-backfill loop for one account.
     ///
-    /// Drains the backfill queue newest-first, downloading a batch of up to
-    /// `per_minute` bodies every 60s (grouped by mailbox, one IMAP session per
-    /// mailbox per batch — see `fetch_message_bodies_bulk`) so we never burst
-    /// the IMAP server (or trip Gmail's daily bandwidth cap) while avoiding a
-    /// fresh TCP+TLS connection per message. Each fetch emits
-    /// `MessageBodyFetched`, which both indexes the body and dequeues the
-    /// entry. Whole-fetch failures (auth/network) leave entries queued and
-    /// retried next pass; entries the server no longer has get a few retries
-    /// before being abandoned (see `MAX_BACKFILL_MISSING_ATTEMPTS`).
+    /// Drains the backfill queue newest-first, a batch at a time (grouped by
+    /// mailbox, one IMAP session per mailbox — see `fetch_message_bodies_bulk`),
+    /// pausing after each batch by the bytes it cost (see `backfill_pause`) so
+    /// the account stays under `daily_limit` bytes per 24 h. Only the text of
+    /// a body is downloaded; attachments are fetched when a message needs them.
+    /// Each fetch emits `MessageBodyFetched`, which both indexes the body and
+    /// dequeues the entry. Whole-fetch failures (auth/network) leave entries
+    /// queued and retried next pass; entries the server no longer has get a
+    /// few retries before being abandoned (see `MAX_BACKFILL_MISSING_ATTEMPTS`).
     /// Runs until `shutdown` fires.
     pub async fn run_backfill(
         &self,
         account_id: AccountId,
-        per_minute: u32,
+        daily_limit: Option<u64>,
         shutdown: CancellationToken,
     ) {
-        if per_minute == 0 {
-            return;
-        }
-        let batch_size = per_minute.max(1) as usize;
-        let cycle = std::time::Duration::from_secs(60);
         let idle_poll = std::time::Duration::from_secs(60);
 
         let mut missing_counts: HashMap<MessageId, u32> = HashMap::new();
         let mut abandoned: HashSet<MessageId> = HashSet::new();
         // Consecutive credential rejections, used to back off. Reset on success.
         let mut auth_failures: u32 = 0;
+        // Bodies downloaded since the queue was last empty. Progress is this
+        // against itself plus what's still queued, so the percentage climbs to
+        // 100% across batches instead of restarting with each one; new mail
+        // only grows the total.
+        let mut drained: u32 = 0;
 
         loop {
             if shutdown.is_cancelled() {
                 return;
             }
 
-            // Resolve mailbox_id → path once per drain pass.
             let path_by_id: HashMap<MailboxId, MailboxPath> =
                 match self.projector.list_mailboxes(&account_id).await {
                     Ok(mbs) => mbs.into_iter().map(|m| (m.id, m.path)).collect(),
@@ -805,16 +827,32 @@ impl<
                     }
                 };
 
-            let pending: Vec<BackfillEntry> = self
+            // Everything this account downloaded counts — opened messages and
+            // forwards too, not just this worker's batches.
+            let downloaded = |since| self.projector.downloaded_since(&account_id, since);
+            let batch_started = chrono::Utc::now();
+            let spent = downloaded(batch_started - chrono::TimeDelta::hours(24)).await.unwrap_or(0);
+            if daily_limit.is_some_and(|limit| spent >= limit) {
+                debug!(%account_id, spent, "backfill: daily download cap reached, waiting");
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(backfill_pause(spent, 0, daily_limit)) => continue,
+                }
+            }
+            let batch_size = if throttled(spent, daily_limit) { 1 } else { BACKFILL_BATCH };
+
+            let batch: Vec<BackfillEntry> = self
                 .projector
                 .list_pending_backfill(&account_id, 500)
                 .await
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|e| !abandoned.contains(&e.message_id))
+                .take(batch_size)
                 .collect();
 
-            if pending.is_empty() {
+            if batch.is_empty() {
+                drained = 0;
                 // Say so explicitly: this worker is otherwise silent while idle, so
                 // without an "all done" event a watching client keeps showing the
                 // last in-progress percentage forever. `total: 0` means "no backlog",
@@ -827,105 +865,72 @@ impl<
                     message: "All message bodies downloaded".to_string(),
                 });
 
-                // Nothing queued — wait for new arrivals (or shutdown).
                 tokio::select! {
                     _ = shutdown.cancelled() => return,
                     _ = tokio::time::sleep(idle_poll) => continue,
                 }
             }
 
-            // Measure against the whole backlog, not against what this pass happens
-            // to drain: `pending` is a capped window, so a percentage of it is
-            // meaningless — and it reads 50% the moment "downloaded this pass"
-            // equals "still queued". Against the backlog the number climbs
-            // monotonically towards 100% as the queue empties, and only moves
-            // backwards when new mail genuinely arrives.
             let backlog = self
                 .projector
                 .count_pending_backfill(&account_id)
                 .await
-                .unwrap_or(pending.len() as u32);
+                .unwrap_or(batch.len() as u32);
 
-            let mut auth_rejected = false;
-            'drain: for chunk in pending.chunks(batch_size) {
-                if shutdown.is_cancelled() {
-                    return;
-                }
+            // One IMAP session per mailbox for the whole batch.
+            let mut by_mailbox: HashMap<MailboxId, Vec<BackfillEntry>> = HashMap::new();
+            for entry in batch {
+                by_mailbox.entry(entry.mailbox_id).or_default().push(entry);
+            }
 
-                // Group by mailbox so each mailbox gets exactly one IMAP
-                // session for the whole chunk instead of one per message.
-                let mut by_mailbox: HashMap<MailboxId, Vec<BackfillEntry>> = HashMap::new();
-                for entry in chunk {
-                    by_mailbox.entry(entry.mailbox_id).or_default().push(entry.clone());
-                }
-
-                for (mailbox_id, entries) in by_mailbox {
-                    let Some(path) = path_by_id.get(&mailbox_id) else {
-                        // Mailbox not yet known locally — skip this pass.
-                        continue;
-                    };
-                    match self.fetch_message_bodies_bulk(&account_id, path, &entries).await {
-                        Ok(missing) => {
-                            auth_failures = 0;
-                            for message_id in missing {
-                                let count = missing_counts.entry(message_id).or_insert(0);
-                                *count += 1;
-                                if *count >= Self::MAX_BACKFILL_MISSING_ATTEMPTS {
-                                    warn!(
-                                        %account_id, %message_id, attempts = *count,
-                                        "backfill: message missing from server after max retries, giving up"
-                                    );
-                                    missing_counts.remove(&message_id);
-                                    abandoned.insert(message_id);
-                                } else {
-                                    warn!(
-                                        %account_id, %message_id, attempts = *count,
-                                        "backfill: message missing from bulk fetch result"
-                                    );
-                                }
+            let (mut auth_rejected, mut fetch_failed) = (false, false);
+            for (mailbox_id, entries) in by_mailbox {
+                let Some(path) = path_by_id.get(&mailbox_id) else {
+                    // Mailbox not yet known locally: nothing fetched, so retry
+                    // on the failure cadence rather than every second.
+                    fetch_failed = true;
+                    continue;
+                };
+                match self.fetch_message_bodies_bulk(&account_id, path, &entries).await {
+                    Ok(missing) => {
+                        auth_failures = 0;
+                        for message_id in missing {
+                            let count = missing_counts.entry(message_id).or_insert(0);
+                            *count += 1;
+                            if *count >= Self::MAX_BACKFILL_MISSING_ATTEMPTS {
+                                warn!(
+                                    %account_id, %message_id, attempts = *count,
+                                    "backfill: message missing from server after max retries, giving up"
+                                );
+                                missing_counts.remove(&message_id);
+                                abandoned.insert(message_id);
+                            } else {
+                                warn!(
+                                    %account_id, %message_id, attempts = *count,
+                                    "backfill: message missing from bulk fetch result"
+                                );
                             }
                         }
-                        // A rejected credential fails every remaining mailbox in
-                        // this pass identically. Abandon the drain immediately and
-                        // back off, instead of re-running the whole queue against a
-                        // server that is refusing us once a minute, forever.
-                        Err(e @ ApplicationError::Domain(DomainError::AuthenticationFailed(_))) => {
-                            auth_failures = auth_failures.saturating_add(1);
-                            warn!(
-                                %account_id, error = %e, attempts = auth_failures,
-                                "backfill: credential rejected, backing off"
-                            );
-                            auth_rejected = true;
-                            break 'drain;
-                        }
-                        Err(e) => {
-                            // Leave them queued; retried next pass (this is a
-                            // whole-fetch failure — e.g. network — not a
-                            // per-message "gone from server" signal, so no cap).
-                            warn!(%account_id, error = %e, "backfill: bulk body fetch failed");
-                        }
                     }
-                }
-
-                // Live progress: the queue length is the authoritative "N bodies
-                // left to download", so derive how far we are from it.
-                let remaining = self
-                    .projector
-                    .count_pending_backfill(&account_id)
-                    .await
-                    .unwrap_or(0);
-                self.publish(SyncProgressEvent {
-                    account_id,
-                    state: SyncState::FetchingMessageBody,
-                    processed: backlog.saturating_sub(remaining),
-                    total: backlog,
-                    message: "Downloading message bodies".to_string(),
-                });
-
-                // Rate limit (interruptible).
-                tokio::select! {
-                    _ = shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(cycle) => {}
+                    // A rejected credential fails every remaining mailbox
+                    // identically. Stop and back off, instead of re-running the
+                    // queue against a server that is refusing us, forever.
+                    Err(e @ ApplicationError::Domain(DomainError::AuthenticationFailed(_))) => {
+                        auth_failures = auth_failures.saturating_add(1);
+                        warn!(
+                            %account_id, error = %e, attempts = auth_failures,
+                            "backfill: credential rejected, backing off"
+                        );
+                        auth_rejected = true;
+                        break;
+                    }
+                    Err(e) => {
+                        // Leave them queued; retried next pass (this is a
+                        // whole-fetch failure — e.g. network — not a
+                        // per-message "gone from server" signal, so no cap).
+                        warn!(%account_id, error = %e, "backfill: bulk body fetch failed");
+                        fetch_failed = true;
+                    }
                 }
             }
 
@@ -934,6 +939,29 @@ impl<
                     _ = shutdown.cancelled() => return,
                     _ = tokio::time::sleep(auth_backoff(auth_failures)) => continue,
                 }
+            }
+
+            let remaining = self
+                .projector
+                .count_pending_backfill(&account_id)
+                .await
+                .unwrap_or(0);
+            drained += backlog.saturating_sub(remaining);
+            self.publish(SyncProgressEvent {
+                account_id,
+                state: SyncState::FetchingMessageBody,
+                processed: drained,
+                total: drained + remaining,
+                message: "Downloading message bodies".to_string(),
+            });
+
+            let batch_bytes = downloaded(batch_started).await.unwrap_or(0);
+            // A failed fetch costs no bytes; without this it would retry every second.
+            let pause = if fetch_failed { idle_poll } else { backfill_pause(spent, batch_bytes, daily_limit) };
+            debug!(%account_id, spent, batch_bytes, pause_secs = pause.as_secs(), "backfill: pacing");
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(pause) => {}
             }
         }
     }
@@ -1449,6 +1477,23 @@ mod tests {
         assert_eq!(auth_backoff(u32::MAX).as_secs(), 3600);
     }
 
+    #[test]
+    fn backfill_paces_by_bytes_against_the_daily_cap() {
+        const MB: u64 = 1 << 20;
+        let limit = Some(2000 * MB);
+        let secs = |spent, batch, limit| backfill_pause(spent, batch, limit).as_secs();
+
+        // First half of the cap, and any uncapped account: the fast rate.
+        assert_eq!(secs(0, 10 * MB, limit), 10);
+        assert_eq!(secs(5000 * MB, 10 * MB, None), 10);
+        // Second half: what's left of the cap spread over a day.
+        assert_eq!(secs(1000 * MB, 10 * MB, limit), 10 * MB / (1000 * MB / 86_400));
+        // At the cap: wait for the window to slide, however small the batch.
+        assert_eq!(secs(2000 * MB, 0, limit), 15 * 60);
+        // A tiny batch still yields the server a second.
+        assert_eq!(secs(0, 10, limit), 1);
+    }
+
     /// A credential rejection must stay typed all the way to `run_backfill`, which
     /// is what lets it back off instead of retrying once a minute forever.
     #[test]
@@ -1932,6 +1977,14 @@ mod tests {
         async fn count_pending_backfill(&self, _account_id: &AccountId) -> Result<u32, DomainError> {
             Ok(0)
         }
+
+        async fn downloaded_since(
+            &self,
+            _account_id: &AccountId,
+            _since: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, DomainError> {
+            Ok(0)
+        }
     }
 
     // ── Test helpers ──────────────────────────────────────────────────
@@ -2065,7 +2118,7 @@ mod tests {
         let worker = {
             let service = service.clone();
             let shutdown = shutdown.clone();
-            tokio::spawn(async move { service.run_backfill(AccountId::new(), 30, shutdown).await })
+            tokio::spawn(async move { service.run_backfill(AccountId::new(), None, shutdown).await })
         };
 
         let event = rx.recv().await.expect("idle worker published its state");

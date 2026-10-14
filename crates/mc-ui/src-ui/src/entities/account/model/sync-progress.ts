@@ -39,11 +39,11 @@ export const useSyncStore = create<SyncState>((set) => ({
   record: (event) =>
     set((s) => {
       const prev = s.byAccount[event.account_id];
-      // `processed` restarts from 0 with every drain pass (it is measured against
-      // that pass's backlog). With no previous event we can't tell a batch from
-      // the pass so far, so the first event after opening the app counts nothing.
+      // `processed` counts up from 0 while the queue drains and restarts once
+      // it empties. With no previous event we can't tell a batch from the run so
+      // far, so the first event after opening the app counts nothing.
       const sameRun = event.phase === 'fetching_bodies' && prev?.phase === 'fetching_bodies';
-      const added = !sameRun ? 0 : event.total === prev.total ? event.processed - prev.processed : event.processed;
+      const added = sameRun ? Math.max(0, event.processed - prev.processed) : 0;
       return {
         byAccount: { ...s.byAccount, [event.account_id]: event },
         lastBodyBatch:
@@ -57,8 +57,10 @@ export const useSyncStore = create<SyncState>((set) => ({
 /**
  * Subscribe to server-side sync progress for every account.
  *
- * The server debounces to one event per percentage point, so this can be fed
- * straight into state — there is no 10k-event flood to throttle here. Most syncs
+ * The server sends envelope progress once per percentage point and body
+ * progress once per downloaded batch (about every second, every message or
+ * two once the daily download cap throttles it), so this can be fed straight
+ * into state — there is no 10k-event flood to throttle here. Most syncs
  * are server-initiated (boot, the 5-minute tick, the body backfill worker), which
  * is why we watch instead of triggering.
  */
@@ -74,9 +76,8 @@ export function useSyncProgress() {
     let unlisten: (() => void) | null = null;
     listen<SyncProgressPayload>('sync:progress', (event) => {
       record(event.payload);
-      // Envelope events are gated to one per percentage point and body events to
-      // one per batch (~1/min), so refreshing the counters on each is cheap and
-      // is what makes the bars in Settings move live.
+      // At most about one event a second per account, so refreshing the
+      // counters on each is cheap and is what makes the bars in Settings move live.
       if (event.payload.phase !== 'discovering_mailboxes') {
         queryClient.invalidateQueries({ queryKey: ['account-stats', event.payload.account_id] });
       }
