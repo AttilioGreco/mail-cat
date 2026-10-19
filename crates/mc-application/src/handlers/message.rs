@@ -1096,7 +1096,9 @@ mod tests {
         /// UID reported for the moved message in its destination.
         moved_uid: RwLock<Option<ProviderUid>>,
         /// What `find_message` finds on the server.
-        found_uid: RwLock<Option<ProviderUid>>,
+        found: RwLock<Vec<ProviderUid>>,
+        /// UIDs `set_flags_bulk` was asked to flag.
+        flagged_bulk: RwLock<Vec<ProviderUid>>,
         /// UIDs `fetch_message_detail` was asked for.
         fetched: RwLock<Vec<ProviderUid>>,
         /// UIDs `move_message` was asked to move.
@@ -1143,7 +1145,7 @@ mod tests {
             _mailbox: &MailboxPath,
             _rfc_id: &str,
         ) -> Result<Vec<ProviderUid>, DomainError> {
-            Ok(self.found_uid.read().unwrap().iter().copied().collect())
+            Ok(self.found.read().unwrap().clone())
         }
         async fn uids_from(&self, _mailbox: &MailboxPath, _from: ProviderUid) -> Result<Vec<ProviderUid>, DomainError> {
             Ok(vec![])
@@ -1167,10 +1169,11 @@ mod tests {
         async fn set_flags_bulk(
             &self,
             _mailbox: &MailboxPath,
-            _uids: &[ProviderUid],
+            uids: &[ProviderUid],
             _add: &[Flag],
             _remove: &[Flag],
         ) -> Result<(), DomainError> {
+            self.flagged_bulk.write().unwrap().extend_from_slice(uids);
             Ok(())
         }
         async fn move_message(
@@ -1280,6 +1283,9 @@ mod tests {
         mailboxes: Vec<mc_domain::Mailbox>,
         messages: Vec<Message>,
         stored_bodies: std::sync::Mutex<Vec<StoredBody>>,
+        unread: Vec<mc_domain::MessageSummary>,
+        /// UIDs other local rows already hold.
+        held: Vec<ProviderUid>,
     }
 
     impl MockMessageReadRepo {
@@ -1358,9 +1364,9 @@ mod tests {
         async fn held_uids(
             &self,
             _mailbox_id: &MailboxId,
-            _uids: &[ProviderUid],
+            uids: &[ProviderUid],
         ) -> Result<std::collections::HashSet<ProviderUid>, DomainError> {
-            Ok(Default::default())
+            Ok(self.held.iter().copied().filter(|uid| uids.contains(uid)).collect())
         }
         async fn uidless_messages(&self, _mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
             Ok(vec![])
@@ -1377,7 +1383,7 @@ mod tests {
             &self,
             _mailbox_id: &MailboxId,
         ) -> Result<Vec<mc_domain::MessageSummary>, DomainError> {
-            Ok(vec![])
+            Ok(self.unread.clone())
         }
 
         async fn scan_all_messages(
@@ -2181,7 +2187,7 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
     async fn a_message_without_uid_is_found_on_the_server_before_acting() {
         let (msg, archive, es) = uidless_in_archive();
         let provider = Arc::new(MockEmailProvider::new());
-        *provider.found_uid.write().unwrap() = Some(ProviderUid::new(55));
+        *provider.found.write().unwrap() = vec![ProviderUid::new(55)];
         *provider.detail_response.write().unwrap() = Some(Message { body_text: Some("text".into()), ..msg.clone() });
         let registry = Arc::new(MockProviderRegistry::new(provider.clone()));
         let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![archive.clone()]));
@@ -2209,10 +2215,70 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
     }
 
     #[tokio::test]
+    async fn marking_a_mailbox_read_reaches_messages_without_uid() {
+        let (msg, archive, es) = uidless_in_archive();
+        let provider = Arc::new(MockEmailProvider::new());
+        *provider.found.write().unwrap() = vec![ProviderUid::new(55)];
+        let unread = mc_domain::MessageSummary {
+            id: msg.id,
+            account_id: msg.account_id,
+            mailbox_id: archive.id,
+            provider_uid: None,
+            from_name: None,
+            from_email: "sender@example.com".into(),
+            to: vec![],
+            cc: vec![],
+            subject: "Test".into(),
+            flags: vec![],
+            size_bytes: 0,
+            has_attachments: false,
+            received_at: chrono::Utc::now(),
+        };
+        let read_repo = Arc::new(MockMessageReadRepo { unread: vec![unread], ..MockMessageReadRepo::with_mailboxes(vec![archive.clone()]) });
+        let registry = Arc::new(MockProviderRegistry::new(provider.clone()));
+        let handler = MessageCommandHandler::new(es, registry, read_repo, Arc::new(MockEventBus::new()));
+
+        handler.handle_mark_mailbox_read(archive.id, archive.path).await.unwrap();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(*provider.flagged_bulk.read().unwrap(), [ProviderUid::new(55)]);
+    }
+
+    /// Two copies of one Message-ID in the mailbox: the one another row
+    /// already holds is not this message's.
+    #[tokio::test]
+    async fn the_uid_found_skips_copies_other_rows_hold() {
+        let (msg, archive, es) = uidless_in_archive();
+        let provider = Arc::new(MockEmailProvider::new());
+        *provider.found.write().unwrap() = vec![ProviderUid::new(55), ProviderUid::new(60)];
+        *provider.detail_response.write().unwrap() = Some(msg.clone());
+        let read_repo = Arc::new(MockMessageReadRepo { held: vec![ProviderUid::new(60)], ..MockMessageReadRepo::with_mailboxes(vec![archive.clone()]) });
+        let handler = MessageCommandHandler::new(es, Arc::new(MockProviderRegistry::new(provider.clone())), read_repo, Arc::new(MockEventBus::new()));
+
+        handler.handle_fetch_body(msg.id, archive.path.clone()).await.unwrap();
+
+        assert_eq!(*provider.fetched.read().unwrap(), [ProviderUid::new(55)]);
+    }
+
+    #[tokio::test]
+    async fn a_uid_is_never_looked_up_in_another_mailbox() {
+        let (msg, archive, es) = uidless_in_archive();
+        let provider = Arc::new(MockEmailProvider::new());
+        *provider.found.write().unwrap() = vec![ProviderUid::new(55)];
+        let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![archive]));
+        let handler = MessageCommandHandler::new(es, Arc::new(MockProviderRegistry::new(provider)), read_repo, Arc::new(MockEventBus::new()));
+
+        let err = handler.handle_fetch_body(msg.id, MailboxPath::inbox()).await.unwrap_err();
+        assert!(matches!(err, ApplicationError::PreconditionFailed(_)), "{err:?}");
+    }
+
+    #[tokio::test]
     async fn bulk_move_finds_messages_without_uid() {
         let (msg, archive, es) = uidless_in_archive();
         let provider = Arc::new(MockEmailProvider::new());
-        *provider.found_uid.write().unwrap() = Some(ProviderUid::new(55));
+        *provider.found.write().unwrap() = vec![ProviderUid::new(55)];
         let registry = Arc::new(MockProviderRegistry::new(provider.clone()));
         let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![archive]));
         let handler = MessageCommandHandler::new(es, registry, read_repo, Arc::new(MockEventBus::new()));

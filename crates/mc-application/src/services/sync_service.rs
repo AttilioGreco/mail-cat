@@ -1497,6 +1497,8 @@ mod tests {
         envelopes: Vec<MessageEnvelopeSummary>,
         status: Option<MailboxStatus>,
         bulk_fetch_calls: Mutex<Vec<Vec<u32>>>,
+        /// Envelope fetches starting at or past this UID fail, as a timeout.
+        fail_envelopes_from: Option<u32>,
     }
 
     impl MockEmailProvider {
@@ -1516,6 +1518,7 @@ mod tests {
                     unseen_messages: 0,
                 }),
                 bulk_fetch_calls: Mutex::new(vec![]),
+                fail_envelopes_from: None,
             }
         }
 
@@ -1553,6 +1556,11 @@ mod tests {
             _mailbox: &MailboxPath,
             range: FetchRange,
         ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
+            if let (Some(limit), FetchRange::UidRange { from, .. }) = (self.fail_envelopes_from, &range)
+                && *from >= limit
+            {
+                return Err(DomainError::ConnectionTimeout("envelopes".into()));
+            }
             Ok(self
                 .envelopes
                 .iter()
@@ -2588,6 +2596,59 @@ mod tests {
         assert!(!pulled_back);
     }
 
+    fn batch_of(count: u32) -> Vec<MessageEnvelopeSummary> {
+        (1..=count).map(|uid| envelope(uid, &format!("<m{uid}@example.com>"))).collect()
+    }
+
+    /// A batch that times out keeps the batches before it: the next cycle
+    /// resumes after them instead of starting over.
+    #[tokio::test]
+    async fn a_failed_batch_keeps_the_checkpoint_of_the_ones_before() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let projector = Arc::new(MockProjector::new());
+        projector.mailboxes.lock().unwrap().push(archive.clone());
+        let mut provider = MockEmailProvider::new().with_mailboxes(vec![archive]).with_envelopes(batch_of(501));
+        provider.fail_envelopes_from = Some(501);
+        make_service(provider, Arc::new(MockEventStore::new()), projector.clone()).start_sync(&account_id).await.unwrap();
+
+        let checkpoint_key = format!("sync:{account_id}:Archive");
+        assert_eq!(received(&projector), 500);
+        assert_eq!(projector.get_checkpoint(&checkpoint_key).await.unwrap(), 501);
+        assert_eq!(projector.get_checkpoint(&format!("{checkpoint_key}:validity")).await.unwrap(), 0, "not complete");
+    }
+
+    /// A renumbering cut short resumes from its checkpoint; it does not clear
+    /// the UIDs re-attached so far all over again.
+    #[tokio::test]
+    async fn an_interrupted_renumbering_resumes_instead_of_starting_over() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let (event_store, projector) = (Arc::new(MockEventStore::new()), Arc::new(MockProjector::new()));
+        let kept = seed(&event_store, &projector, &archive, Some(3), "<m1@example.com>");
+        projector.mailboxes.lock().unwrap().push(archive.clone());
+        let checkpoint_key = format!("sync:{account_id}:Archive");
+        // A renumbering to validity 2 already got past UID 1 (kept is re-attached).
+        projector.save_checkpoint(&format!("{checkpoint_key}:validity"), 1).await.unwrap();
+        projector.save_checkpoint(&format!("{checkpoint_key}:renumbering"), 2).await.unwrap();
+        projector.save_checkpoint(&checkpoint_key, 2).await.unwrap();
+        projector.stored.lock().unwrap()[0].provider_uid = Some(ProviderUid::new(1));
+
+        let mut provider = MockEmailProvider::new().with_mailboxes(vec![archive]).with_envelopes(batch_of(2));
+        provider.status.as_mut().unwrap().uid_validity = 2;
+        make_service(provider, event_store.clone(), projector.clone()).start_sync(&account_id).await.unwrap();
+
+        let forgotten = event_store
+            .appended_events()
+            .iter()
+            .any(|(_, e)| matches!(e, DomainEvent::MessageMoved { provider_uid: None, .. }));
+        assert!(!forgotten, "UIDs are not cleared all over again");
+        assert_eq!(row_uid(&projector, kept), Some(Some(1)));
+        assert_eq!(received(&projector), 1, "only UID 2 was left to ingest");
+        assert_eq!(projector.get_checkpoint(&format!("{checkpoint_key}:validity")).await.unwrap(), 2);
+        assert_eq!(projector.get_checkpoint(&format!("{checkpoint_key}:renumbering")).await.unwrap(), 0);
+    }
+
     /// The server renumbered Archive (UIDVALIDITY 1 → 2). UID 9 now belongs
     /// to a different message: the stale local UID 9 used to hide it.
     #[tokio::test]
@@ -2682,6 +2743,7 @@ mod tests {
             mailboxes: vec![inbox],
             envelopes: vec![],
             bulk_fetch_calls: Mutex::new(vec![]),
+            fail_envelopes_from: None,
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 10,
@@ -2802,6 +2864,7 @@ mod tests {
             mailboxes: vec![inbox],
             envelopes: vec![],
             bulk_fetch_calls: Mutex::new(vec![]),
+            fail_envelopes_from: None,
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 1,
@@ -2846,6 +2909,7 @@ mod tests {
             mailboxes: vec![inbox],
             envelopes: vec![],
             bulk_fetch_calls: Mutex::new(vec![]),
+            fail_envelopes_from: None,
             status: Some(MailboxStatus {
                 uid_validity: 42,
                 uid_next: 100,
@@ -2890,6 +2954,7 @@ mod tests {
             mailboxes: vec![inbox],
             envelopes: vec![],
             bulk_fetch_calls: Mutex::new(vec![]),
+            fail_envelopes_from: None,
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 1,
