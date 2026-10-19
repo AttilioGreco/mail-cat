@@ -430,6 +430,7 @@ mod tests {
                     message_id: mid,
                     from_mailbox_id: MailboxId::new(),
                     to_mailbox_id: MailboxId::new(),
+                    provider_uid: None,
                 },
             )],
         };

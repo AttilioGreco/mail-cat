@@ -166,14 +166,32 @@ impl Message {
     }
 
     /// Move the message to another mailbox and produce the event.
+    ///
+    /// The UID it gets there is not known until the provider has moved it, and
+    /// keeping the old one would address a different message (or none) in the
+    /// destination, so it is cleared until [`Self::attach_uid`] records it.
     pub fn move_to(&mut self, to_mailbox_id: MailboxId) -> DomainEvent {
         let from = self.mailbox_id;
         self.mailbox_id = to_mailbox_id;
+        self.provider_uid = None;
 
         DomainEvent::MessageMoved {
             message_id: self.id,
             from_mailbox_id: from,
             to_mailbox_id,
+            provider_uid: None,
+        }
+    }
+
+    /// Record the UID the message has in its current mailbox.
+    pub fn attach_uid(&mut self, provider_uid: ProviderUid) -> DomainEvent {
+        self.provider_uid = Some(provider_uid);
+
+        DomainEvent::MessageMoved {
+            message_id: self.id,
+            from_mailbox_id: self.mailbox_id,
+            to_mailbox_id: self.mailbox_id,
+            provider_uid: Some(provider_uid),
         }
     }
 
@@ -222,8 +240,9 @@ impl Message {
                     }
                 }
             }
-            DomainEvent::MessageMoved { to_mailbox_id, .. } => {
+            DomainEvent::MessageMoved { to_mailbox_id, provider_uid, .. } => {
                 self.mailbox_id = *to_mailbox_id;
+                self.provider_uid = *provider_uid;
             }
             DomainEvent::MessageDeleted { .. }
             | DomainEvent::MessageSent { .. }
@@ -462,6 +481,44 @@ mod tests {
 
         assert_eq!(msg.mailbox_id, target_mailbox);
         assert_eq!(event.event_name(), "MessageMoved");
+        // UIDs are per-mailbox: the source UID must not follow the message.
+        assert_eq!(msg.provider_uid, None);
+
+        let attached = msg.attach_uid(ProviderUid::new(42));
+        let rehydrated = Message::rehydrate(&[
+            DomainEvent::MessageReceived {
+                message_id: msg.id,
+                account_id: msg.account_id,
+                mailbox_id: original_mailbox,
+                provider_uid: ProviderUid::new(1),
+                message_rfc_id: None,
+                in_reply_to: None,
+                references: vec![],
+                envelope: test_envelope(),
+                flags: vec![],
+                size_bytes: 512,
+                has_attachments: false,
+                received_at: Utc::now(),
+            },
+            event,
+            attached,
+        ])
+        .unwrap();
+        assert_eq!(rehydrated.mailbox_id, target_mailbox);
+        assert_eq!(rehydrated.provider_uid, Some(ProviderUid::new(42)));
+    }
+
+    #[test]
+    fn move_event_stored_before_the_uid_field_still_reads() {
+        let event: DomainEvent = serde_json::from_value(serde_json::json!({
+            "MessageMoved": {
+                "message_id": MessageId::new(),
+                "from_mailbox_id": MailboxId::new(),
+                "to_mailbox_id": MailboxId::new(),
+            }
+        }))
+        .unwrap();
+        assert!(matches!(event, DomainEvent::MessageMoved { provider_uid: None, .. }));
     }
 
     #[test]
@@ -549,6 +606,7 @@ mod tests {
                 message_id: msg_id,
                 from_mailbox_id: mailbox_id,
                 to_mailbox_id: target_mailbox,
+                provider_uid: None,
             },
         ];
 

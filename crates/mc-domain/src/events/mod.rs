@@ -200,10 +200,17 @@ pub enum DomainEvent {
     },
 
     /// A message was moved between mailboxes.
+    ///
+    /// Provider UIDs are per-mailbox (IMAP), so the old one is meaningless in
+    /// `to_mailbox_id`: `provider_uid` is the message's id there, `None` while
+    /// unknown. A move with `from == to` only records a UID learned later.
+    /// `#[serde(default)]`: events stored before the field read as "unknown".
     MessageMoved {
         message_id: MessageId,
         from_mailbox_id: MailboxId,
         to_mailbox_id: MailboxId,
+        #[serde(default)]
+        provider_uid: Option<ProviderUid>,
     },
 
     /// A message was deleted.

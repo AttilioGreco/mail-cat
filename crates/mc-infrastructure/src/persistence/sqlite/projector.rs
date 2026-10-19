@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AccountStatus, ContactEmail, ContactId, Conversation, DomainError, DomainEvent,
-    Envelope, EventEnvelope, Flag, MailboxId, MailboxType, MessageId, ReadModelProjector,
+    Envelope, EventEnvelope, Flag, MailboxId, MailboxType, MessageId, ProviderUid, ReadModelProjector,
 };
 
 use super::repo_err;
@@ -201,8 +201,8 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
         DomainEvent::MessageFlagged { message_id, flags_added, flags_removed, .. } => {
             flag_message(tx, message_id, flags_added, flags_removed)?;
         }
-        DomainEvent::MessageMoved { message_id, to_mailbox_id, .. } => {
-            move_message(tx, message_id, to_mailbox_id)?;
+        DomainEvent::MessageMoved { message_id, to_mailbox_id, provider_uid, .. } => {
+            move_message(tx, message_id, to_mailbox_id, *provider_uid)?;
         }
         DomainEvent::MessageDeleted { message_id, .. } => delete_message(tx, message_id)?,
         DomainEvent::MessageSent {
@@ -563,7 +563,12 @@ fn flag_message(
     Ok(())
 }
 
-fn move_message(tx: &Connection, id: &MessageId, to: &MailboxId) -> Result<(), DomainError> {
+fn move_message(
+    tx: &Connection,
+    id: &MessageId,
+    to: &MailboxId,
+    provider_uid: Option<ProviderUid>,
+) -> Result<(), DomainError> {
     let Some((from, seen)) = query_one(
         tx,
         "SELECT mailbox_id, seen FROM messages WHERE id = ?1",
@@ -574,12 +579,14 @@ fn move_message(tx: &Connection, id: &MessageId, to: &MailboxId) -> Result<(), D
         return Ok(());
     };
     let to = *to.as_uuid();
-    // A replay finds the row already in `to`: nothing moves, nothing to count.
-    if from == Some(to) {
-        return Ok(());
-    }
-    exec(tx, "UPDATE messages SET mailbox_id = ?2 WHERE id = ?1", params![id.as_uuid(), to])?;
-    if !seen {
+    exec(
+        tx,
+        "UPDATE messages SET mailbox_id = ?2, provider_uid = ?3 WHERE id = ?1",
+        params![id.as_uuid(), to, provider_uid.map(|u| u.value())],
+    )?;
+    // A replay, or a UID attached after the move, finds the row already in
+    // `to`: nothing to count.
+    if !seen && from != Some(to) {
         if let Some(from) = from {
             adjust_unread(tx, &from, -1)?;
         }

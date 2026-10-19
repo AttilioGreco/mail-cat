@@ -48,10 +48,10 @@ impl<AW, CW, ES, PR, MR, B> InProcessCommandBus<AW, CW, ES, PR, MR, B>
 where
     AW: AccountWriteRepository + AccountReadRepository,
     CW: ContactWriteRepository + ContactReadRepository,
-    ES: EventStore,
-    PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
-    B: EventPublisher,
+    ES: EventStore + 'static,
+    PR: ProviderRegistry + 'static,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    B: EventPublisher + 'static,
 {
     pub fn new(
         account_write_repo: Arc<AW>,
@@ -93,10 +93,10 @@ impl<AW, CW, ES, PR, MR, B> CommandBus for InProcessCommandBus<AW, CW, ES, PR, M
 where
     AW: AccountWriteRepository + AccountReadRepository,
     CW: ContactWriteRepository + ContactReadRepository,
-    ES: EventStore,
-    PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
-    B: EventPublisher,
+    ES: EventStore + 'static,
+    PR: ProviderRegistry + 'static,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    B: EventPublisher + 'static,
 {
     async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {
         match command {

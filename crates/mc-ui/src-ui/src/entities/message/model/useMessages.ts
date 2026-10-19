@@ -69,11 +69,24 @@ export function useMessages(mailboxKey: string | null) {
   });
 }
 
+const BODY_POLL_MS = 3_000;
+/** About a minute: long enough for a retried download, bounded for a message
+ *  that genuinely has no text part. */
+const BODY_POLL_TRIES = 20;
+
 export function useMessageBody(uid: string | null) {
   return useQuery({
     queryKey: ['body', uid],
     queryFn: () => fetchBody(uid!),
     enabled: uid !== null,
     staleTime: Infinity,
+    // A body not yet downloaded comes back empty when the server's on-open
+    // fetch fails; with an infinite staleTime that empty answer would stay
+    // cached for good. Re-asking retries the fetch and picks up a body the
+    // backfill stored in the meantime.
+    refetchInterval: ({ state: { data, dataUpdateCount } }) =>
+      data && data.htmlBody == null && data.textBody == null && dataUpdateCount < BODY_POLL_TRIES
+        ? BODY_POLL_MS
+        : false,
   });
 }

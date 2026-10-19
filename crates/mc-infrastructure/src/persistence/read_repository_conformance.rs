@@ -840,6 +840,7 @@ macro_rules! read_repository_conformance {
                     message_id,
                     from_mailbox_id: inbox_id,
                     to_mailbox_id: archive_id,
+                    provider_uid: None,
                 },
             );
             repo.project(&env).await.unwrap();
@@ -875,6 +876,25 @@ macro_rules! read_repository_conformance {
             .await
             .unwrap();
             assert_eq!(archive_msgs.total_count, 1);
+            // The inbox UID means nothing in archive.
+            assert_eq!(msg.provider_uid, None);
+
+            // The UID learned after the move lands on the same row.
+            let env = make_event_envelope(
+                3,
+                &message_id.to_string(),
+                AggregateType::Message,
+                3,
+                DomainEvent::MessageMoved {
+                    message_id,
+                    from_mailbox_id: archive_id,
+                    to_mailbox_id: archive_id,
+                    provider_uid: Some(ProviderUid::new(77)),
+                },
+            );
+            repo.project(&env).await.unwrap();
+            let found = repo.find_by_provider_uid(&archive_id, 77).await.unwrap();
+            assert_eq!(found.map(|m| m.id), Some(message_id));
         }
 
         /// Regression test for the "reply shows no content / doesn't attach to
@@ -1666,7 +1686,7 @@ macro_rules! read_repository_conformance {
                     e_gone,
                     DomainEvent::MessageBodyFetched { message_id: root, attachments: vec![] },
                     flagged(root, inbox, vec![Flag::Seen], vec![]),
-                    DomainEvent::MessageMoved { message_id: reply, from_mailbox_id: inbox, to_mailbox_id: archive },
+                    DomainEvent::MessageMoved { message_id: reply, from_mailbox_id: inbox, to_mailbox_id: archive, provider_uid: None },
                     DomainEvent::MessageDeleted { message_id: gone, mailbox_id: inbox, permanently: false },
                     DomainEvent::MessageSent {
                         message_id: sent,
@@ -1777,8 +1797,8 @@ macro_rules! read_repository_conformance {
                     flagged(mid, inbox, vec![Flag::Seen], vec![]),
                     DomainEvent::MessageDeleted { message_id: newest, mailbox_id: inbox, permanently: false },
                     DomainEvent::MessageDeleted { message_id: copy_a, mailbox_id: inbox, permanently: false },
-                    DomainEvent::MessageMoved { message_id: roamer, from_mailbox_id: inbox, to_mailbox_id: trash },
-                    DomainEvent::MessageMoved { message_id: roamer, from_mailbox_id: trash, to_mailbox_id: archive },
+                    DomainEvent::MessageMoved { message_id: roamer, from_mailbox_id: inbox, to_mailbox_id: trash, provider_uid: None },
+                    DomainEvent::MessageMoved { message_id: roamer, from_mailbox_id: trash, to_mailbox_id: archive, provider_uid: None },
                     DomainEvent::MessageSent {
                         message_id: sent,
                         message_rfc_id: None,

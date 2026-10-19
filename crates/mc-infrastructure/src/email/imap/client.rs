@@ -259,7 +259,10 @@ impl ImapEmailProvider {
             self.release(session);
             return Ok(found.into_iter().next());
         }
-        // The failed response may be half-read: that connection is dropped.
+        // The failed response may be half-read: that connection is dropped —
+        // before checking out the next, or callers falling back at once hold
+        // every pool permit while each waits for one more, and all hang.
+        drop(session);
         let mut session = self.selected(mailbox_name).await?;
         let raw = Self::fetch_whole(&mut session, uid).await?;
         self.release(session);
@@ -377,6 +380,44 @@ impl ImapEmailProvider {
         };
 
         Ok(session)
+    }
+
+    /// `UID COPY` that keeps the UIDPLUS `COPYUID` response code (RFC 4315),
+    /// which async-imap's `uid_copy` discards: it is the copy's UID in the
+    /// destination. `None` from a server without UIDPLUS.
+    async fn uid_copy_reporting_uid(
+        session: &mut ImapSession,
+        uid: ProviderUid,
+        to: &str,
+    ) -> Result<Option<ProviderUid>, DomainError> {
+        use async_imap::imap_proto::{Response, Status};
+
+        if to.contains(['\r', '\n']) {
+            return Err(DomainError::Provider(format!("Invalid mailbox name: {to:?}")));
+        }
+        let quoted = to.replace('\\', "\\\\").replace('"', "\\\"");
+        let tag = session
+            .run_command(format!("UID COPY {} \"{quoted}\"", uid.value()))
+            .await
+            .map_err(|e| DomainError::Provider(format!("Copy failed: {e}")))?;
+        loop {
+            let response = session
+                .read_response()
+                .await
+                .map_err(|e| DomainError::Provider(format!("Copy failed: {e}")))?
+                .ok_or_else(|| DomainError::Provider("Copy failed: connection lost".into()))?;
+            // Untagged responses (EXISTS, FETCH) may precede the tagged reply.
+            let Response::Done { tag: done, status, code, information } = response.parsed() else {
+                continue;
+            };
+            if *done != tag {
+                continue;
+            }
+            if *status != Status::Ok {
+                return Err(DomainError::Provider(format!("Copy failed: {status:?} {information:?}")));
+            }
+            return Ok(copied_uid(code.as_ref()));
+        }
     }
 
     /// Helper to convert ProviderUid to IMAP sequence.
@@ -719,6 +760,9 @@ impl EmailProvider for ImapEmailProvider {
                 // One message the parser rejects fails its whole chunk: go one by one.
                 Err(e) => {
                     warn!(mailbox = %mailbox_name, error = %e, "bulk text fetch failed, retrying message by message");
+                    // Same pool rule as `fetch_one_body`: never hold a
+                    // connection while it checks out more.
+                    drop(session);
                     for &uid in chunk {
                         results.extend(self.fetch_one_body(&mailbox_name, uid).await?);
                     }
@@ -886,11 +930,7 @@ impl EmailProvider for ImapEmailProvider {
         let seq = Self::uid_to_seq(&uid);
         let to_name = mailbox_path_to_string(to);
 
-        // Copy to destination
-        session
-            .uid_copy(format!("{}", seq), &to_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Copy failed: {}", e)))?;
+        let new_uid = Self::uid_copy_reporting_uid(&mut session, uid, &to_name).await?;
 
         // Mark as deleted in source
         let _ = session
@@ -905,10 +945,8 @@ impl EmailProvider for ImapEmailProvider {
             .map_err(|e| DomainError::Provider(format!("Expunge failed: {}", e)))?;
         self.release(session);
 
-        info!("Message moved successfully");
-        // Note: IMAP COPY doesn't return the new UID, so we return None
-        // A full implementation would re-fetch to get the new UID
-        Ok(None)
+        info!(new_uid = ?new_uid, "Message moved successfully");
+        Ok(new_uid)
     }
 
     async fn delete_message(
@@ -1409,6 +1447,20 @@ impl EmailProvider for ImapEmailProvider {
     }
 }
 
+/// The destination UID in a `[COPYUID <validity> <source set> <dest set>]`
+/// code. One message was copied, so its UID is the set's first.
+fn copied_uid(code: Option<&async_imap::imap_proto::ResponseCode>) -> Option<ProviderUid> {
+    use async_imap::imap_proto::{ResponseCode, UidSetMember};
+
+    let Some(ResponseCode::CopyUid(_, _, copied)) = code else {
+        return None;
+    };
+    copied.first().map(|member| match member {
+        UidSetMember::Uid(uid) => ProviderUid::new(*uid),
+        UidSetMember::UidRange(range) => ProviderUid::new(*range.start()),
+    })
+}
+
 /// Parse RFC threading headers (Message-ID, In-Reply-To, References) from raw
 /// header bytes returned by `BODY.PEEK[HEADER]`.
 ///
@@ -1654,6 +1706,21 @@ mod tests {
             b"* 1 FETCH (UID 8 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"utf-8\") NIL NIL \"7BIT\" 3 1 NIL NIL NIL))\r\n",
         );
         assert_eq!(parts.iter().map(|p| p.section.clone()).collect::<Vec<_>>(), [vec![1]]);
+    }
+
+    #[test]
+    fn copy_reports_the_destination_uid_only_with_uidplus() {
+        use async_imap::imap_proto::{Response, parser::parse_response};
+
+        let code_of = |line: &'static [u8]| match parse_response(line).unwrap().1 {
+            Response::Done { code, .. } => code,
+            other => panic!("not a tagged reply: {other:?}"),
+        };
+        assert_eq!(
+            copied_uid(code_of(b"A3 OK [COPYUID 38505 304 3956] Done\r\n").as_ref()),
+            Some(ProviderUid::new(3956))
+        );
+        assert_eq!(copied_uid(code_of(b"A3 OK Done\r\n").as_ref()), None);
     }
 
     #[test]

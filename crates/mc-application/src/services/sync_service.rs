@@ -506,6 +506,7 @@ impl<
             // Stable per-mailbox text so `emit`'s gate reduces this to one event
             // per percentage point instead of one per message.
             let envelope_label = format!("Fetching messages in {}", remote.path);
+            let (known_uids, awaiting_uid) = self.held_uids(local).await?;
 
             for (index, envelope_summary) in envelopes.iter().enumerate() {
                 self.emit(
@@ -527,13 +528,21 @@ impl<
 
                 // Soft-deleted remotely (\Deleted set, not yet expunged): skip so it
                 // doesn't resurface as "new" on a mailbox with no local history of it.
-                if envelope_summary.flags.contains(&Flag::Deleted) {
+                if envelope_summary.flags.contains(&Flag::Deleted)
+                    || known_uids.contains(&envelope_summary.provider_uid)
+                {
                     continue;
                 }
                 let placeholder = match self.local_copy(local, envelope_summary).await {
                     Some(stored) if stored.provider_uid.is_some() => continue,
                     other => other,
                 };
+                if placeholder.is_none()
+                    && awaiting_uid
+                    && self.reattach(local, envelope_summary).await?
+                {
+                    continue;
+                }
 
                 let (_message, event) = Message::receive(
                     *account_id,
@@ -1062,15 +1071,21 @@ impl<
 
         let mut new_count = 0u32;
         let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
+        let (known_uids, awaiting_uid) = self.held_uids(&local).await?;
 
         for envelope_summary in &envelopes {
-            if envelope_summary.flags.contains(&Flag::Deleted) {
+            if envelope_summary.flags.contains(&Flag::Deleted)
+                || known_uids.contains(&envelope_summary.provider_uid)
+            {
                 continue;
             }
             let placeholder = match self.local_copy(&local, envelope_summary).await {
                 Some(stored) if stored.provider_uid.is_some() => continue,
                 other => other,
             };
+            if placeholder.is_none() && awaiting_uid && self.reattach(&local, envelope_summary).await? {
+                continue;
+            }
 
             let (_message, event) = Message::receive(
                     *account_id,
@@ -1184,6 +1199,48 @@ impl<
             Some(uid) => m.mailbox_id == mailbox.id && uid == env.provider_uid,
             None => mailbox.mailbox_type == MailboxType::Sent,
         })
+    }
+
+    /// The UIDs `mailbox` already holds, and whether any of its messages is
+    /// waiting for one (moved here by a provider that could not report the new
+    /// UID). One listing per batch, not one query per envelope.
+    async fn held_uids(&self, mailbox: &Mailbox) -> Result<(HashSet<ProviderUid>, bool), ApplicationError> {
+        let all = mc_shared::pagination::Pagination { page: 1, page_size: u32::MAX };
+        let local = self
+            .projector
+            .list_messages(&mailbox.id, &all)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to list local messages: {e}")))?;
+        let awaiting = local.items.iter().any(|m| m.provider_uid.is_none());
+        Ok((local.items.iter().filter_map(|m| m.provider_uid).collect(), awaiting))
+    }
+
+    /// A message moved here without its new UID gets it from the server copy
+    /// with the same Message-ID, instead of that copy arriving as a duplicate.
+    async fn reattach(&self, mailbox: &Mailbox, env: &MessageEnvelopeSummary) -> Result<bool, ApplicationError> {
+        let Some(rfc_id) = env.message_rfc_id.as_deref() else {
+            return Ok(false);
+        };
+        let copies = self
+            .projector
+            .find_by_rfc_id(&mailbox.account_id, rfc_id)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("find_by_rfc_id failed: {e}")))?;
+        let Some(moved) = copies
+            .into_iter()
+            .find(|m| m.mailbox_id == mailbox.id && m.provider_uid.is_none())
+        else {
+            return Ok(false);
+        };
+        let event = DomainEvent::MessageMoved {
+            message_id: moved.id,
+            from_mailbox_id: mailbox.id,
+            to_mailbox_id: mailbox.id,
+            provider_uid: Some(env.provider_uid),
+        };
+        self.append_and_project(&moved.id.to_string(), AggregateType::Message, event)
+            .await?;
+        Ok(true)
     }
 
     /// The server copy just stored replaces the one shown at send time. The
@@ -1877,12 +1934,20 @@ mod tests {
         }
         async fn list_messages(
             &self,
-            _mailbox_id: &MailboxId,
+            mailbox_id: &MailboxId,
             _pagination: &mc_shared::pagination::Pagination,
         ) -> Result<mc_shared::pagination::PagedResult<MessageSummary>, DomainError> {
+            let items: Vec<MessageSummary> = self
+                .stored
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.mailbox_id == *mailbox_id)
+                .cloned()
+                .collect();
             Ok(mc_shared::pagination::PagedResult {
-                items: vec![],
-                total_count: 0,
+                total_count: items.len() as u64,
+                items,
                 page: 1,
                 page_size: 20,
             })
@@ -2361,6 +2426,82 @@ mod tests {
             ),
             "server copy stored, then the placeholder dropped: {message_events:?}"
         );
+    }
+
+    fn archived(account_id: AccountId, mailbox_id: MailboxId, provider_uid: Option<ProviderUid>) -> MessageSummary {
+        MessageSummary {
+            id: MessageId::new(),
+            account_id,
+            mailbox_id,
+            provider_uid,
+            from_name: None,
+            from_email: "sender@example.com".into(),
+            to: vec![],
+            cc: vec![],
+            subject: "Test Subject".into(),
+            flags: vec![Flag::Seen],
+            size_bytes: 0,
+            has_attachments: false,
+            received_at: chrono::Utc::now(),
+        }
+    }
+
+    fn archive_mailbox(account_id: AccountId) -> Mailbox {
+        Mailbox::discover(
+            account_id,
+            MailboxPath::new(vec!["Archive".to_string()], '/').unwrap(),
+            MailboxType::Archive,
+        )
+        .0
+    }
+
+    fn received(projector: &MockProjector) -> usize {
+        projector
+            .projected_events()
+            .iter()
+            .filter(|e| matches!(e, DomainEvent::MessageReceived { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn moved_message_gets_its_uid_back_instead_of_a_duplicate() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let moved = archived(account_id, archive.id, None);
+        let mut server_copy = make_envelope_summary(9);
+        server_copy.message_rfc_id = Some("<moved@example.com>".into());
+
+        let projector = Arc::new(MockProjector::new());
+        projector.stored.lock().unwrap().push(moved.clone());
+        projector.mailboxes.lock().unwrap().push(archive.clone());
+        let provider = MockEmailProvider::new().with_mailboxes(vec![archive]).with_envelopes(vec![server_copy]);
+        let service = make_service(provider, Arc::new(MockEventStore::new()), projector.clone());
+        service.start_sync(&account_id).await.unwrap();
+
+        assert_eq!(received(&projector), 0, "no second copy of the moved message");
+        assert!(projector.projected_events().iter().any(|e| matches!(
+            e,
+            DomainEvent::MessageMoved { message_id, provider_uid: Some(uid), .. }
+                if *message_id == moved.id && uid.value() == 9
+        )));
+    }
+
+    #[tokio::test]
+    async fn envelope_whose_uid_is_already_held_is_not_ingested_again() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let held = archived(account_id, archive.id, Some(ProviderUid::new(9)));
+
+        let projector = Arc::new(MockProjector::new());
+        projector.stored.lock().unwrap().push(held);
+        projector.mailboxes.lock().unwrap().push(archive.clone());
+        let provider = MockEmailProvider::new()
+            .with_mailboxes(vec![archive])
+            .with_envelopes(vec![make_envelope_summary(9)]);
+        let service = make_service(provider, Arc::new(MockEventStore::new()), projector.clone());
+        service.start_sync(&account_id).await.unwrap();
+
+        assert_eq!(received(&projector), 0);
     }
 
     #[tokio::test]
