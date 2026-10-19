@@ -416,7 +416,7 @@ fn note_synced_message(
     )?;
     match mailbox_type.as_deref() {
         Some(t) if t == json(&MailboxType::Sent)? => {
-            drop_sent_placeholders(tx, account_id, rfc_message_id)?;
+            drop_sent_placeholders(tx, account_id, mailbox_id, rfc_message_id)?;
             note_sent_once(tx, account_id, message_id, rfc_message_id, envelope, at)
         }
         Some(t) if t == json(&MailboxType::Drafts)? => Ok(()),
@@ -455,9 +455,15 @@ fn server_copy_exists(
 /// The server copy of a message we sent replaces its `MessageSent`
 /// placeholder. SyncService supersedes it with an event, but a sync that
 /// looked before the placeholder existed can't; this closes that window.
+/// Projection-only, yet replay-safe: it reads only rows earlier events
+/// projected, so a replay deletes exactly the same ones.
+///
+/// Only in `sent`: elsewhere a UID-less copy of the same Message-ID is a
+/// received message waiting for its UID, not a placeholder.
 fn drop_sent_placeholders(
     tx: &Connection,
     account_id: &AccountId,
+    sent: &MailboxId,
     rfc_message_id: Option<&str>,
 ) -> Result<(), DomainError> {
     let Some(rfc_message_id) = rfc_message_id else {
@@ -466,8 +472,8 @@ fn drop_sent_placeholders(
     let placeholders = query_all(
         tx,
         "SELECT id FROM messages \
-         WHERE account_id = ?1 AND rfc_message_id = ?2 AND provider_uid IS NULL",
-        params![account_id.as_uuid(), rfc_message_id],
+         WHERE account_id = ?1 AND rfc_message_id = ?2 AND mailbox_id = ?3 AND provider_uid IS NULL",
+        params![account_id.as_uuid(), rfc_message_id, sent.as_uuid()],
         |r| r.get::<_, Uuid>(0),
     )?;
     placeholders.into_iter().try_for_each(|id| delete_message(tx, &MessageId::from_uuid(id)))

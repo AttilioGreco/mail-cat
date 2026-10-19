@@ -4,6 +4,25 @@ import type { Mailbox } from '@/entities/mailbox';
 import type { MessageEnvelope } from '@/entities/message';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 
+// ── Optimistic removal ──────────────────────────────────────────────────────
+
+type ListSnapshot = [readonly unknown[], MessageEnvelope[] | undefined][];
+
+/** Moves and deletes now wait for the server, so the rows leave every cached
+ *  list at once and come back if the server refuses. */
+async function removeFromLists(qc: ReturnType<typeof useQueryClient>, ids: string[]): Promise<ListSnapshot> {
+  await qc.cancelQueries({ queryKey: ['messages'] });
+  const snapshot = qc.getQueriesData<MessageEnvelope[]>({ queryKey: ['messages'] });
+  qc.setQueriesData<MessageEnvelope[]>({ queryKey: ['messages'] }, (list) =>
+    list?.filter((m) => !ids.includes(m.uid)),
+  );
+  return snapshot;
+}
+
+function restoreLists(qc: ReturnType<typeof useQueryClient>, snapshot: ListSnapshot | undefined) {
+  snapshot?.forEach(([key, list]) => qc.setQueryData(key, list));
+}
+
 // ── Selection follow-through ────────────────────────────────────────────────
 
 /**
@@ -172,7 +191,9 @@ export function useMoveMessage() {
         messageId: params.messageId,
         toMailboxId: params.toMailboxId,
       }),
-    onSuccess: () => {
+    onMutate: (params) => removeFromLists(qc, [params.messageId]),
+    onError: (_e, _params, snapshot) => restoreLists(qc, snapshot),
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ['messages'] });
       qc.invalidateQueries({ queryKey: ['mailboxes'] });
       // Same refresh set as setFlags: a message leaving a folder changes the
@@ -207,7 +228,9 @@ export function useDeleteMessages() {
         messageIds: params.messageIds,
         permanently: params.permanently ?? false,
       }),
-    onSuccess: () => invalidateMessageViews(qc),
+    onMutate: (params) => removeFromLists(qc, params.messageIds),
+    onError: (_e, _params, snapshot) => restoreLists(qc, snapshot),
+    onSettled: () => invalidateMessageViews(qc),
   });
 }
 
@@ -220,7 +243,9 @@ export function useMoveMessages() {
         messageIds: params.messageIds,
         toMailboxId: params.toMailboxId,
       }),
-    onSuccess: () => invalidateMessageViews(qc),
+    onMutate: (params) => removeFromLists(qc, params.messageIds),
+    onError: (_e, _params, snapshot) => restoreLists(qc, snapshot),
+    onSettled: () => invalidateMessageViews(qc),
   });
 }
 
@@ -234,7 +259,9 @@ export function useDeleteMessage() {
         messageId: params.messageId,
         permanently: params.permanently ?? false,
       }),
-    onSuccess: () => {
+    onMutate: (params) => removeFromLists(qc, [params.messageId]),
+    onError: (_e, _params, snapshot) => restoreLists(qc, snapshot),
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ['messages'] });
       qc.invalidateQueries({ queryKey: ['mailboxes'] });
       // A deleted message also drops out of its conversation and thread.

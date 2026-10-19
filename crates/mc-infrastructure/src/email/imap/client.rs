@@ -68,6 +68,8 @@ const BODY_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 /// IDLE is re-issued this often: RFC 2177 has servers drop it after 30
 /// minutes, and NATs often forget a silent connection sooner.
 const IDLE_REISSUE: Duration = Duration::from_secs(25 * 60);
+/// APPEND gets `COMMAND_TIMEOUT` plus a second per this many bytes.
+const UPLOAD_FLOOR_BYTES_PER_SEC: u64 = 64 * 1024;
 
 /// Servers silently drop idle connections, so one parked longer than this gets a
 /// NOOP before reuse instead of failing the caller's first real command.
@@ -419,6 +421,8 @@ impl ImapEmailProvider {
 
     /// Batch size for UID FETCH operations to avoid IMAP command line limits.
     const FETCH_BATCH_SIZE: usize = 500;
+    /// Messages per `UID FETCH (FLAGS)`: about 40 bytes each in the reply.
+    const FLAGS_BATCH_SIZE: usize = 5_000;
 
     /// Compress a sorted slice of UIDs into IMAP range notation.
     /// e.g. [1,2,3,5,6,10] -> "1:3,5:6,10"
@@ -761,13 +765,23 @@ impl EmailProvider for ImapEmailProvider {
         &self,
         mailbox: &MailboxPath,
         rfc_id: &str,
-    ) -> Result<Option<ProviderUid>, DomainError> {
+    ) -> Result<Vec<ProviderUid>, DomainError> {
+        let Some(query) = message_id_search(rfc_id)? else {
+            return Ok(Vec::new());
+        };
         let mut session = self.selected(&mailbox_path_to_string(mailbox)).await?;
-        let query = format!("HEADER Message-ID {}", quoted(rfc_id)?);
         let found = exchange(COMMAND_TIMEOUT, "Search", session.uid_search(query)).await?;
         self.release(session);
-        // Several copies of one Message-ID: the newest is as good as any.
-        Ok(found.into_iter().max().map(ProviderUid::new))
+        Ok(sorted_uids(found))
+    }
+
+    async fn uids_from(&self, mailbox: &MailboxPath, from: ProviderUid) -> Result<Vec<ProviderUid>, DomainError> {
+        let mut session = self.selected(&mailbox_path_to_string(mailbox)).await?;
+        let found =
+            exchange(COMMAND_TIMEOUT, "Search", session.uid_search(format!("UID {}:*", from.value()))).await?;
+        self.release(session);
+        // `n:*` always matches the last message, even when its UID is below n.
+        Ok(sorted_uids(found).into_iter().filter(|uid| *uid >= from).collect())
     }
 
     async fn fetch_raw_message(
@@ -885,12 +899,10 @@ impl EmailProvider for ImapEmailProvider {
         info!("Moving message {} from {} to {}", uid.value(), from_name, to_name);
 
         let mut session = self.selected(&from_name).await?;
-        let new_uid = timed(
-            COMMAND_TIMEOUT,
-            "Move",
-            move_uids(&mut session, self.caps(), &uid.value().to_string(), &to_name),
-        )
-        .await?;
+        let new_uid = timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, self.caps(), &[uid.value()], &to_name))
+            .await?
+            .first()
+            .map(|&(_, new)| ProviderUid::new(new));
         self.release(session);
 
         info!(new_uid = ?new_uid, "Message moved successfully");
@@ -907,8 +919,7 @@ impl EmailProvider for ImapEmailProvider {
         info!("Deleting message {} from {} (permanent: {})", uid.value(), mailbox_name, permanently);
 
         let mut session = self.selected(&mailbox_name).await?;
-        timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, self.caps(), &uid.value().to_string(), permanently))
-            .await?;
+        timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, self.caps(), &[uid.value()], permanently)).await?;
         self.release(session);
 
         info!("Message deleted successfully");
@@ -937,8 +948,7 @@ impl EmailProvider for ImapEmailProvider {
         let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
         uid_nums.sort_unstable();
         for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
-            let set = Self::compress_uid_ranges(chunk);
-            timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, self.caps(), &set, permanently)).await?;
+            timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, self.caps(), chunk, permanently)).await?;
         }
         self.release(session);
 
@@ -953,9 +963,9 @@ impl EmailProvider for ImapEmailProvider {
         uids: &[ProviderUid],
         from: &MailboxPath,
         to: &MailboxPath,
-    ) -> Result<(), DomainError> {
+    ) -> Result<HashMap<ProviderUid, ProviderUid>, DomainError> {
         if uids.is_empty() {
-            return Ok(());
+            return Ok(HashMap::new());
         }
 
         let (from_name, to_name) = (mailbox_path_to_string(from), mailbox_path_to_string(to));
@@ -964,14 +974,15 @@ impl EmailProvider for ImapEmailProvider {
         let mut session = self.selected(&from_name).await?;
         let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
         uid_nums.sort_unstable();
+        let mut moved = HashMap::new();
         for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
-            let set = Self::compress_uid_ranges(chunk);
-            timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, self.caps(), &set, &to_name)).await?;
+            let pairs = timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, self.caps(), chunk, &to_name)).await?;
+            moved.extend(pairs.into_iter().map(|(old, new)| (ProviderUid::new(old), ProviderUid::new(new))));
         }
         self.release(session);
 
         info!("Bulk move of {} messages completed", uid_nums.len());
-        Ok(())
+        Ok(moved)
     }
 
     async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError> {
@@ -998,14 +1009,17 @@ impl EmailProvider for ImapEmailProvider {
 
         let mut session = self.session().await?;
         let mailbox_name = mailbox_path_to_string(mailbox);
-        exchange(BODY_FETCH_TIMEOUT, "APPEND", session.append(&mailbox_name, Some(&flags), None, &raw)).await?;
+        exchange(append_timeout(raw.len()), "APPEND", session.append(&mailbox_name, Some(&flags), None, &raw)).await?;
 
         // async-imap drops the APPENDUID response code, so find the copy by its
         // Message-ID — works on every server, UIDPLUS or not.
-        let uid = match &message.message_rfc_id {
-            Some(rfc_id) => {
+        let query = match &message.message_rfc_id {
+            Some(rfc_id) => message_id_search(rfc_id)?,
+            None => None,
+        };
+        let uid = match query {
+            Some(query) => {
                 exchange(COMMAND_TIMEOUT, "Mailbox select", session.select(&mailbox_name)).await?;
-                let query = format!("HEADER Message-ID {}", quoted(rfc_id)?);
                 exchange(COMMAND_TIMEOUT, "UID SEARCH", session.uid_search(query))
                     .await?
                     .into_iter()
@@ -1055,16 +1069,9 @@ impl EmailProvider for ImapEmailProvider {
         &self,
         mailbox: &MailboxPath,
     ) -> Result<Vec<UidFlagEntry>, DomainError> {
-        use futures::TryStreamExt;
-
         let mailbox_name = mailbox_path_to_string(mailbox);
         let mut session = self.selected(&mailbox_name).await?;
-
-        // UID FETCH 1:* (FLAGS) — lightweight, returns only UID + flags
-        let fetches: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "UID FETCH FLAGS", async {
-            session.uid_fetch("1:*", "(FLAGS)").await?.try_collect().await
-        })
-        .await?;
+        let fetches = uid_flags(&mut session).await?;
 
         // ponytail: `* n FETCH (UID u FLAGS (...))` is about 40 bytes a message.
         self.metered(fetches.len() as u64 * 40).await;
@@ -1245,6 +1252,10 @@ impl EmailProvider for ImapEmailProvider {
                                     uid: ProviderUid::new(0),
                                     flags: vec![],
                                 });
+                                // A timed-out reply may still arrive: never reuse that session.
+                                if matches!(e, DomainError::ConnectionTimeout(_)) {
+                                    continue;
+                                }
                             }
                         }
                     } else {
@@ -1282,7 +1293,12 @@ impl EmailProvider for ImapEmailProvider {
                                         }
                                     }
                                 }
-                                Err(e) => warn!("[watch] UID FETCH for new messages failed: {}", e),
+                                Err(e) => {
+                                    warn!("[watch] UID FETCH for new messages failed: {}", e);
+                                    if matches!(e, DomainError::ConnectionTimeout(_)) {
+                                        continue;
+                                    }
+                                }
                         }
                     }
 
@@ -1377,52 +1393,128 @@ fn quoted(value: &str) -> Result<String, DomainError> {
     Ok(format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
 }
 
-/// Move `uid_set` out of the selected mailbox into `to`, returning the first
-/// destination UID the server reports (UIDPLUS `COPYUID`).
-async fn move_uids<T>(
-    session: &mut async_imap::Session<T>,
-    caps: ServerCaps,
-    uid_set: &str,
-    to: &str,
-) -> Result<Option<ProviderUid>, DomainError>
-where
-    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
-{
-    if caps.move_cmd {
-        return transfer(session, "MOVE", uid_set, to).await;
-    }
-    let copied = transfer(session, "COPY", uid_set, to).await?;
-    delete_uids(session, caps, uid_set, true).await?;
-    Ok(copied)
-}
-
-/// Flag `uid_set` `\Deleted` in the selected mailbox and, when `permanently`,
-/// expunge exactly those messages. A plain `EXPUNGE` would also purge every
-/// other `\Deleted` message there — mail another client only marked, maybe to
-/// undo — so without UIDPLUS (`UID EXPUNGE`) they stay flagged instead: sync
-/// already treats `\Deleted` as gone, and the next client to expunge clears them.
-async fn delete_uids<T>(
-    session: &mut async_imap::Session<T>,
-    caps: ServerCaps,
-    uid_set: &str,
-    permanently: bool,
-) -> Result<(), DomainError>
+/// Every message's UID and flags in the selected mailbox, a bounded batch
+/// per command so a big mailbox is no single huge reply racing one timeout.
+async fn uid_flags<T>(session: &mut async_imap::Session<T>) -> Result<Vec<async_imap::types::Fetch>, DomainError>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
     use futures::TryStreamExt;
 
-    store(session, uid_set, "+FLAGS.SILENT (\\Deleted)", "Delete flag").await?;
-    if permanently && caps.uidplus {
-        session
-            .uid_expunge(uid_set)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?;
+    let all = exchange(COMMAND_TIMEOUT, "UID SEARCH ALL", session.uid_search("ALL")).await?;
+    let all: Vec<u32> = sorted_uids(all).into_iter().map(|u| u.value()).collect();
+    let mut fetches = Vec::with_capacity(all.len());
+    for chunk in all.chunks(ImapEmailProvider::FLAGS_BATCH_SIZE) {
+        let set = ImapEmailProvider::compress_uid_ranges(chunk);
+        let batch: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "UID FETCH FLAGS", async {
+            session.uid_fetch(&set, "(FLAGS)").await?.try_collect().await
+        })
+        .await?;
+        fetches.extend(batch);
+    }
+    Ok(fetches)
+}
+
+/// APPEND's limit: a slow uplink must still get a big attachment through.
+fn append_timeout(bytes: usize) -> Duration {
+    COMMAND_TIMEOUT + Duration::from_secs(bytes as u64 / UPLOAD_FLOOR_BYTES_PER_SEC)
+}
+
+/// `HEADER Message-ID` search for `rfc_id`; `None` for an empty one (`""`,
+/// `<>`), which as a substring search would match every message.
+fn message_id_search(rfc_id: &str) -> Result<Option<String>, DomainError> {
+    if rfc_id.trim_matches(|c: char| c == '<' || c == '>' || c.is_whitespace()).is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!("HEADER Message-ID {}", quoted(rfc_id)?)))
+}
+
+fn sorted_uids(found: std::collections::HashSet<u32>) -> Vec<ProviderUid> {
+    let mut uids: Vec<u32> = found.into_iter().collect();
+    uids.sort_unstable();
+    uids.into_iter().map(ProviderUid::new).collect()
+}
+
+/// Move `uids` (ascending) out of the selected mailbox into `to`, returning
+/// `(old, new)` UID pairs the server reports (UIDPLUS `COPYUID`).
+async fn move_uids<T>(
+    session: &mut async_imap::Session<T>,
+    caps: ServerCaps,
+    uids: &[u32],
+    to: &str,
+) -> Result<Vec<(u32, u32)>, DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    let set = ImapEmailProvider::compress_uid_ranges(uids);
+    if caps.move_cmd {
+        return transfer(session, "MOVE", &set, to).await;
+    }
+    let copied = transfer(session, "COPY", &set, to).await?;
+    store(session, &set, "+FLAGS.SILENT (\\Deleted)", "Delete flag").await?;
+    // Otherwise the source copies stay flagged: sync already reads \Deleted
+    // as gone, and the next client to expunge clears them.
+    if caps.uidplus || !others_deleted(session, uids).await? {
+        expunge(session, caps, &set).await?;
+    }
+    Ok(copied)
+}
+
+/// Flag `uids` (ascending) `\Deleted` in the selected mailbox and, when
+/// `permanently`, expunge exactly them. Without UIDPLUS the only expunge is
+/// the mailbox-wide one, which would also purge mail other clients merely
+/// marked (maybe to undo): then a permanent delete is refused, before any
+/// change, rather than reported done.
+async fn delete_uids<T>(
+    session: &mut async_imap::Session<T>,
+    caps: ServerCaps,
+    uids: &[u32],
+    permanently: bool,
+) -> Result<(), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    let set = ImapEmailProvider::compress_uid_ranges(uids);
+    if permanently && !caps.uidplus && others_deleted(session, uids).await? {
+        return Err(DomainError::NotSupported(
+            "permanent delete: the server can only expunge every message marked deleted in this folder \
+             at once, and other messages are marked"
+                .into(),
+        ));
+    }
+    store(session, &set, "+FLAGS.SILENT (\\Deleted)", "Delete flag").await?;
+    if permanently {
+        expunge(session, caps, &set).await?;
     }
     Ok(())
+}
+
+/// Whether the selected mailbox has `\Deleted` messages other than `ours`.
+async fn others_deleted<T>(session: &mut async_imap::Session<T>, ours: &[u32]) -> Result<bool, DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    let deleted = exchange(COMMAND_TIMEOUT, "UID SEARCH DELETED", session.uid_search("DELETED")).await?;
+    Ok(deleted.iter().any(|uid| ours.binary_search(uid).is_err()))
+}
+
+/// `UID EXPUNGE uid_set` with UIDPLUS, else the plain mailbox-wide
+/// `EXPUNGE` — callers only get there once nothing else is marked.
+async fn expunge<T>(session: &mut async_imap::Session<T>, caps: ServerCaps, uid_set: &str) -> Result<(), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    use futures::TryStreamExt;
+
+    exchange(COMMAND_TIMEOUT, "Expunge", async {
+        if caps.uidplus {
+            session.uid_expunge(uid_set).await?.try_collect::<Vec<_>>().await
+        } else {
+            session.expunge().await?.try_collect::<Vec<_>>().await
+        }
+    })
+    .await
+    .map(drop)
 }
 
 /// `UID COPY` / `UID MOVE` keeping the `COPYUID` code async-imap's own
@@ -1433,7 +1525,7 @@ async fn transfer<T>(
     verb: &str,
     uid_set: &str,
     to: &str,
-) -> Result<Option<ProviderUid>, DomainError>
+) -> Result<Vec<(u32, u32)>, DomainError>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
@@ -1444,7 +1536,7 @@ where
         .run_command(format!("UID {verb} {uid_set} {}", quoted(to)?))
         .await
         .map_err(|e| failed(&e))?;
-    let mut copied = None;
+    let mut copied = Vec::new();
     loop {
         let response = session
             .read_response()
@@ -1452,30 +1544,36 @@ where
             .map_err(|e| failed(&e))?
             .ok_or_else(|| failed(&"connection lost"))?;
         match response.parsed() {
-            Response::Data { status: Status::Ok, code, .. } => copied = copied.or(copied_uid(code.as_ref())),
+            Response::Data { status: Status::Ok, code, .. } => copied.extend(copied_uids(code.as_ref())),
             Response::Done { tag: done, status, code, information } if *done == tag => {
                 if *status != Status::Ok {
                     return Err(failed(&format!("{status:?} {information:?}")));
                 }
-                return Ok(copied.or(copied_uid(code.as_ref())));
+                copied.extend(copied_uids(code.as_ref()));
+                return Ok(copied);
             }
             _ => {}
         }
     }
 }
 
-/// The destination UID in a `[COPYUID <validity> <source set> <dest set>]`
-/// code. One message was copied, so its UID is the set's first.
-fn copied_uid(code: Option<&async_imap::imap_proto::ResponseCode>) -> Option<ProviderUid> {
+/// `(source, destination)` UID pairs of a `[COPYUID <validity> <source set>
+/// <dest set>]` code: the sets list the UIDs in matching order (RFC 4315).
+fn copied_uids(code: Option<&async_imap::imap_proto::ResponseCode>) -> Vec<(u32, u32)> {
     use async_imap::imap_proto::{ResponseCode, UidSetMember};
 
-    let Some(ResponseCode::CopyUid(_, _, copied)) = code else {
-        return None;
+    let Some(ResponseCode::CopyUid(_, from, to)) = code else {
+        return Vec::new();
     };
-    copied.first().map(|member| match member {
-        UidSetMember::Uid(uid) => ProviderUid::new(*uid),
-        UidSetMember::UidRange(range) => ProviderUid::new(*range.start()),
-    })
+    let expand = |set: &[UidSetMember]| -> Vec<u32> {
+        set.iter()
+            .flat_map(|member| match member {
+                UidSetMember::Uid(uid) => *uid..=*uid,
+                UidSetMember::UidRange(range) => range.clone(),
+            })
+            .collect()
+    };
+    expand(from).into_iter().zip(expand(to)).collect()
 }
 
 /// Parse RFC threading headers (Message-ID, In-Reply-To, References) from raw
@@ -1763,11 +1861,19 @@ mod tests {
             "* OK [COPYUID 7 5 77] Moved\r\n* 3 EXPUNGE\r\n$T OK Done\r\n"
         } else if command.starts_with("UID COPY") {
             "$T OK [COPYUID 7 5 78] Done\r\n"
-        } else if command.starts_with("UID EXPUNGE") {
+        } else if command.contains("EXPUNGE") {
             "* 3 EXPUNGE\r\n$T OK Done\r\n"
+        } else if command == "UID SEARCH DELETED" {
+            // Only what the command itself flagged.
+            "* SEARCH 6\r\n$T OK Done\r\n"
         } else {
             "$T OK Done\r\n"
         }
+    }
+
+    /// Another client marked UID 9 deleted and has not expunged it.
+    fn others_marked(command: &str) -> &'static str {
+        if command == "UID SEARCH DELETED" { "* SEARCH 6 9\r\n$T OK Done\r\n" } else { server_reply(command) }
     }
 
     #[tokio::test]
@@ -1775,9 +1881,9 @@ mod tests {
         let (mut session, commands) = scripted(server_reply).await;
         let caps = ServerCaps { move_cmd: true, uidplus: true };
 
-        let uid = move_uids(&mut session, caps, "5", "Archive").await.unwrap();
+        let moved = move_uids(&mut session, caps, &[5], "Archive").await.unwrap();
 
-        assert_eq!(uid, Some(ProviderUid::new(77)), "COPYUID arrives untagged with MOVE");
+        assert_eq!(moved, [(5, 77)], "COPYUID arrives untagged with MOVE");
         assert_eq!(uid_commands(&commands), ["UID MOVE 5 \"Archive\""]);
     }
 
@@ -1786,9 +1892,9 @@ mod tests {
         let (mut session, commands) = scripted(server_reply).await;
         let caps = ServerCaps { move_cmd: false, uidplus: true };
 
-        let uid = move_uids(&mut session, caps, "5", "Archive").await.unwrap();
+        let moved = move_uids(&mut session, caps, &[5], "Archive").await.unwrap();
 
-        assert_eq!(uid, Some(ProviderUid::new(78)));
+        assert_eq!(moved, [(5, 78)]);
         assert_eq!(
             uid_commands(&commands),
             ["UID COPY 5 \"Archive\"", "UID STORE 5 +FLAGS.SILENT (\\Deleted)", "UID EXPUNGE 5"]
@@ -1796,16 +1902,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_uidplus_nothing_is_expunged() {
-        let (mut session, commands) = scripted(server_reply).await;
+    async fn without_uidplus_expunge_runs_only_when_nothing_else_is_marked() {
         let caps = ServerCaps::default();
 
-        move_uids(&mut session, caps, "5", "Archive").await.unwrap();
-        delete_uids(&mut session, caps, "6", true).await.unwrap();
+        let (mut session, commands) = scripted(server_reply).await;
+        delete_uids(&mut session, caps, &[6], true).await.unwrap();
+        assert!(uid_commands(&commands).iter().any(|c| c == "EXPUNGE"), "{commands:?}");
 
+        let (mut session, commands) = scripted(others_marked).await;
+        move_uids(&mut session, caps, &[5], "Archive").await.unwrap();
         assert!(
             uid_commands(&commands).iter().all(|c| !c.contains("EXPUNGE")),
-            "a plain EXPUNGE would purge other clients' \\Deleted mail: {commands:?}"
+            "a plain EXPUNGE would purge another client's \\Deleted mail: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_uidplus_a_permanent_delete_that_would_purge_others_is_refused() {
+        let (mut session, commands) = scripted(others_marked).await;
+
+        let err = delete_uids(&mut session, ServerCaps::default(), &[6], true).await.unwrap_err();
+
+        assert!(matches!(err, DomainError::NotSupported(_)), "{err:?}");
+        assert_eq!(uid_commands(&commands), ["UID SEARCH DELETED"], "refused before changing anything");
+    }
+
+    #[tokio::test]
+    async fn uid_flags_are_fetched_in_bounded_batches() {
+        let (mut session, commands) = scripted(|command| {
+            if command == "UID SEARCH ALL" {
+                // Two batches' worth: 1..=5000 and 5001..=5002.
+                Box::leak(
+                    format!("* SEARCH {}\r\n$T OK Done\r\n", (1..=5002).map(|u| u.to_string()).collect::<Vec<_>>().join(" "))
+                        .into_boxed_str(),
+                )
+            } else {
+                "$T OK Done\r\n"
+            }
+        })
+        .await;
+
+        uid_flags(&mut session).await.unwrap();
+
+        assert_eq!(
+            uid_commands(&commands),
+            ["UID SEARCH ALL", "UID FETCH 1:5000 (FLAGS)", "UID FETCH 5001:5002 (FLAGS)"]
+        );
+    }
+
+    #[test]
+    fn append_time_grows_with_the_message() {
+        assert_eq!(append_timeout(1024), COMMAND_TIMEOUT);
+        assert_eq!(append_timeout(30 * 1024 * 1024), COMMAND_TIMEOUT + Duration::from_secs(480));
+    }
+
+    #[test]
+    fn an_empty_message_id_is_never_searched() {
+        assert!(message_id_search("<>").unwrap().is_none());
+        assert!(message_id_search("  ").unwrap().is_none());
+        assert_eq!(
+            message_id_search("<a@b>").unwrap().as_deref(),
+            Some("HEADER Message-ID \"<a@b>\"")
         );
     }
 
@@ -1842,7 +1999,7 @@ mod tests {
         let (mut session, _) = scripted(|command| if command.starts_with("UID MOVE") { "" } else { "$T OK Done\r\n" }).await;
         let caps = ServerCaps { move_cmd: true, uidplus: true };
 
-        let err = timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, caps, "5", "Archive")).await.unwrap_err();
+        let err = timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, caps, &[5], "Archive")).await.unwrap_err();
 
         assert!(matches!(err, DomainError::ConnectionTimeout(_)), "{err:?}");
     }
@@ -1863,11 +2020,12 @@ mod tests {
             Response::Done { code, .. } => code,
             other => panic!("not a tagged reply: {other:?}"),
         };
+        assert_eq!(copied_uids(code_of(b"A3 OK [COPYUID 38505 304 3956] Done\r\n").as_ref()), [(304, 3956)]);
         assert_eq!(
-            copied_uid(code_of(b"A3 OK [COPYUID 38505 304 3956] Done\r\n").as_ref()),
-            Some(ProviderUid::new(3956))
+            copied_uids(code_of(b"A3 OK [COPYUID 38505 304,319:320 3956:3958] Done\r\n").as_ref()),
+            [(304, 3956), (319, 3957), (320, 3958)]
         );
-        assert_eq!(copied_uid(code_of(b"A3 OK Done\r\n").as_ref()), None);
+        assert!(copied_uids(code_of(b"A3 OK Done\r\n").as_ref()).is_empty());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -57,15 +58,19 @@ pub trait EmailProvider: Send + Sync {
         uids: &[ProviderUid],
     ) -> Result<Vec<MessageBodyResult>, DomainError>;
 
-    /// The UID of the message with RFC Message-ID `rfc_id` (`<…>`) in
-    /// `mailbox`, `None` when it is not there. How a message whose local UID
-    /// is unknown (moved by a provider that could not report the new one) is
-    /// found again; a provider whose ids survive moves still answers it.
+    /// UIDs of the messages with RFC Message-ID `rfc_id` (`<…>`) in
+    /// `mailbox`, ascending; several when the mailbox holds copies. How a
+    /// message whose UID is unknown is found again; a provider whose ids
+    /// survive moves answers it too.
     async fn find_message(
         &self,
         mailbox: &MailboxPath,
         rfc_id: &str,
-    ) -> Result<Option<ProviderUid>, DomainError>;
+    ) -> Result<Vec<ProviderUid>, DomainError>;
+
+    /// UIDs from `from` up in `mailbox`, ascending. Lets sync fetch a big
+    /// mailbox in batches, saving its progress after each.
+    async fn uids_from(&self, mailbox: &MailboxPath, from: ProviderUid) -> Result<Vec<ProviderUid>, DomainError>;
 
     /// Fetch raw message bytes (RFC 2822).
     async fn fetch_raw_message(
@@ -115,16 +120,22 @@ pub trait EmailProvider: Send + Sync {
     /// rather than looping `move_message` themselves: with one connection per
     /// operation, a loop over a few hundred messages is a few hundred TLS
     /// handshakes, which is what gets an account throttled.
+    ///
+    /// Returns the UID each moved message got in `to`, for those the
+    /// provider reported.
     async fn move_messages(
         &self,
         uids: &[ProviderUid],
         from: &MailboxPath,
         to: &MailboxPath,
-    ) -> Result<(), DomainError> {
-        for uid in uids {
-            self.move_message(*uid, from, to).await?;
+    ) -> Result<HashMap<ProviderUid, ProviderUid>, DomainError> {
+        let mut moved = HashMap::new();
+        for &uid in uids {
+            if let Some(new_uid) = self.move_message(uid, from, to).await? {
+                moved.insert(uid, new_uid);
+            }
         }
-        Ok(())
+        Ok(moved)
     }
 
     /// Delete many messages in one go. Same rationale as [`move_messages`].

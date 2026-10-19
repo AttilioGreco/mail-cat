@@ -559,8 +559,10 @@ impl BodyBackfillQueue for SqliteRepository {
             .read(move |conn| {
                 query_all(
                     conn,
+                    // Waiting for its UID (a renumbered mailbox mid-sync):
+                    // nothing to fetch it by until then.
                     "SELECT id, mailbox_id, provider_uid FROM messages \
-                     WHERE account_id = ?1 AND body_state = 'pending' \
+                     WHERE account_id = ?1 AND body_state = 'pending' AND provider_uid IS NOT NULL \
                      ORDER BY received_at DESC LIMIT ?2",
                     params![account, limit],
                     |r| {
@@ -581,7 +583,8 @@ impl BodyBackfillQueue for SqliteRepository {
             .read(move |conn| {
                 count_rows(
                     conn,
-                    "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND body_state = 'pending'",
+                    "SELECT COUNT(*) FROM messages \
+                     WHERE account_id = ?1 AND body_state = 'pending' AND provider_uid IS NOT NULL",
                     [account],
                 )
                 .map(|n| u32::try_from(n).unwrap_or(u32::MAX))

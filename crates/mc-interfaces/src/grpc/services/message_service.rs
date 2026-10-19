@@ -211,10 +211,9 @@ where
         // this one now" signal, so jump the queue and fetch it inline. Failure
         // (offline, provider hiccup) falls through to the empty body rather than
         // erroring the whole read: the backfill worker will retry.
-        let message = if message.body_text.is_none()
-            && message.body_html.is_none()
-            && message.provider_uid.is_some()
-        {
+        // A message without a known UID still goes: the handler finds it by
+        // Message-ID.
+        let message = if message.body_text.is_none() && message.body_html.is_none() {
             let message_id = message.id;
             match self
                 .command_bus
@@ -956,6 +955,59 @@ mod tests {
             event.event_type,
             Some(mailbox_event::EventType::CountsChanged(ref c)) if c.total == 100 && c.unseen == 5
         ));
+    }
+
+    /// A body-less message whose UID is unknown is still fetched on open:
+    /// the handler finds it by Message-ID.
+    #[tokio::test]
+    async fn opening_a_message_without_uid_fetches_its_body() {
+        struct Recording(std::sync::Mutex<Vec<Command>>);
+        #[async_trait::async_trait]
+        impl CommandBus for Recording {
+            async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {
+                self.0.lock().unwrap().push(command);
+                Ok(CommandResult::MessageBodyFetched)
+            }
+        }
+        struct MessageAndMailbox(mc_domain::Message, Mailbox);
+        #[async_trait::async_trait]
+        impl QueryBus for MessageAndMailbox {
+            async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError> {
+                match query {
+                    Query::GetMessage { .. } => Ok(QueryResult::Message(Box::new(Some(self.0.clone())))),
+                    Query::GetMailbox { .. } => Ok(QueryResult::Mailbox(Some(self.1.clone()))),
+                    _ => Err(ApplicationError::Internal("unexpected".into())),
+                }
+            }
+        }
+
+        let (account_id, mailbox_id) = (AccountId::new(), MailboxId::new());
+        let (mut message, _) = mc_domain::Message::receive(
+            account_id,
+            mailbox_id,
+            ProviderUid::new(1),
+            Some("<x@example.com>".into()),
+            None,
+            vec![],
+            mc_domain::Envelope { from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![], subject: "".into(), date: chrono::Utc::now() },
+            vec![],
+            0,
+            false,
+            chrono::Utc::now(),
+        );
+        message.provider_uid = None;
+        let commands = Arc::new(Recording(std::sync::Mutex::new(vec![])));
+        let svc = MessageServiceImpl::new(
+            Arc::clone(&commands),
+            Arc::new(MessageAndMailbox(message.clone(), fake_mailbox(account_id, mailbox_id))),
+            Arc::new(InProcessEventBus::new(16)),
+        );
+
+        svc.get_message(Request::new(GetMessageRequest { message_id: message.id.to_string() }))
+            .await
+            .unwrap();
+
+        assert!(matches!(commands.0.lock().unwrap().as_slice(), [Command::FetchMessageBody { .. }]));
     }
 
     /// MessageFlagged reaches the stream as FlagsChanged.

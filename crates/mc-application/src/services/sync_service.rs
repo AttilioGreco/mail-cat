@@ -137,6 +137,8 @@ pub struct SyncService<
     progress_tx: broadcast::Sender<SyncProgressEvent>,
     /// Last published (phase, percent, message) per account — the debounce gate.
     last_progress: Mutex<HashMap<AccountId, ProgressKey>>,
+    /// One sync at a time per account (see [`Self::exclusive`]).
+    account_locks: Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// What makes one progress event distinguishable from the previous one.
@@ -150,6 +152,26 @@ fn phase_rank(state: &SyncState) -> u8 {
         SyncState::FetchingMessageBody => 3,
         SyncState::Completed => 4,
         SyncState::Failed => 5,
+    }
+}
+
+/// Envelopes fetched and stored per batch; the checkpoint advances after each.
+const ENVELOPE_BATCH: usize = 500;
+
+/// Checkpoint keys of one mailbox's sync.
+struct SyncKeys {
+    /// Next UID to fetch.
+    uid_next: String,
+    /// UIDVALIDITY of the epoch fully ingested.
+    validity: String,
+    /// UIDVALIDITY of the epoch being re-ingested after a change; 0 when none.
+    renumbering: String,
+}
+
+impl SyncKeys {
+    fn new(account_id: &AccountId, path: &MailboxPath) -> Self {
+        let uid_next = format!("sync:{account_id}:{path}");
+        Self { validity: format!("{uid_next}:validity"), renumbering: format!("{uid_next}:renumbering"), uid_next }
     }
 }
 
@@ -184,7 +206,16 @@ impl<
             // intermediate percentage costs nothing since the next one supersedes it.
             progress_tx: broadcast::channel(64).0,
             last_progress: Mutex::new(HashMap::new()),
+            account_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Holds the account's sync slot. The IDLE-triggered `sync_mailbox` and a
+    /// full `start_sync` running side by side would ingest the same envelopes
+    /// twice and race each other's checkpoints.
+    pub async fn exclusive(&self, account_id: &AccountId) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = Arc::clone(self.account_locks.lock().unwrap().entry(*account_id).or_default());
+        lock.lock_owned().await
     }
 
     /// Subscribe to live sync progress for every account.
@@ -251,6 +282,7 @@ impl<
         &self,
         account_id: &AccountId,
     ) -> Result<Vec<SyncProgressEvent>, ApplicationError> {
+        let _exclusive = self.exclusive(account_id).await;
         let result = self.run_sync(account_id).await;
 
         // Every failure path out of `run_sync` is a `?`, so without this nothing
@@ -405,243 +437,14 @@ impl<
                 }
             };
 
-            // Load checkpoint
-            let checkpoint_key = format!("sync:{}:{}", account_id, remote.path);
-            let validity_key = format!("{checkpoint_key}:validity");
-            let stored_uid_next = self
-                .projector
-                .get_checkpoint(&checkpoint_key)
-                .await
-                .unwrap_or(0) as u32;
-            let renumbered = self.renumbered(local, &validity_key, &status).await?;
-            let fetch_from = if renumbered.is_some() {
-                1u32
-            } else if stored_uid_next > 0 {
-                stored_uid_next
-            } else {
-                1u32
-            };
-
-            if fetch_from >= status.uid_next {
-                debug!(path = %remote.path, "No new messages");
-                if let Some(stale) = &renumbered {
-                    self.drop_unclaimed(local, stale).await?;
-                }
-                // Still update counts
-                self.update_mailbox_counts(local, status.total_messages, status.unseen_messages)
-                    .await?;
-                self.projector
-                    .save_checkpoint(&checkpoint_key, status.uid_next as u64)
-                    .await
-                    .map_err(|e| {
-                        ApplicationError::SyncFailed(format!("Checkpoint save failed: {e}"))
-                    })?;
-                self.projector
-                    .save_checkpoint(&validity_key, status.uid_validity as u64)
-                    .await
-                    .map_err(|e| {
-                        ApplicationError::SyncFailed(format!("Checkpoint save failed: {e}"))
-                    })?;
-
-                // Reconcile even when there are no new messages
-                let provider = self.provider_registry.get_provider(account_id)?;
-                let (expunged, flags_changed) = self
-                    .reconcile_mailbox(&provider, local, &remote.path)
-                    .await?;
-                if expunged > 0 || flags_changed > 0 {
-                    let updated_status = match provider.mailbox_status(&remote.path).await {
-                        Ok(s) => s,
-                        Err(_) => status,
-                    };
-                    self.update_mailbox_counts(
-                        local,
-                        updated_status.total_messages,
-                        updated_status.unseen_messages,
-                    )
-                    .await?;
-                }
-
-                mailboxes_synced += 1;
-                continue;
-            }
-
-            // Fetch envelopes
-            let range = FetchRange::UidRange {
-                from: fetch_from,
-                to: status.uid_next - 1,
-            };
-            debug!(
-                path = %remote.path,
-                from = fetch_from,
-                to = status.uid_next - 1,
-                "Fetching envelopes"
-            );
-
-            let envelopes = match provider.fetch_message_envelopes(&remote.path, range).await {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!(path = %remote.path, error = %e, "Failed to fetch envelopes, skipping");
-                    continue;
-                }
-            };
-
-            info!(
-                path = %remote.path,
-                count = envelopes.len(),
-                "Fetched envelopes"
-            );
-
-            // Process each envelope; collect (message_id, provider_uid) for body fetch
-            let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
-            let envelope_total = envelopes.len() as u32;
-            // Stable per-mailbox text so `emit`'s gate reduces this to one event
-            // per percentage point instead of one per message.
-            let envelope_label = format!("Fetching messages in {}", remote.path);
-            let (known_uids, awaiting_uid) = self.uid_state(local, &envelopes).await?;
-
-            for (index, envelope_summary) in envelopes.iter().enumerate() {
-                self.emit(
-                    &mut progress,
-                    SyncProgressEvent {
-                        account_id: *account_id,
-                        state: SyncState::FetchingEnvelopes {
-                            mailbox_id: local.id,
-                        },
-                        processed: index as u32,
-                        total: envelope_total,
-                        message: envelope_label.clone(),
-                    },
-                );
-
-                if self.is_cancelled() {
+            match self.sync_one(&provider, local, &remote.path, 1, status, Some(&mut progress)).await? {
+                Some((new, expunged)) => messages_synced = (messages_synced + new).saturating_sub(expunged),
+                None if self.is_cancelled() => {
+                    info!("Sync cancelled, stopping");
                     break;
                 }
-
-                // Soft-deleted remotely (\Deleted set, not yet expunged): skip so it
-                // doesn't resurface as "new" on a mailbox with no local history of it.
-                if envelope_summary.flags.contains(&Flag::Deleted)
-                    || known_uids.contains(&envelope_summary.provider_uid)
-                {
-                    continue;
-                }
-                let placeholder = match self.local_copy(local, envelope_summary).await {
-                    Some(stored) if stored.provider_uid.is_some() => continue,
-                    other => other,
-                };
-                if placeholder.is_none()
-                    && awaiting_uid
-                    && self.reattach(local, envelope_summary).await?
-                {
-                    continue;
-                }
-
-                let (_message, event) = Message::receive(
-                    *account_id,
-                    local.id,
-                    envelope_summary.provider_uid,
-                    envelope_summary.message_rfc_id.clone(),
-                    envelope_summary.in_reply_to.clone(),
-                    envelope_summary.references.clone(),
-                    envelope_summary.envelope.clone(),
-                    envelope_summary.flags.clone(),
-                    envelope_summary.size_bytes,
-                    envelope_summary.has_attachments,
-                    envelope_summary.internal_date,
-                );
-
-                if let DomainEvent::MessageReceived { ref message_id, .. } = event {
-                    new_messages.push((*message_id, envelope_summary.provider_uid));
-                    self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
-                        .await?;
-                    self.supersede(placeholder).await?;
-                    messages_synced += 1;
-                }
+                None => continue,
             }
-            // A partial batch must not advance the checkpoint (the rest would be
-            // skipped for good) nor judge a renumbered epoch it has not seen.
-            if self.is_cancelled() {
-                info!("Sync cancelled, stopping");
-                break;
-            }
-            if let Some(stale) = &renumbered {
-                self.drop_unclaimed(local, stale).await?;
-            }
-
-            // Eager body fetch for new messages — bulk IMAP fetch, one connection per batch
-            if self.config.eager_body_fetch && !new_messages.is_empty() {
-                let total_bodies = new_messages.len();
-                info!(path = %remote.path, count = total_bodies, "Bulk fetching bodies");
-
-                let uids: Vec<ProviderUid> = new_messages.iter().map(|(_, u)| *u).collect();
-                let uid_to_msg: std::collections::HashMap<u32, &MessageId> = new_messages
-                    .iter()
-                    .map(|(id, uid)| (uid.value(), id))
-                    .collect();
-
-                let provider = self.provider_registry.get_provider(account_id)?;
-                match provider.fetch_bodies_bulk(&remote.path, &uids).await {
-                    Ok(body_results) => {
-                        for result in body_results {
-                            if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value()) {
-                                // Search indexing is owned by the search-index
-                                // projection (driven off this event); no inline
-                                // index_message here.
-                                if let Err(e) = self
-                                    .store_body(message_id, result.body_text, result.body_html, vec![])
-                                    .await
-                                {
-                                    warn!(%message_id, error = %e, "Failed to project body");
-                                    continue;
-                                }
-                            }
-                        }
-                        info!(path = %remote.path, bodies = total_bodies, "Bodies fetched");
-                    }
-                    Err(e) => {
-                        warn!(path = %remote.path, error = %e, "Bulk body fetch failed, skipping");
-                    }
-                }
-            }
-
-            // Update mailbox counts
-            self.update_mailbox_counts(local, status.total_messages, status.unseen_messages)
-                .await?;
-
-            // Save checkpoint
-            self.projector
-                .save_checkpoint(&checkpoint_key, status.uid_next as u64)
-                .await
-                .map_err(|e| {
-                    ApplicationError::SyncFailed(format!("Checkpoint save failed: {e}"))
-                })?;
-            self.projector
-                .save_checkpoint(&validity_key, status.uid_validity as u64)
-                .await
-                .map_err(|e| {
-                    ApplicationError::SyncFailed(format!("Checkpoint save failed: {e}"))
-                })?;
-
-            // Reconcile: detect expunged messages and flag changes
-            let provider = self.provider_registry.get_provider(account_id)?;
-            let (expunged, flags_changed) = self
-                .reconcile_mailbox(&provider, local, &remote.path)
-                .await?;
-            messages_synced = messages_synced.saturating_sub(expunged);
-
-            // Re-update counts after reconciliation if anything changed
-            if expunged > 0 || flags_changed > 0 {
-                let updated_status = match provider.mailbox_status(&remote.path).await {
-                    Ok(s) => s,
-                    Err(_) => status,
-                };
-                self.update_mailbox_counts(
-                    local,
-                    updated_status.total_messages,
-                    updated_status.unseen_messages,
-                )
-                .await?;
-            }
-
             mailboxes_synced += 1;
         }
 
@@ -850,11 +653,18 @@ impl<
             }
             let batch_size = if throttled(spent, daily_limit) { 1 } else { BACKFILL_BATCH };
 
-            let batch: Vec<BackfillEntry> = self
-                .projector
-                .list_pending_backfill(&account_id, 500)
-                .await
-                .unwrap_or_default()
+            let pending = match self.projector.list_pending_backfill(&account_id, 500).await {
+                Ok(pending) => pending,
+                // Not "all downloaded": the queue could not be read at all.
+                Err(e) => {
+                    warn!(%account_id, error = %e, "backfill: reading the queue failed");
+                    tokio::select! {
+                        _ = shutdown.cancelled() => return,
+                        _ = tokio::time::sleep(idle_poll) => continue,
+                    }
+                }
+            };
+            let batch: Vec<BackfillEntry> = pending
                 .into_iter()
                 .filter(|e| !abandoned.contains(&e.message_id))
                 .take(batch_size)
@@ -989,6 +799,7 @@ impl<
         mailbox_path: &MailboxPath,
         from_uid: ProviderUid,
     ) -> Result<u32, ApplicationError> {
+        let _exclusive = self.exclusive(account_id).await;
         let provider = self.provider_registry.get_provider(account_id)?;
 
         // Find the local mailbox record
@@ -1020,158 +831,10 @@ impl<
             }
         };
 
-        // Use max(checkpoint, from_uid) to skip already-synced messages
-        let checkpoint_key = format!("sync:{}:{}", account_id, mailbox_path);
-        let validity_key = format!("{checkpoint_key}:validity");
-        let stored_uid_next = self
-            .projector
-            .get_checkpoint(&checkpoint_key)
-            .await
-            .unwrap_or(0) as u32;
-        let renumbered = self.renumbered(&local, &validity_key, &status).await?;
-        let fetch_from = if renumbered.is_some() { 1 } else { stored_uid_next.max(from_uid.value()) };
-
-        if fetch_from >= status.uid_next {
-            debug!(%mailbox_path, "sync_mailbox: no new messages");
-            if let Some(stale) = &renumbered {
-                self.drop_unclaimed(&local, stale).await?;
-            }
-            // Still update counts in case they changed
-            self.update_mailbox_counts(&local, status.total_messages, status.unseen_messages)
-                .await?;
-
-            // Reconcile even with no new messages: an IDLE-triggered sync can also
-            // fire for expunges/moves-out, which don't advance uid_next.
-            let (expunged, flags_changed) =
-                self.reconcile_mailbox(&provider, &local, mailbox_path).await?;
-            if expunged > 0 || flags_changed > 0 {
-                let updated_status = match provider.mailbox_status(mailbox_path).await {
-                    Ok(s) => s,
-                    Err(_) => status,
-                };
-                self.update_mailbox_counts(
-                    &local,
-                    updated_status.total_messages,
-                    updated_status.unseen_messages,
-                )
-                .await?;
-            }
-            return Ok(0);
-        }
-
-        // Fetch only the new envelopes
-        let range = FetchRange::UidRange {
-            from: fetch_from,
-            to: status.uid_next - 1,
-        };
-        let envelopes = match provider.fetch_message_envelopes(mailbox_path, range).await {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(%mailbox_path, error = %e, "sync_mailbox: fetch_message_envelopes failed");
-                return Ok(0);
-            }
-        };
-        info!(%mailbox_path, count = envelopes.len(), "sync_mailbox: fetched envelopes");
-
-        let mut new_count = 0u32;
-        let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
-        let (known_uids, awaiting_uid) = self.uid_state(&local, &envelopes).await?;
-
-        for envelope_summary in &envelopes {
-            if envelope_summary.flags.contains(&Flag::Deleted)
-                || known_uids.contains(&envelope_summary.provider_uid)
-            {
-                continue;
-            }
-            let placeholder = match self.local_copy(&local, envelope_summary).await {
-                Some(stored) if stored.provider_uid.is_some() => continue,
-                other => other,
-            };
-            if placeholder.is_none() && awaiting_uid && self.reattach(&local, envelope_summary).await? {
-                continue;
-            }
-
-            let (_message, event) = Message::receive(
-                    *account_id,
-                    local.id,
-                    envelope_summary.provider_uid,
-                    envelope_summary.message_rfc_id.clone(),
-                    envelope_summary.in_reply_to.clone(),
-                    envelope_summary.references.clone(),
-                    envelope_summary.envelope.clone(),
-                    envelope_summary.flags.clone(),
-                    envelope_summary.size_bytes,
-                    envelope_summary.has_attachments,
-                    envelope_summary.internal_date,
-                );
-            if let DomainEvent::MessageReceived { ref message_id, .. } = event {
-                new_messages.push((*message_id, envelope_summary.provider_uid));
-                self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
-                    .await?;
-                self.supersede(placeholder).await?;
-                new_count += 1;
-            }
-        }
-
-        if let Some(stale) = &renumbered {
-            self.drop_unclaimed(&local, stale).await?;
-        }
-
-        // Eager body fetch (same pattern as start_sync)
-        if self.config.eager_body_fetch && !new_messages.is_empty() {
-            let uids: Vec<ProviderUid> = new_messages.iter().map(|(_, u)| *u).collect();
-            let uid_to_msg: HashMap<u32, &MessageId> =
-                new_messages.iter().map(|(id, uid)| (uid.value(), id)).collect();
-            let provider2 = self.provider_registry.get_provider(account_id)?;
-            match provider2.fetch_bodies_bulk(mailbox_path, &uids).await {
-                Ok(body_results) => {
-                    for result in body_results {
-                        // Search indexing owned by the search-index projection.
-                        if let Some(message_id) = uid_to_msg.get(&result.provider_uid.value())
-                            && let Err(e) = self
-                                .store_body(message_id, result.body_text, result.body_html, vec![])
-                                .await
-                        {
-                            warn!(%message_id, error = %e, "sync_mailbox: body projection failed");
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(%mailbox_path, error = %e, "sync_mailbox: bulk body fetch failed");
-                }
-            }
-        }
-
-        // Update counts (emits MailboxCountsUpdated → event bus → UI refetch)
-        self.update_mailbox_counts(&local, status.total_messages, status.unseen_messages)
-            .await?;
-
-        // Advance checkpoint so start_sync won't re-fetch these messages
-        self.projector
-            .save_checkpoint(&checkpoint_key, status.uid_next as u64)
-            .await
-            .map_err(|e| ApplicationError::SyncFailed(format!("checkpoint save failed: {e}")))?;
-        self.projector
-            .save_checkpoint(&validity_key, status.uid_validity as u64)
-            .await
-            .map_err(|e| ApplicationError::SyncFailed(format!("checkpoint save failed: {e}")))?;
-
-        // Reconcile: detect expunged/moved-out messages and flag changes.
-        let (expunged, flags_changed) =
-            self.reconcile_mailbox(&provider, &local, mailbox_path).await?;
-        if expunged > 0 || flags_changed > 0 {
-            let updated_status = match provider.mailbox_status(mailbox_path).await {
-                Ok(s) => s,
-                Err(_) => status,
-            };
-            self.update_mailbox_counts(
-                &local,
-                updated_status.total_messages,
-                updated_status.unseen_messages,
-            )
-            .await?;
-        }
-
+        let (new_count, _) = self
+            .sync_one(&provider, &local, mailbox_path, from_uid.value(), status, None)
+            .await?
+            .unwrap_or_default();
         info!(%mailbox_path, new_count, "sync_mailbox: done");
         Ok(new_count)
     }
@@ -1192,26 +855,185 @@ impl<
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    /// Bring one mailbox up to date: envelopes from its checkpoint (or
+    /// `from`, if later) in batches, then counts and reconciliation. Each
+    /// batch saves the checkpoint, so a timeout or crash resumes where it
+    /// stopped. `(new, expunged)`, or `None` when it stopped early (cancelled,
+    /// or the server failed).
+    async fn sync_one(
+        &self,
+        provider: &Arc<PR::Provider>,
+        local: &Mailbox,
+        path: &MailboxPath,
+        from: u32,
+        status: MailboxStatus,
+        mut progress: Option<&mut Vec<SyncProgressEvent>>,
+    ) -> Result<Option<(u32, u32)>, ApplicationError> {
+        let keys = SyncKeys::new(&local.account_id, path);
+        let (resume, renumbering) = self.resume_point(local, &keys, &status).await?;
+        let from = if renumbering { resume } else { resume.max(from) };
+
+        let mut new_count = 0;
+        if from < status.uid_next {
+            let uids = match provider.uids_from(path, ProviderUid::new(from)).await {
+                Ok(uids) => uids,
+                Err(e) => {
+                    warn!(%path, error = %e, "Failed to list new UIDs, skipping");
+                    return Ok(None);
+                }
+            };
+            let uids: Vec<ProviderUid> = uids.into_iter().filter(|u| u.value() < status.uid_next).collect();
+            let label = format!("Fetching messages in {path}");
+            for (index, batch) in uids.chunks(ENVELOPE_BATCH).enumerate() {
+                // Only a full sync (the one reporting progress) is cancellable.
+                if progress.is_some() && self.is_cancelled() {
+                    return Ok(None);
+                }
+                if let Some(progress) = progress.as_deref_mut() {
+                    self.emit(
+                        progress,
+                        SyncProgressEvent {
+                            account_id: local.account_id,
+                            state: SyncState::FetchingEnvelopes { mailbox_id: local.id },
+                            processed: (index * ENVELOPE_BATCH) as u32,
+                            total: uids.len() as u32,
+                            message: label.clone(),
+                        },
+                    );
+                }
+                let (first, last) = (batch[0].value(), batch[batch.len() - 1].value());
+                let envelopes = match provider.fetch_message_envelopes(path, FetchRange::UidRange { from: first, to: last }).await {
+                    Ok(envelopes) => envelopes,
+                    Err(e) => {
+                        warn!(%path, error = %e, "Failed to fetch envelopes, resuming next cycle");
+                        return Ok(None);
+                    }
+                };
+                new_count += self.ingest(provider, local, path, &envelopes).await?;
+                self.save_checkpoint(&keys.uid_next, last as u64 + 1).await?;
+            }
+        }
+
+        if renumbering {
+            self.drop_unclaimed(local).await?;
+        }
+        self.save_checkpoint(&keys.uid_next, status.uid_next as u64).await?;
+        self.save_checkpoint(&keys.validity, status.uid_validity as u64).await?;
+        if renumbering {
+            self.save_checkpoint(&keys.renumbering, 0).await?;
+        }
+
+        self.update_mailbox_counts(local, status.total_messages, status.unseen_messages)
+            .await?;
+        let (expunged, flags_changed) = self.reconcile_mailbox(provider, local, path).await?;
+        if expunged > 0 || flags_changed > 0 {
+            let updated = provider.mailbox_status(path).await.unwrap_or(status);
+            self.update_mailbox_counts(local, updated.total_messages, updated.unseen_messages)
+                .await?;
+        }
+        Ok(Some((new_count, expunged)))
+    }
+
+    /// Store one batch of envelopes, then their bodies when eager.
+    async fn ingest(
+        &self,
+        provider: &Arc<PR::Provider>,
+        local: &Mailbox,
+        path: &MailboxPath,
+        envelopes: &[MessageEnvelopeSummary],
+    ) -> Result<u32, ApplicationError> {
+        let (known_uids, awaiting_uid) = self.uid_state(local, envelopes).await?;
+        let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
+        for env in envelopes {
+            // Soft-deleted remotely (\Deleted set, not yet expunged): skip so it
+            // doesn't resurface as "new" on a mailbox with no local history of it.
+            if env.flags.contains(&Flag::Deleted) || known_uids.contains(&env.provider_uid) {
+                continue;
+            }
+            if awaiting_uid && self.reattach(local, env).await? {
+                continue;
+            }
+            let placeholder = match self.local_copy(local, env).await {
+                Some(stored) if stored.provider_uid.is_some() => continue,
+                other => other,
+            };
+
+            let (_message, event) = Message::receive(
+                local.account_id,
+                local.id,
+                env.provider_uid,
+                env.message_rfc_id.clone(),
+                env.in_reply_to.clone(),
+                env.references.clone(),
+                env.envelope.clone(),
+                env.flags.clone(),
+                env.size_bytes,
+                env.has_attachments,
+                env.internal_date,
+            );
+            if let DomainEvent::MessageReceived { message_id, .. } = event {
+                new_messages.push((message_id, env.provider_uid));
+                self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
+                    .await?;
+                self.supersede(placeholder).await?;
+            }
+        }
+
+        if self.config.eager_body_fetch && !new_messages.is_empty() {
+            let uids: Vec<ProviderUid> = new_messages.iter().map(|(_, u)| *u).collect();
+            let uid_to_msg: HashMap<ProviderUid, MessageId> = new_messages.iter().map(|&(id, uid)| (uid, id)).collect();
+            match provider.fetch_bodies_bulk(path, &uids).await {
+                Ok(bodies) => {
+                    for body in bodies {
+                        // Search indexing is owned by the search-index projection.
+                        if let Some(message_id) = uid_to_msg.get(&body.provider_uid)
+                            && let Err(e) = self.store_body(message_id, body.body_text, body.body_html, vec![]).await
+                        {
+                            warn!(%message_id, error = %e, "Failed to project body");
+                        }
+                    }
+                }
+                Err(e) => warn!(%path, error = %e, "Bulk body fetch failed, skipping"),
+            }
+        }
+        Ok(new_messages.len() as u32)
+    }
+
     /// Mail we put on the server ourselves is stored locally before its
     /// server copy syncs back: a saved draft with the UID APPEND returned, a
     /// sent message with none (`MessageSent`). Scoped to Drafts and Sent: a
     /// per-envelope lookup would be a needless query per message on a big
-    /// Inbox sync.
+    /// Inbox sync. Only this mailbox's rows count, and a UID-less one only if
+    /// it really is a `MessageSent` placeholder: anything else without a UID
+    /// is a received message waiting for it.
     async fn local_copy(&self, mailbox: &Mailbox, env: &MessageEnvelopeSummary) -> Option<MessageSummary> {
         if !matches!(mailbox.mailbox_type, MailboxType::Drafts | MailboxType::Sent) {
             return None;
         }
         let rfc_id = env.message_rfc_id.as_deref()?;
         let copies = self.projector.find_by_rfc_id(&mailbox.account_id, rfc_id).await.ok()?;
-        copies.into_iter().find(|m| match m.provider_uid {
-            Some(uid) => m.mailbox_id == mailbox.id && uid == env.provider_uid,
-            None => mailbox.mailbox_type == MailboxType::Sent,
-        })
+        for copy in copies.into_iter().filter(|m| m.mailbox_id == mailbox.id) {
+            let ours = match copy.provider_uid {
+                Some(uid) => uid == env.provider_uid,
+                None => mailbox.mailbox_type == MailboxType::Sent && self.is_sent_placeholder(&copy.id).await,
+            };
+            if ours {
+                return Some(copy);
+            }
+        }
+        None
+    }
+
+    async fn is_sent_placeholder(&self, message_id: &MessageId) -> bool {
+        self.event_store
+            .load_events(&message_id.to_string(), 0)
+            .await
+            .is_ok_and(|events| matches!(events.first().map(|e| &e.payload), Some(DomainEvent::MessageSent { .. })))
     }
 
     /// Which envelope UIDs `mailbox` already holds, and whether any of its
-    /// messages is waiting for a UID (moved here by a provider that could not
-    /// report it, or renumbered by a UIDVALIDITY change).
+    /// messages is waiting for a UID (renumbered by a UIDVALIDITY change, or
+    /// moved by a provider that could not report it).
     async fn uid_state(
         &self,
         mailbox: &Mailbox,
@@ -1251,49 +1073,70 @@ impl<
         Ok(false)
     }
 
-    /// On a UIDVALIDITY change every UID held for `mailbox` is void, and a
-    /// stale one would hide the new-epoch message that reuses it. They are
-    /// dropped so the epoch, re-ingested from UID 1, re-attaches each message
-    /// by Message-ID. Returns the mailbox's messages at that point, for
-    /// [`Self::drop_unclaimed`]; `None` when nothing changed.
-    async fn renumbered(
+    /// Where ingest resumes in `local`, and whether a renumbering
+    /// (UIDVALIDITY change) is under way. Starting one drops every UID the
+    /// mailbox held — a stale one would hide the new message that reuses it —
+    /// so the new epoch, ingested from UID 1, re-attaches each message by
+    /// Message-ID. It is recorded under `keys.renumbering` (the new validity)
+    /// and the old validity kept until the epoch is complete, so one cut
+    /// short resumes from its checkpoint instead of starting over.
+    async fn resume_point(
         &self,
-        mailbox: &Mailbox,
-        validity_key: &str,
+        local: &Mailbox,
+        keys: &SyncKeys,
         status: &MailboxStatus,
-    ) -> Result<Option<HashSet<MessageId>>, ApplicationError> {
-        let stored = self.projector.get_checkpoint(validity_key).await.unwrap_or(0) as u32;
+    ) -> Result<(u32, bool), ApplicationError> {
+        let stored = self.projector.get_checkpoint(&keys.validity).await.unwrap_or(0) as u32;
+        let resume = || async { (self.projector.get_checkpoint(&keys.uid_next).await.unwrap_or(0) as u32).max(1) };
         if stored == 0 || stored == status.uid_validity {
-            return Ok(None);
+            return Ok((resume().await, false));
         }
-        warn!(path = %mailbox.path, old = stored, new = status.uid_validity, "UIDVALIDITY changed, full resync needed");
-        let all = mc_shared::pagination::Pagination { page: 1, page_size: u32::MAX };
-        let local = self
-            .projector
-            .list_messages(&mailbox.id, &all)
-            .await
-            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to list local messages: {e}")))?;
-        for message in &local.items {
-            self.update_message(&message.id, |m| m.forget_uid(mailbox.id)).await?;
+        if self.projector.get_checkpoint(&keys.renumbering).await.unwrap_or(0) as u32 != status.uid_validity {
+            warn!(path = %local.path, old = stored, new = status.uid_validity, "UIDVALIDITY changed, full resync needed");
+            let all = mc_shared::pagination::Pagination { page: 1, page_size: u32::MAX };
+            let held = self
+                .projector
+                .list_messages(&local.id, &all)
+                .await
+                .map_err(|e| ApplicationError::SyncFailed(format!("Failed to list local messages: {e}")))?;
+            for message in &held.items {
+                self.update_message(&message.id, |m| m.forget_uid(local.id)).await?;
+            }
+            // Checkpoint before marker: a marker with the old epoch's
+            // checkpoint would resume past the new epoch's first UIDs.
+            self.save_checkpoint(&keys.uid_next, 1).await?;
+            self.save_checkpoint(&keys.renumbering, status.uid_validity as u64).await?;
         }
-        Ok(Some(local.items.into_iter().map(|m| m.id).collect()))
+        Ok((resume().await, true))
     }
 
-    /// After a renumbered mailbox's whole epoch was ingested, those of its
-    /// former messages still without a UID are gone from the server.
-    async fn drop_unclaimed(&self, mailbox: &Mailbox, former: &HashSet<MessageId>) -> Result<(), ApplicationError> {
+    /// After a renumbered mailbox's whole new epoch was ingested, the received
+    /// messages there still without a UID are gone from the server. Sent
+    /// placeholders are not received messages, and stay.
+    async fn drop_unclaimed(&self, mailbox: &Mailbox) -> Result<(), ApplicationError> {
         let waiting = self
             .projector
             .uidless_messages(&mailbox.id)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("uidless_messages failed: {e}")))?;
-        for message_id in waiting.into_iter().filter(|id| former.contains(id)) {
-            info!(%message_id, "Not in the renumbered mailbox, deleting locally");
-            let event = DomainEvent::MessageDeleted { message_id, mailbox_id: mailbox.id, permanently: false };
-            self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
+        for message_id in waiting {
+            let dropped = self
+                .update_message(&message_id, |m| {
+                    (m.mailbox_id == mailbox.id && m.provider_uid.is_none()).then(|| m.delete(false))
+                })
                 .await?;
+            if dropped {
+                info!(%message_id, "Not in the renumbered mailbox, deleted locally");
+            }
         }
         Ok(())
+    }
+
+    async fn save_checkpoint(&self, key: &str, value: u64) -> Result<(), ApplicationError> {
+        self.projector
+            .save_checkpoint(key, value)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("Checkpoint save failed: {e}")))
     }
 
     /// Apply `change` to the message's current state and append what it
@@ -1684,9 +1527,10 @@ mod tests {
 
         fn with_envelopes(mut self, envelopes: Vec<MessageEnvelopeSummary>) -> Self {
             let count = envelopes.len() as u32;
+            let uid_next = envelopes.iter().map(|e| e.provider_uid.value() + 1).max().unwrap_or(1);
             self.envelopes = envelopes;
             if let Some(ref mut s) = self.status {
-                s.uid_next = count + 1;
+                s.uid_next = uid_next;
                 s.total_messages = count;
             }
             self
@@ -1707,9 +1551,17 @@ mod tests {
         async fn fetch_message_envelopes(
             &self,
             _mailbox: &MailboxPath,
-            _range: FetchRange,
+            range: FetchRange,
         ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
-            Ok(self.envelopes.clone())
+            Ok(self
+                .envelopes
+                .iter()
+                .filter(|e| match range {
+                    FetchRange::UidRange { from, to } => (from..=to).contains(&e.provider_uid.value()),
+                    _ => true,
+                })
+                .cloned()
+                .collect())
         }
 
         async fn fetch_message_detail(
@@ -1724,8 +1576,14 @@ mod tests {
             &self,
             _mailbox: &MailboxPath,
             _rfc_id: &str,
-        ) -> Result<Option<ProviderUid>, DomainError> {
-            Ok(None)
+        ) -> Result<Vec<ProviderUid>, DomainError> {
+            Ok(vec![])
+        }
+        async fn uids_from(&self, _mailbox: &MailboxPath, from: ProviderUid) -> Result<Vec<ProviderUid>, DomainError> {
+            let mut uids: Vec<ProviderUid> =
+                self.envelopes.iter().map(|e| e.provider_uid).filter(|uid| *uid >= from).collect();
+            uids.sort();
+            Ok(uids)
         }
         async fn fetch_raw_message(
             &self,
@@ -2561,8 +2419,25 @@ mod tests {
 
         let projector = Arc::new(MockProjector::new());
         projector.stored.lock().unwrap().push(placeholder.clone());
+        projector.mailboxes.lock().unwrap().push(sent.clone());
+        let event_store = Arc::new(MockEventStore::new());
+        event_store.events.lock().unwrap().push((
+            placeholder.id.to_string(),
+            DomainEvent::MessageSent {
+                message_id: placeholder.id,
+                account_id,
+                mailbox_id: sent.id,
+                envelope: test_envelope(),
+                message_rfc_id: Some("<sent@example.com>".into()),
+                in_reply_to: None,
+                references: vec![],
+                body_text: None,
+                body_html: None,
+                sent_at: chrono::Utc::now(),
+            },
+        ));
         let provider = MockEmailProvider::new().with_mailboxes(vec![sent]).with_envelopes(vec![server_copy]);
-        let service = make_service(provider, Arc::new(MockEventStore::new()), projector.clone());
+        let service = make_service(provider, event_store, projector.clone());
         service.start_sync(&account_id).await.unwrap();
 
         let message_events: Vec<_> = projector
@@ -2736,6 +2611,44 @@ mod tests {
         assert_eq!(received(&projector), 1, "the message now at UID 9 is new");
         assert_eq!(row_uid(&projector, kept), Some(Some(3)), "re-attached by Message-ID");
         assert_eq!(row_uid(&projector, gone), None, "not in the new epoch: deleted");
+    }
+
+    /// Only a real placeholder in Sent is replaced by the server copy; a
+    /// received message waiting for its UID elsewhere is not one.
+    #[tokio::test]
+    async fn sent_copy_leaves_a_waiting_message_elsewhere_alone() {
+        let account_id = AccountId::new();
+        let (sent, _) = Mailbox::discover(account_id, MailboxPath::new(vec!["Sent".to_string()], '/').unwrap(), MailboxType::Sent);
+        let archive = archive_mailbox(account_id);
+        let (event_store, projector) = (Arc::new(MockEventStore::new()), Arc::new(MockProjector::new()));
+        let waiting = seed(&event_store, &projector, &archive, None, "<sent@example.com>");
+        projector.mailboxes.lock().unwrap().extend([sent.clone(), archive]);
+
+        let provider = MockEmailProvider::new()
+            .with_mailboxes(vec![sent])
+            .with_envelopes(vec![envelope(7, "<sent@example.com>")]);
+        make_service(provider, event_store, projector.clone()).start_sync(&account_id).await.unwrap();
+
+        assert_eq!(row_uid(&projector, waiting), Some(None), "still there, still waiting");
+    }
+
+    #[tokio::test]
+    async fn sync_mailbox_waits_for_a_running_sync_of_the_account() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let projector = Arc::new(MockProjector::new());
+        projector.mailboxes.lock().unwrap().push(archive.clone());
+        let provider = MockEmailProvider::new()
+            .with_mailboxes(vec![archive.clone()])
+            .with_envelopes(vec![envelope(3, "<new@example.com>")]);
+        let service = make_service(provider, Arc::new(MockEventStore::new()), projector.clone());
+
+        let running = service.exclusive(&account_id).await;
+        let sync = service.sync_mailbox(&account_id, &archive.path, ProviderUid::new(1));
+        tokio::pin!(sync);
+        assert!(futures::poll!(&mut sync).is_pending(), "must wait for the running sync");
+        drop(running);
+        assert_eq!(sync.await.unwrap(), 1);
     }
 
     #[tokio::test]

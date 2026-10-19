@@ -166,20 +166,18 @@ impl Message {
     }
 
     /// Move the message to another mailbox and produce the event.
-    ///
-    /// The UID it gets there is not known until the provider has moved it, and
-    /// keeping the old one would address a different message (or none) in the
-    /// destination, so it is cleared until [`Self::attach_uid`] records it.
-    pub fn move_to(&mut self, to_mailbox_id: MailboxId) -> DomainEvent {
+    /// `provider_uid` is its UID there (`None` only when the provider could
+    /// not tell): UIDs are per-mailbox, so the old one must not follow.
+    pub fn move_to(&mut self, to_mailbox_id: MailboxId, provider_uid: Option<ProviderUid>) -> DomainEvent {
         let from = self.mailbox_id;
         self.mailbox_id = to_mailbox_id;
-        self.provider_uid = None;
+        self.provider_uid = provider_uid;
 
         DomainEvent::MessageMoved {
             message_id: self.id,
             from_mailbox_id: from,
             to_mailbox_id,
-            provider_uid: None,
+            provider_uid,
         }
     }
 
@@ -491,7 +489,7 @@ mod tests {
             Utc::now(),
         );
 
-        let event = msg.move_to(target_mailbox);
+        let event = msg.move_to(target_mailbox, None);
 
         assert_eq!(msg.mailbox_id, target_mailbox);
         assert_eq!(event.event_name(), "MessageMoved");

@@ -1862,6 +1862,67 @@ macro_rules! read_repository_conformance {
         }
 
         #[tokio::test]
+        async fn backfill_skips_messages_waiting_for_their_uid() {
+            let (_guard, _es, repo) = $make;
+            let (account, archive) = (AccountId::new(), MailboxId::new());
+            let (waiting, e_waiting) = received(account, archive, 4, Some("<w@x>"), &[], true, at(0));
+            let (_ready, e_ready) = received(account, archive, 5, Some("<r@x>"), &[], true, at(1));
+            project_all(
+                &repo,
+                [
+                    discovered(account, archive, "Archive"),
+                    e_waiting,
+                    e_ready,
+                    DomainEvent::MessageMoved {
+                        message_id: waiting,
+                        from_mailbox_id: archive,
+                        to_mailbox_id: archive,
+                        provider_uid: None,
+                    },
+                ],
+            )
+            .await;
+
+            let pending = repo.list_pending_backfill(&account, 10).await.unwrap();
+            assert_eq!(pending.iter().map(|e| e.provider_uid).collect::<Vec<_>>(), [5]);
+            assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 1);
+        }
+
+        /// A Sent server copy drops its own placeholder — never a UID-less
+        /// copy of the same Message-ID waiting in another mailbox.
+        #[tokio::test]
+        async fn sent_copy_drops_only_placeholders_in_sent() {
+            let (_guard, _es, repo) = $make;
+            let (account, sent, archive) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let (waiting, e_waiting) = received(account, archive, 4, Some("<me@x>"), &[], true, at(0));
+            let (server_copy, e_server_copy) = received(account, sent, 9, Some("<me@x>"), &[], true, at(1));
+            project_all(
+                &repo,
+                [
+                    DomainEvent::MailboxDiscovered {
+                        mailbox_id: sent,
+                        account_id: account,
+                        path: MailboxPath::parse("Sent", '/').unwrap(),
+                        mailbox_type: MailboxType::Sent,
+                    },
+                    discovered(account, archive, "Archive"),
+                    e_waiting,
+                    DomainEvent::MessageMoved {
+                        message_id: waiting,
+                        from_mailbox_id: archive,
+                        to_mailbox_id: archive,
+                        provider_uid: None,
+                    },
+                    e_server_copy,
+                ],
+            )
+            .await;
+
+            assert!(repo.get_message(&waiting).await.unwrap().is_some(), "not a placeholder");
+            assert!(repo.get_message(&server_copy).await.unwrap().is_some());
+        }
+
+        #[tokio::test]
         async fn suggest_groups_matching_values_by_field_most_frequent_first() {
             let (_guard, _es, repo) = $make;
             let (account, inbox) = (AccountId::new(), MailboxId::new());

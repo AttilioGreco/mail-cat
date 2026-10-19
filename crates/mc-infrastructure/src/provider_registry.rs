@@ -81,8 +81,11 @@ mod tests {
             &self,
             _mailbox: &MailboxPath,
             _rfc_id: &str,
-        ) -> Result<Option<ProviderUid>, DomainError> {
-            Ok(None)
+        ) -> Result<Vec<ProviderUid>, DomainError> {
+            Ok(vec![])
+        }
+        async fn uids_from(&self, _mailbox: &MailboxPath, _from: ProviderUid) -> Result<Vec<ProviderUid>, DomainError> {
+            Ok(vec![])
         }
         async fn fetch_raw_message(
             &self,

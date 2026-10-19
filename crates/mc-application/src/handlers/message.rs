@@ -35,7 +35,7 @@ pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, MR: Messa
     event_bus: Arc<B>,
 }
 
-impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static, B: EventPublisher + 'static>
+impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore, B: EventPublisher>
     MessageCommandHandler<ES, PR, MR, B>
 {
     pub fn new(
@@ -142,14 +142,14 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let account_id = unread[0].account_id.clone();
 
         for summary in &unread {
-            let (mut message, seq) = self.load_message(&summary.id).await?;
+            let (mut message, mut seq) = self.load_message(&summary.id).await?;
+            match self.remote_uid(&mut message, &mut seq, &mailbox_path).await {
+                Ok(uid) => provider_uids.push(uid),
+                Err(e) => tracing::warn!(message_id = %summary.id, %e, "marked read locally only"),
+            }
             let event = message.change_flags(vec![Flag::Seen], vec![]);
             self.append_and_publish(&summary.id, AggregateType::Message, seq, event)
                 .await?;
-
-            if let Some(provider_uid) = summary.provider_uid {
-                provider_uids.push(provider_uid);
-            }
         }
 
         info!(%mailbox_id, count = unread.len(), "mailbox marked read locally, syncing to IMAP in background");
@@ -242,18 +242,15 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     ) -> Result<CommandResult, ApplicationError> {
         let (mut message, mut seq) = self.load_message(&message_id).await?;
         let provider_uid = self.remote_uid(&mut message, &mut seq, &from_mailbox_path).await?;
-        let provider = self.provider_registry.get_provider(&message.account_id)?;
+        self.apply_on_server(
+            message.account_id,
+            &from_mailbox_path,
+            Some((to_mailbox_id, &to_mailbox_path)),
+            vec![(message_id, provider_uid)],
+        )
+        .await?;
 
-        // Optimistic: update locally first, sync to IMAP in background.
-        let event = message.move_to(to_mailbox_id);
-
-        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
-            .await?;
-
-        info!(%message_id, "message moved locally, syncing to IMAP in background");
-
-        self.spawn_move(message_id, to_mailbox_id, provider, provider_uid, from_mailbox_path, to_mailbox_path);
-
+        info!(%message_id, "message moved");
         Ok(CommandResult::MessageMoved)
     }
 
@@ -266,7 +263,6 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     ) -> Result<CommandResult, ApplicationError> {
         let (mut message, mut seq) = self.load_message(&message_id).await?;
         let provider_uid = self.remote_uid(&mut message, &mut seq, &mailbox_path).await?;
-        let provider = self.provider_registry.get_provider(&message.account_id)?;
 
         // Standard client behaviour: a plain delete moves the message to the
         // Trash folder (Thunderbird-style). Only a permanent delete, a delete of
@@ -280,67 +276,65 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             .map(|m| m.mailbox_type == MailboxType::Trash)
             .unwrap_or(false);
 
-        if !permanently
-            && !source_is_trash
-            && let Some(trash) = trash
-        {
-            let to_mailbox_id = trash.id;
-            let to_path = trash.path.clone();
-            let from_path = mailbox_path.clone();
-
-            // Optimistic: move locally first, sync to IMAP in background.
-            let event = message.move_to(to_mailbox_id);
-            self.append_and_publish(&message_id, AggregateType::Message, seq, event)
-                .await?;
-
-            info!(%message_id, "message moved to Trash, syncing to IMAP in background");
-
-            self.spawn_move(message_id, to_mailbox_id, provider, provider_uid, from_path, to_path);
-
-            return Ok(CommandResult::MessageDeleted);
-        }
-
-        // Permanent delete (or already in Trash / no Trash folder): expunge on the
-        // server and drop from the local read model.
-        let event = message.delete(true);
-        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
+        let dest = (!permanently && !source_is_trash)
+            .then_some(trash)
+            .flatten()
+            .map(|trash| (trash.id, &trash.path));
+        self.apply_on_server(message.account_id, &mailbox_path, dest, vec![(message_id, provider_uid)])
             .await?;
 
-        info!(%message_id, "message permanently deleted, syncing to IMAP in background");
-
-        tokio::spawn(async move {
-            if let Err(e) = provider
-                .delete_message(&mailbox_path, provider_uid, true)
-                .await
-            {
-                tracing::warn!(%e, "Background IMAP delete failed — next sync will reconcile");
-            }
-        });
-
+        info!(%message_id, to_trash = dest.is_some(), "message deleted");
         Ok(CommandResult::MessageDeleted)
     }
 
     /// Bulk delete. Applies the same Trash-vs-expunge rules as [`Self::handle_delete`]
-    /// per message, then groups the survivors by source mailbox and fires **one**
-    /// background provider call per group.
-    ///
-    /// The grouping is the whole point: the per-message path spawns a task each,
-    /// so deleting a search result set of 800 would open 800 concurrent IMAP
-    /// connections. One `UID STORE` over a compressed UID set is what IMAP is for.
+    /// per message, grouped by source mailbox: **one** provider call per group.
+    /// The per-message path would open a connection each, and deleting a search
+    /// result set of 800 would mean 800 of them.
     ///
     /// A message that can't be loaded, has no provider UID, or whose mailbox has
     /// vanished is counted in `failed` and skipped — a stale search index must not
-    /// abort the rest of the batch halfway through.
+    /// abort the rest of the batch halfway through. So is every message of a
+    /// group the provider refused.
     pub async fn handle_delete_many(
         &self,
         message_ids: Vec<MessageId>,
         permanently: bool,
     ) -> Result<CommandResult, ApplicationError> {
-        let mut failed: u32 = 0;
-        let mut succeeded: u32 = 0;
-        // (account, source path, Some(trash dest) | None = expunge) -> uids
-        let mut groups: HashMap<(AccountId, MailboxPath, Option<MailboxPath>), Vec<ProviderUid>> =
-            HashMap::new();
+        self.apply_many(message_ids, |source, mailboxes| {
+            let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
+            let to_trash = !permanently && source.mailbox_type != MailboxType::Trash;
+            Some(to_trash.then_some(trash).flatten().map(|t| (t.id, t.path.clone())))
+        })
+        .await
+    }
+
+    /// Bulk move to a single destination, grouped like [`Self::handle_delete_many`].
+    pub async fn handle_move_many(
+        &self,
+        message_ids: Vec<MessageId>,
+        to_mailbox_id: MailboxId,
+        to_mailbox_path: MailboxPath,
+    ) -> Result<CommandResult, ApplicationError> {
+        self.apply_many(message_ids, |source, _| {
+            // Moving a message to the folder it already sits in is a no-op, not
+            // a copy — skip it before it reaches the server.
+            (source.id != to_mailbox_id).then(|| Some((to_mailbox_id, to_mailbox_path.clone())))
+        })
+        .await
+    }
+
+    /// Bulk move/delete. `destination` picks, from a message's source mailbox
+    /// (and its account's mailboxes), where it goes: `Some(None)` expunges,
+    /// `None` skips it.
+    async fn apply_many(
+        &self,
+        message_ids: Vec<MessageId>,
+        destination: impl Fn(&mc_domain::Mailbox, &[mc_domain::Mailbox]) -> Option<Option<(MailboxId, MailboxPath)>>,
+    ) -> Result<CommandResult, ApplicationError> {
+        let (mut failed, mut succeeded) = (0u32, 0u32);
+        type Group = (AccountId, MailboxPath, Option<(MailboxId, MailboxPath)>);
+        let mut groups: HashMap<Group, Vec<(MessageId, ProviderUid)>> = HashMap::new();
         // list_mailboxes hits the read model — once per account, not once per message.
         let mut mailbox_cache: HashMap<AccountId, Vec<mc_domain::Mailbox>> = HashMap::new();
 
@@ -349,109 +343,16 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 failed += 1;
                 continue;
             };
-
             let account_id = message.account_id;
-            if !mailbox_cache.contains_key(&account_id) {
-                let boxes = self.message_read_repo.list_mailboxes(&account_id).await?;
-                mailbox_cache.insert(account_id, boxes);
+            if let std::collections::hash_map::Entry::Vacant(entry) = mailbox_cache.entry(account_id) {
+                entry.insert(self.message_read_repo.list_mailboxes(&account_id).await?);
             }
             let mailboxes = &mailbox_cache[&account_id];
-
             let Some(source) = mailboxes.iter().find(|m| m.id == message.mailbox_id) else {
                 failed += 1;
                 continue;
             };
-            let source_path = source.path.clone();
-            let source_is_trash = source.mailbox_type == MailboxType::Trash;
-            let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
-            let Ok(provider_uid) = self.remote_uid(&mut message, &mut seq, &source_path).await else {
-                failed += 1;
-                continue;
-            };
-
-            let (event, dest) = if !permanently
-                && !source_is_trash
-                && let Some(trash) = trash
-            {
-                (message.move_to(trash.id), Some(trash.path.clone()))
-            } else {
-                (message.delete(true), None)
-            };
-
-            if self
-                .append_and_publish(&message_id, AggregateType::Message, seq, event)
-                .await
-                .is_err()
-            {
-                failed += 1;
-                continue;
-            }
-            succeeded += 1;
-
-            groups
-                .entry((account_id, source_path, dest))
-                .or_default()
-                .push(provider_uid);
-        }
-
-        info!(succeeded, failed, "bulk delete applied locally, syncing to IMAP in background");
-
-        for ((account_id, from_path, dest), uids) in groups {
-            let provider = match self.provider_registry.get_provider(&account_id) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(%e, "Bulk delete: no provider for account — next sync will reconcile");
-                    continue;
-                }
-            };
-            tokio::spawn(async move {
-                let result = match &dest {
-                    Some(to) => provider.move_messages(&uids, &from_path, to).await,
-                    None => provider.delete_messages(&from_path, &uids, true).await,
-                };
-                if let Err(e) = result {
-                    tracing::warn!(%e, "Background IMAP bulk delete failed — next sync will reconcile");
-                }
-            });
-        }
-
-        Ok(CommandResult::MessagesBulkChanged { succeeded, failed })
-    }
-
-    /// Bulk move to a single destination. Same grouping rationale as
-    /// [`Self::handle_delete_many`]: one provider call per source mailbox.
-    pub async fn handle_move_many(
-        &self,
-        message_ids: Vec<MessageId>,
-        to_mailbox_id: MailboxId,
-        to_mailbox_path: MailboxPath,
-    ) -> Result<CommandResult, ApplicationError> {
-        let mut failed: u32 = 0;
-        let mut succeeded: u32 = 0;
-        let mut groups: HashMap<(AccountId, MailboxPath), Vec<ProviderUid>> = HashMap::new();
-        let mut mailbox_cache: HashMap<AccountId, Vec<mc_domain::Mailbox>> = HashMap::new();
-
-        for message_id in message_ids {
-            let Ok((mut message, mut seq)) = self.load_message(&message_id).await else {
-                failed += 1;
-                continue;
-            };
-            // Moving a message to the folder it already sits in is a no-op, not
-            // a copy — skip it before it reaches IMAP.
-            if message.mailbox_id == to_mailbox_id {
-                continue;
-            }
-
-            let account_id = message.account_id;
-            if !mailbox_cache.contains_key(&account_id) {
-                let boxes = self.message_read_repo.list_mailboxes(&account_id).await?;
-                mailbox_cache.insert(account_id, boxes);
-            }
-            let Some(source) = mailbox_cache[&account_id]
-                .iter()
-                .find(|m| m.id == message.mailbox_id)
-            else {
-                failed += 1;
+            let Some(dest) = destination(source, mailboxes) else {
                 continue;
             };
             let source_path = source.path.clone();
@@ -459,42 +360,21 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 failed += 1;
                 continue;
             };
-
-            let event = message.move_to(to_mailbox_id);
-            if self
-                .append_and_publish(&message_id, AggregateType::Message, seq, event)
-                .await
-                .is_err()
-            {
-                failed += 1;
-                continue;
-            }
-            succeeded += 1;
-
-            groups
-                .entry((account_id, source_path))
-                .or_default()
-                .push(provider_uid);
+            groups.entry((account_id, source_path, dest)).or_default().push((message_id, provider_uid));
         }
 
-        info!(succeeded, failed, "bulk move applied locally, syncing to IMAP in background");
-
-        for ((account_id, from_path), uids) in groups {
-            let provider = match self.provider_registry.get_provider(&account_id) {
-                Ok(p) => p,
+        for ((account_id, from, dest), members) in groups {
+            let count = members.len() as u32;
+            match self.apply_on_server(account_id, &from, dest.as_ref().map(|(id, path)| (*id, path)), members).await {
+                Ok(()) => succeeded += count,
                 Err(e) => {
-                    tracing::warn!(%e, "Bulk move: no provider for account — next sync will reconcile");
-                    continue;
+                    tracing::warn!(%e, %from, "bulk change refused by the server, nothing changed locally");
+                    failed += count;
                 }
-            };
-            let to = to_mailbox_path.clone();
-            tokio::spawn(async move {
-                if let Err(e) = provider.move_messages(&uids, &from_path, &to).await {
-                    tracing::warn!(%e, "Background IMAP bulk move failed — next sync will reconcile");
-                }
-            });
+            }
         }
 
+        info!(succeeded, failed, "bulk change applied");
         Ok(CommandResult::MessagesBulkChanged { succeeded, failed })
     }
 
@@ -948,56 +828,66 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
     // ── Helpers ────────────────────────────────────────────────────────
 
-    /// Moves on the provider off the request path. The UID the provider gives
-    /// the message in `to` is recorded as soon as it is known; a provider that
-    /// cannot report it leaves the message UID-less until the next sync of `to`
-    /// re-attaches it by Message-ID (`SyncService`).
-    fn spawn_move(
+    /// Move `members` (message, UID) from `from` to `dest`, or expunge them
+    /// when `dest` is `None`, on the server first and only then locally: a
+    /// refusal changes nothing here. Each moved message is recorded with the
+    /// UID it got in `dest` — reported by the provider, else looked up by
+    /// Message-ID — because UIDs are per-mailbox.
+    async fn apply_on_server(
         &self,
-        message_id: MessageId,
-        to_mailbox_id: MailboxId,
-        provider: Arc<PR::Provider>,
-        provider_uid: ProviderUid,
-        from: MailboxPath,
-        to: MailboxPath,
-    ) {
-        let handler = Self {
-            event_store: Arc::clone(&self.event_store),
-            provider_registry: Arc::clone(&self.provider_registry),
-            message_read_repo: Arc::clone(&self.message_read_repo),
-            event_bus: Arc::clone(&self.event_bus),
-        };
-        tokio::spawn(async move {
-            match provider.move_message(provider_uid, &from, &to).await {
-                Ok(Some(new_uid)) => {
-                    if let Err(e) = handler.attach_uid(message_id, to_mailbox_id, new_uid).await {
-                        tracing::warn!(%message_id, %e, "recording the moved message's UID failed — next sync re-attaches it");
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(%e, "Background IMAP move failed — next sync will reconcile"),
-            }
-        });
-    }
-
-    async fn attach_uid(
-        &self,
-        message_id: MessageId,
-        mailbox_id: MailboxId,
-        provider_uid: ProviderUid,
+        account_id: AccountId,
+        from: &MailboxPath,
+        dest: Option<(MailboxId, &MailboxPath)>,
+        members: Vec<(MessageId, ProviderUid)>,
     ) -> Result<(), ApplicationError> {
-        let (mut message, seq) = self.load_message(&message_id).await?;
-        match message.attach_uid(mailbox_id, provider_uid) {
-            Some(event) => self.append_and_publish(&message_id, AggregateType::Message, seq, event).await,
-            None => Ok(()),
+        let provider = self.provider_registry.get_provider(&account_id)?;
+        let uids: Vec<ProviderUid> = members.iter().map(|&(_, uid)| uid).collect();
+        let new_uids = match dest {
+            Some((_, to)) => provider.move_messages(&uids, from, to).await?,
+            None => {
+                provider.delete_messages(from, &uids, true).await?;
+                HashMap::new()
+            }
+        };
+        for (message_id, uid) in members {
+            // Reloaded: a flag change may have landed while the server worked.
+            let (mut message, seq) = self.load_message(&message_id).await?;
+            let event = match dest {
+                Some((to_id, to_path)) => {
+                    let new_uid = match new_uids.get(&uid) {
+                        Some(&new_uid) => Some(new_uid),
+                        None => self.locate(&provider, &message, &to_id, to_path).await?,
+                    };
+                    message.move_to(to_id, new_uid)
+                }
+                None => message.delete(true),
+            };
+            self.append_and_publish(&message_id, AggregateType::Message, seq, event).await?;
         }
+        Ok(())
     }
 
-    /// The message's UID in its mailbox, at `mailbox_path`. One moved by a
-    /// provider that could not report the new UID — or moved before UIDs
-    /// followed moves — has none: it is looked up on the server by Message-ID
-    /// and recorded, so every action on it can go ahead. `seq` follows the
-    /// recording event.
+    /// The UID `message` has in `mailbox` (at `path`), found by Message-ID:
+    /// the newest copy no other local message already holds.
+    async fn locate(
+        &self,
+        provider: &PR::Provider,
+        message: &Message,
+        mailbox_id: &MailboxId,
+        path: &MailboxPath,
+    ) -> Result<Option<ProviderUid>, ApplicationError> {
+        let Some(rfc_id) = message.message_rfc_id.as_deref() else {
+            return Ok(None);
+        };
+        let found = provider.find_message(path, rfc_id).await?;
+        let held = self.message_read_repo.held_uids(mailbox_id, &found).await?;
+        Ok(found.into_iter().rev().find(|uid| !held.contains(uid)))
+    }
+
+    /// The message's UID in its mailbox, at `mailbox_path`. One without (a
+    /// move whose new UID the provider could not report, a renumbered
+    /// mailbox) is looked up on the server by Message-ID and recorded, so
+    /// every action on it can go ahead. `seq` follows the recording event.
     async fn remote_uid(
         &self,
         message: &mut Message,
@@ -1007,17 +897,25 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         if let Some(uid) = message.provider_uid {
             return Ok(uid);
         }
-        let rfc_id = message.message_rfc_id.clone().ok_or_else(|| {
-            ApplicationError::PreconditionFailed(
-                "message has no provider UID and no Message-ID to find it by".into(),
+        let mailbox = self
+            .message_read_repo
+            .get_mailbox(&message.mailbox_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("Mailbox", message.mailbox_id.to_string()))?;
+        // Searching the wrong mailbox would attach a UID valid only there.
+        if mailbox.path != *mailbox_path {
+            return Err(ApplicationError::PreconditionFailed(format!(
+                "message is in {}, not {mailbox_path}",
+                mailbox.path
+            )));
+        }
+        let provider = self.provider_registry.get_provider(&message.account_id)?;
+        let uid = self.locate(&provider, message, &mailbox.id, &mailbox.path).await?.ok_or_else(|| {
+            ApplicationError::NotFound(
+                "Message on the server",
+                format!("{} in {mailbox_path}", message.message_rfc_id.as_deref().unwrap_or("(no Message-ID)")),
             )
         })?;
-        let uid = self
-            .provider_registry
-            .get_provider(&message.account_id)?
-            .find_message(mailbox_path, &rfc_id)
-            .await?
-            .ok_or_else(|| ApplicationError::NotFound("Message on the server", format!("{rfc_id} in {mailbox_path}")))?;
         if let Some(event) = message.attach_uid(message.mailbox_id, uid) {
             self.append_and_publish(&message.id, AggregateType::Message, *seq, event).await?;
             *seq += 1;
@@ -1203,6 +1101,8 @@ mod tests {
         fetched: RwLock<Vec<ProviderUid>>,
         /// UIDs `move_message` was asked to move.
         moved: RwLock<Vec<ProviderUid>>,
+        /// Makes `move_message` fail, as a server refusing it.
+        refuse: RwLock<bool>,
     }
 
     impl MockEmailProvider {
@@ -1242,8 +1142,11 @@ mod tests {
             &self,
             _mailbox: &MailboxPath,
             _rfc_id: &str,
-        ) -> Result<Option<ProviderUid>, DomainError> {
-            Ok(*self.found_uid.read().unwrap())
+        ) -> Result<Vec<ProviderUid>, DomainError> {
+            Ok(self.found_uid.read().unwrap().iter().copied().collect())
+        }
+        async fn uids_from(&self, _mailbox: &MailboxPath, _from: ProviderUid) -> Result<Vec<ProviderUid>, DomainError> {
+            Ok(vec![])
         }
         async fn fetch_raw_message(
             &self,
@@ -1276,6 +1179,9 @@ mod tests {
             _from: &MailboxPath,
             _to: &MailboxPath,
         ) -> Result<Option<ProviderUid>, DomainError> {
+            if *self.refuse.read().unwrap() {
+                return Err(DomainError::Provider("refused".into()));
+            }
             self.moved.write().unwrap().push(uid);
             Ok(*self.moved_uid.read().unwrap())
         }
@@ -2278,7 +2184,8 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
         *provider.found_uid.write().unwrap() = Some(ProviderUid::new(55));
         *provider.detail_response.write().unwrap() = Some(Message { body_text: Some("text".into()), ..msg.clone() });
         let registry = Arc::new(MockProviderRegistry::new(provider.clone()));
-        let handler = MessageCommandHandler::new(es, registry, Arc::new(MockMessageReadRepo::new()), Arc::new(MockEventBus::new()));
+        let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![archive.clone()]));
+        let handler = MessageCommandHandler::new(es, registry, read_repo, Arc::new(MockEventBus::new()));
 
         handler.handle_fetch_body(msg.id, archive.path.clone()).await.unwrap();
 
@@ -2291,7 +2198,8 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
     async fn a_message_gone_from_the_server_is_a_clear_error() {
         let (msg, archive, es) = uidless_in_archive();
         let registry = Arc::new(MockProviderRegistry::new(Arc::new(MockEmailProvider::new())));
-        let handler = MessageCommandHandler::new(es, registry, Arc::new(MockMessageReadRepo::new()), Arc::new(MockEventBus::new()));
+        let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![archive.clone()]));
+        let handler = MessageCommandHandler::new(es, registry, read_repo, Arc::new(MockEventBus::new()));
 
         let err = handler
             .handle_set_flags(msg.id, archive.path, vec![Flag::Seen], vec![])
@@ -2342,16 +2250,35 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
             .handle_move(msg_id, msg.mailbox_id, archive, MailboxPath::inbox(), MailboxPath::parse("Archive", '/').unwrap())
             .await
             .unwrap();
-        let (moved, _) = handler.load_message(&msg_id).await.unwrap();
-        assert_eq!(moved.mailbox_id, archive);
-        // The inbox UID would address some other message in Archive.
-        assert_eq!(moved.provider_uid, None);
 
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
+        // The server moved it before anything changed here; the inbox UID
+        // would address some other message in Archive.
         let (moved, _) = handler.load_message(&msg_id).await.unwrap();
         assert_eq!(moved.mailbox_id, archive);
         assert_eq!(moved.provider_uid, Some(ProviderUid::new(900)));
     }
+
+    /// A move the server refuses changes nothing locally.
+    #[tokio::test]
+    async fn a_refused_move_changes_nothing() {
+        let msg = make_test_message();
+        let provider = MockEmailProvider::new();
+        *provider.refuse.write().unwrap() = true;
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let handler = MessageCommandHandler::new(
+            es,
+            Arc::new(MockProviderRegistry::new(Arc::new(provider))),
+            Arc::new(MockMessageReadRepo::new()),
+            Arc::new(MockEventBus::new()),
+        );
+
+        let result = handler
+            .handle_move(msg.id, msg.mailbox_id, MailboxId::new(), MailboxPath::inbox(), MailboxPath::parse("Archive", '/').unwrap())
+            .await;
+
+        assert!(result.is_err());
+        let (stored, _) = handler.load_message(&msg.id).await.unwrap();
+        assert_eq!((stored.mailbox_id, stored.provider_uid), (msg.mailbox_id, msg.provider_uid));
+    }
+
 }
