@@ -235,6 +235,16 @@ mod tests {
         ) -> Result<Option<MessageSummary>, DomainError> {
             Ok(None)
         }
+        async fn held_uids(
+            &self,
+            _mailbox_id: &MailboxId,
+            _uids: &[mc_domain::ProviderUid],
+        ) -> Result<std::collections::HashSet<mc_domain::ProviderUid>, DomainError> {
+            Ok(Default::default())
+        }
+        async fn uidless_messages(&self, _mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
+            Ok(vec![])
+        }
         async fn find_by_rfc_id(
             &self,
             _account_id: &AccountId,

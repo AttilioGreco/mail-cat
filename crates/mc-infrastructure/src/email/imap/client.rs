@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_imap::imap_proto::types::{BodyStructure, ContentEncoding, SectionPath};
@@ -58,6 +58,16 @@ type ImapSession =
 /// connections shared with every other client (phone, webmail); the IDLE watcher
 /// holds one more outside the pool.
 const MAX_POOLED_CONNECTIONS: usize = 4;
+
+/// TCP + TLS + login (+ CAPABILITY).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// One ordinary command and its reply (SELECT, STORE, COPY/MOVE, SEARCH…).
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// A body or envelope batch: up to `FETCH_BATCH_SIZE` messages in one reply.
+const BODY_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+/// IDLE is re-issued this often: RFC 2177 has servers drop it after 30
+/// minutes, and NATs often forget a silent connection sooner.
+const IDLE_REISSUE: Duration = Duration::from_secs(25 * 60);
 
 /// Servers silently drop idle connections, so one parked longer than this gets a
 /// NOOP before reuse instead of failing the caller's first real command.
@@ -117,6 +127,8 @@ pub struct ImapEmailProvider {
     idle_sessions: Mutex<Vec<(ImapSession, Instant)>>,
     permits: Arc<Semaphore>,
     meter: Option<DownloadMeter>,
+    /// Learned on the first login; until then every extension counts as absent.
+    caps: OnceLock<ServerCaps>,
 }
 
 impl ImapEmailProvider {
@@ -138,6 +150,7 @@ impl ImapEmailProvider {
             idle_sessions: Mutex::default(),
             permits: Arc::new(Semaphore::new(MAX_POOLED_CONNECTIONS)),
             meter: None,
+            caps: OnceLock::new(),
         }
     }
 
@@ -165,13 +178,10 @@ impl ImapEmailProvider {
     ) -> Result<Vec<MessageBodyResult>, DomainError> {
         use futures::TryStreamExt;
 
-        let structures: Vec<async_imap::types::Fetch> = session
-            .uid_fetch(Self::compress_uid_ranges(uids), "(UID BODYSTRUCTURE)")
-            .await
-            .map_err(|e| DomainError::Provider(format!("Body structure fetch failed: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Body structure stream error: {e}")))?;
+        let structures: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Body structure fetch", async {
+            session.uid_fetch(Self::compress_uid_ranges(uids), "(UID BODYSTRUCTURE)").await?.try_collect().await
+        })
+        .await?;
 
         let parts_by_uid: HashMap<u32, Vec<TextPart>> = structures
             .iter()
@@ -201,13 +211,14 @@ impl ImapEmailProvider {
                 .iter()
                 .map(|s| format!("BODY.PEEK[{}]", s.iter().map(u32::to_string).collect::<Vec<_>>().join(".")))
                 .collect();
-            let fetched: Vec<async_imap::types::Fetch> = session
-                .uid_fetch(Self::compress_uid_ranges(&message_uids), format!("(UID {})", wanted.join(" ")))
-                .await
-                .map_err(|e| DomainError::Provider(format!("Body fetch failed: {e}")))?
-                .try_collect()
-                .await
-                .map_err(|e| DomainError::Provider(format!("Body stream error: {e}")))?;
+            let fetched: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Body fetch", async {
+                session
+                    .uid_fetch(Self::compress_uid_ranges(&message_uids), format!("(UID {})", wanted.join(" ")))
+                    .await?
+                    .try_collect()
+                    .await
+            })
+            .await?;
             for item in &fetched {
                 let Some((uid, parts)) = item.uid.and_then(|uid| Some((uid, parts_by_uid.get(&uid)?))) else {
                     continue;
@@ -238,10 +249,7 @@ impl ImapEmailProvider {
 
     async fn selected(&self, mailbox_name: &str) -> Result<PooledSession, DomainError> {
         let mut session = self.session().await?;
-        session
-            .select(mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+        exchange(COMMAND_TIMEOUT, "Mailbox select", session.select(mailbox_name)).await?;
         Ok(session)
     }
 
@@ -255,9 +263,14 @@ impl ImapEmailProvider {
         uid: u32,
     ) -> Result<Option<MessageBodyResult>, DomainError> {
         let mut session = self.selected(mailbox_name).await?;
-        if let Ok(found) = self.fetch_text_bodies(&mut session, &[uid]).await {
-            self.release(session);
-            return Ok(found.into_iter().next());
+        match self.fetch_text_bodies(&mut session, &[uid]).await {
+            Ok(found) => {
+                self.release(session);
+                return Ok(found.into_iter().next());
+            }
+            // A silent server stays silent: no fallback round on it.
+            Err(e @ DomainError::ConnectionTimeout(_)) => return Err(e),
+            Err(_) => {}
         }
         // The failed response may be half-read: that connection is dropped —
         // before checking out the next, or callers falling back at once hold
@@ -275,13 +288,10 @@ impl ImapEmailProvider {
     async fn fetch_whole(session: &mut ImapSession, uid: u32) -> Result<Option<Vec<u8>>, DomainError> {
         use futures::TryStreamExt;
 
-        let fetched: Vec<async_imap::types::Fetch> = session
-            .uid_fetch(uid.to_string(), "BODY.PEEK[]")
-            .await
-            .map_err(|e| DomainError::Provider(format!("Raw fetch failed: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Raw stream error: {e}")))?;
+        let fetched: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Raw fetch", async {
+            session.uid_fetch(uid.to_string(), "BODY.PEEK[]").await?.try_collect().await
+        })
+        .await?;
         Ok(fetched.into_iter().find_map(|f| f.body().map(<[u8]>::to_vec)))
     }
 
@@ -301,7 +311,9 @@ impl ImapEmailProvider {
         loop {
             let idle = self.idle_sessions.lock().expect("IMAP pool lock poisoned").pop();
             let Some((mut session, parked_at)) = idle else { break };
-            if parked_at.elapsed() < REVALIDATE_AFTER || session.noop().await.is_ok() {
+            if parked_at.elapsed() < REVALIDATE_AFTER
+                || exchange(COMMAND_TIMEOUT, "NOOP", session.noop()).await.is_ok()
+            {
                 return Ok(PooledSession { session, _permit: permit });
             }
             debug!("Dropping stale pooled IMAP connection");
@@ -318,6 +330,10 @@ impl ImapEmailProvider {
     }
 
     async fn create_imap_session(&self) -> Result<ImapSession, DomainError> {
+        timed(CONNECT_TIMEOUT, "IMAP connect and login", self.connect_and_login()).await
+    }
+
+    async fn connect_and_login(&self) -> Result<ImapSession, DomainError> {
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         info!(
@@ -379,45 +395,21 @@ impl ImapEmailProvider {
             }
         };
 
+        let mut session = session;
+        if self.caps.get().is_none() {
+            match exchange(COMMAND_TIMEOUT, "CAPABILITY", session.capabilities()).await {
+                Ok(caps) => {
+                    let _ = self.caps.set(ServerCaps::from_names(|name| caps.has_str(name)));
+                }
+                Err(e) => warn!(error = %e, "CAPABILITY failed, assuming no MOVE / UIDPLUS"),
+            }
+        }
+
         Ok(session)
     }
 
-    /// `UID COPY` that keeps the UIDPLUS `COPYUID` response code (RFC 4315),
-    /// which async-imap's `uid_copy` discards: it is the copy's UID in the
-    /// destination. `None` from a server without UIDPLUS.
-    async fn uid_copy_reporting_uid(
-        session: &mut ImapSession,
-        uid: ProviderUid,
-        to: &str,
-    ) -> Result<Option<ProviderUid>, DomainError> {
-        use async_imap::imap_proto::{Response, Status};
-
-        if to.contains(['\r', '\n']) {
-            return Err(DomainError::Provider(format!("Invalid mailbox name: {to:?}")));
-        }
-        let quoted = to.replace('\\', "\\\\").replace('"', "\\\"");
-        let tag = session
-            .run_command(format!("UID COPY {} \"{quoted}\"", uid.value()))
-            .await
-            .map_err(|e| DomainError::Provider(format!("Copy failed: {e}")))?;
-        loop {
-            let response = session
-                .read_response()
-                .await
-                .map_err(|e| DomainError::Provider(format!("Copy failed: {e}")))?
-                .ok_or_else(|| DomainError::Provider("Copy failed: connection lost".into()))?;
-            // Untagged responses (EXISTS, FETCH) may precede the tagged reply.
-            let Response::Done { tag: done, status, code, information } = response.parsed() else {
-                continue;
-            };
-            if *done != tag {
-                continue;
-            }
-            if *status != Status::Ok {
-                return Err(DomainError::Provider(format!("Copy failed: {status:?} {information:?}")));
-            }
-            return Ok(copied_uid(code.as_ref()));
-        }
+    fn caps(&self) -> ServerCaps {
+        self.caps.get().copied().unwrap_or_default()
     }
 
     /// Helper to convert ProviderUid to IMAP sequence.
@@ -504,11 +496,10 @@ impl EmailProvider for ImapEmailProvider {
         debug!("Listing mailboxes");
         let mut session = self.session().await?;
 
-        let stream = session
-            .list(None, Some("*"))
-            .await
-            .map_err(|e| DomainError::Provider(format!("List mailboxes failed: {}", e)))?;
-        let mailbox_list: Vec<Result<_, _>> = stream.collect::<Vec<_>>().await;
+        let mailbox_list: Vec<Result<_, _>> = exchange(COMMAND_TIMEOUT, "List mailboxes", async {
+            Ok(session.list(None, Some("*")).await?.collect::<Vec<_>>().await)
+        })
+        .await?;
         self.release(session);
 
         // Convert IMAP mailbox names to Mailbox objects
@@ -554,13 +545,8 @@ impl EmailProvider for ImapEmailProvider {
         range: FetchRange,
     ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
         debug!("Fetching envelopes from mailbox: {:?}", mailbox);
-        let mut session = self.session().await?;
-
-        // Select mailbox
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
-        session.select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
+        let mut session = self.selected(&mailbox_name).await?;
 
         // Use SEARCH to find actual existing UIDs (handles UID gaps from deleted messages)
         let search_criteria = match range {
@@ -571,10 +557,8 @@ impl EmailProvider for ImapEmailProvider {
         };
 
         debug!("Executing UID SEARCH with criteria: {}", search_criteria);
-        let search_results = session
-            .uid_search(&search_criteria)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Search failed: {}", e)))?;
+        let search_results =
+            exchange(COMMAND_TIMEOUT, "Search", session.uid_search(&search_criteria)).await?;
 
         if search_results.is_empty() {
             debug!("No messages found matching search criteria");
@@ -604,17 +588,14 @@ impl EmailProvider for ImapEmailProvider {
             debug!("Batch {}: fetching {} UIDs (query: {})", batch_idx, chunk.len(), &query[..query.len().min(100)]);
 
             use futures::TryStreamExt;
-            let batch_results: Vec<async_imap::types::Fetch> = session
-                .uid_fetch(&query, "(ENVELOPE FLAGS INTERNALDATE BODY.PEEK[HEADER])")
-                .await
-                .map_err(|e| {
-                    DomainError::Provider(format!("Fetch envelopes failed: {}", e))
-                })?
-                .try_collect()
-                .await
-                .map_err(|e| {
-                    DomainError::Provider(format!("Fetch stream error: {}", e))
-                })?;
+            let batch_results: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Fetch envelopes", async {
+                session
+                    .uid_fetch(&query, "(ENVELOPE FLAGS INTERNALDATE BODY.PEEK[HEADER])")
+                    .await?
+                    .try_collect()
+                    .await
+            })
+            .await?;
 
             debug!("Batch {}: fetched {} envelopes", batch_idx, batch_results.len());
             // ponytail: the ENVELOPE structure repeats the header, so it costs
@@ -757,6 +738,7 @@ impl EmailProvider for ImapEmailProvider {
             debug!("Bulk body fetch: {} UIDs", chunk.len());
             match self.fetch_text_bodies(&mut session, chunk).await {
                 Ok(found) => results.extend(found),
+                Err(e @ DomainError::ConnectionTimeout(_)) => return Err(e),
                 // One message the parser rejects fails its whole chunk: go one by one.
                 Err(e) => {
                     warn!(mailbox = %mailbox_name, error = %e, "bulk text fetch failed, retrying message by message");
@@ -773,6 +755,19 @@ impl EmailProvider for ImapEmailProvider {
 
         self.release(session);
         Ok(results)
+    }
+
+    async fn find_message(
+        &self,
+        mailbox: &MailboxPath,
+        rfc_id: &str,
+    ) -> Result<Option<ProviderUid>, DomainError> {
+        let mut session = self.selected(&mailbox_path_to_string(mailbox)).await?;
+        let query = format!("HEADER Message-ID {}", quoted(rfc_id)?);
+        let found = exchange(COMMAND_TIMEOUT, "Search", session.uid_search(query)).await?;
+        self.release(session);
+        // Several copies of one Message-ID: the newest is as good as any.
+        Ok(found.into_iter().max().map(ProviderUid::new))
     }
 
     async fn fetch_raw_message(
@@ -803,14 +798,7 @@ impl EmailProvider for ImapEmailProvider {
             mailbox_path_to_string(mailbox)
         );
 
-        let mut session = self.session().await?;
-
-        // Select mailbox
-        let mailbox_name = mailbox_path_to_string(mailbox);
-        session.select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
-
+        let mut session = self.selected(&mailbox_path_to_string(mailbox)).await?;
         let seq = Self::uid_to_seq(&uid);
 
         // Add flags
@@ -818,10 +806,7 @@ impl EmailProvider for ImapEmailProvider {
             let flags_str: Vec<String> = flags_to_add.iter().map(flag_to_imap).collect();
             let flags_query = flags_str.join(" ");
 
-            let _ = session
-                .uid_store(format!("{}", seq), format!("+FLAGS ({})", flags_query))
-                .await
-                .map_err(|e| DomainError::Provider(format!("Add flags failed: {}", e)))?;
+            store(&mut session, &seq.to_string(), &format!("+FLAGS ({flags_query})"), "Add flags").await?;
 
             debug!("Added flags: {}", flags_query);
         }
@@ -831,10 +816,7 @@ impl EmailProvider for ImapEmailProvider {
             let flags_str: Vec<String> = flags_to_remove.iter().map(flag_to_imap).collect();
             let flags_query = flags_str.join(" ");
 
-            let _ = session
-                .uid_store(format!("{}", seq), format!("-FLAGS ({})", flags_query))
-                .await
-                .map_err(|e| DomainError::Provider(format!("Remove flags failed: {}", e)))?;
+            store(&mut session, &seq.to_string(), &format!("-FLAGS ({flags_query})"), "Remove flags").await?;
 
             debug!("Removed flags: {}", flags_query);
         }
@@ -861,12 +843,7 @@ impl EmailProvider for ImapEmailProvider {
             mailbox_path_to_string(mailbox)
         );
 
-        let mut session = self.session().await?;
-        let mailbox_name = mailbox_path_to_string(mailbox);
-        session
-            .select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
+        let mut session = self.selected(&mailbox_path_to_string(mailbox)).await?;
 
         let uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
 
@@ -877,10 +854,7 @@ impl EmailProvider for ImapEmailProvider {
                 let flags_str: Vec<String> = flags_to_add.iter().map(flag_to_imap).collect();
                 let flags_query = flags_str.join(" ");
 
-                let _ = session
-                    .uid_store(&query, format!("+FLAGS ({})", flags_query))
-                    .await
-                    .map_err(|e| DomainError::Provider(format!("Add flags failed: {}", e)))?;
+                store(&mut session, &query, &format!("+FLAGS ({flags_query})"), "Add flags").await?;
 
                 debug!("Added flags: {} for {} UIDs", flags_query, chunk.len());
             }
@@ -889,10 +863,7 @@ impl EmailProvider for ImapEmailProvider {
                 let flags_str: Vec<String> = flags_to_remove.iter().map(flag_to_imap).collect();
                 let flags_query = flags_str.join(" ");
 
-                let _ = session
-                    .uid_store(&query, format!("-FLAGS ({})", flags_query))
-                    .await
-                    .map_err(|e| DomainError::Provider(format!("Remove flags failed: {}", e)))?;
+                store(&mut session, &query, &format!("-FLAGS ({flags_query})"), "Remove flags").await?;
 
                 debug!("Removed flags: {} for {} UIDs", flags_query, chunk.len());
             }
@@ -910,39 +881,16 @@ impl EmailProvider for ImapEmailProvider {
         from: &MailboxPath,
         to: &MailboxPath,
     ) -> Result<Option<ProviderUid>, DomainError> {
+        let (from_name, to_name) = (mailbox_path_to_string(from), mailbox_path_to_string(to));
+        info!("Moving message {} from {} to {}", uid.value(), from_name, to_name);
 
-        info!(
-            "Moving message {} from {} to {}",
-            uid.value(),
-            mailbox_path_to_string(from),
-            mailbox_path_to_string(to)
-        );
-
-        let mut session = self.session().await?;
-
-        // Select source mailbox
-        let from_name = mailbox_path_to_string(from);
-        session
-            .select(&from_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Source mailbox select failed: {}", e)))?;
-
-        let seq = Self::uid_to_seq(&uid);
-        let to_name = mailbox_path_to_string(to);
-
-        let new_uid = Self::uid_copy_reporting_uid(&mut session, uid, &to_name).await?;
-
-        // Mark as deleted in source
-        let _ = session
-            .uid_store(format!("{}", seq), "+FLAGS (\\Deleted)")
-            .await
-            .map_err(|e| DomainError::Provider(format!("Delete flag failed: {}", e)))?;
-
-        // Expunge to remove from source
-        let _ = session
-            .expunge()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Expunge failed: {}", e)))?;
+        let mut session = self.selected(&from_name).await?;
+        let new_uid = timed(
+            COMMAND_TIMEOUT,
+            "Move",
+            move_uids(&mut session, self.caps(), &uid.value().to_string(), &to_name),
+        )
+        .await?;
         self.release(session);
 
         info!(new_uid = ?new_uid, "Message moved successfully");
@@ -955,40 +903,12 @@ impl EmailProvider for ImapEmailProvider {
         uid: ProviderUid,
         permanently: bool,
     ) -> Result<(), DomainError> {
-
-        info!(
-            "Deleting message {} from {} (permanent: {})",
-            uid.value(),
-            mailbox_path_to_string(mailbox),
-            permanently
-        );
-
-        let mut session = self.session().await?;
-
-        // Select mailbox
         let mailbox_name = mailbox_path_to_string(mailbox);
-        session.select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {}", e)))?;
+        info!("Deleting message {} from {} (permanent: {})", uid.value(), mailbox_name, permanently);
 
-        let seq = Self::uid_to_seq(&uid);
-
-        // Mark as deleted
-        let _ = session
-            .uid_store(format!("{}", seq), "+FLAGS (\\Deleted)")
-            .await
-            .map_err(|e| DomainError::Provider(format!("Delete flag failed: {}", e)))?;
-
-        // If permanent deletion, expunge
-        if permanently {
-            let _ = session
-                .expunge()
-                .await
-                .map_err(|e| DomainError::Provider(format!("Expunge failed: {}", e)))?;
-            debug!("Message permanently deleted via expunge");
-        } else {
-            debug!("Message marked as deleted (soft delete)");
-        }
+        let mut session = self.selected(&mailbox_name).await?;
+        timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, self.caps(), &uid.value().to_string(), permanently))
+            .await?;
         self.release(session);
 
         info!("Message deleted successfully");
@@ -1009,49 +929,25 @@ impl EmailProvider for ImapEmailProvider {
         }
 
         let mailbox_name = mailbox_path_to_string(mailbox);
-        info!(
-            "Deleting {} messages from {} (permanent: {})",
-            uids.len(),
-            mailbox_name,
-            permanently
-        );
+        info!("Deleting {} messages from {} (permanent: {})", uids.len(), mailbox_name, permanently);
 
-        let mut session = self.session().await?;
-        session
-            .select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
-
+        let mut session = self.selected(&mailbox_name).await?;
         // compress_uid_ranges assumes sorted input — the caller's order is
         // whatever the selection was, so sort here rather than trusting it.
         let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
         uid_nums.sort_unstable();
-
         for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
-            let query = Self::compress_uid_ranges(chunk);
-            let _ = session
-                .uid_store(&query, "+FLAGS (\\Deleted)")
-                .await
-                .map_err(|e| DomainError::Provider(format!("Delete flag failed: {e}")))?;
+            let set = Self::compress_uid_ranges(chunk);
+            timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, self.caps(), &set, permanently)).await?;
         }
-
-        // One expunge for the whole batch, not one per chunk.
-        if permanently {
-            let _ = session
-                .expunge()
-                .await
-                .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?;
-        }
-
         self.release(session);
 
         info!("Bulk delete of {} messages completed", uid_nums.len());
         Ok(())
     }
 
-    /// One session, one `UID COPY` + one `UID STORE` + one `EXPUNGE` for the
-    /// whole set. IMAP has no MOVE guarantee across servers, so this keeps the
-    /// copy-then-flag-then-expunge shape of `move_message`.
+    /// One session and one command set per chunk of the whole selection,
+    /// instead of a session per message.
     async fn move_messages(
         &self,
         uids: &[ProviderUid],
@@ -1062,36 +958,16 @@ impl EmailProvider for ImapEmailProvider {
             return Ok(());
         }
 
-        let from_name = mailbox_path_to_string(from);
-        let to_name = mailbox_path_to_string(to);
+        let (from_name, to_name) = (mailbox_path_to_string(from), mailbox_path_to_string(to));
         info!("Moving {} messages from {} to {}", uids.len(), from_name, to_name);
 
-        let mut session = self.session().await?;
-        session
-            .select(&from_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("Source mailbox select failed: {e}")))?;
-
+        let mut session = self.selected(&from_name).await?;
         let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
         uid_nums.sort_unstable();
-
         for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
-            let query = Self::compress_uid_ranges(chunk);
-            session
-                .uid_copy(&query, &to_name)
-                .await
-                .map_err(|e| DomainError::Provider(format!("Copy failed: {e}")))?;
-            let _ = session
-                .uid_store(&query, "+FLAGS (\\Deleted)")
-                .await
-                .map_err(|e| DomainError::Provider(format!("Delete flag failed: {e}")))?;
+            let set = Self::compress_uid_ranges(chunk);
+            timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, self.caps(), &set, &to_name)).await?;
         }
-
-        let _ = session
-            .expunge()
-            .await
-            .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?;
-
         self.release(session);
 
         info!("Bulk move of {} messages completed", uid_nums.len());
@@ -1122,24 +998,16 @@ impl EmailProvider for ImapEmailProvider {
 
         let mut session = self.session().await?;
         let mailbox_name = mailbox_path_to_string(mailbox);
-        session
-            .append(&mailbox_name, Some(&flags), None, &raw)
-            .await
-            .map_err(|e| DomainError::Provider(format!("APPEND to {mailbox_name} failed: {e}")))?;
+        exchange(BODY_FETCH_TIMEOUT, "APPEND", session.append(&mailbox_name, Some(&flags), None, &raw)).await?;
 
         // async-imap drops the APPENDUID response code, so find the copy by its
         // Message-ID — works on every server, UIDPLUS or not.
         let uid = match &message.message_rfc_id {
             Some(rfc_id) => {
-                session
-                    .select(&mailbox_name)
-                    .await
-                    .map_err(|e| DomainError::Provider(format!("Mailbox select failed: {e}")))?;
-                let query = format!("HEADER Message-ID \"{}\"", rfc_id.replace(['"', '\\'], ""));
-                session
-                    .uid_search(query)
-                    .await
-                    .map_err(|e| DomainError::Provider(format!("UID SEARCH failed: {e}")))?
+                exchange(COMMAND_TIMEOUT, "Mailbox select", session.select(&mailbox_name)).await?;
+                let query = format!("HEADER Message-ID {}", quoted(rfc_id)?);
+                exchange(COMMAND_TIMEOUT, "UID SEARCH", session.uid_search(query))
+                    .await?
                     .into_iter()
                     .max()
                     .map(ProviderUid::new)
@@ -1160,10 +1028,12 @@ impl EmailProvider for ImapEmailProvider {
         // Use STATUS command to get accurate counts.
         // SELECT's "unseen" field is the sequence number of the first unseen message (RFC 3501),
         // NOT the count — STATUS (MESSAGES UNSEEN UIDNEXT UIDVALIDITY) returns the actual count.
-        let mailbox_data = session
-            .status(&mailbox_name, "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)")
-            .await
-            .map_err(|e| DomainError::Provider(format!("Mailbox STATUS failed: {}", e)))?;
+        let mailbox_data = exchange(
+            COMMAND_TIMEOUT,
+            "Mailbox STATUS",
+            session.status(&mailbox_name, "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"),
+        )
+        .await?;
 
         self.release(session);
 
@@ -1188,21 +1058,13 @@ impl EmailProvider for ImapEmailProvider {
         use futures::TryStreamExt;
 
         let mailbox_name = mailbox_path_to_string(mailbox);
-        let mut session = self.session().await?;
-
-        session
-            .select(&mailbox_name)
-            .await
-            .map_err(|e| DomainError::Provider(format!("SELECT failed: {e}")))?;
+        let mut session = self.selected(&mailbox_name).await?;
 
         // UID FETCH 1:* (FLAGS) — lightweight, returns only UID + flags
-        let fetches: Vec<async_imap::types::Fetch> = session
-            .uid_fetch("1:*", "(FLAGS)")
-            .await
-            .map_err(|e| DomainError::Provider(format!("UID FETCH FLAGS failed: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| DomainError::Provider(format!("UID FETCH FLAGS stream error: {e}")))?;
+        let fetches: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "UID FETCH FLAGS", async {
+            session.uid_fetch("1:*", "(FLAGS)").await?.try_collect().await
+        })
+        .await?;
 
         // ponytail: `* n FETCH (UID u FLAGS (...))` is about 40 bytes a message.
         self.metered(fetches.len() as u64 * 40).await;
@@ -1278,11 +1140,11 @@ impl EmailProvider for ImapEmailProvider {
                     }
                 };
 
-                let select_data = match session.select(&mailbox_name).await {
+                let select_data = match exchange(COMMAND_TIMEOUT, "SELECT", session.select(&mailbox_name)).await {
                     Ok(mb) => mb,
                     Err(e) => {
                         warn!("[watch] SELECT '{}' failed: {}", mailbox_name, e);
-                        let _ = session.logout().await;
+                        let _ = exchange(COMMAND_TIMEOUT, "LOGOUT", session.logout()).await;
                         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                         continue;
                     }
@@ -1293,13 +1155,13 @@ impl EmailProvider for ImapEmailProvider {
                 info!("[watch] IDLE active for '{}'", mailbox_name);
                 let mut idle = session.idle();
                 // init() sends the IDLE command to the server — required before wait_with_timeout
-                if let Err(e) = idle.init().await {
+                if let Err(e) = exchange(COMMAND_TIMEOUT, "IDLE", idle.init()).await {
                     warn!("[watch] IDLE init failed: {}", e);
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     continue;
                 }
                 let (wait_future, _stop_source) =
-                    idle.wait_with_timeout(std::time::Duration::from_secs(29 * 60));
+                    idle.wait_with_timeout(IDLE_REISSUE);
 
                 let idle_response = match wait_future.await {
                     Ok(r) => r,
@@ -1310,7 +1172,9 @@ impl EmailProvider for ImapEmailProvider {
                     }
                 };
 
-                session = match idle.done().await {
+                // DONE must be answered promptly; one that is not means the
+                // connection died during the wait.
+                session = match exchange(COMMAND_TIMEOUT, "IDLE DONE", idle.done()).await {
                     Ok(s) => s,
                     Err(e) => {
                         warn!("[watch] IDLE done error: {}", e);
@@ -1328,12 +1192,12 @@ impl EmailProvider for ImapEmailProvider {
                     }
                     IdleResponse::Timeout => {
                         info!("[watch] IDLE timeout for '{}', reconnecting", mailbox_name);
-                        let _ = session.logout().await;
+                        let _ = exchange(COMMAND_TIMEOUT, "LOGOUT", session.logout()).await;
                         continue;
                     }
                     IdleResponse::ManualInterrupt => {
                         info!("[watch] IDLE interrupted for '{}'", mailbox_name);
-                        let _ = session.logout().await;
+                        let _ = exchange(COMMAND_TIMEOUT, "LOGOUT", session.logout()).await;
                         break;
                     }
                 };
@@ -1353,10 +1217,10 @@ impl EmailProvider for ImapEmailProvider {
                     if let Some(seq) = seq_num {
                         use futures::TryStreamExt;
                         let fetches: Result<Vec<async_imap::types::Fetch>, _> =
-                            match session.fetch(seq.to_string(), "(UID FLAGS)").await {
-                                Ok(stream) => stream.try_collect().await,
-                                Err(e) => Err(e),
-                            };
+                            exchange(COMMAND_TIMEOUT, "FETCH (UID FLAGS)", async {
+                                session.fetch(seq.to_string(), "(UID FLAGS)").await?.try_collect().await
+                            })
+                            .await;
                         match fetches {
                             Ok(items) => {
                                 for fetch_data in &items {
@@ -1400,8 +1264,11 @@ impl EmailProvider for ImapEmailProvider {
                     if has_exists {
                         use futures::TryStreamExt as _;
                         let range = format!("{}:*", uid_next);
-                        match session.uid_fetch(&range, "FLAGS").await {
-                            Ok(stream) => match stream.try_collect::<Vec<_>>().await {
+                        match exchange(COMMAND_TIMEOUT, "UID FETCH", async {
+                            session.uid_fetch(&range, "FLAGS").await?.try_collect::<Vec<_>>().await
+                        })
+                        .await
+                        {
                                 Ok(fetches) => {
                                     for fetch in &fetches {
                                         if let Some(uid) = fetch.uid
@@ -1416,17 +1283,15 @@ impl EmailProvider for ImapEmailProvider {
                                     }
                                 }
                                 Err(e) => warn!("[watch] UID FETCH for new messages failed: {}", e),
-                            },
-                            Err(e) => warn!("[watch] UID FETCH for new messages failed: {}", e),
                         }
                     }
 
                     // Always emit updated counts (covers both new messages and expunges).
-                    let updated_mb = match session.status(&mailbox_name, "(MESSAGES UNSEEN)").await {
+                    let updated_mb = match exchange(COMMAND_TIMEOUT, "STATUS", session.status(&mailbox_name, "(MESSAGES UNSEEN)")).await {
                         Ok(mb) => mb,
                         Err(e) => {
                             warn!("[watch] STATUS failed: {}", e);
-                            let _ = session.logout().await;
+                            let _ = exchange(COMMAND_TIMEOUT, "LOGOUT", session.logout()).await;
                             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                             continue;
                         }
@@ -1440,10 +1305,162 @@ impl EmailProvider for ImapEmailProvider {
                     });
                 }
 
-                let _ = session.logout().await;
+                let _ = exchange(COMMAND_TIMEOUT, "LOGOUT", session.logout()).await;
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
         })
+    }
+}
+
+/// `fut` within `limit`. A server that stops answering fails as a typed
+/// timeout — a transient network fault to the callers' backoff — and the
+/// connection, dropped with the caller's `?`, never goes back to the pool.
+async fn timed<T>(
+    limit: Duration,
+    what: &str,
+    fut: impl std::future::Future<Output = Result<T, DomainError>>,
+) -> Result<T, DomainError> {
+    tokio::time::timeout(limit, fut).await.unwrap_or_else(|_| {
+        Err(DomainError::ConnectionTimeout(format!("{what}: no answer in {}s", limit.as_secs())))
+    })
+}
+
+/// One IMAP exchange under [`timed`].
+async fn exchange<T>(
+    limit: Duration,
+    what: &str,
+    fut: impl std::future::Future<Output = Result<T, async_imap::error::Error>>,
+) -> Result<T, DomainError> {
+    timed(limit, what, async { fut.await.map_err(|e| DomainError::Provider(format!("{what} failed: {e}"))) }).await
+}
+
+/// `UID STORE`, its reply read to the end so the connection can be reused.
+async fn store<T>(
+    session: &mut async_imap::Session<T>,
+    uid_set: &str,
+    change: &str,
+    what: &str,
+) -> Result<(), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    use futures::TryStreamExt;
+
+    exchange(COMMAND_TIMEOUT, what, async {
+        session.uid_store(uid_set, change).await?.try_collect::<Vec<_>>().await
+    })
+    .await
+    .map(drop)
+}
+
+/// IMAP extensions the adapter adapts to. IMAP4rev2 includes both.
+#[derive(Debug, Clone, Copy, Default)]
+struct ServerCaps {
+    /// RFC 6851 `MOVE`.
+    move_cmd: bool,
+    /// RFC 4315 `UIDPLUS`: `COPYUID` and `UID EXPUNGE`.
+    uidplus: bool,
+}
+
+impl ServerCaps {
+    fn from_names(has: impl Fn(&str) -> bool) -> Self {
+        let rev2 = has("IMAP4rev2");
+        Self { move_cmd: rev2 || has("MOVE"), uidplus: rev2 || has("UIDPLUS") }
+    }
+}
+
+/// An IMAP quoted string.
+fn quoted(value: &str) -> Result<String, DomainError> {
+    if value.contains(['\r', '\n']) {
+        return Err(DomainError::Provider(format!("Not sendable in an IMAP command: {value:?}")));
+    }
+    Ok(format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
+}
+
+/// Move `uid_set` out of the selected mailbox into `to`, returning the first
+/// destination UID the server reports (UIDPLUS `COPYUID`).
+async fn move_uids<T>(
+    session: &mut async_imap::Session<T>,
+    caps: ServerCaps,
+    uid_set: &str,
+    to: &str,
+) -> Result<Option<ProviderUid>, DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    if caps.move_cmd {
+        return transfer(session, "MOVE", uid_set, to).await;
+    }
+    let copied = transfer(session, "COPY", uid_set, to).await?;
+    delete_uids(session, caps, uid_set, true).await?;
+    Ok(copied)
+}
+
+/// Flag `uid_set` `\Deleted` in the selected mailbox and, when `permanently`,
+/// expunge exactly those messages. A plain `EXPUNGE` would also purge every
+/// other `\Deleted` message there — mail another client only marked, maybe to
+/// undo — so without UIDPLUS (`UID EXPUNGE`) they stay flagged instead: sync
+/// already treats `\Deleted` as gone, and the next client to expunge clears them.
+async fn delete_uids<T>(
+    session: &mut async_imap::Session<T>,
+    caps: ServerCaps,
+    uid_set: &str,
+    permanently: bool,
+) -> Result<(), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    use futures::TryStreamExt;
+
+    store(session, uid_set, "+FLAGS.SILENT (\\Deleted)", "Delete flag").await?;
+    if permanently && caps.uidplus {
+        session
+            .uid_expunge(uid_set)
+            .await
+            .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| DomainError::Provider(format!("Expunge failed: {e}")))?;
+    }
+    Ok(())
+}
+
+/// `UID COPY` / `UID MOVE` keeping the `COPYUID` code async-imap's own
+/// methods discard. COPY puts it in the tagged OK; MOVE usually in an
+/// untagged OK before the expunges (RFC 6851 §4.3), so both are read.
+async fn transfer<T>(
+    session: &mut async_imap::Session<T>,
+    verb: &str,
+    uid_set: &str,
+    to: &str,
+) -> Result<Option<ProviderUid>, DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    use async_imap::imap_proto::{Response, Status};
+
+    let failed = |e: &dyn std::fmt::Display| DomainError::Provider(format!("{verb} failed: {e}"));
+    let tag = session
+        .run_command(format!("UID {verb} {uid_set} {}", quoted(to)?))
+        .await
+        .map_err(|e| failed(&e))?;
+    let mut copied = None;
+    loop {
+        let response = session
+            .read_response()
+            .await
+            .map_err(|e| failed(&e))?
+            .ok_or_else(|| failed(&"connection lost"))?;
+        match response.parsed() {
+            Response::Data { status: Status::Ok, code, .. } => copied = copied.or(copied_uid(code.as_ref())),
+            Response::Done { tag: done, status, code, information } if *done == tag => {
+                if *status != Status::Ok {
+                    return Err(failed(&format!("{status:?} {information:?}")));
+                }
+                return Ok(copied.or(copied_uid(code.as_ref())));
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1706,6 +1723,136 @@ mod tests {
             b"* 1 FETCH (UID 8 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"utf-8\") NIL NIL \"7BIT\" 3 1 NIL NIL NIL))\r\n",
         );
         assert_eq!(parts.iter().map(|p| p.section.clone()).collect::<Vec<_>>(), [vec![1]]);
+    }
+
+    type FakeSession = async_imap::Session<tokio_util::compat::Compat<tokio::io::DuplexStream>>;
+
+    /// A logged-in session against an in-memory server that answers each
+    /// command with `reply(command)` (`$T` = its tag) and records the commands.
+    async fn scripted(reply: fn(&str) -> &'static str) -> (FakeSession, Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let (client_end, server_end) = tokio::io::duplex(64 * 1024);
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&commands);
+        tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(server_end);
+            write.write_all(b"* OK ready\r\n").await.unwrap();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let (tag, command) = line.split_once(' ').unwrap();
+                seen.lock().unwrap().push(command.to_owned());
+                let answer = if command.starts_with("LOGIN") { "$T OK logged in\r\n" } else { reply(command) };
+                write.write_all(answer.replace("$T", tag).as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut client = async_imap::Client::new(client_end.compat());
+        client.read_response().await.unwrap();
+        let session = client.login("user", "pass").await.map_err(|e| e.0).unwrap();
+        (session, commands)
+    }
+
+    fn uid_commands(commands: &Mutex<Vec<String>>) -> Vec<String> {
+        commands.lock().unwrap().iter().filter(|c| !c.starts_with("LOGIN")).cloned().collect()
+    }
+
+    fn server_reply(command: &str) -> &'static str {
+        if command.starts_with("UID MOVE") {
+            "* OK [COPYUID 7 5 77] Moved\r\n* 3 EXPUNGE\r\n$T OK Done\r\n"
+        } else if command.starts_with("UID COPY") {
+            "$T OK [COPYUID 7 5 78] Done\r\n"
+        } else if command.starts_with("UID EXPUNGE") {
+            "* 3 EXPUNGE\r\n$T OK Done\r\n"
+        } else {
+            "$T OK Done\r\n"
+        }
+    }
+
+    #[tokio::test]
+    async fn move_uses_uid_move_and_reports_the_new_uid() {
+        let (mut session, commands) = scripted(server_reply).await;
+        let caps = ServerCaps { move_cmd: true, uidplus: true };
+
+        let uid = move_uids(&mut session, caps, "5", "Archive").await.unwrap();
+
+        assert_eq!(uid, Some(ProviderUid::new(77)), "COPYUID arrives untagged with MOVE");
+        assert_eq!(uid_commands(&commands), ["UID MOVE 5 \"Archive\""]);
+    }
+
+    #[tokio::test]
+    async fn move_without_move_expunges_only_its_own_uids() {
+        let (mut session, commands) = scripted(server_reply).await;
+        let caps = ServerCaps { move_cmd: false, uidplus: true };
+
+        let uid = move_uids(&mut session, caps, "5", "Archive").await.unwrap();
+
+        assert_eq!(uid, Some(ProviderUid::new(78)));
+        assert_eq!(
+            uid_commands(&commands),
+            ["UID COPY 5 \"Archive\"", "UID STORE 5 +FLAGS.SILENT (\\Deleted)", "UID EXPUNGE 5"]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_uidplus_nothing_is_expunged() {
+        let (mut session, commands) = scripted(server_reply).await;
+        let caps = ServerCaps::default();
+
+        move_uids(&mut session, caps, "5", "Archive").await.unwrap();
+        delete_uids(&mut session, caps, "6", true).await.unwrap();
+
+        assert!(
+            uid_commands(&commands).iter().all(|c| !c.contains("EXPUNGE")),
+            "a plain EXPUNGE would purge other clients' \\Deleted mail: {commands:?}"
+        );
+    }
+
+    /// Accepts the connection, then never says a word.
+    async fn silent_server() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _connection = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+        port
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_that_never_answers_times_out_instead_of_hanging() {
+        let port = silent_server().await;
+        let provider = ImapEmailProvider::new(
+            "127.0.0.1".into(),
+            port,
+            "user".into(),
+            ImapCredential::Password("pass".into()),
+            true,
+            None,
+        );
+
+        let err = provider.mailbox_status(&MailboxPath::inbox()).await.unwrap_err();
+
+        assert!(matches!(err, DomainError::ConnectionTimeout(_)), "{err:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_command_left_unanswered_times_out() {
+        let (mut session, _) = scripted(|command| if command.starts_with("UID MOVE") { "" } else { "$T OK Done\r\n" }).await;
+        let caps = ServerCaps { move_cmd: true, uidplus: true };
+
+        let err = timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, caps, "5", "Archive")).await.unwrap_err();
+
+        assert!(matches!(err, DomainError::ConnectionTimeout(_)), "{err:?}");
+    }
+
+    #[test]
+    fn imap4rev2_implies_move_and_uidplus() {
+        let rev2 = ServerCaps::from_names(|name| name == "IMAP4rev2");
+        assert!(rev2.move_cmd && rev2.uidplus);
+        let rev1 = ServerCaps::from_names(|name| name == "UIDPLUS");
+        assert!(!rev1.move_cmd && rev1.uidplus);
     }
 
     #[test]

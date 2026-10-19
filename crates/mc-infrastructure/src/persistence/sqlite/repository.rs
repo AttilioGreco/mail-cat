@@ -2,6 +2,7 @@
 //! the body store and the backfill queue. Projection arms live in
 //! `projector.rs`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -804,6 +805,47 @@ impl MessageReadRepository for SqliteRepository {
                 )
             })
             .await
+    }
+
+    async fn held_uids(
+        &self,
+        mailbox_id: &MailboxId,
+        uids: &[ProviderUid],
+    ) -> Result<HashSet<ProviderUid>, DomainError> {
+        let mailbox = *mailbox_id.as_uuid();
+        // One JSON array parameter: a sync batch can be tens of thousands of
+        // UIDs, past SQLite's bound-parameter limit.
+        let uids = serde_json::to_string(&uids.iter().map(|u| u.value()).collect::<Vec<_>>())
+            .map_err(repo_err)?;
+        let held = self
+            .db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    "SELECT DISTINCT provider_uid FROM messages \
+                     WHERE mailbox_id = ?1 AND provider_uid IN (SELECT value FROM json_each(?2))",
+                    params![mailbox, uids],
+                    |r| r.get::<_, u32>(0),
+                )
+            })
+            .await?;
+        Ok(held.into_iter().map(ProviderUid::new).collect())
+    }
+
+    async fn uidless_messages(&self, mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
+        let mailbox = *mailbox_id.as_uuid();
+        let ids = self
+            .db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    "SELECT id FROM messages WHERE mailbox_id = ?1 AND provider_uid IS NULL",
+                    [mailbox],
+                    |r| r.get::<_, Uuid>(0),
+                )
+            })
+            .await?;
+        Ok(ids.into_iter().map(MessageId::from_uuid).collect())
     }
 
     async fn find_by_rfc_id(

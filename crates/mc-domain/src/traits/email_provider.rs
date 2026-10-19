@@ -57,6 +57,16 @@ pub trait EmailProvider: Send + Sync {
         uids: &[ProviderUid],
     ) -> Result<Vec<MessageBodyResult>, DomainError>;
 
+    /// The UID of the message with RFC Message-ID `rfc_id` (`<…>`) in
+    /// `mailbox`, `None` when it is not there. How a message whose local UID
+    /// is unknown (moved by a provider that could not report the new one) is
+    /// found again; a provider whose ids survive moves still answers it.
+    async fn find_message(
+        &self,
+        mailbox: &MailboxPath,
+        rfc_id: &str,
+    ) -> Result<Option<ProviderUid>, DomainError>;
+
     /// Fetch raw message bytes (RFC 2822).
     async fn fetch_raw_message(
         &self,

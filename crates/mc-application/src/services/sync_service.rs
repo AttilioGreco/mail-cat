@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 
 use mc_domain::{
     AccountId, AggregateType, Attachment, BackfillEntry, BodyBackfillQueue, DomainError, DomainEvent,
-    EmailProvider, EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath, MailboxType,
+    EmailProvider, EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath, MailboxStatus, MailboxType,
     MailboxReadRepository, Message, MessageBodyResult, MessageBodyStore, MessageId,
     MessageEnvelopeSummary, MessageReadRepository, MessageSummary,
     ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
@@ -413,20 +413,8 @@ impl<
                 .get_checkpoint(&checkpoint_key)
                 .await
                 .unwrap_or(0) as u32;
-            let stored_validity = self
-                .projector
-                .get_checkpoint(&validity_key)
-                .await
-                .unwrap_or(0) as u32;
-
-            // Check UIDVALIDITY
-            let fetch_from = if stored_validity != 0 && stored_validity != status.uid_validity {
-                warn!(
-                    path = %remote.path,
-                    old = stored_validity,
-                    new = status.uid_validity,
-                    "UIDVALIDITY changed, full resync needed"
-                );
+            let renumbered = self.renumbered(local, &validity_key, &status).await?;
+            let fetch_from = if renumbered.is_some() {
                 1u32
             } else if stored_uid_next > 0 {
                 stored_uid_next
@@ -436,6 +424,9 @@ impl<
 
             if fetch_from >= status.uid_next {
                 debug!(path = %remote.path, "No new messages");
+                if let Some(stale) = &renumbered {
+                    self.drop_unclaimed(local, stale).await?;
+                }
                 // Still update counts
                 self.update_mailbox_counts(local, status.total_messages, status.unseen_messages)
                     .await?;
@@ -506,7 +497,7 @@ impl<
             // Stable per-mailbox text so `emit`'s gate reduces this to one event
             // per percentage point instead of one per message.
             let envelope_label = format!("Fetching messages in {}", remote.path);
-            let (known_uids, awaiting_uid) = self.held_uids(local).await?;
+            let (known_uids, awaiting_uid) = self.uid_state(local, &envelopes).await?;
 
             for (index, envelope_summary) in envelopes.iter().enumerate() {
                 self.emit(
@@ -565,6 +556,15 @@ impl<
                     self.supersede(placeholder).await?;
                     messages_synced += 1;
                 }
+            }
+            // A partial batch must not advance the checkpoint (the rest would be
+            // skipped for good) nor judge a renumbered epoch it has not seen.
+            if self.is_cancelled() {
+                info!("Sync cancelled, stopping");
+                break;
+            }
+            if let Some(stale) = &renumbered {
+                self.drop_unclaimed(local, stale).await?;
             }
 
             // Eager body fetch for new messages — bulk IMAP fetch, one connection per batch
@@ -1028,10 +1028,14 @@ impl<
             .get_checkpoint(&checkpoint_key)
             .await
             .unwrap_or(0) as u32;
-        let fetch_from = stored_uid_next.max(from_uid.value());
+        let renumbered = self.renumbered(&local, &validity_key, &status).await?;
+        let fetch_from = if renumbered.is_some() { 1 } else { stored_uid_next.max(from_uid.value()) };
 
         if fetch_from >= status.uid_next {
             debug!(%mailbox_path, "sync_mailbox: no new messages");
+            if let Some(stale) = &renumbered {
+                self.drop_unclaimed(&local, stale).await?;
+            }
             // Still update counts in case they changed
             self.update_mailbox_counts(&local, status.total_messages, status.unseen_messages)
                 .await?;
@@ -1071,7 +1075,7 @@ impl<
 
         let mut new_count = 0u32;
         let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
-        let (known_uids, awaiting_uid) = self.held_uids(&local).await?;
+        let (known_uids, awaiting_uid) = self.uid_state(&local, &envelopes).await?;
 
         for envelope_summary in &envelopes {
             if envelope_summary.flags.contains(&Flag::Deleted)
@@ -1107,6 +1111,10 @@ impl<
                 self.supersede(placeholder).await?;
                 new_count += 1;
             }
+        }
+
+        if let Some(stale) = &renumbered {
+            self.drop_unclaimed(&local, stale).await?;
         }
 
         // Eager body fetch (same pattern as start_sync)
@@ -1201,22 +1209,31 @@ impl<
         })
     }
 
-    /// The UIDs `mailbox` already holds, and whether any of its messages is
-    /// waiting for one (moved here by a provider that could not report the new
-    /// UID). One listing per batch, not one query per envelope.
-    async fn held_uids(&self, mailbox: &Mailbox) -> Result<(HashSet<ProviderUid>, bool), ApplicationError> {
-        let all = mc_shared::pagination::Pagination { page: 1, page_size: u32::MAX };
-        let local = self
+    /// Which envelope UIDs `mailbox` already holds, and whether any of its
+    /// messages is waiting for a UID (moved here by a provider that could not
+    /// report it, or renumbered by a UIDVALIDITY change).
+    async fn uid_state(
+        &self,
+        mailbox: &Mailbox,
+        envelopes: &[MessageEnvelopeSummary],
+    ) -> Result<(HashSet<ProviderUid>, bool), ApplicationError> {
+        let uids: Vec<ProviderUid> = envelopes.iter().map(|e| e.provider_uid).collect();
+        let held = self
             .projector
-            .list_messages(&mailbox.id, &all)
+            .held_uids(&mailbox.id, &uids)
             .await
-            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to list local messages: {e}")))?;
-        let awaiting = local.items.iter().any(|m| m.provider_uid.is_none());
-        Ok((local.items.iter().filter_map(|m| m.provider_uid).collect(), awaiting))
+            .map_err(|e| ApplicationError::SyncFailed(format!("held_uids failed: {e}")))?;
+        let awaiting = !self
+            .projector
+            .uidless_messages(&mailbox.id)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("uidless_messages failed: {e}")))?
+            .is_empty();
+        Ok((held, awaiting))
     }
 
-    /// A message moved here without its new UID gets it from the server copy
-    /// with the same Message-ID, instead of that copy arriving as a duplicate.
+    /// A message waiting for its UID here gets it from the server copy with
+    /// the same Message-ID, instead of that copy arriving as a duplicate.
     async fn reattach(&self, mailbox: &Mailbox, env: &MessageEnvelopeSummary) -> Result<bool, ApplicationError> {
         let Some(rfc_id) = env.message_rfc_id.as_deref() else {
             return Ok(false);
@@ -1226,20 +1243,79 @@ impl<
             .find_by_rfc_id(&mailbox.account_id, rfc_id)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("find_by_rfc_id failed: {e}")))?;
-        let Some(moved) = copies
-            .into_iter()
-            .find(|m| m.mailbox_id == mailbox.id && m.provider_uid.is_none())
-        else {
+        for waiting in copies.iter().filter(|m| m.mailbox_id == mailbox.id && m.provider_uid.is_none()) {
+            if self.update_message(&waiting.id, |m| m.attach_uid(mailbox.id, env.provider_uid)).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// On a UIDVALIDITY change every UID held for `mailbox` is void, and a
+    /// stale one would hide the new-epoch message that reuses it. They are
+    /// dropped so the epoch, re-ingested from UID 1, re-attaches each message
+    /// by Message-ID. Returns the mailbox's messages at that point, for
+    /// [`Self::drop_unclaimed`]; `None` when nothing changed.
+    async fn renumbered(
+        &self,
+        mailbox: &Mailbox,
+        validity_key: &str,
+        status: &MailboxStatus,
+    ) -> Result<Option<HashSet<MessageId>>, ApplicationError> {
+        let stored = self.projector.get_checkpoint(validity_key).await.unwrap_or(0) as u32;
+        if stored == 0 || stored == status.uid_validity {
+            return Ok(None);
+        }
+        warn!(path = %mailbox.path, old = stored, new = status.uid_validity, "UIDVALIDITY changed, full resync needed");
+        let all = mc_shared::pagination::Pagination { page: 1, page_size: u32::MAX };
+        let local = self
+            .projector
+            .list_messages(&mailbox.id, &all)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to list local messages: {e}")))?;
+        for message in &local.items {
+            self.update_message(&message.id, |m| m.forget_uid(mailbox.id)).await?;
+        }
+        Ok(Some(local.items.into_iter().map(|m| m.id).collect()))
+    }
+
+    /// After a renumbered mailbox's whole epoch was ingested, those of its
+    /// former messages still without a UID are gone from the server.
+    async fn drop_unclaimed(&self, mailbox: &Mailbox, former: &HashSet<MessageId>) -> Result<(), ApplicationError> {
+        let waiting = self
+            .projector
+            .uidless_messages(&mailbox.id)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("uidless_messages failed: {e}")))?;
+        for message_id in waiting.into_iter().filter(|id| former.contains(id)) {
+            info!(%message_id, "Not in the renumbered mailbox, deleting locally");
+            let event = DomainEvent::MessageDeleted { message_id, mailbox_id: mailbox.id, permanently: false };
+            self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Apply `change` to the message's current state and append what it
+    /// produces at that state's sequence: a decision taken from the read model
+    /// must not land on a message that has changed since (moved again, say).
+    async fn update_message(
+        &self,
+        message_id: &MessageId,
+        change: impl FnOnce(&mut Message) -> Option<DomainEvent>,
+    ) -> Result<bool, ApplicationError> {
+        let aggregate_id = message_id.to_string();
+        let events = self
+            .event_store
+            .load_events(&aggregate_id, 0)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("Failed to load events: {e}")))?;
+        let seq = events.len() as u64;
+        let events: Vec<DomainEvent> = events.into_iter().map(|e| e.payload).collect();
+        let Some(event) = Message::rehydrate(&events).as_mut().and_then(change) else {
             return Ok(false);
         };
-        let event = DomainEvent::MessageMoved {
-            message_id: moved.id,
-            from_mailbox_id: mailbox.id,
-            to_mailbox_id: mailbox.id,
-            provider_uid: Some(env.provider_uid),
-        };
-        self.append_and_project(&moved.id.to_string(), AggregateType::Message, event)
-            .await?;
+        self.append_at(&aggregate_id, AggregateType::Message, seq, event).await?;
         Ok(true)
     }
 
@@ -1293,7 +1369,16 @@ impl<
             .current_sequence(aggregate_id)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("Failed to load sequence: {e}")))?;
+        self.append_at(aggregate_id, aggregate_type, expected_seq, event).await
+    }
 
+    async fn append_at(
+        &self,
+        aggregate_id: &str,
+        aggregate_type: AggregateType,
+        expected_seq: u64,
+        event: DomainEvent,
+    ) -> Result<(), ApplicationError> {
         let new_seq = self
             .event_store
             .append(
@@ -1635,6 +1720,13 @@ mod tests {
             Err(DomainError::Provider("Not implemented".to_string()))
         }
 
+        async fn find_message(
+            &self,
+            _mailbox: &MailboxPath,
+            _rfc_id: &str,
+        ) -> Result<Option<ProviderUid>, DomainError> {
+            Ok(None)
+        }
         async fn fetch_raw_message(
             &self,
             _mailbox: &MailboxPath,
@@ -1801,23 +1893,33 @@ mod tests {
             &self,
             aggregate_id: &str,
             _aggregate_type: AggregateType,
-            _expected_sequence: u64,
+            expected_sequence: u64,
             events: Vec<DomainEvent>,
         ) -> Result<u64, DomainError> {
             let mut store = self.events.lock().unwrap();
-            let start = store.len() as u64;
-            for event in events {
-                store.push((aggregate_id.to_string(), event));
+            let actual = store.iter().filter(|(id, _)| id == aggregate_id).count() as u64;
+            if actual != expected_sequence {
+                return Err(DomainError::ConcurrencyConflict { expected: expected_sequence, actual });
             }
-            Ok(start + 1)
+            let appended = events.len() as u64;
+            store.extend(events.into_iter().map(|event| (aggregate_id.to_string(), event)));
+            Ok(actual + appended)
         }
 
         async fn load_events(
             &self,
-            _aggregate_id: &str,
+            aggregate_id: &str,
             _from_sequence: u64,
         ) -> Result<Vec<EventEnvelope>, DomainError> {
-            Ok(vec![])
+            Ok(self
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| id == aggregate_id)
+                .enumerate()
+                .map(|(i, (id, event))| EventEnvelope::new(id.clone(), AggregateType::Message, i as u64 + 1, event.clone()))
+                .collect())
         }
 
         fn load_all_events(
@@ -1844,6 +1946,8 @@ mod tests {
         projected_events: Mutex<Vec<DomainEvent>>,
         bodies: Mutex<HashMap<MessageId, StoredBody>>,
         stored: Mutex<Vec<MessageSummary>>,
+        /// Message-IDs of `stored` rows; a row without one matches any lookup.
+        rfc_ids: Mutex<HashMap<MessageId, String>>,
     }
 
     impl MockProjector {
@@ -1854,6 +1958,7 @@ mod tests {
                 projected_events: Mutex::new(vec![]),
                 bodies: Mutex::new(HashMap::new()),
                 stored: Mutex::new(vec![]),
+                rfc_ids: Mutex::new(HashMap::new()),
             }
         }
 
@@ -1894,6 +1999,18 @@ mod tests {
                     uid_validity: None,
                     uid_next: None,
                 });
+            }
+
+            let mut stored = self.stored.lock().unwrap();
+            match &envelope.payload {
+                DomainEvent::MessageMoved { message_id, to_mailbox_id, provider_uid, .. } => {
+                    if let Some(row) = stored.iter_mut().find(|m| m.id == *message_id) {
+                        row.mailbox_id = *to_mailbox_id;
+                        row.provider_uid = *provider_uid;
+                    }
+                }
+                DomainEvent::MessageDeleted { message_id, .. } => stored.retain(|m| m.id != *message_id),
+                _ => {}
             }
 
             Ok(())
@@ -1966,9 +2083,44 @@ mod tests {
         async fn find_by_rfc_id(
             &self,
             _account_id: &AccountId,
-            _rfc_id: &str,
+            rfc_id: &str,
         ) -> Result<Vec<MessageSummary>, DomainError> {
-            Ok(self.stored.lock().unwrap().clone())
+            let rfc_ids = self.rfc_ids.lock().unwrap();
+            Ok(self
+                .stored
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| rfc_ids.get(&m.id).is_none_or(|id| id == rfc_id))
+                .cloned()
+                .collect())
+        }
+
+        async fn held_uids(
+            &self,
+            mailbox_id: &MailboxId,
+            uids: &[ProviderUid],
+        ) -> Result<HashSet<ProviderUid>, DomainError> {
+            Ok(self
+                .stored
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.mailbox_id == *mailbox_id)
+                .filter_map(|m| m.provider_uid)
+                .filter(|uid| uids.contains(uid))
+                .collect())
+        }
+
+        async fn uidless_messages(&self, mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
+            Ok(self
+                .stored
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.mailbox_id == *mailbox_id && m.provider_uid.is_none())
+                .map(|m| m.id)
+                .collect())
         }
 
         async fn find_unread_by_mailbox(
@@ -2463,27 +2615,127 @@ mod tests {
             .count()
     }
 
+    /// A message in `mailbox` holding `uid` there (`None`: waiting for one,
+    /// as after a move), the same in the log and in the read model.
+    fn seed(
+        event_store: &MockEventStore,
+        projector: &MockProjector,
+        mailbox: &Mailbox,
+        uid: Option<u32>,
+        rfc_id: &str,
+    ) -> MessageId {
+        let (msg, received) = Message::receive(
+            mailbox.account_id,
+            mailbox.id,
+            ProviderUid::new(uid.unwrap_or(1)),
+            Some(rfc_id.into()),
+            None,
+            vec![],
+            test_envelope(),
+            vec![Flag::Seen],
+            0,
+            false,
+            chrono::Utc::now(),
+        );
+        let mut events = vec![received];
+        if uid.is_none() {
+            events.push(DomainEvent::MessageMoved {
+                message_id: msg.id,
+                from_mailbox_id: MailboxId::new(),
+                to_mailbox_id: mailbox.id,
+                provider_uid: None,
+            });
+        }
+        event_store
+            .events
+            .lock()
+            .unwrap()
+            .extend(events.into_iter().map(|e| (msg.id.to_string(), e)));
+        let mut row = archived(mailbox.account_id, mailbox.id, uid.map(ProviderUid::new));
+        row.id = msg.id;
+        projector.stored.lock().unwrap().push(row);
+        projector.rfc_ids.lock().unwrap().insert(msg.id, rfc_id.into());
+        msg.id
+    }
+
+    fn envelope(uid: u32, rfc_id: &str) -> MessageEnvelopeSummary {
+        let mut env = make_envelope_summary(uid);
+        env.message_rfc_id = Some(rfc_id.into());
+        env
+    }
+
+    fn row_uid(projector: &MockProjector, id: MessageId) -> Option<Option<u32>> {
+        projector.stored.lock().unwrap().iter().find(|m| m.id == id).map(|m| m.provider_uid.map(|u| u.value()))
+    }
+
     #[tokio::test]
     async fn moved_message_gets_its_uid_back_instead_of_a_duplicate() {
         let account_id = AccountId::new();
         let archive = archive_mailbox(account_id);
-        let moved = archived(account_id, archive.id, None);
-        let mut server_copy = make_envelope_summary(9);
-        server_copy.message_rfc_id = Some("<moved@example.com>".into());
-
-        let projector = Arc::new(MockProjector::new());
-        projector.stored.lock().unwrap().push(moved.clone());
+        let (event_store, projector) = (Arc::new(MockEventStore::new()), Arc::new(MockProjector::new()));
+        let moved = seed(&event_store, &projector, &archive, None, "<moved@example.com>");
         projector.mailboxes.lock().unwrap().push(archive.clone());
-        let provider = MockEmailProvider::new().with_mailboxes(vec![archive]).with_envelopes(vec![server_copy]);
-        let service = make_service(provider, Arc::new(MockEventStore::new()), projector.clone());
-        service.start_sync(&account_id).await.unwrap();
+
+        let provider = MockEmailProvider::new()
+            .with_mailboxes(vec![archive])
+            .with_envelopes(vec![envelope(9, "<moved@example.com>")]);
+        make_service(provider, event_store, projector.clone()).start_sync(&account_id).await.unwrap();
 
         assert_eq!(received(&projector), 0, "no second copy of the moved message");
-        assert!(projector.projected_events().iter().any(|e| matches!(
-            e,
-            DomainEvent::MessageMoved { message_id, provider_uid: Some(uid), .. }
-                if *message_id == moved.id && uid.value() == 9
-        )));
+        assert_eq!(row_uid(&projector, moved), Some(Some(9)));
+    }
+
+    /// The read model can lag the log: a message it still lists here, waiting
+    /// for a UID, may have been moved on. Re-attaching from that stale view
+    /// appended `MessageMoved { from: Archive, to: Archive }` and pulled the
+    /// message back.
+    #[tokio::test]
+    async fn reattach_does_not_pull_back_a_message_moved_on() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let (event_store, projector) = (Arc::new(MockEventStore::new()), Arc::new(MockProjector::new()));
+        let moved = seed(&event_store, &projector, &archive, None, "<moved@example.com>");
+        let trash = MailboxId::new();
+        event_store.events.lock().unwrap().push((
+            moved.to_string(),
+            DomainEvent::MessageMoved { message_id: moved, from_mailbox_id: archive.id, to_mailbox_id: trash, provider_uid: None },
+        ));
+        projector.mailboxes.lock().unwrap().push(archive.clone());
+
+        let provider = MockEmailProvider::new()
+            .with_mailboxes(vec![archive.clone()])
+            .with_envelopes(vec![envelope(9, "<moved@example.com>")]);
+        make_service(provider, event_store.clone(), projector).start_sync(&account_id).await.unwrap();
+
+        let pulled_back = event_store.appended_events().into_iter().any(|(id, e)| {
+            id == moved.to_string() && matches!(e, DomainEvent::MessageMoved { from_mailbox_id, to_mailbox_id, .. } if from_mailbox_id == archive.id && to_mailbox_id == archive.id)
+        });
+        assert!(!pulled_back);
+    }
+
+    /// The server renumbered Archive (UIDVALIDITY 1 → 2). UID 9 now belongs
+    /// to a different message: the stale local UID 9 used to hide it.
+    #[tokio::test]
+    async fn uidvalidity_change_reingests_the_whole_new_epoch() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let (event_store, projector) = (Arc::new(MockEventStore::new()), Arc::new(MockProjector::new()));
+        let kept = seed(&event_store, &projector, &archive, Some(9), "<kept@example.com>");
+        let gone = seed(&event_store, &projector, &archive, Some(5), "<gone@example.com>");
+        projector.mailboxes.lock().unwrap().push(archive.clone());
+        let checkpoint_key = format!("sync:{account_id}:Archive");
+        projector.save_checkpoint(&checkpoint_key, 50).await.unwrap();
+        projector.save_checkpoint(&format!("{checkpoint_key}:validity"), 1).await.unwrap();
+
+        let mut provider = MockEmailProvider::new()
+            .with_mailboxes(vec![archive])
+            .with_envelopes(vec![envelope(3, "<kept@example.com>"), envelope(9, "<new@example.com>")]);
+        provider.status = Some(MailboxStatus { uid_validity: 2, uid_next: 10, total_messages: 2, unseen_messages: 0 });
+        make_service(provider, event_store, projector.clone()).start_sync(&account_id).await.unwrap();
+
+        assert_eq!(received(&projector), 1, "the message now at UID 9 is new");
+        assert_eq!(row_uid(&projector, kept), Some(Some(3)), "re-attached by Message-ID");
+        assert_eq!(row_uid(&projector, gone), None, "not in the new epoch: deleted");
     }
 
     #[tokio::test]

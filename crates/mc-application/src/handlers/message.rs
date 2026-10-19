@@ -57,11 +57,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         message_id: MessageId,
         mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
-        let (message, _) = self.load_message(&message_id).await?;
-
-        let provider_uid = message.provider_uid.ok_or_else(|| {
-            ApplicationError::PreconditionFailed("message has no provider UID".into())
-        })?;
+        let (mut message, mut seq) = self.load_message(&message_id).await?;
+        let provider_uid = self.remote_uid(&mut message, &mut seq, &mailbox_path).await?;
 
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
@@ -98,12 +95,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         flags_to_add: Vec<Flag>,
         flags_to_remove: Vec<Flag>,
     ) -> Result<CommandResult, ApplicationError> {
-        let (mut message, seq) = self.load_message(&message_id).await?;
-
-        let provider_uid = message.provider_uid.ok_or_else(|| {
-            ApplicationError::PreconditionFailed("message has no provider UID".into())
-        })?;
-
+        let (mut message, mut seq) = self.load_message(&message_id).await?;
+        let provider_uid = self.remote_uid(&mut message, &mut seq, &mailbox_path).await?;
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
         // Optimistic update: persist locally first for instant UI feedback,
@@ -247,12 +240,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         from_mailbox_path: MailboxPath,
         to_mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
-        let (mut message, seq) = self.load_message(&message_id).await?;
-
-        let provider_uid = message.provider_uid.ok_or_else(|| {
-            ApplicationError::PreconditionFailed("message has no provider UID".into())
-        })?;
-
+        let (mut message, mut seq) = self.load_message(&message_id).await?;
+        let provider_uid = self.remote_uid(&mut message, &mut seq, &from_mailbox_path).await?;
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
         // Optimistic: update locally first, sync to IMAP in background.
@@ -275,12 +264,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         mailbox_path: MailboxPath,
         permanently: bool,
     ) -> Result<CommandResult, ApplicationError> {
-        let (mut message, seq) = self.load_message(&message_id).await?;
-
-        let provider_uid = message.provider_uid.ok_or_else(|| {
-            ApplicationError::PreconditionFailed("message has no provider UID".into())
-        })?;
-
+        let (mut message, mut seq) = self.load_message(&message_id).await?;
+        let provider_uid = self.remote_uid(&mut message, &mut seq, &mailbox_path).await?;
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
         // Standard client behaviour: a plain delete moves the message to the
@@ -360,11 +345,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let mut mailbox_cache: HashMap<AccountId, Vec<mc_domain::Mailbox>> = HashMap::new();
 
         for message_id in message_ids {
-            let Ok((mut message, seq)) = self.load_message(&message_id).await else {
-                failed += 1;
-                continue;
-            };
-            let Some(provider_uid) = message.provider_uid else {
+            let Ok((mut message, mut seq)) = self.load_message(&message_id).await else {
                 failed += 1;
                 continue;
             };
@@ -383,6 +364,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             let source_path = source.path.clone();
             let source_is_trash = source.mailbox_type == MailboxType::Trash;
             let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
+            let Ok(provider_uid) = self.remote_uid(&mut message, &mut seq, &source_path).await else {
+                failed += 1;
+                continue;
+            };
 
             let (event, dest) = if !permanently
                 && !source_is_trash
@@ -447,11 +432,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let mut mailbox_cache: HashMap<AccountId, Vec<mc_domain::Mailbox>> = HashMap::new();
 
         for message_id in message_ids {
-            let Ok((mut message, seq)) = self.load_message(&message_id).await else {
-                failed += 1;
-                continue;
-            };
-            let Some(provider_uid) = message.provider_uid else {
+            let Ok((mut message, mut seq)) = self.load_message(&message_id).await else {
                 failed += 1;
                 continue;
             };
@@ -474,6 +455,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 continue;
             };
             let source_path = source.path.clone();
+            let Ok(provider_uid) = self.remote_uid(&mut message, &mut seq, &source_path).await else {
+                failed += 1;
+                continue;
+            };
 
             let event = message.move_to(to_mailbox_id);
             if self
@@ -873,14 +858,20 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     }
 
     async fn fetch_raw(&self, message: &Message) -> Result<Vec<u8>, ApplicationError> {
-        let uid = message.provider_uid.ok_or_else(|| {
-            ApplicationError::PreconditionFailed("il messaggio non è ancora sul server".into())
-        })?;
         let mailbox = self
             .message_read_repo
             .get_mailbox(&message.mailbox_id)
             .await?
             .ok_or_else(|| ApplicationError::NotFound("Mailbox", message.mailbox_id.to_string()))?;
+        let uid = match self.load_message(&message.id).await {
+            Ok((mut aggregate, mut seq)) => self.remote_uid(&mut aggregate, &mut seq, &mailbox.path).await?,
+            // Only received mail rehydrates; one sent from here has no server
+            // copy until Sent syncs.
+            Err(ApplicationError::NotFound(..)) => {
+                return Err(ApplicationError::PreconditionFailed("il messaggio non è ancora sul server".into()));
+            }
+            Err(e) => return Err(e),
+        };
         Ok(self
             .provider_registry
             .get_provider(&message.account_id)?
@@ -934,12 +925,17 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
     /// Delete a draft locally now and on the server in the background.
     async fn remove_draft(&self, id: MessageId) -> Result<(), ApplicationError> {
-        let (message, seq) = self.load_message(&id).await?;
+        let (mut message, mut seq) = self.load_message(&id).await?;
         let mailbox = self.message_read_repo.get_mailbox(&message.mailbox_id).await?;
+        // No server copy to find is no reason to keep the local one.
+        let uid = match &mailbox {
+            Some(mailbox) => self.remote_uid(&mut message, &mut seq, &mailbox.path).await.ok(),
+            None => None,
+        };
         self.append_and_publish(&id, AggregateType::Message, seq, message.delete(true))
             .await?;
 
-        if let (Some(uid), Some(mailbox)) = (message.provider_uid, mailbox) {
+        if let (Some(uid), Some(mailbox)) = (uid, mailbox) {
             let provider = self.provider_registry.get_provider(&message.account_id)?;
             tokio::spawn(async move {
                 if let Err(e) = provider.delete_message(&mailbox.path, uid, true).await {
@@ -991,13 +987,42 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         provider_uid: ProviderUid,
     ) -> Result<(), ApplicationError> {
         let (mut message, seq) = self.load_message(&message_id).await?;
-        // Re-attached by a sync in the meantime, or no longer in that mailbox.
-        if message.mailbox_id != mailbox_id || message.provider_uid.is_some() {
-            return Ok(());
+        match message.attach_uid(mailbox_id, provider_uid) {
+            Some(event) => self.append_and_publish(&message_id, AggregateType::Message, seq, event).await,
+            None => Ok(()),
         }
-        let event = message.attach_uid(provider_uid);
-        self.append_and_publish(&message_id, AggregateType::Message, seq, event)
-            .await
+    }
+
+    /// The message's UID in its mailbox, at `mailbox_path`. One moved by a
+    /// provider that could not report the new UID — or moved before UIDs
+    /// followed moves — has none: it is looked up on the server by Message-ID
+    /// and recorded, so every action on it can go ahead. `seq` follows the
+    /// recording event.
+    async fn remote_uid(
+        &self,
+        message: &mut Message,
+        seq: &mut u64,
+        mailbox_path: &MailboxPath,
+    ) -> Result<ProviderUid, ApplicationError> {
+        if let Some(uid) = message.provider_uid {
+            return Ok(uid);
+        }
+        let rfc_id = message.message_rfc_id.clone().ok_or_else(|| {
+            ApplicationError::PreconditionFailed(
+                "message has no provider UID and no Message-ID to find it by".into(),
+            )
+        })?;
+        let uid = self
+            .provider_registry
+            .get_provider(&message.account_id)?
+            .find_message(mailbox_path, &rfc_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("Message on the server", format!("{rfc_id} in {mailbox_path}")))?;
+        if let Some(event) = message.attach_uid(message.mailbox_id, uid) {
+            self.append_and_publish(&message.id, AggregateType::Message, *seq, event).await?;
+            *seq += 1;
+        }
+        Ok(uid)
     }
 
     /// Load a message aggregate from the event store.
@@ -1172,6 +1197,12 @@ mod tests {
         during_fetch: RwLock<Option<Box<dyn Fn() + Send + Sync>>>,
         /// UID reported for the moved message in its destination.
         moved_uid: RwLock<Option<ProviderUid>>,
+        /// What `find_message` finds on the server.
+        found_uid: RwLock<Option<ProviderUid>>,
+        /// UIDs `fetch_message_detail` was asked for.
+        fetched: RwLock<Vec<ProviderUid>>,
+        /// UIDs `move_message` was asked to move.
+        moved: RwLock<Vec<ProviderUid>>,
     }
 
     impl MockEmailProvider {
@@ -1195,8 +1226,9 @@ mod tests {
         async fn fetch_message_detail(
             &self,
             _mailbox: &MailboxPath,
-            _uid: ProviderUid,
+            uid: ProviderUid,
         ) -> Result<Message, DomainError> {
+            self.fetched.write().unwrap().push(uid);
             if let Some(during) = self.during_fetch.read().unwrap().as_ref() {
                 during();
             }
@@ -1205,6 +1237,13 @@ mod tests {
                 .unwrap()
                 .clone()
                 .ok_or_else(|| DomainError::Provider("no detail configured".into()))
+        }
+        async fn find_message(
+            &self,
+            _mailbox: &MailboxPath,
+            _rfc_id: &str,
+        ) -> Result<Option<ProviderUid>, DomainError> {
+            Ok(*self.found_uid.read().unwrap())
         }
         async fn fetch_raw_message(
             &self,
@@ -1233,10 +1272,11 @@ mod tests {
         }
         async fn move_message(
             &self,
-            _uid: ProviderUid,
+            uid: ProviderUid,
             _from: &MailboxPath,
             _to: &MailboxPath,
         ) -> Result<Option<ProviderUid>, DomainError> {
+            self.moved.write().unwrap().push(uid);
             Ok(*self.moved_uid.read().unwrap())
         }
         async fn delete_message(
@@ -1409,6 +1449,16 @@ mod tests {
             Ok(None)
         }
 
+        async fn held_uids(
+            &self,
+            _mailbox_id: &MailboxId,
+            _uids: &[ProviderUid],
+        ) -> Result<std::collections::HashSet<ProviderUid>, DomainError> {
+            Ok(Default::default())
+        }
+        async fn uidless_messages(&self, _mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
+            Ok(vec![])
+        }
         async fn find_by_rfc_id(
             &self,
             _account_id: &AccountId,
@@ -2175,6 +2225,100 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
 
         handler.handle_fetch_body(msg_id, MailboxPath::inbox()).await.unwrap();
         assert_eq!(bus.last_event_name().unwrap(), "MessageBodyFetched");
+    }
+
+    /// A message moved into a new "Archive" mailbox whose UID there is not
+    /// known — as after a move on a server without UIDPLUS, or any move
+    /// stored before moves carried the UID.
+    fn uidless_in_archive() -> (Message, mc_domain::Mailbox, Arc<MockEventStore>) {
+        let (msg, _) = Message::receive(
+            AccountId::new(),
+            MailboxId::new(),
+            ProviderUid::new(42),
+            Some("<moved@example.com>".into()),
+            None,
+            vec![],
+            test_envelope(),
+            vec![],
+            2048,
+            false,
+            chrono::Utc::now(),
+        );
+        let archive = mc_domain::Mailbox {
+            id: MailboxId::new(),
+            account_id: msg.account_id,
+            path: MailboxPath::parse("Archive", '/').unwrap(),
+            display_name: "Archive".into(),
+            mailbox_type: MailboxType::Archive,
+            flags: vec![],
+            total_messages: 0,
+            unread_messages: 0,
+            uid_validity: None,
+            uid_next: None,
+        };
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        es.events.write().unwrap().get_mut(&msg.id.to_string()).unwrap().push(EventEnvelope::new(
+            msg.id.to_string(),
+            AggregateType::Message,
+            2,
+            DomainEvent::MessageMoved {
+                message_id: msg.id,
+                from_mailbox_id: msg.mailbox_id,
+                to_mailbox_id: archive.id,
+                provider_uid: None,
+            },
+        ));
+        (msg, archive, es)
+    }
+
+    #[tokio::test]
+    async fn a_message_without_uid_is_found_on_the_server_before_acting() {
+        let (msg, archive, es) = uidless_in_archive();
+        let provider = Arc::new(MockEmailProvider::new());
+        *provider.found_uid.write().unwrap() = Some(ProviderUid::new(55));
+        *provider.detail_response.write().unwrap() = Some(Message { body_text: Some("text".into()), ..msg.clone() });
+        let registry = Arc::new(MockProviderRegistry::new(provider.clone()));
+        let handler = MessageCommandHandler::new(es, registry, Arc::new(MockMessageReadRepo::new()), Arc::new(MockEventBus::new()));
+
+        handler.handle_fetch_body(msg.id, archive.path.clone()).await.unwrap();
+
+        assert_eq!(*provider.fetched.read().unwrap(), [ProviderUid::new(55)]);
+        let (stored, _) = handler.load_message(&msg.id).await.unwrap();
+        assert_eq!(stored.provider_uid, Some(ProviderUid::new(55)), "found UID is recorded");
+    }
+
+    #[tokio::test]
+    async fn a_message_gone_from_the_server_is_a_clear_error() {
+        let (msg, archive, es) = uidless_in_archive();
+        let registry = Arc::new(MockProviderRegistry::new(Arc::new(MockEmailProvider::new())));
+        let handler = MessageCommandHandler::new(es, registry, Arc::new(MockMessageReadRepo::new()), Arc::new(MockEventBus::new()));
+
+        let err = handler
+            .handle_set_flags(msg.id, archive.path, vec![Flag::Seen], vec![])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApplicationError::NotFound(..)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn bulk_move_finds_messages_without_uid() {
+        let (msg, archive, es) = uidless_in_archive();
+        let provider = Arc::new(MockEmailProvider::new());
+        *provider.found_uid.write().unwrap() = Some(ProviderUid::new(55));
+        let registry = Arc::new(MockProviderRegistry::new(provider.clone()));
+        let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![archive]));
+        let handler = MessageCommandHandler::new(es, registry, read_repo, Arc::new(MockEventBus::new()));
+
+        let result = handler
+            .handle_move_many(vec![msg.id], MailboxId::new(), MailboxPath::parse("Trash", '/').unwrap())
+            .await
+            .unwrap();
+
+        assert!(matches!(result, CommandResult::MessagesBulkChanged { succeeded: 1, failed: 0 }));
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*provider.moved.read().unwrap(), [ProviderUid::new(55)]);
     }
 
     #[tokio::test]

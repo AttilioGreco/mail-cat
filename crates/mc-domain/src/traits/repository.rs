@@ -125,6 +125,16 @@ pub trait MessageReadRepository: Send + Sync {
         provider_uid: u32,
     ) -> Result<Option<MessageSummary>, DomainError>;
 
+    /// Which of `uids` a message in `mailbox_id` already holds.
+    async fn held_uids(
+        &self,
+        mailbox_id: &MailboxId,
+        uids: &[ProviderUid],
+    ) -> Result<std::collections::HashSet<ProviderUid>, DomainError>;
+
+    /// Messages in `mailbox_id` whose UID there is unknown.
+    async fn uidless_messages(&self, mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError>;
+
     /// Every copy of an RFC Message-ID (`<…>`) stored for an account.
     async fn find_by_rfc_id(
         &self,

@@ -183,15 +183,29 @@ impl Message {
         }
     }
 
-    /// Record the UID the message has in its current mailbox.
-    pub fn attach_uid(&mut self, provider_uid: ProviderUid) -> DomainEvent {
-        self.provider_uid = Some(provider_uid);
+    /// Record the UID the message has in `mailbox_id`, learned after the move
+    /// that cleared it. `None` when the message has since left that mailbox or
+    /// already has a UID: the information arrived late and no longer applies.
+    pub fn attach_uid(&mut self, mailbox_id: MailboxId, provider_uid: ProviderUid) -> Option<DomainEvent> {
+        (self.mailbox_id == mailbox_id && self.provider_uid.is_none())
+            .then(|| self.set_uid(Some(provider_uid)))
+    }
+
+    /// Drop the UID the message had in `mailbox_id`, after the server
+    /// renumbered that mailbox (UIDVALIDITY change). `None` when the message
+    /// is no longer there or has no UID.
+    pub fn forget_uid(&mut self, mailbox_id: MailboxId) -> Option<DomainEvent> {
+        (self.mailbox_id == mailbox_id && self.provider_uid.is_some()).then(|| self.set_uid(None))
+    }
+
+    fn set_uid(&mut self, provider_uid: Option<ProviderUid>) -> DomainEvent {
+        self.provider_uid = provider_uid;
 
         DomainEvent::MessageMoved {
             message_id: self.id,
             from_mailbox_id: self.mailbox_id,
             to_mailbox_id: self.mailbox_id,
-            provider_uid: Some(provider_uid),
+            provider_uid,
         }
     }
 
@@ -484,7 +498,9 @@ mod tests {
         // UIDs are per-mailbox: the source UID must not follow the message.
         assert_eq!(msg.provider_uid, None);
 
-        let attached = msg.attach_uid(ProviderUid::new(42));
+        assert!(msg.attach_uid(original_mailbox, ProviderUid::new(7)).is_none(), "left that mailbox");
+        let attached = msg.attach_uid(target_mailbox, ProviderUid::new(42)).unwrap();
+        assert!(msg.attach_uid(target_mailbox, ProviderUid::new(43)).is_none(), "already attached");
         let rehydrated = Message::rehydrate(&[
             DomainEvent::MessageReceived {
                 message_id: msg.id,
@@ -506,6 +522,11 @@ mod tests {
         .unwrap();
         assert_eq!(rehydrated.mailbox_id, target_mailbox);
         assert_eq!(rehydrated.provider_uid, Some(ProviderUid::new(42)));
+
+        assert!(msg.forget_uid(original_mailbox).is_none(), "not in that mailbox");
+        assert!(msg.forget_uid(target_mailbox).is_some());
+        assert_eq!(msg.provider_uid, None);
+        assert!(msg.forget_uid(target_mailbox).is_none(), "nothing left to forget");
     }
 
     #[test]

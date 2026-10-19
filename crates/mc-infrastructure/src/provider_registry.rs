@@ -77,6 +77,13 @@ mod tests {
         ) -> Result<Message, DomainError> {
             Err(DomainError::Provider("stub".into()))
         }
+        async fn find_message(
+            &self,
+            _mailbox: &MailboxPath,
+            _rfc_id: &str,
+        ) -> Result<Option<ProviderUid>, DomainError> {
+            Ok(None)
+        }
         async fn fetch_raw_message(
             &self,
             _mailbox: &MailboxPath,

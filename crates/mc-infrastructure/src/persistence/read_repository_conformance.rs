@@ -878,6 +878,7 @@ macro_rules! read_repository_conformance {
             assert_eq!(archive_msgs.total_count, 1);
             // The inbox UID means nothing in archive.
             assert_eq!(msg.provider_uid, None);
+            assert_eq!(repo.uidless_messages(&archive_id).await.unwrap(), [message_id]);
 
             // The UID learned after the move lands on the same row.
             let env = make_event_envelope(
@@ -895,6 +896,13 @@ macro_rules! read_repository_conformance {
             repo.project(&env).await.unwrap();
             let found = repo.find_by_provider_uid(&archive_id, 77).await.unwrap();
             assert_eq!(found.map(|m| m.id), Some(message_id));
+            assert!(repo.uidless_messages(&archive_id).await.unwrap().is_empty());
+            let held = repo
+                .held_uids(&archive_id, &[ProviderUid::new(5), ProviderUid::new(77)])
+                .await
+                .unwrap();
+            assert_eq!(held, [ProviderUid::new(77)].into());
+            assert!(repo.held_uids(&inbox_id, &[ProviderUid::new(77)]).await.unwrap().is_empty());
         }
 
         /// Regression test for the "reply shows no content / doesn't attach to
