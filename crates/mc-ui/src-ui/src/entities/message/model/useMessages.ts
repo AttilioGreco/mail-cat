@@ -70,9 +70,22 @@ export function useMessages(mailboxKey: string | null) {
 }
 
 const BODY_POLL_MS = 3_000;
-/** About a minute: long enough for a retried download, bounded for a message
- *  that genuinely has no text part. */
-const BODY_POLL_TRIES = 20;
+/** Fetches of a still-empty body, the first included, before giving up:
+ *  about a minute, bounded for a message with no text part at all. */
+const BODY_FETCHES = 20;
+
+interface BodyQueryState {
+  data?: MessageBody;
+  dataUpdateCount: number;
+  errorUpdateCount: number;
+}
+
+/** Re-ask while the body is missing — empty, or the fetch failed — counting
+ *  failed fetches too, so a server that keeps erroring is not polled forever. */
+export function bodyPollInterval({ data, dataUpdateCount, errorUpdateCount }: BodyQueryState): number | false {
+  const missing = data?.htmlBody == null && data?.textBody == null;
+  return missing && dataUpdateCount + errorUpdateCount < BODY_FETCHES ? BODY_POLL_MS : false;
+}
 
 export function useMessageBody(uid: string | null) {
   return useQuery({
@@ -84,9 +97,6 @@ export function useMessageBody(uid: string | null) {
     // fetch fails; with an infinite staleTime that empty answer would stay
     // cached for good. Re-asking retries the fetch and picks up a body the
     // backfill stored in the meantime.
-    refetchInterval: ({ state: { data, dataUpdateCount } }) =>
-      data && data.htmlBody == null && data.textBody == null && dataUpdateCount < BODY_POLL_TRIES
-        ? BODY_POLL_MS
-        : false,
+    refetchInterval: ({ state }) => bodyPollInterval(state),
   });
 }
