@@ -103,6 +103,18 @@ impl MailCatClient {
         Ok(())
     }
 
+    /// Replace a password account's IMAP/SMTP password; active after a server restart.
+    pub async fn set_account_password(&self, account_id: &str, password: &str) -> Result<()> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        client
+            .set_account_password(pb::SetAccountPasswordRequest {
+                account_id: account_id.to_owned(),
+                password: password.to_owned(),
+            })
+            .await?;
+        Ok(())
+    }
+
     /// How much of an account is downloaded locally.
     pub async fn account_stats(&self, account_id: &str) -> Result<AccountStats> {
         let mut client = AccountServiceClient::new(self.channel.clone());

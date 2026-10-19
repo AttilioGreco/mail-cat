@@ -384,6 +384,19 @@ pub async fn remove_account(account_id: String, state: State<'_, AppState>) -> R
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn set_account_password(
+    account_id: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .set_account_password(&account_id, &password)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Ask the server to sync an account now. Returns as soon as the sync is under
 /// way — progress arrives through the `sync:progress` event stream.
 #[tauri::command]

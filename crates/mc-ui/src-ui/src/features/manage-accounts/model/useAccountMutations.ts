@@ -31,6 +31,14 @@ export function useRemoveAccount() {
   });
 }
 
+/** Store a new password in the server keychain; providers pick it up at restart. */
+export function useSetAccountPassword() {
+  return useMutation({
+    mutationFn: ({ accountId, password }: { accountId: string; password: string }) =>
+      invoke('set_account_password', { accountId, password }),
+  });
+}
+
 export function useSyncNow() {
   return useMutation({
     mutationFn: (accountId: string) => invoke('sync_now', { accountId }),

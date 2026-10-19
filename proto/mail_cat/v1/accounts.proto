@@ -42,6 +42,10 @@ service AccountService {
   // StartOAuthLogin; takes only the account id because the OAuth provider an
   // account was registered with is not derivable from its address.
   rpc ReauthAccount(ReauthAccountRequest) returns (stream OAuthLoginEvent);
+
+  // Replace a password account's IMAP/SMTP password in the keychain. Takes
+  // effect at the next server restart, when providers are rebuilt.
+  rpc SetAccountPassword(SetAccountPasswordRequest) returns (SetAccountPasswordResponse);
 }
 
 // Provider type for email account.
@@ -175,6 +179,13 @@ message RemoveAccountRequest {
 message RemoveAccountResponse {
   bool success = 1;
 }
+
+message SetAccountPasswordRequest {
+  string account_id = 1;
+  string password = 2;
+}
+
+message SetAccountPasswordResponse {}
 
 message GetAccountStatsRequest {
   string account_id = 1;

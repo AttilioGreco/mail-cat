@@ -36,4 +36,7 @@ pub trait AccountProvisioner: Send + Sync {
     /// Drop an account from the server's configuration and forget its secrets.
     /// Without this a removed account comes back on the next restart.
     async fn deprovision(&self, email: &str) -> Result<(), ApplicationError>;
+
+    /// Replace the keychain password of an already-declared account.
+    async fn set_password(&self, email: &str, password: &str) -> Result<(), ApplicationError>;
 }

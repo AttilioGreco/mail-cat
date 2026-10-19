@@ -9,7 +9,12 @@ import {
   type AccountStatus,
   type BodyBatch,
 } from '@/entities/account';
-import { useRemoveAccount, useRestartServer, useSyncNow } from '../model/useAccountMutations';
+import {
+  useRemoveAccount,
+  useRestartServer,
+  useSetAccountPassword,
+  useSyncNow,
+} from '../model/useAccountMutations';
 import { AddAccountDialog } from './AddAccountDialog';
 
 export function AccountsSection() {
@@ -83,7 +88,7 @@ export function AccountsSection() {
           <AccountCard
             key={account.id}
             account={account}
-            onRemoved={() => setRestartNeeded(true)}
+            onRestartNeeded={() => setRestartNeeded(true)}
           />
         ))}
       </div>
@@ -100,13 +105,20 @@ export function AccountsSection() {
   );
 }
 
-function AccountCard({ account, onRemoved }: { account: Account; onRemoved: () => void }) {
+function AccountCard({
+  account,
+  onRestartNeeded,
+}: {
+  account: Account;
+  onRestartNeeded: () => void;
+}) {
   const { data: stats } = useAccountStats(account.id);
   const progress = useSyncStore((s) => s.byAccount[account.id]);
   const lastBatch = useSyncStore((s) => s.lastBodyBatch[account.id]);
   const syncNow = useSyncNow();
   const removeAccount = useRemoveAccount();
   const [confirming, setConfirming] = useState(false);
+  const [editingPassword, setEditingPassword] = useState(false);
 
   const livePercent = progressPercent(progress);
   // The body backfill worker runs continuously in the background and never
@@ -141,6 +153,14 @@ function AccountCard({ account, onRemoved }: { account: Account; onRemoved: () =
             className="rounded border border-border bg-background p-1.5 text-muted hover:bg-surface-hover hover:text-foreground disabled:opacity-50"
           >
             <RefreshCw size={13} className={syncing ? 'animate-spin' : undefined} />
+          </button>
+          <button
+            type="button"
+            title="Aggiorna password"
+            onClick={() => setEditingPassword((v) => !v)}
+            className="rounded border border-border bg-background p-1.5 text-muted hover:bg-surface-hover hover:text-foreground"
+          >
+            <KeyRound size={13} />
           </button>
           <button
             type="button"
@@ -182,6 +202,17 @@ function AccountCard({ account, onRemoved }: { account: Account; onRemoved: () =
         </p>
       )}
 
+      {editingPassword && (
+        <PasswordForm
+          accountId={account.id}
+          onDone={() => {
+            setEditingPassword(false);
+            onRestartNeeded();
+          }}
+          onCancel={() => setEditingPassword(false)}
+        />
+      )}
+
       {confirming && (
         <div className="mt-3 rounded border border-destructive/40 bg-background p-3">
           <p className="text-xs text-foreground">
@@ -199,7 +230,7 @@ function AccountCard({ account, onRemoved }: { account: Account; onRemoved: () =
                 removeAccount.mutate(account.id, {
                   onSuccess: () => {
                     setConfirming(false);
-                    onRemoved();
+                    onRestartNeeded();
                   },
                 })
               }
@@ -218,6 +249,60 @@ function AccountCard({ account, onRemoved }: { account: Account; onRemoved: () =
         </div>
       )}
     </article>
+  );
+}
+
+function PasswordForm({
+  accountId,
+  onDone,
+  onCancel,
+}: {
+  accountId: string;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [password, setPassword] = useState('');
+  const setAccountPassword = useSetAccountPassword();
+
+  return (
+    <form
+      className="mt-3 rounded border border-border bg-background p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setAccountPassword.mutate({ accountId, password }, { onSuccess: onDone });
+      }}
+    >
+      <label className="block text-xs text-foreground">
+        Nuova password IMAP/SMTP (salvata nel keychain)
+        <input
+          type="password"
+          autoFocus
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="mt-1.5 w-full rounded border border-border bg-surface px-2 py-1.5 text-xs text-foreground outline-none focus:border-accent"
+        />
+      </label>
+      {setAccountPassword.isError && (
+        <p className="mt-1 text-xs text-destructive">{String(setAccountPassword.error)}</p>
+      )}
+      <div className="mt-2 flex gap-2">
+        <button
+          type="submit"
+          disabled={!password || setAccountPassword.isPending}
+          className="rounded bg-accent px-2.5 py-1.5 text-xs font-medium text-accent-foreground disabled:opacity-50"
+        >
+          {setAccountPassword.isPending ? 'Salvataggio…' : 'Salva'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded border border-border bg-background px-2.5 py-1.5 text-xs text-foreground hover:bg-surface-hover"
+        >
+          Annulla
+        </button>
+      </div>
+    </form>
   );
 }
 

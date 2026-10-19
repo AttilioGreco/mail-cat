@@ -58,6 +58,20 @@ impl AccountProvisioner for ConfigAccountProvisioner {
             .delete(email)
             .map_err(|e| ApplicationError::Internal(format!("keychain delete failed: {e}")))
     }
+
+    async fn set_password(&self, email: &str, password: &str) -> Result<(), ApplicationError> {
+        let mut secrets = self
+            .secrets
+            .load(email)
+            .map_err(|e| ApplicationError::Internal(format!("keychain read failed: {e}")))?
+            .unwrap_or_default();
+        // Mirrors provision_imap: one credential for both IMAP and SMTP.
+        secrets.imap_password = Some(password.to_owned());
+        secrets.smtp_password = Some(password.to_owned());
+        self.secrets
+            .store(email, &secrets)
+            .map_err(|e| ApplicationError::Internal(format!("keychain write failed: {e}")))
+    }
 }
 
 /// Append an `[[accounts]]` table for a password-authenticated IMAP account.

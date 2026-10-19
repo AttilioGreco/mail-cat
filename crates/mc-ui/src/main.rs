@@ -71,6 +71,7 @@ async fn main() {
             commands::stop_sync_watch,
             commands::start_oauth_login,
             commands::reauth_account,
+            commands::set_account_password,
             commands::restart_server,
             commands::list_mailboxes,
             commands::list_messages,

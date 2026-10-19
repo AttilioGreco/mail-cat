@@ -465,6 +465,41 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+    async fn set_account_password(
+        &self,
+        request: Request<proto::SetAccountPasswordRequest>,
+    ) -> Result<Response<proto::SetAccountPasswordResponse>, Status> {
+        let req = request.into_inner();
+        if req.password.is_empty() {
+            return Err(Status::invalid_argument("password is required"));
+        }
+        let account_id = AccountId::from_uuid(
+            uuid::Uuid::parse_str(&req.account_id)
+                .map_err(|e| Status::invalid_argument(format!("invalid account_id: {e}")))?,
+        );
+        let provisioner = self
+            .provisioner
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("account provisioning not configured"))?;
+
+        // The keychain is keyed by address, not by account id.
+        let email = self
+            .query_bus
+            .dispatch(Query::GetAccount { account_id })
+            .await
+            .map_err(application_error_to_status)?
+            .into_account()
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("account not found"))?
+            .email;
+
+        provisioner
+            .set_password(email.as_str(), &req.password)
+            .await
+            .map_err(application_error_to_status)?;
+
+        Ok(Response::new(proto::SetAccountPasswordResponse {}))
+    }
 }
 
 /// Pump broadcast progress events into one client's stream.
