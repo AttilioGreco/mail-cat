@@ -1,20 +1,39 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
+import type { ConversationSummary, ThreadMessage } from '@/entities/conversation';
 import type { Mailbox } from '@/entities/mailbox';
 import type { MessageEnvelope } from '@/entities/message';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 
 // ── Optimistic removal ──────────────────────────────────────────────────────
 
-type ListSnapshot = [readonly unknown[], MessageEnvelope[] | undefined][];
+type ListSnapshot = [readonly unknown[], unknown][];
+
+/** Every cached view that lists messages. */
+const MESSAGE_LISTS = ['messages', 'conversations', 'search', 'thread'] as const;
 
 /** Moves and deletes now wait for the server, so the rows leave every cached
  *  list at once and come back if the server refuses. */
 async function removeFromLists(qc: ReturnType<typeof useQueryClient>, ids: string[]): Promise<ListSnapshot> {
-  await qc.cancelQueries({ queryKey: ['messages'] });
-  const snapshot = qc.getQueriesData<MessageEnvelope[]>({ queryKey: ['messages'] });
+  const gone = new Set(ids);
+  await Promise.all(MESSAGE_LISTS.map((key) => qc.cancelQueries({ queryKey: [key] })));
+  const snapshot = MESSAGE_LISTS.flatMap((key) => qc.getQueriesData({ queryKey: [key] }));
   qc.setQueriesData<MessageEnvelope[]>({ queryKey: ['messages'] }, (list) =>
-    list?.filter((m) => !ids.includes(m.uid)),
+    list?.filter((m) => !gone.has(m.uid)),
+  );
+  qc.setQueriesData<{ messageId: string }[]>({ queryKey: ['search'] }, (hits) =>
+    hits?.filter((h) => !gone.has(h.messageId)),
+  );
+  qc.setQueriesData<ThreadMessage[]>({ queryKey: ['thread'] }, (thread) =>
+    thread?.filter((m) => !gone.has(m.id)),
+  );
+  // A conversation row names one message only: the row loses that one, and
+  // goes when it was the last; the refetch fills in the rest.
+  qc.setQueriesData<ConversationSummary[]>({ queryKey: ['conversations'] }, (rows) =>
+    rows?.flatMap((c) => {
+      if (!gone.has(c.sampleMessageId)) return [c];
+      return c.messageCount > 1 ? [{ ...c, messageCount: c.messageCount - 1 }] : [];
+    }),
   );
   return snapshot;
 }
@@ -193,14 +212,7 @@ export function useMoveMessage() {
       }),
     onMutate: (params) => removeFromLists(qc, [params.messageId]),
     onError: (_e, _params, snapshot) => restoreLists(qc, snapshot),
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: ['messages'] });
-      qc.invalidateQueries({ queryKey: ['mailboxes'] });
-      // Same refresh set as setFlags: a message leaving a folder changes the
-      // conversation list and the open thread too, not just the flat list.
-      qc.invalidateQueries({ queryKey: ['thread'] });
-      qc.invalidateQueries({ queryKey: ['conversations'] });
-    },
+    onSettled: () => invalidateMessageViews(qc),
   });
 }
 
@@ -212,11 +224,7 @@ export function useMoveMessage() {
 export type BulkResult = [number, number];
 
 function invalidateMessageViews(qc: ReturnType<typeof useQueryClient>) {
-  qc.invalidateQueries({ queryKey: ['messages'] });
-  qc.invalidateQueries({ queryKey: ['mailboxes'] });
-  qc.invalidateQueries({ queryKey: ['thread'] });
-  qc.invalidateQueries({ queryKey: ['conversations'] });
-  qc.invalidateQueries({ queryKey: ['search'] });
+  for (const key of [...MESSAGE_LISTS, 'mailboxes']) qc.invalidateQueries({ queryKey: [key] });
 }
 
 /** Delete many messages in one provider round trip. */
@@ -261,12 +269,6 @@ export function useDeleteMessage() {
       }),
     onMutate: (params) => removeFromLists(qc, [params.messageId]),
     onError: (_e, _params, snapshot) => restoreLists(qc, snapshot),
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: ['messages'] });
-      qc.invalidateQueries({ queryKey: ['mailboxes'] });
-      // A deleted message also drops out of its conversation and thread.
-      qc.invalidateQueries({ queryKey: ['thread'] });
-      qc.invalidateQueries({ queryKey: ['conversations'] });
-    },
+    onSettled: () => invalidateMessageViews(qc),
   });
 }
