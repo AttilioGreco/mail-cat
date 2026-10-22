@@ -24,16 +24,29 @@ async function removeFromLists(qc: ReturnType<typeof useQueryClient>, ids: strin
   qc.setQueriesData<{ messageId: string }[]>({ queryKey: ['search'] }, (hits) =>
     hits?.filter((h) => !gone.has(h.messageId)),
   );
-  qc.setQueriesData<ThreadMessage[]>({ queryKey: ['thread'] }, (thread) =>
-    thread?.filter((m) => !gone.has(m.id)),
-  );
-  // A conversation row names one message only: the row loses that one, and
-  // goes when it was the last; the refetch fills in the rest.
+  // A conversation row loses each removed message it holds. Its members are
+  // known only when a thread holding its sample message is cached; otherwise
+  // the sample is the one member known. Rows left empty go; the refetch fills
+  // in the rest.
+  const threads = qc.getQueriesData<ThreadMessage[]>({ queryKey: ['thread'] }).map(([, t]) => t ?? []);
   qc.setQueriesData<ConversationSummary[]>({ queryKey: ['conversations'] }, (rows) =>
     rows?.flatMap((c) => {
-      if (!gone.has(c.sampleMessageId)) return [c];
-      return c.messageCount > 1 ? [{ ...c, messageCount: c.messageCount - 1 }] : [];
+      const members = threads.find((t) => t.some((m) => m.id === c.sampleMessageId));
+      const removed = members
+        ? members.filter((m) => gone.has(m.id))
+        : gone.has(c.sampleMessageId)
+          ? [undefined]
+          : [];
+      if (removed.length === 0) return [c];
+      const messageCount = c.messageCount - removed.length;
+      if (messageCount <= 0) return [];
+      const unreadRemoved = removed.filter((m) => m && !m.isRead).length;
+      return [{ ...c, messageCount, unreadCount: Math.max(0, c.unreadCount - unreadRemoved) }];
     }),
+  );
+  // After the conversations: they read the threads as they were.
+  qc.setQueriesData<ThreadMessage[]>({ queryKey: ['thread'] }, (thread) =>
+    thread?.filter((m) => !gone.has(m.id)),
   );
   return snapshot;
 }
