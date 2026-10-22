@@ -319,15 +319,23 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     }
 
     /// One message's move/delete; `destination` as in [`Self::apply_many`].
+    /// A message (or its mailbox) gone by its turn is nothing left to do,
+    /// as when the same delete is sent twice.
     async fn apply_one(&self, message_id: MessageId, destination: impl Fn(&Mailbox, &[Mailbox]) -> Destination) -> Result<(), ApplicationError> {
-        let account_id = self.load_message(&message_id).await?.0.account_id;
+        let account_id = match self.load_message(&message_id).await {
+            Ok((message, _)) => message.account_id,
+            Err(ApplicationError::NotFound(..)) => return Ok(()),
+            Err(e) => return Err(e),
+        };
         let _turn = self.turn(account_id).await;
-        let (mut message, mut seq) = self.load_message(&message_id).await?;
+        let (mut message, mut seq) = match self.load_message(&message_id).await {
+            Err(ApplicationError::NotFound(..)) => return Ok(()),
+            loaded => loaded?,
+        };
         let mailboxes = self.message_read_repo.list_mailboxes(&account_id).await?;
-        let source = mailboxes
-            .iter()
-            .find(|m| m.id == message.mailbox_id)
-            .ok_or_else(|| ApplicationError::NotFound("Mailbox", message.mailbox_id.to_string()))?;
+        let Some(source) = mailboxes.iter().find(|m| m.id == message.mailbox_id) else {
+            return Ok(());
+        };
         let Some(dest) = destination(source, &mailboxes) else {
             return Ok(());
         };
@@ -956,11 +964,17 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 })
             }
         };
-        if let Some(uid) = new_uid {
-            return self.record(&message_id, |m| Some(m.move_to(to_id, Some(uid)))).await.map(drop);
+        let Some(uid) = new_uid else {
+            self.record(&message_id, |m| Some(m.delete(false))).await?;
+            return Err(ApplicationError::Internal(format!("server confirmed the move to {to_path} without the new UID")));
+        };
+        // The destination already had that copy as a row of its own: a
+        // Gmail label the message already carried, All Mail as the archive.
+        // Recording the move too would make two rows of one server message.
+        if self.message_read_repo.held_uids(&to_id, &[uid]).await?.contains(&uid) {
+            return self.record(&message_id, |m| Some(m.delete(false))).await.map(drop);
         }
-        self.record(&message_id, |m| Some(m.delete(false))).await?;
-        Err(ApplicationError::Internal(format!("server confirmed the move to {to_path} without the new UID")))
+        self.record(&message_id, |m| Some(m.move_to(to_id, Some(uid)))).await.map(drop)
     }
 
     fn request_resync(&self, account_id: AccountId, from: &MailboxPath, to: Option<&MailboxPath>) {
@@ -2653,6 +2667,32 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
         let created = m.es.events.read().unwrap().len();
         assert_eq!(created, 1, "no new row");
         assert_eq!(m.resync_requests(), [MailboxPath::inbox(), archive.path]);
+    }
+
+    /// Gmail: archiving to All Mail, whose COPYUID names the UID the synced
+    /// All Mail row already holds. That row is the message there; this one
+    /// goes instead of becoming a second row of the same server message.
+    #[tokio::test]
+    async fn a_move_onto_a_uid_another_row_holds_leaves_that_row_alone() {
+        let msg = make_test_message();
+        let m = moving_with(&msg, MockEmailProvider::moving_to(900), MockMessageReadRepo { held: vec![ProviderUid::new(900)], ..Default::default() });
+        let archive = m.archive.clone();
+
+        m.handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
+
+        assert!(matches!(m.handler.load_message(&msg.id).await, Err(ApplicationError::NotFound(..))), "no second row in Archive");
+        assert_eq!(m.es.events.read().unwrap().len(), 1, "and no new one");
+    }
+
+    #[tokio::test]
+    async fn the_same_delete_sent_twice_is_done_once() {
+        let msg = make_test_message();
+        let m = moving(&msg, MockEmailProvider::new());
+
+        m.handler.handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), true).await.unwrap();
+        let again = m.handler.handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), true).await;
+
+        assert!(matches!(again, Ok(CommandResult::MessageDeleted)), "{again:?}");
     }
 
     /// The connection dropped after the MOVE went out: it may have been
