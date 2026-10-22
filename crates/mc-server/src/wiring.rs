@@ -247,6 +247,10 @@ impl AppContext {
         let event_bus = Arc::new(InProcessEventBus::new(1000));
         tracing::info!("Initialized event bus");
 
+        // Message commands ask for these when the server did more than they
+        // could record; served once the sync service exists.
+        let (resync_tx, mut resync_rx) = tokio::sync::mpsc::unbounded_channel::<(AccountId, MailboxPath)>();
+
         // Create command bus
         let command_bus = Arc::new(InProcessCommandBus::new(
             repository_arc.clone(),    // AW
@@ -255,7 +259,7 @@ impl AppContext {
             provider_registry.clone(), // PR
             repository_arc.clone(),    // MR
             event_bus.clone(),         // B
-        ));
+        ).with_resync_requests(resync_tx));
         tracing::info!("Initialized command bus");
 
         // Create query bus
@@ -288,6 +292,18 @@ impl AppContext {
             .with_event_publisher(event_bus.clone()),
         );
         tracing::info!("Initialized sync service");
+
+        {
+            let sync = Arc::clone(&sync_service);
+            tokio::spawn(async move {
+                while let Some((account_id, path)) = resync_rx.recv().await {
+                    // UID 0: from the mailbox's checkpoint, then reconcile.
+                    if let Err(e) = sync.sync_mailbox(&account_id, &path, ProviderUid::new(0)).await {
+                        tracing::warn!(%path, "Resync after a move failed: {e}");
+                    }
+                }
+            });
+        }
 
         // Create projection event handlers and start catching up
         // Search index is an event-sourced projection with its own checkpoint,

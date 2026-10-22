@@ -48,10 +48,10 @@ impl<AW, CW, ES, PR, MR, B> InProcessCommandBus<AW, CW, ES, PR, MR, B>
 where
     AW: AccountWriteRepository + AccountReadRepository,
     CW: ContactWriteRepository + ContactReadRepository,
-    ES: EventStore,
-    PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
-    B: EventPublisher,
+    ES: EventStore + 'static,
+    PR: ProviderRegistry + 'static,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    B: EventPublisher + 'static,
 {
     pub fn new(
         account_write_repo: Arc<AW>,
@@ -75,6 +75,17 @@ where
         }
     }
 
+    /// Where message commands ask for a mailbox sync when their local record
+    /// fell behind what the server did.
+    #[must_use]
+    pub fn with_resync_requests(
+        mut self,
+        resync: tokio::sync::mpsc::UnboundedSender<(mc_domain::AccountId, mc_domain::MailboxPath)>,
+    ) -> Self {
+        self.message_handler = self.message_handler.with_resync_requests(resync);
+        self
+    }
+
     /// Full aggregates of the active accounts, in listing order.
     async fn accounts(&self) -> Result<Vec<Account>, ApplicationError> {
         let mut accounts = Vec::new();
@@ -93,10 +104,10 @@ impl<AW, CW, ES, PR, MR, B> CommandBus for InProcessCommandBus<AW, CW, ES, PR, M
 where
     AW: AccountWriteRepository + AccountReadRepository,
     CW: ContactWriteRepository + ContactReadRepository,
-    ES: EventStore,
-    PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
-    B: EventPublisher,
+    ES: EventStore + 'static,
+    PR: ProviderRegistry + 'static,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    B: EventPublisher + 'static,
 {
     async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {
         match command {
