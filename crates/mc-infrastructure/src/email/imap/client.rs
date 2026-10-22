@@ -1448,7 +1448,9 @@ fn message_id_search(rfc_id: &str) -> Result<Option<String>, DomainError> {
     if rfc_id.trim_matches(|c: char| c == '<' || c == '>' || c.is_whitespace()).is_empty() {
         return Ok(None);
     }
-    Ok(Some(format!("HEADER Message-ID {}", quoted(rfc_id)?)))
+    // A copy marked \Deleted is gone as far as sync is concerned (moves
+    // without UIDPLUS leave one behind), so it must not be found either.
+    Ok(Some(format!("UNDELETED HEADER Message-ID {}", quoted(rfc_id)?)))
 }
 
 fn sorted_uids(found: std::collections::HashSet<u32>) -> Vec<ProviderUid> {
@@ -1959,7 +1961,7 @@ mod tests {
         assert!(message_id_search("  ").unwrap().is_none());
         assert_eq!(
             message_id_search("<a@b>").unwrap().as_deref(),
-            Some("HEADER Message-ID \"<a@b>\"")
+            Some("UNDELETED HEADER Message-ID \"<a@b>\"")
         );
     }
 

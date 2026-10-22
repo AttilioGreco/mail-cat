@@ -950,7 +950,7 @@ impl<
             if env.flags.contains(&Flag::Deleted) || known_uids.contains(&env.provider_uid) {
                 continue;
             }
-            if awaiting_uid && self.reattach(local, env).await? {
+            if awaiting_uid && self.reattach(provider, local, env).await? {
                 continue;
             }
             let placeholder = match self.local_copy(local, env).await {
@@ -1031,9 +1031,10 @@ impl<
             .is_ok_and(|events| matches!(events.first().map(|e| &e.payload), Some(DomainEvent::MessageSent { .. })))
     }
 
-    /// Which envelope UIDs `mailbox` already holds, and whether any of its
-    /// messages is waiting for a UID (renumbered by a UIDVALIDITY change, or
-    /// moved by a provider that could not report it).
+    /// Which envelope UIDs `mailbox` already holds, and whether any message
+    /// of the account is waiting for a UID (renumbered by a UIDVALIDITY
+    /// change, or left behind by a move the server confirmed without saying
+    /// where the message went).
     async fn uid_state(
         &self,
         mailbox: &Mailbox,
@@ -1045,18 +1046,35 @@ impl<
             .held_uids(&mailbox.id, &uids)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("held_uids failed: {e}")))?;
-        let awaiting = !self
+        let mailboxes = self
             .projector
-            .uidless_messages(&mailbox.id)
+            .list_mailboxes(&mailbox.account_id)
             .await
-            .map_err(|e| ApplicationError::SyncFailed(format!("uidless_messages failed: {e}")))?
-            .is_empty();
-        Ok((held, awaiting))
+            .map_err(|e| ApplicationError::SyncFailed(format!("list_mailboxes failed: {e}")))?;
+        for id in std::iter::once(mailbox.id).chain(mailboxes.iter().map(|m| m.id).filter(|id| *id != mailbox.id)) {
+            let waiting = self
+                .projector
+                .uidless_messages(&id)
+                .await
+                .map_err(|e| ApplicationError::SyncFailed(format!("uidless_messages failed: {e}")))?;
+            if !waiting.is_empty() {
+                return Ok((held, true));
+            }
+        }
+        Ok((held, false))
     }
 
-    /// A message waiting for its UID here gets it from the server copy with
-    /// the same Message-ID, instead of that copy arriving as a duplicate.
-    async fn reattach(&self, mailbox: &Mailbox, env: &MessageEnvelopeSummary) -> Result<bool, ApplicationError> {
+    /// The server copy with a Message-ID the account already has keeps that
+    /// message's id instead of arriving as a duplicate: a message waiting for
+    /// its UID here gets it, else one waiting elsewhere that the server no
+    /// longer has there moves here. A copy still present in its own mailbox
+    /// is a genuine second copy (self-sent mail in Sent and INBOX) and stays.
+    async fn reattach(
+        &self,
+        provider: &Arc<PR::Provider>,
+        mailbox: &Mailbox,
+        env: &MessageEnvelopeSummary,
+    ) -> Result<bool, ApplicationError> {
         let Some(rfc_id) = env.message_rfc_id.as_deref() else {
             return Ok(false);
         };
@@ -1065,12 +1083,42 @@ impl<
             .find_by_rfc_id(&mailbox.account_id, rfc_id)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("find_by_rfc_id failed: {e}")))?;
-        for waiting in copies.iter().filter(|m| m.mailbox_id == mailbox.id && m.provider_uid.is_none()) {
+        let (here, elsewhere): (Vec<_>, Vec<_>) =
+            copies.into_iter().filter(|m| m.provider_uid.is_none()).partition(|m| m.mailbox_id == mailbox.id);
+        for waiting in here {
             if self.update_message(&waiting.id, |m| m.attach_uid(mailbox.id, env.provider_uid)).await? {
                 return Ok(true);
             }
         }
+        for orphan in elsewhere {
+            if self.is_sent_placeholder(&orphan.id).await || !self.gone_from_server(provider, &orphan, rfc_id).await {
+                continue;
+            }
+            let from = orphan.mailbox_id;
+            let moved = self
+                .update_message(&orphan.id, |m| {
+                    (m.mailbox_id == from && m.provider_uid.is_none()).then(|| m.move_to(mailbox.id, Some(env.provider_uid)))
+                })
+                .await?;
+            if moved {
+                info!(message_id = %orphan.id, "Found again in another mailbox, moved there");
+                return Ok(true);
+            }
+        }
         Ok(false)
+    }
+
+    /// Whether the server has no copy of `message` (waiting for a UID) left in
+    /// its mailbox that another local row doesn't already hold. Unsure counts
+    /// as present: a wrong "gone" would steal the message from its mailbox.
+    async fn gone_from_server(&self, provider: &Arc<PR::Provider>, message: &MessageSummary, rfc_id: &str) -> bool {
+        let Ok(Some(own)) = self.projector.get_mailbox(&message.mailbox_id).await else {
+            return false;
+        };
+        let Ok(found) = provider.find_message(&own.path, rfc_id).await else {
+            return false;
+        };
+        self.projector.held_uids(&own.id, &found).await.is_ok_and(|held| found.iter().all(|uid| held.contains(uid)))
     }
 
     /// Where ingest resumes in `local`, and whether a renumbering
@@ -1499,6 +1547,8 @@ mod tests {
         bulk_fetch_calls: Mutex<Vec<Vec<u32>>>,
         /// Envelope fetches starting at or past this UID fail, as a timeout.
         fail_envelopes_from: Option<u32>,
+        /// What `find_message` finds, by mailbox path.
+        found: HashMap<String, Vec<ProviderUid>>,
     }
 
     impl MockEmailProvider {
@@ -1519,6 +1569,7 @@ mod tests {
                 }),
                 bulk_fetch_calls: Mutex::new(vec![]),
                 fail_envelopes_from: None,
+                found: HashMap::new(),
             }
         }
 
@@ -1582,10 +1633,10 @@ mod tests {
 
         async fn find_message(
             &self,
-            _mailbox: &MailboxPath,
+            mailbox: &MailboxPath,
             _rfc_id: &str,
         ) -> Result<Vec<ProviderUid>, DomainError> {
-            Ok(vec![])
+            Ok(self.found.get(&mailbox.full_path()).cloned().unwrap_or_default())
         }
         async fn uids_from(&self, _mailbox: &MailboxPath, from: ProviderUid) -> Result<Vec<ProviderUid>, DomainError> {
             let mut uids: Vec<ProviderUid> =
@@ -2685,12 +2736,60 @@ mod tests {
         let waiting = seed(&event_store, &projector, &archive, None, "<sent@example.com>");
         projector.mailboxes.lock().unwrap().extend([sent.clone(), archive]);
 
-        let provider = MockEmailProvider::new()
+        let mut provider = MockEmailProvider::new()
             .with_mailboxes(vec![sent])
             .with_envelopes(vec![envelope(7, "<sent@example.com>")]);
+        provider.found.insert("Archive".into(), vec![ProviderUid::new(4)]);
         make_service(provider, event_store, projector.clone()).start_sync(&account_id).await.unwrap();
 
         assert_eq!(row_uid(&projector, waiting), Some(None), "still there, still waiting");
+    }
+
+    fn inbox_mailbox(account_id: AccountId) -> Mailbox {
+        Mailbox::discover(account_id, MailboxPath::inbox(), MailboxType::Inbox).0
+    }
+
+    /// A move the server confirmed without saying where the message went
+    /// leaves it waiting in its old mailbox; the copy that turns up in the
+    /// destination is that message, not a new one.
+    #[tokio::test]
+    async fn an_orphan_is_found_again_in_another_mailbox_under_its_own_id() {
+        let account_id = AccountId::new();
+        let (inbox, archive) = (inbox_mailbox(account_id), archive_mailbox(account_id));
+        let (event_store, projector) = (Arc::new(MockEventStore::new()), Arc::new(MockProjector::new()));
+        let orphan = seed(&event_store, &projector, &inbox, None, "<moved@example.com>");
+        projector.mailboxes.lock().unwrap().extend([inbox, archive.clone()]);
+
+        let provider = MockEmailProvider::new()
+            .with_mailboxes(vec![archive.clone()])
+            .with_envelopes(vec![envelope(9, "<moved@example.com>")]);
+        make_service(provider, event_store, projector.clone()).start_sync(&account_id).await.unwrap();
+
+        assert_eq!(received(&projector), 0, "no duplicate");
+        let row = projector.stored.lock().unwrap().iter().find(|m| m.id == orphan).cloned().unwrap();
+        assert_eq!((row.mailbox_id, row.provider_uid), (archive.id, Some(ProviderUid::new(9))));
+    }
+
+    /// The same Message-ID can legitimately sit in two mailboxes. One still
+    /// on the server in its own mailbox is not taken over by the other copy.
+    #[tokio::test]
+    async fn a_copy_still_in_its_own_mailbox_is_not_taken_over() {
+        let account_id = AccountId::new();
+        let (inbox, archive) = (inbox_mailbox(account_id), archive_mailbox(account_id));
+        let (event_store, projector) = (Arc::new(MockEventStore::new()), Arc::new(MockProjector::new()));
+        let waiting = seed(&event_store, &projector, &inbox, None, "<both@example.com>");
+        let held = seed(&event_store, &projector, &inbox, Some(3), "<both@example.com>");
+        projector.mailboxes.lock().unwrap().extend([inbox, archive.clone()]);
+
+        let mut provider = MockEmailProvider::new()
+            .with_mailboxes(vec![archive])
+            .with_envelopes(vec![envelope(9, "<both@example.com>")]);
+        provider.found.insert("INBOX".into(), vec![ProviderUid::new(3), ProviderUid::new(5)]);
+        make_service(provider, event_store, projector.clone()).start_sync(&account_id).await.unwrap();
+
+        assert_eq!(received(&projector), 1, "a second copy of its own");
+        assert_eq!(row_uid(&projector, waiting), Some(None));
+        assert_eq!(row_uid(&projector, held), Some(Some(3)));
     }
 
     #[tokio::test]
@@ -2744,6 +2843,7 @@ mod tests {
             envelopes: vec![],
             bulk_fetch_calls: Mutex::new(vec![]),
             fail_envelopes_from: None,
+            found: HashMap::new(),
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 10,
@@ -2865,6 +2965,7 @@ mod tests {
             envelopes: vec![],
             bulk_fetch_calls: Mutex::new(vec![]),
             fail_envelopes_from: None,
+            found: HashMap::new(),
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 1,
@@ -2910,6 +3011,7 @@ mod tests {
             envelopes: vec![],
             bulk_fetch_calls: Mutex::new(vec![]),
             fail_envelopes_from: None,
+            found: HashMap::new(),
             status: Some(MailboxStatus {
                 uid_validity: 42,
                 uid_next: 100,
@@ -2955,6 +3057,7 @@ mod tests {
             envelopes: vec![],
             bulk_fetch_calls: Mutex::new(vec![]),
             fail_envelopes_from: None,
+            found: HashMap::new(),
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 1,
