@@ -964,9 +964,11 @@ impl<
 
         self.update_mailbox_counts(local, status.total_messages, status.unseen_messages)
             .await?;
-        let (mut expunged, flags_changed) = self.reconcile_mailbox(provider, local, path).await?;
+        let (mut expunged, flags_changed, restored) =
+            self.reconcile_mailbox(provider, local, path, status.uid_next).await?;
+        new_count += restored;
         expunged += self.settle_uidless(provider, local, path, waiting).await?;
-        if expunged > 0 || flags_changed > 0 {
+        if expunged > 0 || flags_changed > 0 || restored > 0 {
             let updated = provider.mailbox_status(path).await.unwrap_or(status);
             self.update_mailbox_counts(local, updated.total_messages, updated.unseen_messages)
                 .await?;
@@ -1425,18 +1427,22 @@ impl<
     /// compares with the local read model, and emits:
     /// - `MessageDeleted` for local messages whose UID no longer exists remotely
     /// - `MessageFlagged` for local messages whose flags differ from remote
+    ///
+    /// and ingests server messages below `uid_next` that no local row holds
+    /// (see [`Self::restore`]). Returns `(expunged, flags_changed, restored)`.
     #[instrument(skip(self, provider, local), fields(mailbox_id = %local.id))]
     async fn reconcile_mailbox(
         &self,
         provider: &Arc<<PR as ProviderRegistry>::Provider>,
         local: &Mailbox,
         remote_path: &MailboxPath,
-    ) -> Result<(u32, u32), ApplicationError> {
+        uid_next: u32,
+    ) -> Result<(u32, u32, u32), ApplicationError> {
         let remote_entries = match provider.fetch_uid_flags(remote_path).await {
             Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "fetch_uid_flags failed, skipping reconciliation");
-                return Ok((0, 0));
+                return Ok((0, 0, 0));
             }
         };
 
@@ -1550,15 +1556,56 @@ impl<
             }
         }
 
-        if expunged > 0 || flags_changed > 0 {
+        // Holes below the checkpoint: messages on the server no row here
+        // holds, because a local change dropped a row the server kept.
+        // Ingest only walks up from the checkpoint and would never see them.
+        // A \Deleted copy is gone as far as sync goes (and may be one we
+        // deleted on a server without UIDPLUS).
+        let held: HashSet<u32> =
+            local_messages.items.iter().filter_map(|m| m.provider_uid.map(|uid| uid.value())).collect();
+        let mut unheld: Vec<u32> = remote_entries
+            .iter()
+            .filter(|e| e.uid.value() < uid_next && !held.contains(&e.uid.value()) && !e.flags.contains(&Flag::Deleted))
+            .map(|e| e.uid.value())
+            .collect();
+        unheld.sort_unstable();
+        let restored = self.restore(provider, local, remote_path, &unheld).await?;
+
+        if expunged > 0 || flags_changed > 0 || restored > 0 {
             info!(
                 expunged,
                 flags_changed,
+                restored,
                 "Reconciliation complete for mailbox"
             );
         }
 
-        Ok((expunged, flags_changed))
+        Ok((expunged, flags_changed, restored))
+    }
+
+    /// Ingest `uids` (ascending) like new mail, a contiguous run per envelope
+    /// fetch so the messages between them, already stored, aren't fetched
+    /// again. A failed fetch leaves the rest for the next sync.
+    async fn restore(
+        &self,
+        provider: &Arc<PR::Provider>,
+        local: &Mailbox,
+        path: &MailboxPath,
+        uids: &[u32],
+    ) -> Result<u32, ApplicationError> {
+        let mut restored = 0;
+        for run in uids.chunk_by(|a, b| *b == a + 1).flat_map(|run| run.chunks(ENVELOPE_BATCH)) {
+            let range = FetchRange::UidRange { from: run[0], to: run[run.len() - 1] };
+            let envelopes = match provider.fetch_message_envelopes(path, range).await {
+                Ok(envelopes) => envelopes,
+                Err(e) => {
+                    warn!(%path, error = %e, "Failed to fetch envelopes missing locally, retrying next sync");
+                    break;
+                }
+            };
+            restored += self.ingest(provider, local, path, &envelopes).await?;
+        }
+        Ok(restored)
     }
 
     /// Update mailbox message counts (transient: read model + bus, not the log).
@@ -2030,6 +2077,26 @@ mod tests {
 
             let mut stored = self.stored.lock().unwrap();
             match &envelope.payload {
+                DomainEvent::MessageReceived { message_id, account_id, mailbox_id, provider_uid, message_rfc_id, flags, .. } => {
+                    stored.push(MessageSummary {
+                        id: *message_id,
+                        account_id: *account_id,
+                        mailbox_id: *mailbox_id,
+                        provider_uid: Some(*provider_uid),
+                        from_name: None,
+                        from_email: "sender@example.com".into(),
+                        to: vec![],
+                        cc: vec![],
+                        subject: String::new(),
+                        flags: flags.clone(),
+                        size_bytes: 0,
+                        has_attachments: false,
+                        received_at: chrono::Utc::now(),
+                    });
+                    if let Some(rfc_id) = message_rfc_id {
+                        self.rfc_ids.lock().unwrap().insert(*message_id, rfc_id.clone());
+                    }
+                }
                 DomainEvent::MessageMoved { message_id, to_mailbox_id, provider_uid, .. } => {
                     if let Some(row) = stored.iter_mut().find(|m| m.id == *message_id) {
                         row.mailbox_id = *to_mailbox_id;
@@ -2891,6 +2958,30 @@ mod tests {
 
         assert_eq!(row_uid(&projector, stranded), None, "deleted");
         assert_eq!(row_uid(&projector, placeholder), Some(None), "still waiting for its server copy");
+    }
+
+    /// A row dropped here while the server kept the message, below the
+    /// checkpoint where ingest never looks again: reconcile brings it back.
+    /// A copy marked \Deleted on the server stays gone.
+    #[tokio::test]
+    async fn a_message_still_on_the_server_comes_back_below_the_checkpoint() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let projector = Arc::new(MockProjector::new());
+        projector.mailboxes.lock().unwrap().push(archive.clone());
+        let checkpoint_key = format!("sync:{account_id}:Archive");
+        projector.save_checkpoint(&checkpoint_key, 5).await.unwrap();
+        projector.save_checkpoint(&format!("{checkpoint_key}:validity"), 1).await.unwrap();
+        let mut deleted = envelope(4, "<deleted@example.com>");
+        deleted.flags = vec![Flag::Deleted];
+        let provider = MockEmailProvider::new()
+            .with_mailboxes(vec![archive])
+            .with_envelopes(vec![envelope(3, "<kept@example.com>"), deleted]);
+
+        make_service(provider, Arc::new(MockEventStore::new()), projector.clone()).start_sync(&account_id).await.unwrap();
+
+        let uids: Vec<_> = projector.stored.lock().unwrap().iter().filter_map(|m| m.provider_uid.map(|u| u.value())).collect();
+        assert_eq!(uids, [3]);
     }
 
     #[tokio::test]
