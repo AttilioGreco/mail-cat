@@ -129,7 +129,7 @@ pub struct ImapEmailProvider {
     idle_sessions: Mutex<Vec<(ImapSession, Instant)>>,
     permits: Arc<Semaphore>,
     meter: Option<DownloadMeter>,
-    /// Learned on the first login; until then every extension counts as absent.
+    /// Learned on the first login, or by [`known_caps`] before a move or delete.
     caps: OnceLock<ServerCaps>,
 }
 
@@ -400,18 +400,15 @@ impl ImapEmailProvider {
         let mut session = session;
         if self.caps.get().is_none() {
             match exchange(COMMAND_TIMEOUT, "CAPABILITY", session.capabilities()).await {
-                Ok(caps) => {
-                    let _ = self.caps.set(ServerCaps::from_names(|name| caps.has_str(name)));
+                Ok(caps) if let Some(caps) = ServerCaps::from_names(|name| caps.has_str(name)) => {
+                    let _ = self.caps.set(caps);
                 }
-                Err(e) => warn!(error = %e, "CAPABILITY failed, assuming no MOVE / UIDPLUS"),
+                Ok(_) => warn!("CAPABILITY answered without a protocol version, asking again before the next move or delete"),
+                Err(e) => warn!(error = %e, "CAPABILITY failed, asking again before the next move or delete"),
             }
         }
 
         Ok(session)
-    }
-
-    fn caps(&self) -> ServerCaps {
-        self.caps.get().copied().unwrap_or_default()
     }
 
     /// Helper to convert ProviderUid to IMAP sequence.
@@ -899,7 +896,8 @@ impl EmailProvider for ImapEmailProvider {
         info!("Moving message {} from {} to {}", uid.value(), from_name, to_name);
 
         let mut session = self.selected(&from_name).await?;
-        let new_uid = timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, self.caps(), &[uid.value()], &to_name))
+        let caps = known_caps(&self.caps, &mut session).await?;
+        let new_uid = timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, caps, &[uid.value()], &to_name))
             .await?
             .first()
             .map(|&(_, new)| ProviderUid::new(new));
@@ -919,7 +917,8 @@ impl EmailProvider for ImapEmailProvider {
         info!("Deleting message {} from {} (permanent: {})", uid.value(), mailbox_name, permanently);
 
         let mut session = self.selected(&mailbox_name).await?;
-        timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, self.caps(), &[uid.value()], permanently)).await?;
+        let caps = known_caps(&self.caps, &mut session).await?;
+        timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, caps, &[uid.value()], permanently)).await?;
         self.release(session);
 
         info!("Message deleted successfully");
@@ -943,12 +942,13 @@ impl EmailProvider for ImapEmailProvider {
         info!("Deleting {} messages from {} (permanent: {})", uids.len(), mailbox_name, permanently);
 
         let mut session = self.selected(&mailbox_name).await?;
+        let caps = known_caps(&self.caps, &mut session).await?;
         // compress_uid_ranges assumes sorted input — the caller's order is
         // whatever the selection was, so sort here rather than trusting it.
         let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
         uid_nums.sort_unstable();
         for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
-            timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, self.caps(), chunk, permanently)).await?;
+            timed(COMMAND_TIMEOUT, "Delete", delete_uids(&mut session, caps, chunk, permanently)).await?;
         }
         self.release(session);
 
@@ -972,11 +972,12 @@ impl EmailProvider for ImapEmailProvider {
         info!("Moving {} messages from {} to {}", uids.len(), from_name, to_name);
 
         let mut session = self.selected(&from_name).await?;
+        let caps = known_caps(&self.caps, &mut session).await?;
         let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
         uid_nums.sort_unstable();
         let mut moved = HashMap::new();
         for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
-            let pairs = timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, self.caps(), chunk, &to_name)).await?;
+            let pairs = timed(COMMAND_TIMEOUT, "Move", move_uids(&mut session, caps, chunk, &to_name)).await?;
             moved.extend(pairs.into_iter().map(|(old, new)| (ProviderUid::new(old), ProviderUid::new(new))));
         }
         self.release(session);
@@ -1379,10 +1380,31 @@ struct ServerCaps {
 }
 
 impl ServerCaps {
-    fn from_names(has: impl Fn(&str) -> bool) -> Self {
+    /// `None` without a protocol version: every server lists one, so its
+    /// absence means the answer was lost (async-imap ignores a failed tagged
+    /// reply here and hands back an empty set).
+    fn from_names(has: impl Fn(&str) -> bool) -> Option<Self> {
         let rev2 = has("IMAP4rev2");
-        Self { move_cmd: rev2 || has("MOVE"), uidplus: rev2 || has("UIDPLUS") }
+        (rev2 || has("IMAP4rev1")).then(|| Self { move_cmd: rev2 || has("MOVE"), uidplus: rev2 || has("UIDPLUS") })
     }
+}
+
+/// The server's extensions, asking again when the login could not learn
+/// them. Guessing "none" would take the degraded move/delete path on a
+/// server that supports better, so an unknown answer refuses the operation.
+async fn known_caps<T>(cell: &OnceLock<ServerCaps>, session: &mut async_imap::Session<T>) -> Result<ServerCaps, DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    if let Some(caps) = cell.get() {
+        return Ok(*caps);
+    }
+    let unknown = |why: &dyn std::fmt::Display| {
+        DomainError::Provider(format!("server capabilities unknown, not moving or deleting: {why}"))
+    };
+    let names = exchange(COMMAND_TIMEOUT, "CAPABILITY", session.capabilities()).await.map_err(|e| unknown(&e))?;
+    let caps = ServerCaps::from_names(|name| names.has_str(name)).ok_or_else(|| unknown(&"no protocol version listed"))?;
+    Ok(*cell.get_or_init(|| caps))
 }
 
 /// An IMAP quoted string.
@@ -1452,19 +1474,19 @@ where
     }
     let copied = transfer(session, "COPY", &set, to).await?;
     store(session, &set, "+FLAGS.SILENT (\\Deleted)", "Delete flag").await?;
-    // Otherwise the source copies stay flagged: sync already reads \Deleted
-    // as gone, and the next client to expunge clears them.
-    if caps.uidplus || !others_deleted(session, uids).await? {
-        expunge(session, caps, &set).await?;
+    if caps.uidplus {
+        uid_expunge(session, &set).await?;
     }
     Ok(copied)
 }
 
 /// Flag `uids` (ascending) `\Deleted` in the selected mailbox and, when
-/// `permanently`, expunge exactly them. Without UIDPLUS the only expunge is
-/// the mailbox-wide one, which would also purge mail other clients merely
-/// marked (maybe to undo): then a permanent delete is refused, before any
-/// change, rather than reported done.
+/// `permanently` and the server has UIDPLUS, expunge exactly them.
+///
+/// Never a plain `EXPUNGE`: it purges every `\Deleted` message in the
+/// mailbox, including ones another client merely marked (maybe to undo),
+/// and checking first is a race. Without UIDPLUS the marked copies stay
+/// until some client expunges them; sync already reads `\Deleted` as gone.
 async fn delete_uids<T>(
     session: &mut async_imap::Session<T>,
     caps: ServerCaps,
@@ -1475,43 +1497,21 @@ where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
     let set = ImapEmailProvider::compress_uid_ranges(uids);
-    if permanently && !caps.uidplus && others_deleted(session, uids).await? {
-        return Err(DomainError::NotSupported(
-            "permanent delete: the server can only expunge every message marked deleted in this folder \
-             at once, and other messages are marked"
-                .into(),
-        ));
-    }
     store(session, &set, "+FLAGS.SILENT (\\Deleted)", "Delete flag").await?;
-    if permanently {
-        expunge(session, caps, &set).await?;
+    if permanently && caps.uidplus {
+        uid_expunge(session, &set).await?;
     }
     Ok(())
 }
 
-/// Whether the selected mailbox has `\Deleted` messages other than `ours`.
-async fn others_deleted<T>(session: &mut async_imap::Session<T>, ours: &[u32]) -> Result<bool, DomainError>
-where
-    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
-{
-    let deleted = exchange(COMMAND_TIMEOUT, "UID SEARCH DELETED", session.uid_search("DELETED")).await?;
-    Ok(deleted.iter().any(|uid| ours.binary_search(uid).is_err()))
-}
-
-/// `UID EXPUNGE uid_set` with UIDPLUS, else the plain mailbox-wide
-/// `EXPUNGE` — callers only get there once nothing else is marked.
-async fn expunge<T>(session: &mut async_imap::Session<T>, caps: ServerCaps, uid_set: &str) -> Result<(), DomainError>
+async fn uid_expunge<T>(session: &mut async_imap::Session<T>, uid_set: &str) -> Result<(), DomainError>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
     use futures::TryStreamExt;
 
     exchange(COMMAND_TIMEOUT, "Expunge", async {
-        if caps.uidplus {
-            session.uid_expunge(uid_set).await?.try_collect::<Vec<_>>().await
-        } else {
-            session.expunge().await?.try_collect::<Vec<_>>().await
-        }
+        session.uid_expunge(uid_set).await?.try_collect::<Vec<_>>().await
     })
     .await
     .map(drop)
@@ -1863,17 +1863,9 @@ mod tests {
             "$T OK [COPYUID 7 5 78] Done\r\n"
         } else if command.contains("EXPUNGE") {
             "* 3 EXPUNGE\r\n$T OK Done\r\n"
-        } else if command == "UID SEARCH DELETED" {
-            // Only what the command itself flagged.
-            "* SEARCH 6\r\n$T OK Done\r\n"
         } else {
             "$T OK Done\r\n"
         }
-    }
-
-    /// Another client marked UID 9 deleted and has not expunged it.
-    fn others_marked(command: &str) -> &'static str {
-        if command == "UID SEARCH DELETED" { "* SEARCH 6 9\r\n$T OK Done\r\n" } else { server_reply(command) }
     }
 
     #[tokio::test]
@@ -1901,30 +1893,35 @@ mod tests {
         );
     }
 
+    /// A plain EXPUNGE would purge mail another client merely marked.
     #[tokio::test]
-    async fn without_uidplus_expunge_runs_only_when_nothing_else_is_marked() {
+    async fn without_uidplus_nothing_is_ever_expunged() {
         let caps = ServerCaps::default();
 
         let (mut session, commands) = scripted(server_reply).await;
         delete_uids(&mut session, caps, &[6], true).await.unwrap();
-        assert!(uid_commands(&commands).iter().any(|c| c == "EXPUNGE"), "{commands:?}");
+        assert_eq!(uid_commands(&commands), ["UID STORE 6 +FLAGS.SILENT (\\Deleted)"]);
 
-        let (mut session, commands) = scripted(others_marked).await;
+        let (mut session, commands) = scripted(server_reply).await;
         move_uids(&mut session, caps, &[5], "Archive").await.unwrap();
-        assert!(
-            uid_commands(&commands).iter().all(|c| !c.contains("EXPUNGE")),
-            "a plain EXPUNGE would purge another client's \\Deleted mail: {commands:?}"
-        );
+        assert_eq!(uid_commands(&commands), ["UID COPY 5 \"Archive\"", "UID STORE 5 +FLAGS.SILENT (\\Deleted)"]);
     }
 
     #[tokio::test]
-    async fn without_uidplus_a_permanent_delete_that_would_purge_others_is_refused() {
-        let (mut session, commands) = scripted(others_marked).await;
+    async fn unknown_capabilities_are_asked_again_and_refuse_when_still_unknown() {
+        let (mut session, _) = scripted(|command| {
+            if command == "CAPABILITY" { "* CAPABILITY IMAP4rev1 MOVE UIDPLUS\r\n$T OK Done\r\n" } else { "$T OK Done\r\n" }
+        })
+        .await;
+        let cell = OnceLock::new();
+        let caps = known_caps(&cell, &mut session).await.unwrap();
+        assert!(caps.move_cmd && caps.uidplus);
+        assert!(cell.get().is_some(), "learned once");
 
-        let err = delete_uids(&mut session, ServerCaps::default(), &[6], true).await.unwrap_err();
-
-        assert!(matches!(err, DomainError::NotSupported(_)), "{err:?}");
-        assert_eq!(uid_commands(&commands), ["UID SEARCH DELETED"], "refused before changing anything");
+        let (mut session, commands) = scripted(|_| "$T BAD no\r\n").await;
+        let err = known_caps(&OnceLock::new(), &mut session).await.unwrap_err();
+        assert!(matches!(err, DomainError::Provider(_)), "{err:?}");
+        assert_eq!(uid_commands(&commands), ["CAPABILITY"], "nothing moved or deleted on a guess");
     }
 
     #[tokio::test]
@@ -2006,10 +2003,11 @@ mod tests {
 
     #[test]
     fn imap4rev2_implies_move_and_uidplus() {
-        let rev2 = ServerCaps::from_names(|name| name == "IMAP4rev2");
+        let rev2 = ServerCaps::from_names(|name| name == "IMAP4rev2").unwrap();
         assert!(rev2.move_cmd && rev2.uidplus);
-        let rev1 = ServerCaps::from_names(|name| name == "UIDPLUS");
+        let rev1 = ServerCaps::from_names(|name| ["IMAP4rev1", "UIDPLUS"].contains(&name)).unwrap();
         assert!(!rev1.move_cmd && rev1.uidplus);
+        assert!(ServerCaps::from_names(|_| false).is_none(), "an empty answer is no answer");
     }
 
     #[test]
