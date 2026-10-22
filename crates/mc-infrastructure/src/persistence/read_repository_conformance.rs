@@ -122,6 +122,7 @@ macro_rules! read_repository_conformance {
                         in_reply_to: None,
                         references: vec![],
                         received_at: at,
+                        restored: false,
                     },
                 )
             };
@@ -209,6 +210,7 @@ macro_rules! read_repository_conformance {
                         in_reply_to: None,
                         references: vec![],
                         received_at: chrono::Utc::now(),
+                        restored: false,
                     },
                 ))
                 .await
@@ -481,6 +483,7 @@ macro_rules! read_repository_conformance {
                     in_reply_to: None,
                     references: vec![],
                     received_at: chrono::Utc::now(),
+                    restored: false,
                 },
                 DomainEvent::MailboxCountsUpdated {
                     mailbox_id,
@@ -585,6 +588,7 @@ macro_rules! read_repository_conformance {
                     in_reply_to: None,
                     references: vec![],
                     received_at,
+                    restored: false,
                 },
             );
             repo.project(&env).await.unwrap();
@@ -728,6 +732,7 @@ macro_rules! read_repository_conformance {
                         in_reply_to: irt.map(|s| s.to_string()),
                         references: vec![],
                         received_at: now,
+                        restored: false,
                     },
                 )
             };
@@ -826,6 +831,7 @@ macro_rules! read_repository_conformance {
                     in_reply_to: None,
                     references: vec![],
                     received_at,
+                    restored: false,
                 },
             );
             repo.project(&env).await.unwrap();
@@ -939,6 +945,7 @@ macro_rules! read_repository_conformance {
                     in_reply_to: None,
                     references: vec![],
                     received_at: chrono::Utc::now(),
+                    restored: false,
                 },
             );
             repo.project(&env).await.unwrap();
@@ -1027,6 +1034,7 @@ macro_rules! read_repository_conformance {
                     size_bytes: 1,
                     has_attachments: false,
                     received_at,
+                    restored: false,
                 },
             )
         }
@@ -1191,6 +1199,7 @@ macro_rules! read_repository_conformance {
                 size_bytes: 100,
                 has_attachments: false,
                 received_at,
+                restored: false,
             };
             (message_id, event)
         }
@@ -1465,6 +1474,7 @@ macro_rules! read_repository_conformance {
                 size_bytes: 1,
                 has_attachments: false,
                 received_at: at(5),
+                restored: false,
             };
             // Sent from another client, then synced from the Sent folder.
             let rare = synced(sent, "me@example.com", "ann.rare@example.com");

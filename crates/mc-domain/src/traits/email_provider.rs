@@ -197,6 +197,8 @@ pub enum FetchRange {
     Since(DateTime<Utc>),
     /// Fetch all messages.
     All,
+    /// Fetch exactly these UIDs (ascending), wherever they fall.
+    Uids(Vec<ProviderUid>),
 }
 
 /// Lightweight envelope summary for list views (without body).

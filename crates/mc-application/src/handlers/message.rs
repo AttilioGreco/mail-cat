@@ -1193,6 +1193,7 @@ mod tests {
                 size_bytes: message.size_bytes,
                 has_attachments: message.has_attachments,
                 received_at: message.received_at,
+                restored: false,
             };
             let env = EventEnvelope::new(message.id.to_string(), AggregateType::Message, 1, event);
             self.events.write().unwrap().insert(message.id.to_string(), vec![env]);

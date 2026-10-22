@@ -81,6 +81,7 @@ impl Message {
             size_bytes,
             has_attachments,
             received_at,
+            restored: false,
         };
 
         let message = Self {
@@ -285,6 +286,7 @@ impl Message {
             size_bytes,
             has_attachments,
             received_at,
+            ..
         } = first
         else {
             return None;
@@ -513,6 +515,7 @@ mod tests {
                 size_bytes: 512,
                 has_attachments: false,
                 received_at: Utc::now(),
+                restored: false,
             },
             event,
             attached,
@@ -610,6 +613,7 @@ mod tests {
                 size_bytes: 2048,
                 has_attachments: false,
                 received_at,
+                restored: false,
             },
             DomainEvent::MessageBodyFetched {
                 message_id: msg_id,

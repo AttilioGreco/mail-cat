@@ -609,9 +609,10 @@ impl AppContext {
                             mailbox_id,
                             envelope: mail_envelope,
                             flags,
+                            restored,
                             ..
                         } => {
-                            if flags.contains(&mc_domain::Flag::Seen) {
+                            if restored || flags.contains(&mc_domain::Flag::Seen) {
                                 continue;
                             }
                             let from = mail_envelope

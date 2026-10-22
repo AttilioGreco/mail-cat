@@ -181,6 +181,10 @@ pub enum DomainEvent {
         size_bytes: u64,
         has_attachments: bool,
         received_at: DateTime<Utc>,
+        /// Brought back by a sync repairing local state (a row dropped while
+        /// the server kept the message), not newly arrived: nothing to notify.
+        #[serde(default)]
+        restored: bool,
     },
 
     /// A message body was fetched and stored (`MessageBodyStore`). The body
@@ -467,6 +471,7 @@ mod tests {
             size_bytes: 4096,
             has_attachments: false,
             received_at: Utc::now(),
+            restored: false,
         };
 
         let json = serde_json::to_string_pretty(&event).unwrap();

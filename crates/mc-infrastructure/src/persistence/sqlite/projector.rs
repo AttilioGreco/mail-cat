@@ -154,6 +154,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             size_bytes,
             has_attachments,
             received_at,
+            ..
         } => {
             let thread_id = Conversation::resolve_thread_id(
                 message_rfc_id.as_deref(),

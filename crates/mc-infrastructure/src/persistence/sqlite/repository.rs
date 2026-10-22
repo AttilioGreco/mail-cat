@@ -1210,6 +1210,7 @@ mod tests {
             size_bytes: 1,
             has_attachments: false,
             received_at: Utc::now(),
+            restored: false,
         };
         (message_id, event)
     }

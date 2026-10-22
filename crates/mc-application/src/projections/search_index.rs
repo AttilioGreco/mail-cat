@@ -401,6 +401,7 @@ mod tests {
                     size_bytes: 0,
                     has_attachments: false,
                     received_at: chrono::Utc::now(),
+                    restored: false,
                 },
             )],
         };

@@ -872,6 +872,7 @@ mod tests {
             in_reply_to: None,
             references: vec![],
             received_at: chrono::Utc::now(),
+            restored: false,
         }));
 
         let event = timeout(Duration::from_secs(1), stream.next())
@@ -906,7 +907,7 @@ mod tests {
             mailbox_id,
             provider_uid: ProviderUid::new(1),
             envelope: mc_domain::Envelope { from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![], subject: "".into(), date: chrono::Utc::now() },
-            flags: vec![], size_bytes: 0, has_attachments: false, message_rfc_id: None, in_reply_to: None, references: vec![], received_at: chrono::Utc::now(),
+            flags: vec![], size_bytes: 0, has_attachments: false, message_rfc_id: None, in_reply_to: None, references: vec![], received_at: chrono::Utc::now(), restored: false,
         }));
         // Correct account → arrives
         bus.publish(envelope(DomainEvent::MessageReceived {
@@ -915,7 +916,7 @@ mod tests {
             mailbox_id,
             provider_uid: ProviderUid::new(2),
             envelope: mc_domain::Envelope { from: vec![], to: vec![], cc: vec![], bcc: vec![], reply_to: vec![], subject: "".into(), date: chrono::Utc::now() },
-            flags: vec![], size_bytes: 0, has_attachments: false, message_rfc_id: None, in_reply_to: None, references: vec![], received_at: chrono::Utc::now(),
+            flags: vec![], size_bytes: 0, has_attachments: false, message_rfc_id: None, in_reply_to: None, references: vec![], received_at: chrono::Utc::now(), restored: false,
         }));
 
         let event = timeout(Duration::from_secs(1), stream.next())

@@ -158,6 +158,11 @@ fn phase_rank(state: &SyncState) -> u8 {
 /// Envelopes fetched and stored per batch; the checkpoint advances after each.
 const ENVELOPE_BATCH: usize = 500;
 
+/// Most messages one sync restores per mailbox (see `restore`). A mailbox
+/// that lost many rows comes back over a few syncs instead of one sync
+/// re-downloading it whole while the account waits.
+const RESTORE_CAP: usize = 2000;
+
 /// Checkpoint keys of one mailbox's sync.
 struct SyncKeys {
     /// Next UID to fetch.
@@ -948,7 +953,7 @@ impl<
                         return Ok(None);
                     }
                 };
-                new_count += self.ingest(provider, local, path, &envelopes).await?;
+                new_count += self.ingest(provider, local, path, &envelopes, false).await?;
                 self.save_checkpoint(&keys.uid_next, last as u64 + 1).await?;
             }
         }
@@ -977,12 +982,14 @@ impl<
     }
 
     /// Store one batch of envelopes, then their bodies when eager.
+    /// `restored`: messages brought back, not new (see `MessageReceived`).
     async fn ingest(
         &self,
         provider: &Arc<PR::Provider>,
         local: &Mailbox,
         path: &MailboxPath,
         envelopes: &[MessageEnvelopeSummary],
+        restored: bool,
     ) -> Result<u32, ApplicationError> {
         let (known_uids, awaiting_uid) = self.uid_state(local, envelopes).await?;
         let mut new_messages: Vec<(MessageId, ProviderUid)> = Vec::new();
@@ -1000,7 +1007,7 @@ impl<
                 other => other,
             };
 
-            let (_message, event) = Message::receive(
+            let (_message, mut event) = Message::receive(
                 local.account_id,
                 local.id,
                 env.provider_uid,
@@ -1013,7 +1020,9 @@ impl<
                 env.has_attachments,
                 env.internal_date,
             );
-            if let DomainEvent::MessageReceived { message_id, .. } = event {
+            if let DomainEvent::MessageReceived { message_id, restored: quiet, .. } = &mut event {
+                *quiet = restored;
+                let message_id = *message_id;
                 new_messages.push((message_id, env.provider_uid));
                 self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
                     .await?;
@@ -1560,12 +1569,17 @@ impl<
         // holds, because a local change dropped a row the server kept.
         // Ingest only walks up from the checkpoint and would never see them.
         // A \Deleted copy is gone as far as sync goes (and may be one we
-        // deleted on a server without UIDPLUS).
+        // deleted on a server without UIDPLUS). Not in Drafts: a draft
+        // discarded or replaced here is deleted on the server afterwards,
+        // and bringing it back in between would resurrect it — a stray
+        // server copy is harmless there, a revived draft is not.
+        let restorable = local.mailbox_type != MailboxType::Drafts;
         let held: HashSet<u32> =
             local_messages.items.iter().filter_map(|m| m.provider_uid.map(|uid| uid.value())).collect();
         let mut unheld: Vec<u32> = remote_entries
             .iter()
-            .filter(|e| e.uid.value() < uid_next && !held.contains(&e.uid.value()) && !e.flags.contains(&Flag::Deleted))
+            .filter(|e| restorable && e.uid.value() < uid_next)
+            .filter(|e| !held.contains(&e.uid.value()) && !e.flags.contains(&Flag::Deleted))
             .map(|e| e.uid.value())
             .collect();
         unheld.sort_unstable();
@@ -1583,9 +1597,10 @@ impl<
         Ok((expunged, flags_changed, restored))
     }
 
-    /// Ingest `uids` (ascending) like new mail, a contiguous run per envelope
-    /// fetch so the messages between them, already stored, aren't fetched
-    /// again. A failed fetch leaves the rest for the next sync.
+    /// Ingest `uids` (ascending) like new mail, but quietly: they were here
+    /// before, so nobody is notified of them again. At most [`RESTORE_CAP`]
+    /// a sync, newest first; a batch the server fails on is skipped, the
+    /// rest still come back, and the next sync tries the remainder.
     async fn restore(
         &self,
         provider: &Arc<PR::Provider>,
@@ -1594,16 +1609,15 @@ impl<
         uids: &[u32],
     ) -> Result<u32, ApplicationError> {
         let mut restored = 0;
-        for run in uids.chunk_by(|a, b| *b == a + 1).flat_map(|run| run.chunks(ENVELOPE_BATCH)) {
-            let range = FetchRange::UidRange { from: run[0], to: run[run.len() - 1] };
-            let envelopes = match provider.fetch_message_envelopes(path, range).await {
-                Ok(envelopes) => envelopes,
-                Err(e) => {
-                    warn!(%path, error = %e, "Failed to fetch envelopes missing locally, retrying next sync");
-                    break;
-                }
-            };
-            restored += self.ingest(provider, local, path, &envelopes).await?;
+        for batch in uids[uids.len().saturating_sub(RESTORE_CAP)..].chunks(ENVELOPE_BATCH) {
+            if self.is_cancelled() {
+                break;
+            }
+            let range = FetchRange::Uids(batch.iter().map(|&uid| ProviderUid::new(uid)).collect());
+            match provider.fetch_message_envelopes(path, range).await {
+                Ok(envelopes) => restored += self.ingest(provider, local, path, &envelopes, true).await?,
+                Err(e) => warn!(%path, error = %e, "Failed to fetch envelopes missing locally, skipping them this sync"),
+            }
         }
         Ok(restored)
     }
@@ -1706,6 +1720,8 @@ mod tests {
         fail_envelopes_from: Option<u32>,
         /// What `find_message` finds, by mailbox path.
         found: HashMap<String, Vec<ProviderUid>>,
+        /// Size of each `FetchRange::Uids` fetch.
+        uid_set_fetches: Mutex<Vec<usize>>,
     }
 
     impl MockEmailProvider {
@@ -1727,6 +1743,7 @@ mod tests {
                 bulk_fetch_calls: Mutex::new(vec![]),
                 fail_envelopes_from: None,
                 found: HashMap::new(),
+            uid_set_fetches: Mutex::default(),
             }
         }
 
@@ -1769,11 +1786,18 @@ mod tests {
             {
                 return Err(DomainError::ConnectionTimeout("envelopes".into()));
             }
+            if let FetchRange::Uids(uids) = &range {
+                self.uid_set_fetches.lock().unwrap().push(uids.len());
+                if self.fail_envelopes_from.is_some_and(|limit| uids.contains(&ProviderUid::new(limit))) {
+                    return Err(DomainError::ConnectionTimeout("envelopes".into()));
+                }
+            }
             Ok(self
                 .envelopes
                 .iter()
                 .filter(|e| match range {
                     FetchRange::UidRange { from, to } => (from..=to).contains(&e.provider_uid.value()),
+                    FetchRange::Uids(ref uids) => uids.contains(&e.provider_uid),
                     _ => true,
                 })
                 .cloned()
@@ -2960,18 +2984,32 @@ mod tests {
         assert_eq!(row_uid(&projector, placeholder), Some(None), "still waiting for its server copy");
     }
 
+    /// A projector for `mailbox` whose checkpoint is already at `uid_next`:
+    /// every server message is below it, where ingest won't look again.
+    async fn synced_up_to(mailbox: &Mailbox, uid_next: u64) -> Arc<MockProjector> {
+        let projector = Arc::new(MockProjector::new());
+        projector.mailboxes.lock().unwrap().push(mailbox.clone());
+        let checkpoint_key = format!("sync:{}:{}", mailbox.account_id, mailbox.path.full_path());
+        projector.save_checkpoint(&checkpoint_key, uid_next).await.unwrap();
+        projector.save_checkpoint(&format!("{checkpoint_key}:validity"), 1).await.unwrap();
+        projector
+    }
+
+    fn stored_uids(projector: &MockProjector) -> Vec<u32> {
+        let mut uids: Vec<_> = projector.stored.lock().unwrap().iter().filter_map(|m| m.provider_uid.map(|u| u.value())).collect();
+        uids.sort_unstable();
+        uids
+    }
+
     /// A row dropped here while the server kept the message, below the
-    /// checkpoint where ingest never looks again: reconcile brings it back.
-    /// A copy marked \Deleted on the server stays gone.
+    /// checkpoint where ingest never looks again: reconcile brings it back,
+    /// quietly (no new-mail notification). A copy marked \Deleted on the
+    /// server stays gone.
     #[tokio::test]
     async fn a_message_still_on_the_server_comes_back_below_the_checkpoint() {
         let account_id = AccountId::new();
         let archive = archive_mailbox(account_id);
-        let projector = Arc::new(MockProjector::new());
-        projector.mailboxes.lock().unwrap().push(archive.clone());
-        let checkpoint_key = format!("sync:{account_id}:Archive");
-        projector.save_checkpoint(&checkpoint_key, 5).await.unwrap();
-        projector.save_checkpoint(&format!("{checkpoint_key}:validity"), 1).await.unwrap();
+        let projector = synced_up_to(&archive, 5).await;
         let mut deleted = envelope(4, "<deleted@example.com>");
         deleted.flags = vec![Flag::Deleted];
         let provider = MockEmailProvider::new()
@@ -2980,8 +3018,61 @@ mod tests {
 
         make_service(provider, Arc::new(MockEventStore::new()), projector.clone()).start_sync(&account_id).await.unwrap();
 
-        let uids: Vec<_> = projector.stored.lock().unwrap().iter().filter_map(|m| m.provider_uid.map(|u| u.value())).collect();
-        assert_eq!(uids, [3]);
+        assert_eq!(stored_uids(&projector), [3]);
+        assert!(
+            projector.projected_events().iter().all(|e| !matches!(e, DomainEvent::MessageReceived { restored: false, .. })),
+            "a restored message is not announced as new"
+        );
+    }
+
+    /// A draft discarded here is deleted on the server only afterwards; a
+    /// Drafts sync in between must not bring it back.
+    #[tokio::test]
+    async fn drafts_are_never_restored() {
+        let account_id = AccountId::new();
+        let (drafts, _) = Mailbox::discover(account_id, MailboxPath::new(vec!["Drafts".to_string()], '/').unwrap(), MailboxType::Drafts);
+        let projector = synced_up_to(&drafts, 5).await;
+        let provider = MockEmailProvider::new().with_mailboxes(vec![drafts]).with_envelopes(vec![envelope(3, "<draft@example.com>")]);
+
+        make_service(provider, Arc::new(MockEventStore::new()), projector.clone()).start_sync(&account_id).await.unwrap();
+
+        assert!(stored_uids(&projector).is_empty());
+    }
+
+    /// One sync restores at most RESTORE_CAP, newest first, in UID-set
+    /// fetches of a batch each; the rest wait for the next sync.
+    #[tokio::test]
+    async fn restoring_is_capped_per_sync() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let total = RESTORE_CAP as u32 + 1;
+        let projector = synced_up_to(&archive, total as u64 + 1).await;
+        let provider = Arc::new(MockEmailProvider::new().with_mailboxes(vec![archive]).with_envelopes(batch_of(total)));
+        let registry = Arc::new(MockProviderRegistry::new(provider.clone()));
+        let service = SyncService::new(registry, Arc::new(MockEventStore::new()), projector.clone(), SyncConfig::default());
+
+        service.start_sync(&account_id).await.unwrap();
+
+        let uids = stored_uids(&projector);
+        assert_eq!((uids.len(), uids[0]), (RESTORE_CAP, 2), "the oldest one waits");
+        assert_eq!(*provider.uid_set_fetches.lock().unwrap(), [ENVELOPE_BATCH; RESTORE_CAP / ENVELOPE_BATCH]);
+
+        service.start_sync(&account_id).await.unwrap();
+        assert_eq!(stored_uids(&projector).len(), total as usize, "and comes back next sync");
+    }
+
+    /// A batch the server fails on doesn't hold back the others.
+    #[tokio::test]
+    async fn a_failing_restore_batch_is_skipped() {
+        let account_id = AccountId::new();
+        let archive = archive_mailbox(account_id);
+        let projector = synced_up_to(&archive, 601).await;
+        let mut provider = MockEmailProvider::new().with_mailboxes(vec![archive]).with_envelopes(batch_of(600));
+        provider.fail_envelopes_from = Some(1);
+
+        make_service(provider, Arc::new(MockEventStore::new()), projector.clone()).start_sync(&account_id).await.unwrap();
+
+        assert_eq!(stored_uids(&projector), (501..=600).collect::<Vec<_>>());
     }
 
     #[tokio::test]
@@ -3097,6 +3188,7 @@ mod tests {
             bulk_fetch_calls: Mutex::new(vec![]),
             fail_envelopes_from: None,
             found: HashMap::new(),
+            uid_set_fetches: Mutex::default(),
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 10,
@@ -3219,6 +3311,7 @@ mod tests {
             bulk_fetch_calls: Mutex::new(vec![]),
             fail_envelopes_from: None,
             found: HashMap::new(),
+            uid_set_fetches: Mutex::default(),
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 1,
@@ -3265,6 +3358,7 @@ mod tests {
             bulk_fetch_calls: Mutex::new(vec![]),
             fail_envelopes_from: None,
             found: HashMap::new(),
+            uid_set_fetches: Mutex::default(),
             status: Some(MailboxStatus {
                 uid_validity: 42,
                 uid_next: 100,
@@ -3311,6 +3405,7 @@ mod tests {
             bulk_fetch_calls: Mutex::new(vec![]),
             fail_envelopes_from: None,
             found: HashMap::new(),
+            uid_set_fetches: Mutex::default(),
             status: Some(MailboxStatus {
                 uid_validity: 1,
                 uid_next: 1,

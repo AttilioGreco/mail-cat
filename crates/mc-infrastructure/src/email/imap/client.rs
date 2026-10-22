@@ -546,15 +546,22 @@ impl EmailProvider for ImapEmailProvider {
         range: FetchRange,
     ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
         debug!("Fetching envelopes from mailbox: {:?}", mailbox);
+        if matches!(&range, FetchRange::Uids(uids) if uids.is_empty()) {
+            return Ok(Vec::new());
+        }
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
         let mut session = self.selected(&mailbox_name).await?;
 
         // Use SEARCH to find actual existing UIDs (handles UID gaps from deleted messages)
-        let search_criteria = match range {
+        let search_criteria = match &range {
             FetchRange::All => "ALL".to_string(),
             FetchRange::UidRange { from, to } => format!("UID {}:{}", from, to),
             FetchRange::Last(_) => "ALL".to_string(),
             FetchRange::Since(date) => format!("SINCE {}", date.format("%d-%b-%Y")),
+            FetchRange::Uids(uids) => {
+                let uids: Vec<u32> = uids.iter().map(|u| u.value()).collect();
+                format!("UID {}", Self::compress_uid_ranges(&uids))
+            }
         };
 
         debug!("Executing UID SEARCH with criteria: {}", search_criteria);
