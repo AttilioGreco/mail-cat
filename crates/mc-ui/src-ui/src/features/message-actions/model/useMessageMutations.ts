@@ -24,24 +24,18 @@ async function removeFromLists(qc: ReturnType<typeof useQueryClient>, ids: strin
   qc.setQueriesData<{ messageId: string }[]>({ queryKey: ['search'] }, (hits) =>
     hits?.filter((h) => !gone.has(h.messageId)),
   );
-  // A conversation row loses each removed message it holds. Its members are
-  // known only when a thread holding its sample message is cached; otherwise
-  // the sample is the one member known. Rows left empty go; the refetch fills
-  // in the rest.
-  const threads = qc.getQueriesData<ThreadMessage[]>({ queryKey: ['thread'] }).map(([, t]) => t ?? []);
+  // A conversation row counts only its own mailbox's messages, while a cached
+  // thread spans every mailbox and doesn't say which member lives where. So
+  // a row only loses its sample message, the one member known to be its own;
+  // the refetch settles the rest. A row left empty goes.
+  const threadMembers = qc.getQueriesData<ThreadMessage[]>({ queryKey: ['thread'] }).flatMap(([, t]) => t ?? []);
   qc.setQueriesData<ConversationSummary[]>({ queryKey: ['conversations'] }, (rows) =>
     rows?.flatMap((c) => {
-      const members = threads.find((t) => t.some((m) => m.id === c.sampleMessageId));
-      const removed = members
-        ? members.filter((m) => gone.has(m.id))
-        : gone.has(c.sampleMessageId)
-          ? [undefined]
-          : [];
-      if (removed.length === 0) return [c];
-      const messageCount = c.messageCount - removed.length;
-      if (messageCount <= 0) return [];
-      const unreadRemoved = removed.filter((m) => m && !m.isRead).length;
-      return [{ ...c, messageCount, unreadCount: Math.max(0, c.unreadCount - unreadRemoved) }];
+      if (!gone.has(c.sampleMessageId)) return [c];
+      if (c.messageCount <= 1) return [];
+      const sample = threadMembers.find((m) => m.id === c.sampleMessageId);
+      const unread = sample && !sample.isRead ? 1 : 0;
+      return [{ ...c, messageCount: c.messageCount - 1, unreadCount: Math.max(0, c.unreadCount - unread) }];
     }),
   );
   // After the conversations: they read the threads as they were.
