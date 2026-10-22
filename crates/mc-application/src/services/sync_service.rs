@@ -182,6 +182,20 @@ fn percent(processed: u32, total: u32) -> u8 {
     ((processed as u64 * 100 / total as u64).min(100)) as u8
 }
 
+/// The next request and every one already queued behind it, each mailbox
+/// once. `None` once all senders are gone.
+async fn resync_batch(
+    requests: &mut tokio::sync::mpsc::UnboundedReceiver<(AccountId, MailboxPath)>,
+) -> Option<Vec<(AccountId, MailboxPath)>> {
+    let mut batch = vec![requests.recv().await?];
+    while let Ok(request) = requests.try_recv() {
+        if !batch.contains(&request) {
+            batch.push(request);
+        }
+    }
+    Some(batch)
+}
+
 impl<
     PR: ProviderRegistry,
     ES: EventStore,
@@ -785,11 +799,13 @@ impl<
         }
     }
 
-    /// Lightweight sync for a single mailbox starting from a given UID.
+    /// Sync a single mailbox: new envelopes from `from_uid` (or its
+    /// checkpoint, if later), then reconciliation of what it holds. No
+    /// account-wide scan.
     ///
-    /// Called by the IMAP IDLE watcher on `NewMessage` notifications. Only fetches
-    /// new envelopes (no reconciliation, no account-wide scan). Updates the checkpoint
-    /// so the next `start_sync` won't re-fetch the same messages.
+    /// Called by the IMAP IDLE watcher on `NewMessage` notifications and on
+    /// resync requests. Updates the checkpoint so the next `start_sync` won't
+    /// re-fetch the same messages.
     ///
     /// Returns the number of new messages stored.
     #[instrument(skip(self), fields(%account_id, %mailbox_path, uid = from_uid.value()))]
@@ -839,6 +855,20 @@ impl<
         Ok(new_count)
     }
 
+    /// Serve the resync requests message commands send when the server did
+    /// more than they could record, until the senders are gone. A burst
+    /// (a bulk move's chunks) syncs each mailbox once.
+    pub async fn serve_resyncs(&self, mut requests: tokio::sync::mpsc::UnboundedReceiver<(AccountId, MailboxPath)>) {
+        while let Some(batch) = resync_batch(&mut requests).await {
+            for (account_id, path) in batch {
+                // UID 0: from the mailbox's checkpoint.
+                if let Err(e) = self.sync_mailbox(&account_id, &path, ProviderUid::new(0)).await {
+                    warn!(%path, error = %e, "Resync failed");
+                }
+            }
+        }
+    }
+
     /// Cancels an ongoing sync operation.
     ///
     /// The sync loop checks the cancellation flag between mailboxes and
@@ -872,6 +902,15 @@ impl<
         let keys = SyncKeys::new(&local.account_id, path);
         let (resume, renumbering) = self.resume_point(local, &keys, &status).await?;
         let from = if renumbering { resume } else { resume.max(from) };
+        // A renumbering settles its own UID-less rows (drop_unclaimed).
+        let waiting = if renumbering {
+            Vec::new()
+        } else {
+            self.projector
+                .uidless_messages(&local.id)
+                .await
+                .map_err(|e| ApplicationError::SyncFailed(format!("uidless_messages failed: {e}")))?
+        };
 
         let mut new_count = 0;
         if from < status.uid_next {
@@ -925,7 +964,8 @@ impl<
 
         self.update_mailbox_counts(local, status.total_messages, status.unseen_messages)
             .await?;
-        let (expunged, flags_changed) = self.reconcile_mailbox(provider, local, path).await?;
+        let (mut expunged, flags_changed) = self.reconcile_mailbox(provider, local, path).await?;
+        expunged += self.settle_uidless(provider, local, path, waiting).await?;
         if expunged > 0 || flags_changed > 0 {
             let updated = provider.mailbox_status(path).await.unwrap_or(status);
             self.update_mailbox_counts(local, updated.total_messages, updated.unseen_messages)
@@ -1156,6 +1196,76 @@ impl<
             self.save_checkpoint(&keys.renumbering, status.uid_validity as u64).await?;
         }
         Ok((resume().await, true))
+    }
+
+    /// Rows already waiting for a UID before this sync, and still waiting
+    /// after its ingest: reconcile goes by UID and skips them, so nothing
+    /// else would ever resolve them. The server copy found by Message-ID
+    /// (one no other row holds) gives the UID back; with none the message is
+    /// gone and is deleted here. Sent placeholders and drafts are ours and
+    /// wait for their server copy instead. A server that can't answer
+    /// leaves them for the next sync. Returns how many were deleted.
+    async fn settle_uidless(
+        &self,
+        provider: &Arc<PR::Provider>,
+        mailbox: &Mailbox,
+        path: &MailboxPath,
+        waiting: Vec<MessageId>,
+    ) -> Result<u32, ApplicationError> {
+        if waiting.is_empty() || mailbox.mailbox_type == MailboxType::Drafts {
+            return Ok(0);
+        }
+        let mut deleted = 0;
+        for message_id in waiting {
+            if self.is_sent_placeholder(&message_id).await {
+                continue;
+            }
+            let events = self
+                .event_store
+                .load_events(&message_id.to_string(), 0)
+                .await
+                .map_err(|e| ApplicationError::SyncFailed(format!("Failed to load events: {e}")))?;
+            let events: Vec<DomainEvent> = events.into_iter().map(|e| e.payload).collect();
+            let gone = events.iter().any(|e| matches!(e, DomainEvent::MessageDeleted { .. }));
+            let Some(message) = Message::rehydrate(&events).filter(|_| !gone) else {
+                continue;
+            };
+            if message.mailbox_id != mailbox.id || message.provider_uid.is_some() {
+                continue;
+            }
+            let found = match message.message_rfc_id.as_deref() {
+                Some(rfc_id) => match provider.find_message(path, rfc_id).await {
+                    Ok(found) => found,
+                    Err(e) => {
+                        warn!(%message_id, error = %e, "Could not look for a UID-less message, keeping it");
+                        continue;
+                    }
+                },
+                None => Vec::new(),
+            };
+            let held = self
+                .projector
+                .held_uids(&mailbox.id, &found)
+                .await
+                .map_err(|e| ApplicationError::SyncFailed(format!("held_uids failed: {e}")))?;
+            let free = found.into_iter().rev().find(|uid| !held.contains(uid));
+            let changed = self
+                .update_message(&message_id, |m| {
+                    if m.mailbox_id != mailbox.id || m.provider_uid.is_some() {
+                        return None;
+                    }
+                    match free {
+                        Some(uid) => m.attach_uid(mailbox.id, uid),
+                        None => Some(m.delete(false)),
+                    }
+                })
+                .await?;
+            if changed && free.is_none() {
+                info!(%message_id, "UID-less and not on the server, deleted locally");
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 
     /// After a renumbered mailbox's whole new epoch was ingested, the received
@@ -2743,6 +2853,58 @@ mod tests {
         make_service(provider, event_store, projector.clone()).start_sync(&account_id).await.unwrap();
 
         assert_eq!(row_uid(&projector, waiting), Some(None), "still there, still waiting");
+    }
+
+    /// A row waiting for a UID that the server no longer has goes; reconcile
+    /// works by UID and would keep it, unactionable, forever. A Sent
+    /// placeholder waits for its server copy and stays.
+    #[tokio::test]
+    async fn a_uid_less_row_the_server_no_longer_has_is_deleted_but_a_placeholder_stays() {
+        let account_id = AccountId::new();
+        let inbox = inbox_mailbox(account_id);
+        let (sent, _) = Mailbox::discover(account_id, MailboxPath::new(vec!["Sent".to_string()], '/').unwrap(), MailboxType::Sent);
+        let (event_store, projector) = (Arc::new(MockEventStore::new()), Arc::new(MockProjector::new()));
+        let stranded = seed(&event_store, &projector, &inbox, None, "<gone@example.com>");
+        let placeholder = MessageId::new();
+        event_store.events.lock().unwrap().push((
+            placeholder.to_string(),
+            DomainEvent::MessageSent {
+                message_id: placeholder,
+                account_id,
+                mailbox_id: sent.id,
+                envelope: test_envelope(),
+                message_rfc_id: Some("<out@example.com>".into()),
+                in_reply_to: None,
+                references: vec![],
+                body_text: None,
+                body_html: None,
+                sent_at: chrono::Utc::now(),
+            },
+        ));
+        let mut row = archived(account_id, sent.id, None);
+        row.id = placeholder;
+        projector.stored.lock().unwrap().push(row);
+        projector.mailboxes.lock().unwrap().extend([inbox.clone(), sent.clone()]);
+
+        let provider = MockEmailProvider::new().with_mailboxes(vec![inbox, sent]);
+        make_service(provider, event_store, projector.clone()).start_sync(&account_id).await.unwrap();
+
+        assert_eq!(row_uid(&projector, stranded), None, "deleted");
+        assert_eq!(row_uid(&projector, placeholder), Some(None), "still waiting for its server copy");
+    }
+
+    #[tokio::test]
+    async fn resync_requests_are_coalesced() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let account = AccountId::new();
+        let archive = MailboxPath::new(vec!["Archive".to_string()], '/').unwrap();
+        for path in [MailboxPath::inbox(), archive.clone(), MailboxPath::inbox()] {
+            tx.send((account, path)).unwrap();
+        }
+
+        assert_eq!(resync_batch(&mut rx).await.unwrap(), [(account, MailboxPath::inbox()), (account, archive)]);
+        drop(tx);
+        assert!(resync_batch(&mut rx).await.is_none());
     }
 
     fn inbox_mailbox(account_id: AccountId) -> Mailbox {

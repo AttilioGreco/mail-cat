@@ -249,7 +249,7 @@ impl AppContext {
 
         // Message commands ask for these when the server did more than they
         // could record; served once the sync service exists.
-        let (resync_tx, mut resync_rx) = tokio::sync::mpsc::unbounded_channel::<(AccountId, MailboxPath)>();
+        let (resync_tx, resync_rx) = tokio::sync::mpsc::unbounded_channel::<(AccountId, MailboxPath)>();
 
         // Create command bus
         let command_bus = Arc::new(InProcessCommandBus::new(
@@ -295,14 +295,7 @@ impl AppContext {
 
         {
             let sync = Arc::clone(&sync_service);
-            tokio::spawn(async move {
-                while let Some((account_id, path)) = resync_rx.recv().await {
-                    // UID 0: from the mailbox's checkpoint, then reconcile.
-                    if let Err(e) = sync.sync_mailbox(&account_id, &path, ProviderUid::new(0)).await {
-                        tracing::warn!(%path, "Resync after a move failed: {e}");
-                    }
-                }
-            });
+            tokio::spawn(async move { sync.serve_resyncs(resync_rx).await });
         }
 
         // Create projection event handlers and start catching up
