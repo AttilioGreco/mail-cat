@@ -285,69 +285,58 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         Ok(CommandResult::RemoteFlagApplied)
     }
 
+    /// Move the message, from wherever it is when the account's turn comes:
+    /// an action queued ahead may already have moved it. One already in
+    /// `to_mailbox_id` stays put.
     pub async fn handle_move(
         &self,
         message_id: MessageId,
         _from_mailbox_id: MailboxId,
         to_mailbox_id: MailboxId,
-        from_mailbox_path: MailboxPath,
+        _from_mailbox_path: MailboxPath,
         to_mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
-        let account_id = self.load_message(&message_id).await?.0.account_id;
-        let _turn = self.turn(account_id).await;
-        let Some((_, provider_uid)) = self.still_in(&message_id, &from_mailbox_path).await? else {
-            info!(%message_id, "already left {from_mailbox_path}, move skipped");
-            return Ok(CommandResult::MessageMoved);
-        };
-        let dest = Some((to_mailbox_id, &to_mailbox_path));
-        if let (_, Some(refused)) =
-            self.apply_on_server(account_id, &from_mailbox_path, dest, vec![(message_id, provider_uid)]).await
-        {
-            return Err(refused);
-        }
-
+        self.apply_one(message_id, to_mailbox(to_mailbox_id, to_mailbox_path)).await?;
         info!(%message_id, "message moved");
         Ok(CommandResult::MessageMoved)
     }
 
+    /// Standard client behaviour: a plain delete moves the message to the
+    /// Trash folder (Thunderbird-style). Only a permanent delete, a delete of
+    /// a message already in Trash, or the absence of a Trash folder actually
+    /// expunges it. Like a move, it acts on the message where it is when the
+    /// account's turn comes.
     pub async fn handle_delete(
         &self,
         message_id: MessageId,
         _mailbox_id: MailboxId,
-        mailbox_path: MailboxPath,
+        _mailbox_path: MailboxPath,
         permanently: bool,
     ) -> Result<CommandResult, ApplicationError> {
+        self.apply_one(message_id, to_trash_or_expunged(permanently)).await?;
+        info!(%message_id, "message deleted");
+        Ok(CommandResult::MessageDeleted)
+    }
+
+    /// One message's move/delete; `destination` as in [`Self::apply_many`].
+    async fn apply_one(&self, message_id: MessageId, destination: impl Fn(&Mailbox, &[Mailbox]) -> Destination) -> Result<(), ApplicationError> {
         let account_id = self.load_message(&message_id).await?.0.account_id;
         let _turn = self.turn(account_id).await;
-        let Some((message, provider_uid)) = self.still_in(&message_id, &mailbox_path).await? else {
-            info!(%message_id, "already left {mailbox_path}, delete skipped");
-            return Ok(CommandResult::MessageDeleted);
-        };
-
-        // Standard client behaviour: a plain delete moves the message to the
-        // Trash folder (Thunderbird-style). Only a permanent delete, a delete of
-        // a message already in Trash, or the absence of a Trash folder actually
-        // expunges it.
+        let (mut message, mut seq) = self.load_message(&message_id).await?;
         let mailboxes = self.message_read_repo.list_mailboxes(&account_id).await?;
-        let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
-        let source_is_trash = mailboxes
+        let source = mailboxes
             .iter()
             .find(|m| m.id == message.mailbox_id)
-            .map(|m| m.mailbox_type == MailboxType::Trash)
-            .unwrap_or(false);
-
-        let dest = (!permanently && !source_is_trash)
-            .then_some(trash)
-            .flatten()
-            .map(|trash| (trash.id, &trash.path));
-        if let (_, Some(refused)) =
-            self.apply_on_server(account_id, &mailbox_path, dest, vec![(message_id, provider_uid)]).await
-        {
-            return Err(refused);
+            .ok_or_else(|| ApplicationError::NotFound("Mailbox", message.mailbox_id.to_string()))?;
+        let Some(dest) = destination(source, &mailboxes) else {
+            return Ok(());
+        };
+        let uid = self.remote_uid(&mut message, &mut seq, &source.path).await?;
+        let dest = dest.as_ref().map(|(id, path)| (*id, path));
+        match self.apply_on_server(account_id, &source.path, dest, vec![(message_id, uid)]).await {
+            (_, Some(refused)) => Err(refused),
+            _ => Ok(()),
         }
-
-        info!(%message_id, to_trash = dest.is_some(), "message deleted");
-        Ok(CommandResult::MessageDeleted)
     }
 
     /// Bulk delete. Applies the same Trash-vs-expunge rules as [`Self::handle_delete`]
@@ -364,12 +353,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         message_ids: Vec<MessageId>,
         permanently: bool,
     ) -> Result<CommandResult, ApplicationError> {
-        self.apply_many(message_ids, |source, mailboxes| {
-            let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
-            let to_trash = !permanently && source.mailbox_type != MailboxType::Trash;
-            Some(to_trash.then_some(trash).flatten().map(|t| (t.id, t.path.clone())))
-        })
-        .await
+        self.apply_many(message_ids, to_trash_or_expunged(permanently)).await
     }
 
     /// Bulk move to a single destination, grouped like [`Self::handle_delete_many`].
@@ -379,12 +363,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         to_mailbox_id: MailboxId,
         to_mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
-        self.apply_many(message_ids, |source, _| {
-            // Moving a message to the folder it already sits in is a no-op, not
-            // a copy — skip it before it reaches the server.
-            (source.id != to_mailbox_id).then(|| Some((to_mailbox_id, to_mailbox_path.clone())))
-        })
-        .await
+        self.apply_many(message_ids, to_mailbox(to_mailbox_id, to_mailbox_path)).await
     }
 
     /// Bulk move/delete. `destination` picks, from a message's source mailbox
@@ -394,7 +373,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     async fn apply_many(
         &self,
         message_ids: Vec<MessageId>,
-        destination: impl Fn(&Mailbox, &[Mailbox]) -> Option<Option<(MailboxId, MailboxPath)>>,
+        destination: impl Fn(&Mailbox, &[Mailbox]) -> Destination,
     ) -> Result<CommandResult, ApplicationError> {
         let (mut failed, mut succeeded) = (0u32, 0u32);
         let mut by_account: HashMap<AccountId, Vec<MessageId>> = HashMap::new();
@@ -884,7 +863,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
         if let (Some(uid), Some(mailbox)) = (uid, mailbox) {
             let provider = self.provider_registry.get_provider(&message.account_id)?;
+            let this = self.clone();
             tokio::spawn(async move {
+                let _turn = this.turn(message.account_id).await;
                 if let Err(e) = provider.delete_message(&mailbox.path, uid, true).await {
                     tracing::warn!(%e, "Background IMAP draft delete failed — next sync will reconcile");
                 }
@@ -899,25 +880,6 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     async fn turn(&self, account_id: AccountId) -> tokio::sync::OwnedMutexGuard<()> {
         let queue = Arc::clone(self.account_queues.lock().unwrap().entry(account_id).or_default());
         queue.lock_owned().await
-    }
-
-    /// The message and its UID in `mailbox_path`, or `None` when it is gone
-    /// or no longer there — an action queued ahead of this one moved it.
-    async fn still_in(
-        &self,
-        message_id: &MessageId,
-        mailbox_path: &MailboxPath,
-    ) -> Result<Option<(Message, ProviderUid)>, ApplicationError> {
-        let (mut message, mut seq) = match self.load_message(message_id).await {
-            Err(ApplicationError::NotFound(..)) => return Ok(None),
-            loaded => loaded?,
-        };
-        let mailbox = self.message_read_repo.get_mailbox(&message.mailbox_id).await?;
-        if !mailbox.is_some_and(|m| m.path.full_path() == mailbox_path.full_path()) {
-            return Ok(None);
-        }
-        let uid = self.remote_uid(&mut message, &mut seq, mailbox_path).await?;
-        Ok(Some((message, uid)))
     }
 
     /// Move `members` (message, UID) from `from` to `dest`, or expunge them
@@ -946,7 +908,12 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             };
             let new_uids = match applied {
                 Ok(new_uids) => new_uids,
-                Err(e) => return (done, Some(e.into())),
+                Err(e) => {
+                    // A timeout or a dropped connection may come after the
+                    // server applied it: let a sync tell.
+                    self.request_resync(account_id, from, dest.map(|(_, to)| to));
+                    return (done, Some(e.into()));
+                }
             };
             for &(message_id, uid) in chunk {
                 if let Err(e) = self.record_applied(&provider, message_id, dest, new_uids.get(&uid).copied()).await {
@@ -964,11 +931,11 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
     /// Record a move or expunge the server confirmed. A moved message is
     /// recorded in `dest` only with evidence of its UID there — reported by
-    /// the server, else found by Message-ID. With neither (the UID had
-    /// already vanished, say) it is left without a UID where it was: a
-    /// UID-less row is not acted on blindly, and the resync this asks for
-    /// reattaches it wherever the server really has it. `Err` means local
-    /// state is out of step and needs that resync.
+    /// the server, else found by Message-ID. With neither, the server had
+    /// nothing under that UID any more (another client moved it) or the
+    /// destination copy already belongs to another row: either way the real
+    /// copy is, or will be, synced as a row of its own, so this one goes.
+    /// `Err` means local state is out of step and needs a resync.
     async fn record_applied(
         &self,
         provider: &PR::Provider,
@@ -992,13 +959,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         if let Some(uid) = new_uid {
             return self.record(&message_id, |m| Some(m.move_to(to_id, Some(uid)))).await.map(drop);
         }
-        // Without a Message-ID nothing could ever find it again: the
-        // destination's sync brings it in as a new message.
-        self.record(&message_id, |m| match m.message_rfc_id {
-            Some(_) => m.forget_uid(m.mailbox_id),
-            None => Some(m.delete(false)),
-        })
-        .await?;
+        self.record(&message_id, |m| Some(m.delete(false))).await?;
         Err(ApplicationError::Internal(format!("server confirmed the move to {to_path} without the new UID")))
     }
 
@@ -1137,6 +1098,24 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         self.event_bus.publish(envelope);
 
         Ok(())
+    }
+}
+
+/// Where a move/delete sends a message from its source mailbox (given the
+/// account's mailboxes): `Some(Some(_))` a mailbox, `Some(None)` expunged,
+/// `None` nowhere — it stays put.
+type Destination = Option<Option<(MailboxId, MailboxPath)>>;
+
+/// Moving a message to the folder it already sits in is a no-op, not a copy.
+fn to_mailbox(id: MailboxId, path: MailboxPath) -> impl Fn(&Mailbox, &[Mailbox]) -> Destination {
+    move |source, _| (source.id != id).then(|| Some((id, path.clone())))
+}
+
+fn to_trash_or_expunged(permanently: bool) -> impl Fn(&Mailbox, &[Mailbox]) -> Destination {
+    move |source, mailboxes| {
+        let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
+        let to_trash = !permanently && source.mailbox_type != MailboxType::Trash;
+        Some(to_trash.then_some(trash).flatten().map(|t| (t.id, t.path.clone())))
     }
 }
 
@@ -1296,6 +1275,8 @@ mod tests {
         moved: RwLock<Vec<ProviderUid>>,
         /// Makes `move_message` fail, as a server refusing it.
         refuse: RwLock<bool>,
+        /// `move_message` moves, then times out before the server's answer.
+        time_out: RwLock<bool>,
         /// Makes `move_message` fail once this many messages moved.
         refuse_after: RwLock<Option<usize>>,
         /// Mailbox of each `set_flags_bulk` call.
@@ -1388,6 +1369,9 @@ mod tests {
                 return Err(DomainError::Provider("refused".into()));
             }
             self.moved.write().unwrap().push(uid);
+            if *self.time_out.read().unwrap() {
+                return Err(DomainError::ConnectionTimeout("move".into()));
+            }
             Ok(*self.moved_uid.read().unwrap())
         }
         async fn delete_message(
@@ -2554,58 +2538,76 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
         assert_eq!((stored.mailbox_id, stored.provider_uid), (msg.mailbox_id, msg.provider_uid));
     }
 
-    type ResyncRequests = tokio::sync::mpsc::UnboundedReceiver<(AccountId, MailboxPath)>;
-    type TestHandler = MessageCommandHandler<MockEventStore, MockProviderRegistry, MockMessageReadRepo, MockEventBus>;
+    struct Moving {
+        handler: MessageCommandHandler<MockEventStore, MockProviderRegistry, MockMessageReadRepo, MockEventBus>,
+        provider: Arc<MockEmailProvider>,
+        es: Arc<MockEventStore>,
+        archive: mc_domain::Mailbox,
+        trash: mc_domain::Mailbox,
+        resync: tokio::sync::mpsc::UnboundedReceiver<(AccountId, MailboxPath)>,
+    }
+
+    impl Moving {
+        fn resync_requests(&mut self) -> Vec<MailboxPath> {
+            std::iter::from_fn(|| self.resync.try_recv().ok().map(|(_, path)| path)).collect()
+        }
+
+        async fn location(&self, id: MessageId) -> (MailboxId, Option<ProviderUid>) {
+            let (stored, _) = self.handler.load_message(&id).await.unwrap();
+            (stored.mailbox_id, stored.provider_uid)
+        }
+    }
 
     /// INBOX, Archive and Trash of `msg`'s account, and a handler over them
-    /// that reports resync requests; returns the handler, provider, store,
-    /// Archive and the requests.
-    fn moving(
-        msg: &Message,
-        provider: MockEmailProvider,
-    ) -> (TestHandler, Arc<MockEmailProvider>, Arc<MockEventStore>, mc_domain::Mailbox, ResyncRequests) {
+    /// that reports resync requests.
+    fn moving(msg: &Message, provider: MockEmailProvider) -> Moving {
+        moving_with(msg, provider, MockMessageReadRepo::default())
+    }
+
+    fn moving_with(msg: &Message, provider: MockEmailProvider, repo: MockMessageReadRepo) -> Moving {
         let archive = test_mailbox(msg.account_id, "Archive", MailboxType::Archive);
         let trash = test_mailbox(msg.account_id, "Trash", MailboxType::Trash);
         let provider = Arc::new(provider);
         let es = Arc::new(MockEventStore::with_message(msg));
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, resync) = tokio::sync::mpsc::unbounded_channel();
+        let repo = MockMessageReadRepo { mailboxes: vec![inbox_of(msg), archive.clone(), trash.clone()], ..repo };
         let handler = MessageCommandHandler::new(
             es.clone(),
             Arc::new(MockProviderRegistry::new(provider.clone())),
-            Arc::new(MockMessageReadRepo::with_mailboxes(vec![inbox_of(msg), archive.clone(), trash])),
+            Arc::new(repo),
             Arc::new(MockEventBus::new()),
         )
         .with_resync_requests(tx);
-        (handler, provider, es, archive, rx)
+        Moving { handler, provider, es, archive, trash, resync }
     }
 
     /// Archive, then delete before the list caught up: the delete waits its
-    /// turn, finds the message gone from INBOX, and leaves it alone instead
-    /// of sending its old UID to the server.
+    /// turn and acts on the message where the archive put it, with the UID
+    /// it has there — never the INBOX UID again.
     #[tokio::test]
-    async fn a_second_action_on_a_message_already_moved_is_skipped() {
+    async fn a_delete_queued_behind_a_move_follows_it_to_trash() {
         let msg = make_test_message();
-        let (handler, provider, _, archive, _) = moving(&msg, MockEmailProvider::moving_to(900));
+        let m = moving(&msg, MockEmailProvider::moving_to(900));
+        let archive = m.archive.clone();
 
-        handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
-        let result = handler.handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), false).await.unwrap();
+        m.handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
+        let result = m.handler.handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), false).await.unwrap();
 
         assert!(matches!(result, CommandResult::MessageDeleted));
-        assert_eq!(*provider.moved.read().unwrap(), [ProviderUid::new(42)], "one server call only");
-        let (stored, _) = handler.load_message(&msg.id).await.unwrap();
-        assert_eq!((stored.mailbox_id, stored.provider_uid), (archive.id, Some(ProviderUid::new(900))));
+        assert_eq!(*m.provider.moved.read().unwrap(), [ProviderUid::new(42), ProviderUid::new(900)]);
+        assert_eq!(m.location(msg.id).await, (m.trash.id, Some(ProviderUid::new(900))));
+
+        // Moving it where it already is changes nothing.
+        m.handler.handle_move(msg.id, msg.mailbox_id, m.trash.id, MailboxPath::inbox(), m.trash.path.clone()).await.unwrap();
+        assert_eq!(m.provider.moved.read().unwrap().len(), 2);
     }
 
-    /// The server said OK without COPYUID and the destination has no copy
-    /// to find: nothing may claim the message sits there. It is left
-    /// UID-less where it was, and both mailboxes resync.
-    #[tokio::test]
-    async fn a_move_confirmed_without_evidence_records_no_destination() {
-        let (msg, _) = Message::receive(
+    fn with_rfc_id(rfc_id: &str) -> Message {
+        Message::receive(
             AccountId::new(),
             MailboxId::new(),
             ProviderUid::new(42),
-            Some("<ghost@example.com>".into()),
+            Some(rfc_id.into()),
             None,
             vec![],
             test_envelope(),
@@ -2613,15 +2615,62 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
             0,
             false,
             chrono::Utc::now(),
-        );
-        let (handler, _, _, archive, mut resync) = moving(&msg, MockEmailProvider::new());
+        )
+        .0
+    }
 
-        handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
+    /// The server said OK without COPYUID and the destination has no copy
+    /// to find: nothing may claim the message sits there. The row goes —
+    /// the real copy syncs as its own — and both mailboxes resync.
+    #[tokio::test]
+    async fn a_move_confirmed_without_evidence_records_no_destination() {
+        let msg = with_rfc_id("<ghost@example.com>");
+        let mut m = moving(&msg, MockEmailProvider::new());
+        let archive = m.archive.clone();
 
-        let (stored, _) = handler.load_message(&msg.id).await.unwrap();
-        assert_eq!((stored.mailbox_id, stored.provider_uid), (msg.mailbox_id, None));
-        let requested: Vec<_> = std::iter::from_fn(|| resync.try_recv().ok().map(|(_, path)| path)).collect();
-        assert_eq!(requested, [MailboxPath::inbox(), archive.path]);
+        m.handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
+
+        assert!(matches!(m.handler.load_message(&msg.id).await, Err(ApplicationError::NotFound(..))));
+        assert_eq!(m.resync_requests(), [MailboxPath::inbox(), archive.path]);
+    }
+
+    /// A phone moved it to Archive; the Archive sync already stored that copy
+    /// as a row of its own while this one kept its stale INBOX UID. Archiving
+    /// it here: the server has nothing at that UID (OK, no COPYUID) and the
+    /// Archive copy is the other row's. This row goes rather than lingering
+    /// UID-less in INBOX, and nothing is duplicated.
+    #[tokio::test]
+    async fn archiving_a_message_another_client_already_moved_leaves_one_row() {
+        let msg = with_rfc_id("<phone@example.com>");
+        let provider = MockEmailProvider::new();
+        *provider.found.write().unwrap() = vec![ProviderUid::new(900)];
+        let mut m = moving_with(&msg, provider, MockMessageReadRepo { held: vec![ProviderUid::new(900)], ..Default::default() });
+        let archive = m.archive.clone();
+
+        m.handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
+
+        assert!(matches!(m.handler.load_message(&msg.id).await, Err(ApplicationError::NotFound(..))), "no UID-less row left");
+        let created = m.es.events.read().unwrap().len();
+        assert_eq!(created, 1, "no new row");
+        assert_eq!(m.resync_requests(), [MailboxPath::inbox(), archive.path]);
+    }
+
+    /// The connection dropped after the MOVE went out: it may have been
+    /// applied. The user sees the error, and both mailboxes resync.
+    #[tokio::test]
+    async fn a_timeout_after_a_move_resyncs_both_mailboxes() {
+        let msg = make_test_message();
+        let provider = MockEmailProvider::moving_to(900);
+        *provider.time_out.write().unwrap() = true;
+        let mut m = moving(&msg, provider);
+        let archive = m.archive.clone();
+
+        let result =
+            m.handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await;
+
+        assert!(result.is_err());
+        assert_eq!(m.location(msg.id).await, (msg.mailbox_id, Some(ProviderUid::new(42))));
+        assert_eq!(m.resync_requests(), [MailboxPath::inbox(), archive.path]);
     }
 
     /// The server moved it; recording that loses to a sync appending first.
@@ -2630,22 +2679,24 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
     #[tokio::test]
     async fn recording_a_done_move_retries_past_a_concurrent_append() {
         let msg = make_test_message();
-        let (handler, _, es, archive, mut resync) = moving(&msg, MockEmailProvider::moving_to(900));
-        *es.conflicts.lock().unwrap() = 1;
+        let mut m = moving(&msg, MockEmailProvider::moving_to(900));
+        let archive = m.archive.clone();
+        *m.es.conflicts.lock().unwrap() = 1;
 
-        handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
+        m.handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
 
-        let (stored, _) = handler.load_message(&msg.id).await.unwrap();
+        let (stored, _) = m.handler.load_message(&msg.id).await.unwrap();
         assert_eq!((stored.mailbox_id, stored.provider_uid), (archive.id, Some(ProviderUid::new(900))));
         assert!(stored.flags.contains(&Flag::Flagged), "the other writer's change is kept");
-        assert!(resync.try_recv().is_err());
+        assert!(m.resync_requests().is_empty());
 
         // Losing every time is still no error to the user: a resync repairs it.
         let msg = make_test_message();
-        let (handler, _, es, archive, mut resync) = moving(&msg, MockEmailProvider::moving_to(900));
-        *es.conflicts.lock().unwrap() = RECORD_ATTEMPTS;
-        handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
-        assert!(resync.try_recv().is_ok());
+        let mut m = moving(&msg, MockEmailProvider::moving_to(900));
+        let archive = m.archive.clone();
+        *m.es.conflicts.lock().unwrap() = RECORD_ATTEMPTS;
+        m.handler.handle_move(msg.id, msg.mailbox_id, archive.id, MailboxPath::inbox(), archive.path.clone()).await.unwrap();
+        assert!(!m.resync_requests().is_empty());
     }
 
     /// The server applied the first chunk and refused the second: the first
@@ -2655,7 +2706,7 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
         let first = make_test_message();
         let provider = MockEmailProvider::moving_to(900);
         *provider.refuse_after.write().unwrap() = Some(SERVER_CHUNK);
-        let (handler, _, es, archive, _) = moving(&first, provider);
+        let Moving { handler, es, archive, .. } = moving(&first, provider);
         let mut ids = vec![first.id];
         for _ in 1..=SERVER_CHUNK {
             let other = Message { id: MessageId::new(), ..first.clone() };
@@ -2723,7 +2774,7 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
     #[tokio::test]
     async fn a_flag_store_follows_a_move_queued_ahead_of_it() {
         let msg = make_test_message();
-        let (handler, provider, _, archive, _) = moving(&msg, MockEmailProvider::moving_to(900));
+        let Moving { handler, provider, archive, .. } = moving(&msg, MockEmailProvider::moving_to(900));
         let turn = handler.turn(msg.account_id).await;
 
         let mover = handler.clone();
