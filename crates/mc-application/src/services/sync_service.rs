@@ -2409,6 +2409,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backfill_waits_while_the_account_needs_the_user() {
+        use crate::services::auth_gate::{AuthGates, Credential};
+
+        let service = Arc::new(make_service(
+            MockEmailProvider::new(),
+            Arc::new(MockEventStore::new()),
+            Arc::new(MockProjector::new()),
+        ));
+        let mut rx = service.subscribe_progress();
+        let refresh: crate::RefreshFn = Arc::new(|_, _| Box::pin(async { Err(DomainError::Provider("unused".into())) }));
+        let keychain: Arc<dyn mc_domain::SecretStore> = Arc::new(NoKeychain);
+        let mut gates = AuthGates::new(refresh, keychain, tokio::sync::mpsc::unbounded_channel().0);
+        let account_id = AccountId::new();
+        let gate = gates.add(account_id, "me@example.com", Credential::Password("old".into()));
+        let rejected = DomainError::AuthenticationFailed("NO".into());
+        gate.login_failed(&LoginSecret::Password("old".into()), &rejected, false).await;
+
+        let shutdown = CancellationToken::new();
+        let worker = tokio::spawn({
+            let (service, gate, shutdown) = (service.clone(), gate.clone(), shutdown.clone());
+            async move { service.run_backfill(account_id, None, gate, shutdown).await }
+        });
+
+        let paused = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(paused.is_err(), "a paused account's backfill must not run");
+
+        gate.set_password("new".into());
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+        shutdown.cancel();
+        let _ = worker.await;
+        assert!(event.expect("resumed after the password change").is_ok());
+    }
+
+    struct NoKeychain;
+    impl mc_domain::SecretStore for NoKeychain {
+        fn load(&self, _: &str) -> Result<Option<mc_domain::AccountSecrets>, DomainError> {
+            Ok(None)
+        }
+        fn store(&self, _: &str, _: &mc_domain::AccountSecrets) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
     async fn empty_backfill_queue_announces_itself() {
         // Regression: the worker used to go silent once the queue drained, so a
         // client kept rendering the last in-progress percentage forever.
