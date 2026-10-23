@@ -39,33 +39,26 @@ fn stops_the_pass(e: &DomainError) -> bool {
     )
 }
 
-/// Bodies the backfill downloads between two pauses at the fast rate. Once
-/// throttled it takes one at a time: the pause scales with the bytes, so the
-/// rate is the same, but progress moves per message instead of per minute.
+/// Bodies the backfill downloads per round, between two looks at the meter.
 const BACKFILL_BATCH: usize = 50;
 
-/// Bytes per second the backfill never exceeds, capped account or not: a
-/// mailbox's text arrives in minutes without hammering the server.
-const BACKFILL_FAST_RATE: u64 = 1 << 20;
+/// Share of the daily cap, in percent, the backfill fills at full speed. The
+/// rest is headroom for opened messages and forwards, and for the last batch
+/// overshooting.
+const BACKFILL_CAP_PERCENT: u64 = 90;
 
-/// Pause after a backfill batch that cost `batch_bytes`, given `spent` bytes
-/// downloaded in the last 24 h. Under a daily cap the first half of it goes
-/// at the fast rate and the second half is spread across the day, so the
-/// sliding 24 h total stays near the cap without crossing it; at the cap,
-/// wait for old downloads to leave the window.
-fn backfill_pause(spent: u64, batch_bytes: u64, daily_limit: Option<u64>) -> std::time::Duration {
-    let rate = match daily_limit {
-        Some(limit) if spent >= limit => return std::time::Duration::from_secs(15 * 60),
-        Some(limit) if throttled(spent, daily_limit) => (limit / 2 / 86_400).max(1),
-        _ => BACKFILL_FAST_RATE,
-    };
-    std::time::Duration::from_secs_f64(batch_bytes as f64 / rate as f64)
-        .max(std::time::Duration::from_secs(1))
-}
+/// How long a backfill at its share of the cap waits before looking again,
+/// for old downloads to leave the 24 h window.
+const BACKFILL_CAP_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Past the first half of the daily cap, downloads are spread across the day.
-fn throttled(spent: u64, daily_limit: Option<u64>) -> bool {
-    daily_limit.is_some_and(|limit| spent >= limit / 2)
+/// The wait before the next backfill batch, given `spent` bytes downloaded in
+/// the last 24 h: none below the backfill's share of the cap. Text-only,
+/// capped and shared between copies, a whole mailbox fits well inside a
+/// day's cap, so crawling to stretch it would only delay it.
+fn backfill_pause(spent: u64, daily_limit: Option<u64>) -> Option<std::time::Duration> {
+    daily_limit
+        .is_some_and(|limit| spent >= limit / 100 * BACKFILL_CAP_PERCENT)
+        .then_some(BACKFILL_CAP_WAIT)
 }
 
 /// Tracks the state of a sync operation.
@@ -618,11 +611,12 @@ impl<
 
     /// Background body-backfill loop for one account.
     ///
-    /// Drains the backfill queue newest-first, a batch at a time (grouped by
-    /// mailbox, one IMAP session per mailbox — see `fetch_message_bodies_bulk`),
-    /// pausing after each batch by the bytes it cost (see `backfill_pause`) so
-    /// the account stays under `daily_limit` bytes per 24 h. Only the text of
-    /// a body is downloaded; attachments are fetched when a message needs them.
+    /// Drains the backfill queue in its priority order, a batch at a time
+    /// (grouped by mailbox, one IMAP session per mailbox — see
+    /// `fetch_message_bodies_bulk`), at full speed until most of `daily_limit`
+    /// bytes per 24 h is spent (see `backfill_pause`). Only the start of a
+    /// body's text is downloaded, once per Message-ID; attachments are fetched
+    /// when a message needs them.
     /// Each fetch emits `MessageBodyFetched`, which both indexes the body and
     /// dequeues the entry. Whole-fetch failures (auth/network) leave entries
     /// queued and retried next pass; entries the server no longer has get a
@@ -666,20 +660,21 @@ impl<
 
             // Everything this account downloaded counts — opened messages and
             // forwards too, not just this worker's batches.
-            let downloaded = |since| self.projector.downloaded_since(&account_id, since);
-            let batch_started = chrono::Utc::now();
-            let spent = downloaded(batch_started - chrono::TimeDelta::hours(24)).await.unwrap_or(0);
-            if daily_limit.is_some_and(|limit| spent >= limit) {
+            let spent = self
+                .projector
+                .downloaded_since(&account_id, chrono::Utc::now() - chrono::TimeDelta::hours(24))
+                .await
+                .unwrap_or(0);
+            if let Some(pause) = backfill_pause(spent, daily_limit) {
                 debug!(%account_id, spent, "backfill: daily download cap reached, waiting");
                 tokio::select! {
                     _ = shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(backfill_pause(spent, 0, daily_limit)) => continue,
+                    _ = tokio::time::sleep(pause) => continue,
                 }
             }
-            let batch_size = if throttled(spent, daily_limit) { 1 } else { BACKFILL_BATCH };
 
-            let pending = match self.projector.list_pending_backfill(&account_id, 500).await {
-                Ok(pending) => pending,
+            let batch = match self.next_backfill_batch(&account_id, &abandoned).await {
+                Ok(batch) => batch,
                 // Not "all downloaded": the queue could not be read at all.
                 Err(e) => {
                     warn!(%account_id, error = %e, "backfill: reading the queue failed");
@@ -689,11 +684,6 @@ impl<
                     }
                 }
             };
-            let batch: Vec<BackfillEntry> = pending
-                .into_iter()
-                .filter(|e| !abandoned.contains(&e.message_id))
-                .take(batch_size)
-                .collect();
 
             if batch.is_empty() {
                 drained = 0;
@@ -721,6 +711,7 @@ impl<
                 .await
                 .unwrap_or(batch.len() as u32);
 
+            let rfc_ids: Vec<String> = batch.iter().filter_map(|e| e.rfc_message_id.clone()).collect();
             // One IMAP session per mailbox for the whole batch.
             let mut by_mailbox: HashMap<MailboxId, Vec<BackfillEntry>> = HashMap::new();
             for entry in batch {
@@ -772,6 +763,11 @@ impl<
                 }
             }
 
+            // Every other copy of what was just fetched gets it too.
+            if let Err(e) = self.share_bodies(&account_id, &rfc_ids).await {
+                warn!(%account_id, error = %e, "backfill: sharing fetched bodies failed");
+            }
+
             let remaining = self
                 .projector
                 .count_pending_backfill(&account_id)
@@ -786,13 +782,12 @@ impl<
                 message: "Downloading message bodies".to_string(),
             });
 
-            let batch_bytes = downloaded(batch_started).await.unwrap_or(0);
-            // A failed fetch costs no bytes; without this it would retry every second.
-            let pause = if fetch_failed { idle_poll } else { backfill_pause(spent, batch_bytes, daily_limit) };
-            debug!(%account_id, spent, batch_bytes, pause_secs = pause.as_secs(), "backfill: pacing");
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(pause) => {}
+            // A failed fetch costs no bytes; without this it would retry at once.
+            if fetch_failed {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(idle_poll) => {}
+                }
             }
         }
     }
@@ -1360,6 +1355,48 @@ impl<
             .await
     }
 
+    /// Gives the copies of these messages a body another copy already has
+    /// (see `MessageBodyStore::share_bodies`) and records each; returns them.
+    async fn share_bodies(
+        &self,
+        account_id: &AccountId,
+        rfc_ids: &[String],
+    ) -> Result<Vec<MessageId>, ApplicationError> {
+        let shared = self.projector.share_bodies(account_id, rfc_ids).await?;
+        for (message_id, _) in &shared {
+            let event = DomainEvent::MessageBodyFetched { message_id: *message_id, attachments: vec![] };
+            self.append_and_project(&message_id.to_string(), AggregateType::Message, event).await?;
+        }
+        Ok(shared.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// The next bodies to download: the head of the queue less the copies
+    /// of a message whose body is already stored, which get it for free, and
+    /// one copy per Message-ID. The others get theirs once it is fetched.
+    async fn next_backfill_batch(
+        &self,
+        account_id: &AccountId,
+        abandoned: &HashSet<MessageId>,
+    ) -> Result<Vec<BackfillEntry>, ApplicationError> {
+        loop {
+            let pending = self.projector.list_pending_backfill(account_id, 500).await?;
+            let rfc_ids: Vec<String> = pending.iter().filter_map(|e| e.rfc_message_id.clone()).collect();
+            let shared: HashSet<MessageId> = self.share_bodies(account_id, &rfc_ids).await?.into_iter().collect();
+            let mut seen = HashSet::new();
+            let batch: Vec<BackfillEntry> = pending
+                .into_iter()
+                .filter(|e| !abandoned.contains(&e.message_id) && !shared.contains(&e.message_id))
+                .filter(|e| e.rfc_message_id.as_ref().is_none_or(|id| seen.insert(id.clone())))
+                .take(BACKFILL_BATCH)
+                .collect();
+            // A page of nothing but copies (All Mail, late in the queue) says
+            // nothing about the rows behind it.
+            if !batch.is_empty() || shared.is_empty() {
+                return Ok(batch);
+            }
+        }
+    }
+
     /// Append a domain event to the event store and project it into the read model.
     ///
     /// Reads the aggregate's current sequence for optimistic concurrency, then
@@ -1672,20 +1709,18 @@ mod tests {
     }
 
     #[test]
-    fn backfill_paces_by_bytes_against_the_daily_cap() {
+    fn backfill_runs_at_full_speed_until_ninety_percent_of_the_cap() {
         const MB: u64 = 1 << 20;
         let limit = Some(2000 * MB);
-        let secs = |spent, batch, limit| backfill_pause(spent, batch, limit).as_secs();
 
-        // First half of the cap, and any uncapped account: the fast rate.
-        assert_eq!(secs(0, 10 * MB, limit), 10);
-        assert_eq!(secs(5000 * MB, 10 * MB, None), 10);
-        // Second half: what's left of the cap spread over a day.
-        assert_eq!(secs(1000 * MB, 10 * MB, limit), 10 * MB / (1000 * MB / 86_400));
-        // At the cap: wait for the window to slide, however small the batch.
-        assert_eq!(secs(2000 * MB, 0, limit), 15 * 60);
-        // A tiny batch still yields the server a second.
-        assert_eq!(secs(0, 10, limit), 1);
+        // Batches of 50 back to back, capped account or not.
+        assert_eq!(BACKFILL_BATCH, 50);
+        assert_eq!(backfill_pause(0, limit), None);
+        assert_eq!(backfill_pause(1799 * MB, limit), None);
+        assert_eq!(backfill_pause(50_000 * MB, None), None);
+        // At 90%: wait for the window to free, no trickle.
+        assert_eq!(backfill_pause(1800 * MB, limit), Some(BACKFILL_CAP_WAIT));
+        assert_eq!(backfill_pause(2500 * MB, limit), Some(BACKFILL_CAP_WAIT));
     }
 
     /// A credential rejection must stay typed all the way to `run_backfill`, which
@@ -2289,6 +2324,50 @@ mod tests {
             self.bodies.lock().unwrap().insert(*message_id, (body_text, body_html));
             Ok(())
         }
+
+        async fn share_bodies(
+            &self,
+            _account_id: &AccountId,
+            rfc_message_ids: &[String],
+        ) -> Result<Vec<(MessageId, bool)>, DomainError> {
+            let rfc_ids = self.rfc_ids.lock().unwrap();
+            let mut bodies = self.bodies.lock().unwrap();
+            let mut shared = Vec::new();
+            for rfc_id in rfc_message_ids {
+                let copies: Vec<MessageId> =
+                    rfc_ids.iter().filter(|(_, id)| *id == rfc_id).map(|(m, _)| *m).collect();
+                let Some(body) = copies.iter().find_map(|m| bodies.get(m).cloned()) else { continue };
+                for copy in copies {
+                    if let std::collections::hash_map::Entry::Vacant(slot) = bodies.entry(copy) {
+                        slot.insert(body.clone());
+                        shared.push((copy, false));
+                    }
+                }
+            }
+            Ok(shared)
+        }
+    }
+
+    impl MockProjector {
+        /// Stored rows with a UID and no body yet, in storage order.
+        fn pending(&self) -> Vec<mc_domain::BackfillEntry> {
+            let bodies = self.bodies.lock().unwrap();
+            let rfc_ids = self.rfc_ids.lock().unwrap();
+            self.stored
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| !bodies.contains_key(&m.id))
+                .filter_map(|m| {
+                    Some(mc_domain::BackfillEntry {
+                        message_id: m.id,
+                        mailbox_id: m.mailbox_id,
+                        provider_uid: m.provider_uid?.value(),
+                        rfc_message_id: rfc_ids.get(&m.id).cloned(),
+                    })
+                })
+                .collect()
+        }
     }
 
     #[async_trait]
@@ -2296,13 +2375,13 @@ mod tests {
         async fn list_pending_backfill(
             &self,
             _account_id: &AccountId,
-            _limit: usize,
+            limit: usize,
         ) -> Result<Vec<mc_domain::BackfillEntry>, DomainError> {
-            Ok(vec![])
+            Ok(self.pending().into_iter().take(limit).collect())
         }
 
         async fn count_pending_backfill(&self, _account_id: &AccountId) -> Result<u32, DomainError> {
-            Ok(0)
+            Ok(self.pending().len() as u32)
         }
 
         async fn downloaded_since(
@@ -2612,6 +2691,7 @@ mod tests {
                 message_id: MessageId::new(),
                 mailbox_id,
                 provider_uid: uid,
+                rfc_message_id: None,
             })
             .collect();
 
@@ -2653,6 +2733,56 @@ mod tests {
             let shown = format!("{event:?}");
             assert!(!shown.contains("body-"), "body leaked into the log: {shown}");
         }
+    }
+
+    /// Gmail lists a message once per label plus All Mail: the backfill
+    /// downloads it once and every copy gets that body.
+    #[tokio::test]
+    async fn backfill_downloads_a_message_once_for_all_its_copies() {
+        let account_id = AccountId::new();
+        let (inbox, discovered) = Mailbox::discover(account_id, MailboxPath::inbox(), MailboxType::Inbox);
+        let projector = Arc::new(MockProjector::new());
+        let event_store = Arc::new(MockEventStore::new());
+        let mut events = vec![discovered];
+        let mut copy = |uid: u32, rfc: &str| {
+            let (message, event) = Message::receive(
+                account_id, inbox.id, ProviderUid::new(uid), Some(rfc.into()), None, vec![],
+                test_envelope(), vec![], 10, false, chrono::Utc::now(),
+            );
+            events.push(event);
+            message.id
+        };
+        let (first, second, other) = (copy(1, "<a@x>"), copy(2, "<a@x>"), copy(3, "<c@x>"));
+        let (stored, late) = (copy(9, "<d@x>"), copy(4, "<d@x>"));
+        for event in events {
+            projector.project(&EventEnvelope::new(String::new(), AggregateType::Message, 1, event)).await.unwrap();
+        }
+        projector.put_body(&stored, Some("stored before".into()), None, false).await.unwrap();
+
+        let service = Arc::new(make_service(MockEmailProvider::new(), event_store.clone(), projector.clone()));
+        let mut progress = service.subscribe_progress();
+        let shutdown = CancellationToken::new();
+        let worker = tokio::spawn({
+            let (service, shutdown) = (Arc::clone(&service), shutdown.clone());
+            let gate: Arc<dyn LoginGate> = Arc::new(mc_domain::LoginSecret::Password("x".into()));
+            async move { service.run_backfill(account_id, None, gate, shutdown).await }
+        });
+        while progress.recv().await.unwrap().message != "All message bodies downloaded" {}
+        shutdown.cancel();
+        worker.await.unwrap();
+
+        let provider = service.provider_registry.get_provider(&account_id).unwrap();
+        assert_eq!(*provider.bulk_fetch_calls.lock().unwrap(), [vec![1, 3]], "one copy of <a>, none of <d>");
+        let bodies = projector.stored_bodies();
+        assert_eq!(bodies[&first], bodies[&second]);
+        assert_eq!(bodies[&other].0.as_deref(), Some("body-3"));
+        assert_eq!(bodies[&late].0.as_deref(), Some("stored before"));
+        let fetched = event_store
+            .appended_events()
+            .iter()
+            .filter(|(_, e)| matches!(e, DomainEvent::MessageBodyFetched { .. }))
+            .count();
+        assert_eq!(fetched, 4, "every copy recorded as fetched");
     }
 
     #[tokio::test]

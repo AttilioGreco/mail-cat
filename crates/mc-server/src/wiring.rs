@@ -714,8 +714,9 @@ impl AppContext {
 
         // ── Background body backfill ─────────────────────────────────────────
         // The initial sync only pulls envelopes; message bodies are downloaded
-        // here, newest-first, text only, paced by bytes against each account's
-        // daily download cap (Gmail locks an account out past 2.5 GB/day).
+        // here, INBOX first, capped text only, once per Message-ID, at full
+        // speed up to 90% of each account's daily download cap (Gmail locks an
+        // account out past 2.5 GB/day).
         // Each fetch indexes the body for search and dequeues itself.
         for (account_id, _name, gate) in &registered {
             let sync = Arc::clone(&sync_service);

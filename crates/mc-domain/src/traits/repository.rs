@@ -194,6 +194,8 @@ pub struct BackfillEntry {
     pub message_id: MessageId,
     pub mailbox_id: MailboxId,
     pub provider_uid: u32,
+    /// Copies sharing it share one download (Gmail: a label folder and All Mail).
+    pub rfc_message_id: Option<String>,
 }
 
 /// Queue of message bodies still to be downloaded, drained newest-first.
@@ -203,7 +205,9 @@ pub struct BackfillEntry {
 /// replay and holds exactly "received but body not yet fetched".
 #[async_trait]
 pub trait BodyBackfillQueue: Send + Sync {
-    /// Pending entries for an account, newest received first, up to `limit`.
+    /// Pending entries for an account, up to `limit`: INBOX first, then other
+    /// folders, then All Mail and Important (copies of the rest), newest first
+    /// within each. Trash and Spam are never queued: they load when opened.
     async fn list_pending_backfill(
         &self,
         account_id: &AccountId,
@@ -238,6 +242,17 @@ pub trait MessageBodyStore: Send + Sync {
         body_html: Option<String>,
         truncated: bool,
     ) -> Result<(), DomainError>;
+
+    /// Gives every copy of the messages with these Message-IDs in the account
+    /// the best body stored for any of them (a full one over a truncated one):
+    /// each copy still pending, and each truncated one when a full body exists.
+    /// Returns the copies that got one, with whether it is truncated; their
+    /// `MessageBodyFetched` is the caller's to record.
+    async fn share_bodies(
+        &self,
+        account_id: &AccountId,
+        rfc_message_ids: &[String],
+    ) -> Result<Vec<(MessageId, bool)>, DomainError>;
 }
 
 // ── Contact Repositories ─────────────────────────────────────────────────────

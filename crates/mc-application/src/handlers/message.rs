@@ -100,6 +100,22 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
         let (mut message, mut seq) = self.load_message(&message_id).await?;
+        // Another copy (Gmail: the same mail under another label) may already
+        // hold the whole text.
+        if let Some(rfc_id) = message.message_rfc_id.clone() {
+            let shared = self.message_read_repo.share_bodies(&message.account_id, &[rfc_id]).await?;
+            for (copy, _) in &shared {
+                self.record(copy, |m| Some(m.set_body(None, None, vec![]))).await?;
+            }
+            if shared.contains(&(message_id, false)) {
+                info!(%message_id, "message body taken from another copy");
+                return Ok(CommandResult::MessageBodyFetched);
+            }
+            if !shared.is_empty() {
+                // Recording a truncated body here moved the sequence.
+                (message, seq) = self.load_message(&message_id).await?;
+            }
+        }
         let provider_uid = self.remote_uid(&mut message, &mut seq, &mailbox_path).await?;
 
         let provider = self.provider_registry.get_provider(&message.account_id)?;
@@ -1496,6 +1512,8 @@ mod tests {
         unread: Vec<mc_domain::MessageSummary>,
         /// UIDs other local rows already hold.
         held: Vec<ProviderUid>,
+        /// What `share_bodies` hands out: copies given another's body.
+        shared: Vec<(MessageId, bool)>,
     }
 
     impl MockMessageReadRepo {
@@ -1519,6 +1537,14 @@ mod tests {
         ) -> Result<(), DomainError> {
             self.stored_bodies.lock().unwrap().push((*message_id, body_text, body_html));
             Ok(())
+        }
+
+        async fn share_bodies(
+            &self,
+            _account_id: &AccountId,
+            _rfc_message_ids: &[String],
+        ) -> Result<Vec<(MessageId, bool)>, DomainError> {
+            Ok(self.shared.clone())
         }
     }
 
@@ -2313,6 +2339,47 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
             &[(msg_id, Some("fetched text".to_string()), Some("<p>fetched</p>".to_string()))]
         );
         assert_eq!(bus.last_event_name().unwrap(), "MessageBodyFetched");
+    }
+
+    /// Gmail: the same mail under another label already has its whole text.
+    #[tokio::test]
+    async fn handle_fetch_body_takes_a_full_body_from_another_copy() {
+        let msg = Message { message_rfc_id: Some("<m@x>".into()), ..make_test_message() };
+        let provider = Arc::new(MockEmailProvider::new());
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let registry = Arc::new(MockProviderRegistry::new(Arc::clone(&provider)));
+        let bus = Arc::new(MockEventBus::new());
+        let read_repo = Arc::new(MockMessageReadRepo {
+            shared: vec![(msg.id, false)],
+            ..MockMessageReadRepo::with_mailboxes(vec![inbox_of(&msg)])
+        });
+        let handler = MessageCommandHandler::new(es, registry, read_repo.clone(), bus.clone());
+
+        handler.handle_fetch_body(msg.id, MailboxPath::inbox()).await.unwrap();
+
+        assert!(provider.fetched.read().unwrap().is_empty(), "nothing downloaded");
+        assert_eq!(bus.last_event_name().unwrap(), "MessageBodyFetched");
+    }
+
+    /// Only the start of it is anywhere: the server still sends the rest.
+    #[tokio::test]
+    async fn handle_fetch_body_still_downloads_when_the_copy_is_truncated() {
+        let msg = Message { message_rfc_id: Some("<m@x>".into()), ..make_test_message() };
+        let provider = Arc::new(MockEmailProvider::new());
+        *provider.detail_response.write().unwrap() = Some(Message { body_text: Some("whole".into()), ..msg.clone() });
+        let es = Arc::new(MockEventStore::with_message(&msg));
+        let registry = Arc::new(MockProviderRegistry::new(Arc::clone(&provider)));
+        let bus = Arc::new(MockEventBus::new());
+        let read_repo = Arc::new(MockMessageReadRepo {
+            shared: vec![(msg.id, true)],
+            ..MockMessageReadRepo::with_mailboxes(vec![inbox_of(&msg)])
+        });
+        let handler = MessageCommandHandler::new(es, registry, read_repo.clone(), bus.clone());
+
+        handler.handle_fetch_body(msg.id, MailboxPath::inbox()).await.unwrap();
+
+        assert_eq!(*provider.fetched.read().unwrap(), [ProviderUid::new(42)]);
+        assert_eq!(read_repo.stored_bodies.lock().unwrap()[0].1.as_deref(), Some("whole"));
     }
 
     /// Opening an unread message marks it read at the same moment, so the

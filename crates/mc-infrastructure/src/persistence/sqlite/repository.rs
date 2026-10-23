@@ -206,6 +206,47 @@ pub(super) fn store_body(
     .map(drop)
 }
 
+/// The copies of one message (`rfc_id`) in an account that lack a body the
+/// best stored copy has, each given that body: blobs are copied, not shared,
+/// so every copy keeps its own row and is deleted with it.
+fn share_body(conn: &Connection, account: Uuid, rfc_id: &str) -> Result<Vec<(MessageId, bool)>, DomainError> {
+    let copies = query_all(
+        conn,
+        "SELECT m.id, m.body_state = 'pending', b.truncated FROM messages m \
+         LEFT JOIN message_bodies b ON b.message_id = m.id \
+         WHERE m.account_id = ?1 AND m.rfc_message_id = ?2",
+        params![account, rfc_id],
+        |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, bool>(1)?, r.get::<_, Option<bool>>(2)?)),
+    )?;
+    let Some((source, truncated)) = copies
+        .iter()
+        .filter_map(|&(id, _, truncated)| Some((id, truncated?)))
+        .min_by_key(|&(_, truncated)| truncated)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut shared = Vec::new();
+    for (id, pending, has) in copies {
+        // A pending copy holding a body of its own lost its event: record it.
+        let wants = pending || has.is_some_and(|t| t && !truncated);
+        if !wants {
+            continue;
+        }
+        if id != source {
+            exec(
+                conn,
+                "INSERT INTO message_bodies (message_id, text_zstd, html_zstd, truncated, fetched_at) \
+                 SELECT ?1, text_zstd, html_zstd, truncated, fetched_at FROM message_bodies WHERE message_id = ?2 \
+                 ON CONFLICT(message_id) DO UPDATE SET text_zstd = excluded.text_zstd, \
+                     html_zstd = excluded.html_zstd, truncated = excluded.truncated, fetched_at = excluded.fetched_at",
+                params![id, source],
+            )?;
+        }
+        shared.push((MessageId::from_uuid(id), truncated));
+    }
+    Ok(shared)
+}
+
 pub(super) fn save_checkpoint_in(
     conn: &Connection,
     name: &str,
@@ -551,7 +592,38 @@ impl MessageBodyStore for SqliteRepository {
             })
             .await
     }
+
+    async fn share_bodies(
+        &self,
+        account_id: &AccountId,
+        rfc_message_ids: &[String],
+    ) -> Result<Vec<(MessageId, bool)>, DomainError> {
+        // An empty `<>` would pair unrelated messages.
+        let rfc_ids: Vec<String> =
+            rfc_message_ids.iter().filter(|id| !id.trim_matches(['<', '>', ' ']).is_empty()).cloned().collect();
+        if rfc_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let account = *account_id.as_uuid();
+        self.db
+            .write(move |conn| {
+                let tx = conn.transaction().map_err(repo_err)?;
+                let mut shared = Vec::new();
+                for rfc_id in &rfc_ids {
+                    shared.extend(share_body(&tx, account, rfc_id)?);
+                }
+                tx.commit().map_err(repo_err)?;
+                Ok(shared)
+            })
+            .await
+    }
 }
+
+/// Messages the backfill downloads: Trash and Spam only when opened, and
+/// none without a UID to fetch it by (a renumbered mailbox mid-sync).
+const BACKFILLABLE: &str = "FROM messages m LEFT JOIN mailboxes b ON b.id = m.mailbox_id \
+     WHERE m.account_id = ?1 AND m.body_state = 'pending' AND m.provider_uid IS NOT NULL \
+     AND IFNULL(b.mailbox_type, '') NOT IN ('\"Trash\"', '\"Spam\"')";
 
 #[async_trait]
 impl BodyBackfillQueue for SqliteRepository {
@@ -563,19 +635,24 @@ impl BodyBackfillQueue for SqliteRepository {
         let (account, limit) = (*account_id.as_uuid(), sql_int(limit as u64));
         self.db
             .read(move |conn| {
+                // ponytail: sorts every pending row per call (~100k on a big
+                // Gmail account, well under a batch's fetch); a class column
+                // in the backfill index if it ever shows.
                 query_all(
                     conn,
-                    // Waiting for its UID (a renumbered mailbox mid-sync):
-                    // nothing to fetch it by until then.
-                    "SELECT id, mailbox_id, provider_uid FROM messages \
-                     WHERE account_id = ?1 AND body_state = 'pending' AND provider_uid IS NOT NULL \
-                     ORDER BY received_at DESC LIMIT ?2",
+                    &format!(
+                        "SELECT m.id, m.mailbox_id, m.provider_uid, m.rfc_message_id {BACKFILLABLE} \
+                         ORDER BY CASE b.mailbox_type WHEN '\"Inbox\"' THEN 0 \
+                             WHEN '\"All\"' THEN 2 WHEN '\"Important\"' THEN 2 ELSE 1 END, \
+                             m.received_at DESC LIMIT ?2"
+                    ),
                     params![account, limit],
                     |r| {
                         Ok(BackfillEntry {
                             message_id: MessageId::from_uuid(r.get(0)?),
                             mailbox_id: MailboxId::from_uuid(r.get(1)?),
                             provider_uid: r.get(2)?,
+                            rfc_message_id: r.get(3)?,
                         })
                     },
                 )
@@ -587,12 +664,7 @@ impl BodyBackfillQueue for SqliteRepository {
         let account = *account_id.as_uuid();
         self.db
             .read(move |conn| {
-                count_rows(
-                    conn,
-                    "SELECT COUNT(*) FROM messages \
-                     WHERE account_id = ?1 AND body_state = 'pending' AND provider_uid IS NOT NULL",
-                    [account],
-                )
+                count_rows(conn, &format!("SELECT COUNT(*) {BACKFILLABLE}"), [account])
                 .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
             })
             .await
@@ -687,11 +759,11 @@ impl AccountReadRepository for SqliteRepository {
             .read(move |conn| {
                 let (total, synced, pending): (i64, i64, i64) = conn
                     .query_row(
-                        "SELECT \
+                        &format!("SELECT \
                            (SELECT COALESCE(SUM(total_messages), 0) FROM mailboxes WHERE account_id = ?1), \
                            (SELECT COUNT(*) FROM messages WHERE mailbox_id IN \
                                (SELECT id FROM mailboxes WHERE account_id = ?1)), \
-                           (SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND body_state = 'pending')",
+                           (SELECT COUNT(*) {BACKFILLABLE})"),
                         [id],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )

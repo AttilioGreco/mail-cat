@@ -1898,6 +1898,72 @@ macro_rules! read_repository_conformance {
             assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 1);
         }
 
+        #[tokio::test]
+        async fn backfill_goes_inbox_then_folders_then_all_mail_and_skips_spam_and_trash() {
+            let (_guard, _es, repo) = $make;
+            let account = AccountId::new();
+            let typed = |path: &str, mailbox_type| {
+                let id = MailboxId::new();
+                let event = DomainEvent::MailboxDiscovered {
+                    mailbox_id: id,
+                    account_id: account,
+                    path: MailboxPath::parse(path, '/').unwrap(),
+                    mailbox_type,
+                };
+                (id, event)
+            };
+            let (all, e_all) = typed("[Gmail]/Tutti i messaggi", MailboxType::All);
+            let (important, e_important) = typed("[Gmail]/Importanti", MailboxType::Important);
+            let (work, e_work) = typed("Work", MailboxType::Custom);
+            let (inbox, e_inbox) = typed("INBOX", MailboxType::Inbox);
+            let (spam, e_spam) = typed("[Gmail]/Spam", MailboxType::Spam);
+            let (trash, e_trash) = typed("[Gmail]/Cestino", MailboxType::Trash);
+            // Newest in the folders that must wait, oldest in INBOX.
+            let messages = [(all, 1, 9), (important, 2, 8), (spam, 3, 7), (trash, 4, 6), (work, 5, 2), (work, 6, 3), (inbox, 7, 0), (inbox, 8, 1)];
+            let mut events = vec![e_all, e_important, e_work, e_inbox, e_spam, e_trash];
+            for (mailbox, uid, minutes) in messages {
+                events.push(received(account, mailbox, uid, None, &[], false, at(minutes)).1);
+            }
+            project_all(&repo, events).await;
+
+            let pending = repo.list_pending_backfill(&account, 10).await.unwrap();
+            assert_eq!(pending.iter().map(|e| e.provider_uid).collect::<Vec<_>>(), [8, 7, 6, 5, 1, 2]);
+            assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 6);
+            assert_eq!(repo.account_stats(&account).await.unwrap().pending_bodies, 6);
+        }
+
+        #[tokio::test]
+        async fn copies_of_a_message_share_one_body_full_over_truncated() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox, all) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let (in_inbox, e1) = received(account, inbox, 1, Some("<m@x>"), &[], false, at(0));
+            let (in_all, e2) = received(account, all, 7, Some("<m@x>"), &[], false, at(0));
+            let (other, e3) = received(account, all, 8, None, &[], false, at(0));
+            project_all(&repo, [discovered(account, inbox, "INBOX"), discovered(account, all, "All"), e1, e2, e3]).await;
+
+            // Nothing stored yet: nothing to share.
+            assert!(repo.share_bodies(&account, &["<m@x>".into()]).await.unwrap().is_empty());
+
+            repo.put_body(&in_inbox, Some("start".into()), None, true).await.unwrap();
+            repo.project(&body_fetched(in_inbox)).await.unwrap();
+            let shared = repo.share_bodies(&account, &["<m@x>".into()]).await.unwrap();
+            assert_eq!(shared, [(in_all, true)]);
+            repo.project(&body_fetched(in_all)).await.unwrap();
+            let copy = MessageReadRepository::get_message(&repo, &in_all).await.unwrap().unwrap();
+            assert_eq!((copy.body_text.as_deref(), copy.body_truncated), (Some("start"), true));
+
+            // Opening one fetches the whole text; the other copy gets it too.
+            repo.put_body(&in_all, Some("start and the rest".into()), None, false).await.unwrap();
+            assert_eq!(repo.share_bodies(&account, &["<m@x>".into()]).await.unwrap(), [(in_inbox, false)]);
+            let first = MessageReadRepository::get_message(&repo, &in_inbox).await.unwrap().unwrap();
+            assert_eq!((first.body_text.as_deref(), first.body_truncated), (Some("start and the rest"), false));
+            assert!(repo.share_bodies(&account, &["<m@x>".into(), "<>".into()]).await.unwrap().is_empty());
+
+            // A message without a Message-ID shares with nothing.
+            assert_eq!(body_text(&repo, &other).await, None);
+            assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 1);
+        }
+
         /// A Sent server copy drops its own placeholder — never a UID-less
         /// copy of the same Message-ID waiting in another mailbox.
         #[tokio::test]
