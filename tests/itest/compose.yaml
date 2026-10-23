@@ -1,0 +1,21 @@
+# Throwaway Stalwart for the integration harness. All ports bind to localhost
+# on non-standard numbers so nothing collides with a real mail setup.
+name: mailcat-itest
+
+services:
+  stalwart:
+    image: stalwartlabs/stalwart:v0.16.25
+    environment:
+      # Pinned admin credential, valid both in bootstrap mode and afterwards.
+      STALWART_RECOVERY_ADMIN: "admin:itest-admin-horse-battery"
+    ports:
+      - "127.0.0.1:18080:8080"   # HTTP: JMAP, management API (./stalwart-cli)
+      - "127.0.0.1:19993:993"    # IMAPS (mail-cat always speaks TLS)
+      - "127.0.0.1:19465:465"    # SMTP submission, implicit TLS
+    volumes:
+      - etc:/etc/stalwart
+      - data:/var/lib/stalwart
+
+volumes:
+  etc:
+  data:

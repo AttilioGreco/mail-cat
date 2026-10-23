@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# stalwart-cli from its image, logged in as the itest admin.
+# Usage: tests/itest/stalwart-cli query Account
+exec docker run --rm --network host stalwartlabs/cli:1.0.13 \
+    --url http://127.0.0.1:18080 --user admin --password itest-admin-horse-battery \
+    --no-color "$@"

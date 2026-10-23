@@ -79,6 +79,29 @@ check:
 lint:
     cargo clippy --workspace -- -D warnings
 
+# ── Integration test (Stalwart locale, vedi tests/itest/README.md) ─────────
+
+# avvia lo Stalwart di test senza azzerarlo
+itest-up:
+    docker compose -f tests/itest/compose.yaml up -d
+
+# azzera Stalwart (alice/bob, mailbox standard) e riavvia il mail-cat-server isolato su :50061
+itest-reset:
+    tests/itest/reset.sh
+
+# aggiunge messaggi generati (es: just itest-seed -n 50 INBOX Projects)
+itest-seed *args:
+    tests/itest/seed.py {{args}}
+
+# esegue gli scenari, ognuno da reset+seed (es: just itest flags reappear)
+itest *args:
+    tests/itest/scenarios.py {{args}}
+
+# ferma il server isolato e distrugge Stalwart con i suoi volumi
+itest-down:
+    tests/itest/reset.sh --stop
+    docker compose -f tests/itest/compose.yaml down -v
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 # esegui il CLI (es: just cli -- accounts list)
