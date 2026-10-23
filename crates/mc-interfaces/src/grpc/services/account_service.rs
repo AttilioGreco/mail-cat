@@ -14,7 +14,7 @@ use crate::grpc::proto::{
     account_service_server::AccountService,
 };
 use mc_application::{
-    AccountProvisioner, ImapProvisionParams, OAuthLoginProgress, OAuthLoginTrigger,
+    AccountProvisioner, AuthGates, ImapProvisionParams, OAuthLoginProgress, OAuthLoginTrigger,
     SyncProgressEvent as AppSyncProgressEvent, SyncState, SyncTrigger,
     bus::{CommandBus, QueryBus},
     commands::{Command, CommandResult},
@@ -29,6 +29,7 @@ pub struct AccountServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
     sync_trigger: Option<Arc<dyn SyncTrigger>>,
     oauth_trigger: Option<Arc<dyn OAuthLoginTrigger>>,
     provisioner: Option<Arc<dyn AccountProvisioner>>,
+    auth_gates: Option<Arc<AuthGates>>,
 }
 
 impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
@@ -39,6 +40,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
             sync_trigger: None,
             oauth_trigger: None,
             provisioner: None,
+            auth_gates: None,
         }
     }
 
@@ -54,6 +56,11 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
 
     pub fn with_provisioner(mut self, provisioner: Arc<dyn AccountProvisioner>) -> Self {
         self.provisioner = Some(provisioner);
+        self
+    }
+
+    pub fn with_auth_gates(mut self, gates: Arc<AuthGates>) -> Self {
+        self.auth_gates = Some(gates);
         self
     }
 }
@@ -497,6 +504,10 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             .set_password(email.as_str(), &req.password)
             .await
             .map_err(application_error_to_status)?;
+        // The live gate takes the new password too: a rejected account resumes now.
+        if let Some(gate) = self.auth_gates.as_ref().and_then(|g| g.get(&account_id)) {
+            gate.set_password(req.password);
+        }
 
         Ok(Response::new(proto::SetAccountPasswordResponse {}))
     }

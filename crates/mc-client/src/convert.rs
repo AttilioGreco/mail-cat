@@ -12,6 +12,7 @@ pub fn account_from_proto(a: pb::AccountSummary) -> Account {
         Ok(pb::AccountStatus::Disabled) => AccountStatus::Disabled,
         Ok(pb::AccountStatus::Error) => AccountStatus::Error,
         Ok(pb::AccountStatus::NeedsReauth) => AccountStatus::NeedsReauth,
+        Ok(pb::AccountStatus::CredentialsRejected) => AccountStatus::CredentialsRejected,
         _ => AccountStatus::Unknown,
     };
 

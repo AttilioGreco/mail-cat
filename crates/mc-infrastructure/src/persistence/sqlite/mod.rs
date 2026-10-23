@@ -161,6 +161,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         bytes         INTEGER NOT NULL
     );
     CREATE INDEX downloads_recent ON downloads(account_email, at);",
+    // 6: why and since when an account is in its status (re-login needed,
+    // password rejected), so a restart keeps the reason.
+    "ALTER TABLE accounts ADD COLUMN status_error TEXT;
+    ALTER TABLE accounts ADD COLUMN status_since INTEGER;",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

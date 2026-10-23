@@ -27,6 +27,7 @@ pub use traits::email_provider::{
     ProviderNotification, UidFlagEntry,
 };
 pub use traits::event_store::EventStore;
+pub use traits::login_gate::{login_with, LoginGate, LoginSecret};
 pub use traits::provider_registry::ProviderRegistry;
 pub use traits::secret_store::{AccountSecrets, OAuthSecrets, SecretStore};
 pub use traits::read_model_projector::ReadModelProjector;

@@ -8,10 +8,11 @@ use async_imap::imap_proto::types::{BodyStructure, ContentEncoding, SectionPath}
 use async_imap::types::Seq;
 use async_trait::async_trait;
 use futures::Stream;
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
+use mc_domain::traits::login_gate::{login_with, LoginGate, LoginSecret};
 use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::{Message, OutgoingMessage};
 use mc_domain::traits::email_provider::{
@@ -26,30 +27,6 @@ use crate::email::smtp::SmtpSender;
 use crate::persistence::DownloadMeter;
 
 use super::mapper::{flag_to_imap, mailbox_path_to_string};
-
-/// Credential an `ImapEmailProvider` authenticates with.
-///
-/// `OAuthToken` wraps a shared cell so a background token refresh (see
-/// `mc-server`'s periodic OAuth refresh loop) is visible on the very next
-/// connection without restarting anything.
-pub enum ImapCredential {
-    Password(String),
-    OAuthToken(Arc<RwLock<String>>),
-}
-
-/// Reconnect delay after `failures` consecutive failed attempts.
-///
-/// Transient faults (network down, server restarting) recover quickly, so they
-/// keep the short cadence and cap at 5 minutes. A rejected credential does not
-/// recover without the user acting, so it backs off far harder — retrying every
-/// 30s gets the client rate-limited or blocked by the provider, and buries the
-/// real problem under thousands of identical log lines.
-fn backoff_delay(failures: u32, auth_rejected: bool) -> std::time::Duration {
-    let (base_secs, cap_secs) = if auth_rejected { (60, 3600) } else { (30, 300) };
-    // Double per failure, saturating — shift beyond 31 would overflow.
-    let factor = 1u64 << failures.saturating_sub(1).min(20);
-    std::time::Duration::from_secs(base_secs * factor).min(std::time::Duration::from_secs(cap_secs))
-}
 
 type ImapSession =
     async_imap::Session<async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>;
@@ -121,7 +98,8 @@ pub struct ImapEmailProvider {
     host: String,
     port: u16,
     username: String,
-    credential: ImapCredential,
+    /// Every login asks it for the secret and reports back to it.
+    gate: Arc<dyn LoginGate>,
     use_tls: bool,
     /// Pre-built SMTP sender. `None` when no SMTP config was provided for this
     /// account — sending will be rejected with a clear error.
@@ -138,7 +116,7 @@ impl ImapEmailProvider {
         host: String,
         port: u16,
         username: String,
-        credential: ImapCredential,
+        gate: Arc<dyn LoginGate>,
         use_tls: bool,
         smtp_sender: Option<SmtpSender>,
     ) -> Self {
@@ -146,7 +124,7 @@ impl ImapEmailProvider {
             host,
             port,
             username,
-            credential,
+            gate,
             use_tls,
             smtp_sender,
             idle_sessions: Mutex::default(),
@@ -340,10 +318,13 @@ impl ImapEmailProvider {
     }
 
     async fn create_imap_session(&self) -> Result<ImapSession, DomainError> {
-        timed(CONNECT_TIMEOUT, "IMAP connect and login", self.connect_and_login()).await
+        login_with(self.gate.as_ref(), |secret| {
+            timed(CONNECT_TIMEOUT, "IMAP connect and login", self.connect_and_login(secret))
+        })
+        .await
     }
 
-    async fn connect_and_login(&self) -> Result<ImapSession, DomainError> {
+    async fn connect_and_login(&self, secret: LoginSecret) -> Result<ImapSession, DomainError> {
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         info!(
@@ -354,7 +335,7 @@ impl ImapEmailProvider {
         // Connect TCP, then wrap with compat for futures AsyncRead/Write compatibility
         let tcp_stream = tokio::net::TcpStream::connect((&self.host as &str, self.port))
             .await
-            .map_err(|e| DomainError::Provider(format!("TCP connection failed: {}", e)))?;
+            .map_err(|e| DomainError::ConnectionFailed(format!("TCP connection failed: {}", e)))?;
         let compat_stream = tcp_stream.compat();
 
         // TLS via async-native-tls (natively futures-compatible, no compat needed)
@@ -362,7 +343,7 @@ impl ImapEmailProvider {
         let tls_stream = tls
             .connect(&self.host, compat_stream)
             .await
-            .map_err(|e| DomainError::Provider(format!("TLS connection failed: {}", e)))?;
+            .map_err(|e| DomainError::ConnectionFailed(format!("TLS connection failed: {}", e)))?;
 
         // Create IMAP client and authenticate.
         // Client::new does NOT read the server greeting — the caller must.
@@ -374,14 +355,13 @@ impl ImapEmailProvider {
         client
             .read_response()
             .await
-            .map_err(|e| DomainError::Provider(format!("IMAP greeting read failed: {e}")))?
-            .ok_or_else(|| DomainError::Provider("IMAP connection closed before greeting".into()))?;
-        // Credential rejection must surface as AuthenticationFailed, not the generic
-        // Provider error. Callers retry Provider errors (transient network faults);
-        // a rejected credential never recovers on its own, so collapsing the two
-        // makes a dead account get hammered forever instead of backing off.
-        let session = match &self.credential {
-            ImapCredential::Password(password) => client
+            .map_err(|e| DomainError::ConnectionFailed(format!("IMAP greeting read failed: {e}")))?
+            .ok_or_else(|| DomainError::ConnectionFailed("IMAP connection closed before greeting".into()))?;
+        // A rejected credential must surface as AuthenticationFailed and a dead
+        // link as ConnectionFailed: the gate refreshes and retries on the first,
+        // and schedules a reconnect on the second.
+        let session = match secret {
+            LoginSecret::Password(password) => client
                 .login(&self.username, password)
                 .await
                 .map_err(|e| {
@@ -390,8 +370,7 @@ impl ImapEmailProvider {
                         e.0
                     ))
                 })?,
-            ImapCredential::OAuthToken(token_cell) => {
-                let access_token = token_cell.read().await.clone();
+            LoginSecret::OAuthToken(access_token) => {
                 let auth = XOAuth2Authenticator { user: self.username.clone(), access_token };
                 client
                     .authenticate("XOAUTH2", auth)
@@ -1132,33 +1111,16 @@ impl EmailProvider for ImapEmailProvider {
 
             info!("[watch] Starting IMAP IDLE for mailbox '{}'", mailbox_name);
 
-            // Consecutive connect failures, used to back off. Reset on every success.
-            let mut failures: u32 = 0;
-
             loop {
-                // Reuse the same TLS session creation as the rest of the provider
+                // The gate knows when to connect: not while the account waits for
+                // the user, and on the offline schedule after a failure.
+                self.gate.ready().await;
                 let mut session = match self.create_imap_session().await {
-                    Ok(s) => {
-                        failures = 0;
-                        s
-                    }
+                    Ok(s) => s,
                     Err(e) => {
-                        let fatal = matches!(e, DomainError::AuthenticationFailed(_));
-                        failures = failures.saturating_add(1);
-                        // A rejected credential will not fix itself: retrying every
-                        // 30s just burns connections and gets the client rate-limited
-                        // (or blocked) by the provider. Yield the error so the account
-                        // can be flagged, then back off hard.
-                        if fatal {
-                            warn!(
-                                "[watch] Authentication rejected for '{}' (attempt {}): {}",
-                                mailbox_name, failures, e
-                            );
-                            yield Err(e);
-                        } else {
-                            warn!("[watch] Session creation failed: {}", e);
-                        }
-                        tokio::time::sleep(backoff_delay(failures, fatal)).await;
+                        warn!("[watch] Session creation failed for '{}': {}", mailbox_name, e);
+                        // A floor for errors the gate does not schedule.
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                         continue;
                     }
                 };
@@ -1998,7 +1960,7 @@ mod tests {
             "127.0.0.1".into(),
             port,
             "user".into(),
-            ImapCredential::Password("pass".into()),
+            Arc::new(LoginSecret::Password("pass".into())),
             true,
             None,
         );
@@ -2044,32 +2006,12 @@ mod tests {
     }
 
     #[test]
-    fn backoff_grows_and_caps_per_failure_kind() {
-        let secs = |f, auth| backoff_delay(f, auth).as_secs();
-
-        // Transient: keeps the old 30s cadence on the first failure, caps at 5 min.
-        assert_eq!(secs(1, false), 30);
-        assert_eq!(secs(2, false), 60);
-        assert_eq!(secs(4, false), 240);
-        assert_eq!(secs(10, false), 300, "transient failures cap at 5 minutes");
-
-        // Auth rejection: starts higher and caps far higher — it will not self-heal.
-        assert_eq!(secs(1, true), 60);
-        assert_eq!(secs(2, true), 120);
-        assert_eq!(secs(10, true), 3600, "auth failures cap at 1 hour");
-
-        // A large failure count must not overflow the shift.
-        assert_eq!(secs(u32::MAX, true), 3600);
-        assert_eq!(secs(u32::MAX, false), 300);
-    }
-
-    #[test]
     fn test_imap_provider_creation() {
         let provider = ImapEmailProvider::new(
             "imap.example.com".to_string(),
             993,
             "user@example.com".to_string(),
-            ImapCredential::Password("password".to_string()),
+            Arc::new(LoginSecret::Password("password".to_string())),
             true,
             None, // no SMTP sender in unit test
         );

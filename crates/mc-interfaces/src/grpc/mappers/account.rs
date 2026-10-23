@@ -35,6 +35,7 @@ pub fn domain_account_status_to_proto(status: &DomainAccountStatus) -> i32 {
         DomainAccountStatus::Disabled => ProtoAccountStatus::Disabled as i32,
         DomainAccountStatus::Error => ProtoAccountStatus::Error as i32,
         DomainAccountStatus::NeedsReauth => ProtoAccountStatus::NeedsReauth as i32,
+        DomainAccountStatus::CredentialsRejected => ProtoAccountStatus::CredentialsRejected as i32,
     }
 }
 
@@ -45,6 +46,7 @@ pub fn proto_account_status_to_domain(status: i32) -> Result<DomainAccountStatus
         Some(ProtoAccountStatus::Disabled) => Ok(DomainAccountStatus::Disabled),
         Some(ProtoAccountStatus::Error) => Ok(DomainAccountStatus::Error),
         Some(ProtoAccountStatus::NeedsReauth) => Ok(DomainAccountStatus::NeedsReauth),
+        Some(ProtoAccountStatus::CredentialsRejected) => Ok(DomainAccountStatus::CredentialsRejected),
         _ => Err(format!("Invalid account status: {}", status)),
     }
 }

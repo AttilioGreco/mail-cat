@@ -20,6 +20,7 @@ pub use error::ApplicationError;
 pub use projections::ProjectionEventHandler;
 pub use queries::{Query, QueryResult};
 pub use services::{
-    AccountProvisioner, ImapProvisionParams, OAuthLoginProgress, OAuthLoginTrigger, SyncConfig,
+    AccountProvisioner, AuthGate, AuthGates, AuthState, AuthStatus, Credential, ImapProvisionParams,
+    RefreshFn, OAuthLoginProgress, OAuthLoginTrigger, SyncConfig,
     SyncProgressEvent, SyncService, SyncState, SyncTrigger,
 };

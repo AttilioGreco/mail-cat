@@ -300,7 +300,7 @@ fn summary_from_row(row: &Row) -> rusqlite::Result<MessageSummary> {
 }
 
 const SELECT_ACCOUNT: &str =
-    "SELECT id, name, email, provider_type, status, total_unread FROM accounts";
+    "SELECT id, name, email, provider_type, status, total_unread, status_error, status_since FROM accounts";
 
 fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
     Ok(AccountSummary {
@@ -310,6 +310,8 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
         provider_type: json_col(row, 3)?,
         status: json_col(row, 4)?,
         total_unread: row.get(5)?,
+        status_error: row.get(6)?,
+        status_since: row.get::<_, Option<i64>>(7)?.map(DateTime::from_timestamp_nanos),
     })
 }
 
@@ -1159,7 +1161,7 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mc_domain::{EventEnvelope, MailboxType, ProviderType, ReadModelProjector};
+    use mc_domain::{AccountStatus, EventEnvelope, MailboxType, ProviderType, ReadModelProjector};
 
     fn open() -> (tempfile::TempDir, SqliteRepository) {
         let dir = tempfile::tempdir().unwrap();
@@ -1239,6 +1241,29 @@ mod tests {
         assert!(stored < 1000, "{stored} bytes for {} of text", text.len());
         let message = repo.get_message(&id).await.unwrap().unwrap();
         assert_eq!(message.body_text, Some(text));
+    }
+
+    #[tokio::test]
+    async fn an_auth_status_keeps_its_reason_and_since_until_fixed() {
+        let (_dir, repo) = open();
+        let added = account_added();
+        let DomainEvent::AccountAdded { account_id, .. } = added else { unreachable!() };
+        repo.project(&at_position(1, added)).await.unwrap();
+
+        let rejected = at_position(
+            2,
+            DomainEvent::AccountCredentialsRejected { account_id, error: "the server rejected the password".into() },
+        );
+        repo.project(&rejected).await.unwrap();
+        let account = repo.get_account(&account_id).await.unwrap().unwrap();
+        assert_eq!(account.status, AccountStatus::CredentialsRejected);
+        assert_eq!(account.status_error.as_deref(), Some("the server rejected the password"));
+        assert_eq!(account.status_since, Some(rejected.occurred_at));
+
+        repo.project(&at_position(3, DomainEvent::AccountReauthenticated { account_id })).await.unwrap();
+        let account = repo.get_account(&account_id).await.unwrap().unwrap();
+        assert_eq!(account.status, AccountStatus::Active);
+        assert_eq!(account.status_error, None);
     }
 
     #[tokio::test]
@@ -1423,7 +1448,11 @@ mod tests {
         }
         // Back to a pre-usage database holding the same messages.
         repo.db
-            .write(|c| c.execute_batch("DROP TABLE address_usage; DROP TABLE sent_counted; DROP TABLE downloads; PRAGMA user_version = 2;").map_err(repo_err))
+            .write(|c| c.execute_batch(
+                "DROP TABLE address_usage; DROP TABLE sent_counted; DROP TABLE downloads; \
+                 ALTER TABLE accounts DROP COLUMN status_error; ALTER TABLE accounts DROP COLUMN status_since; \
+                 PRAGMA user_version = 2;",
+            ).map_err(repo_err))
             .await
             .unwrap();
         drop(repo);

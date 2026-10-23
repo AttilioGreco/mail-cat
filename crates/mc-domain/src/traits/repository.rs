@@ -50,6 +50,12 @@ pub struct AccountSummary {
     pub provider_type: ProviderType,
     pub status: AccountStatus,
     pub total_unread: u32,
+    /// Why the account is in `status`, for the states that need the user.
+    #[serde(default)]
+    pub status_error: Option<String>,
+    /// When the account entered `status`; `None` before it ever changed.
+    #[serde(default)]
+    pub status_since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// How much of an account is actually downloaded locally.

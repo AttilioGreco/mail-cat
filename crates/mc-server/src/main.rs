@@ -15,7 +15,6 @@ mod config;
 mod notifications;
 mod oauth_login;
 mod oauth_reauth;
-mod oauth_refresh;
 mod secret_ingest;
 mod wiring;
 

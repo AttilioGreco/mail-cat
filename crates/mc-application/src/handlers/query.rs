@@ -237,6 +237,8 @@ mod tests {
                 provider_type: ProviderType::Imap,
                 status: AccountStatus::Active,
                 total_unread: 5,
+                status_error: None,
+                status_since: None,
             }))
         }
 
@@ -248,6 +250,8 @@ mod tests {
                 provider_type: ProviderType::Imap,
                 status: AccountStatus::Active,
                 total_unread: 3,
+                status_error: None,
+                status_since: None,
             }])
         }
 

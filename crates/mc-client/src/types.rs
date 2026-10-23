@@ -31,8 +31,10 @@ pub enum AccountStatus {
     Disabled,
     /// Sync is failing for a reason other than credentials.
     Error,
-    /// Credentials were rejected or lost — needs an interactive re-login.
+    /// The OAuth token is gone or rejected — needs an interactive re-login.
     NeedsReauth,
+    /// The server rejected the password — the user has to update it.
+    CredentialsRejected,
     Unknown,
 }
 
@@ -44,6 +46,7 @@ impl AccountStatus {
             Self::Disabled => "disabled",
             Self::Error => "error",
             Self::NeedsReauth => "needs_reauth",
+            Self::CredentialsRejected => "credentials_rejected",
             Self::Unknown => "unknown",
         }
     }

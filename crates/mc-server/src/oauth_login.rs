@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mc_application::OAuthLoginProgress;
-use mc_domain::{DomainError, OAuthProvider, OAuthSecrets, SecretStore};
-use mc_infrastructure::email::imap::ImapCredential;
+use mc_domain::{DomainError, LoginSecret, OAuthProvider, OAuthSecrets, SecretStore};
 use mc_infrastructure::ImapEmailProvider;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
 #[derive(Clone)]
@@ -103,7 +102,7 @@ async fn verify_imap_login(provider: OAuthProvider, email: &str, access_token: &
         preset.imap_host.into(),
         preset.imap_port,
         email.into(),
-        ImapCredential::OAuthToken(Arc::new(RwLock::new(access_token.into()))),
+        Arc::new(LoginSecret::OAuthToken(access_token.into())),
         true,
         None,
     )

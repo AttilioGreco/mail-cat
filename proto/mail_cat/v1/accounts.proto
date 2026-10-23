@@ -43,8 +43,9 @@ service AccountService {
   // account was registered with is not derivable from its address.
   rpc ReauthAccount(ReauthAccountRequest) returns (stream OAuthLoginEvent);
 
-  // Replace a password account's IMAP/SMTP password in the keychain. Takes
-  // effect at the next server restart, when providers are rebuilt.
+  // Replace a password account's IMAP/SMTP password in the keychain. IMAP
+  // takes it at once (an account whose password was rejected resumes); SMTP
+  // at the next server restart, when senders are rebuilt.
   rpc SetAccountPassword(SetAccountPasswordRequest) returns (SetAccountPasswordResponse);
 }
 
@@ -64,6 +65,8 @@ enum AccountStatus {
   ACCOUNT_STATUS_ERROR = 3;
   // Credentials are gone/rejected: the account needs an interactive re-login.
   ACCOUNT_STATUS_NEEDS_REAUTH = 4;
+  // The server rejected the account's password: the user has to update it.
+  ACCOUNT_STATUS_CREDENTIALS_REJECTED = 5;
 }
 
 enum OAuthProvider {

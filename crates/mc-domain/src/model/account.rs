@@ -67,6 +67,8 @@ pub enum AccountStatus {
     Disabled,
     Error,
     NeedsReauth,
+    /// The server rejected the account's password: the user has to change it.
+    CredentialsRejected,
 }
 
 /// SMTP security mode.
@@ -260,6 +262,9 @@ impl Account {
             }
             DomainEvent::AccountAuthExpired { .. } => {
                 self.status = AccountStatus::NeedsReauth;
+            }
+            DomainEvent::AccountCredentialsRejected { .. } => {
+                self.status = AccountStatus::CredentialsRejected;
             }
             DomainEvent::AccountReauthenticated { .. } => {
                 self.status = AccountStatus::Active;

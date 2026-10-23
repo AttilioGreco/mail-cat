@@ -119,8 +119,14 @@ pub enum DomainEvent {
         error: String,
     },
 
-    /// The user completed a fresh OAuth login for an account that was
-    /// previously flagged `AccountAuthExpired`.
+    /// The server rejected a password account's password.
+    AccountCredentialsRejected {
+        account_id: AccountId,
+        error: String,
+    },
+
+    /// The user fixed an account flagged `AccountAuthExpired` or
+    /// `AccountCredentialsRejected`: a fresh OAuth login or a new password.
     AccountReauthenticated { account_id: AccountId },
 
     // ── Mailbox Events ──────────────────────────────────────────────
@@ -310,6 +316,7 @@ impl DomainEvent {
             | Self::AccountSyncCompleted { .. }
             | Self::AccountSyncFailed { .. }
             | Self::AccountAuthExpired { .. }
+            | Self::AccountCredentialsRejected { .. }
             | Self::AccountReauthenticated { .. } => AggregateType::Account,
 
             Self::MailboxDiscovered { .. }
@@ -344,6 +351,7 @@ impl DomainEvent {
             Self::AccountSyncCompleted { .. } => "AccountSyncCompleted",
             Self::AccountSyncFailed { .. } => "AccountSyncFailed",
             Self::AccountAuthExpired { .. } => "AccountAuthExpired",
+            Self::AccountCredentialsRejected { .. } => "AccountCredentialsRejected",
             Self::AccountReauthenticated { .. } => "AccountReauthenticated",
             Self::MailboxDiscovered { .. } => "MailboxDiscovered",
             Self::MailboxTypeChanged { .. } => "MailboxTypeChanged",

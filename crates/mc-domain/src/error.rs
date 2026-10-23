@@ -33,6 +33,11 @@ pub enum DomainError {
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
 
+    /// The OAuth provider refused the app itself (invalid_client,
+    /// unauthorized_client): a configuration problem no retry can fix.
+    #[error("OAuth client rejected: {0}")]
+    OAuthClientInvalid(String),
+
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
 

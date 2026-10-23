@@ -17,7 +17,7 @@ use mc_domain::{
     AccountId, AggregateType, Attachment, BackfillEntry, BodyBackfillQueue, DomainError, DomainEvent,
     EmailProvider, EventEnvelope, EventStore, FetchRange, Flag, Mailbox, MailboxId, MailboxPath, MailboxStatus, MailboxType,
     MailboxReadRepository, Message, MessageBodyResult, MessageBodyStore, MessageId,
-    MessageEnvelopeSummary, MessageReadRepository, MessageSummary,
+    LoginGate, MessageEnvelopeSummary, MessageReadRepository, MessageSummary,
     ProjectionCheckpoint, ProviderRegistry, ProviderUid, ReadModelProjector,
 };
 use tokio_util::sync::CancellationToken;
@@ -26,14 +26,6 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::bus::EventPublisher;
 use crate::error::ApplicationError;
 use crate::services::sync_trigger::SyncTrigger;
-
-/// Backoff after `failures` consecutive credential rejections: 5 min, doubling
-/// to a 1 hour cap. A rejected credential needs the user to act, so retrying on
-/// the normal cadence only burns connections and risks provider rate-limiting.
-fn auth_backoff(failures: u32) -> std::time::Duration {
-    let factor = 1u64 << failures.saturating_sub(1).min(20);
-    std::time::Duration::from_secs(300 * factor).min(std::time::Duration::from_secs(3600))
-}
 
 /// Bodies the backfill downloads between two pauses at the fast rate. Once
 /// throttled it takes one at a time: the pause scales with the bytes, so the
@@ -357,7 +349,7 @@ impl<
 
         let remote_mailboxes = provider.list_mailboxes().await.map_err(|e| {
             error!("Failed to list mailboxes: {}", e);
-            // Typed, like fetch_bodies_bulk: the periodic loop backs off on it.
+            // Typed, like fetch_bodies_bulk: callers tell a refused credential from a failed sync.
             if matches!(e, DomainError::AuthenticationFailed(_)) {
                 return ApplicationError::Domain(e);
             }
@@ -622,19 +614,19 @@ impl<
     /// dequeues the entry. Whole-fetch failures (auth/network) leave entries
     /// queued and retried next pass; entries the server no longer has get a
     /// few retries before being abandoned (see `MAX_BACKFILL_MISSING_ATTEMPTS`).
-    /// Runs until `shutdown` fires.
+    /// Waits on `gate` before each batch, so it pauses while the account needs
+    /// the user and follows the offline retry schedule. Runs until `shutdown` fires.
     pub async fn run_backfill(
         &self,
         account_id: AccountId,
         daily_limit: Option<u64>,
+        gate: Arc<dyn LoginGate>,
         shutdown: CancellationToken,
     ) {
         let idle_poll = std::time::Duration::from_secs(60);
 
         let mut missing_counts: HashMap<MessageId, u32> = HashMap::new();
         let mut abandoned: HashSet<MessageId> = HashSet::new();
-        // Consecutive credential rejections, used to back off. Reset on success.
-        let mut auth_failures: u32 = 0;
         // Bodies downloaded since the queue was last empty. Progress is this
         // against itself plus what's still queued, so the percentage climbs to
         // 100% across batches instead of restarting with each one; new mail
@@ -642,8 +634,9 @@ impl<
         let mut drained: u32 = 0;
 
         loop {
-            if shutdown.is_cancelled() {
-                return;
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                () = gate.ready() => {}
             }
 
             let path_by_id: HashMap<MailboxId, MailboxPath> =
@@ -721,7 +714,7 @@ impl<
                 by_mailbox.entry(entry.mailbox_id).or_default().push(entry);
             }
 
-            let (mut auth_rejected, mut fetch_failed) = (false, false);
+            let mut fetch_failed = false;
             for (mailbox_id, entries) in by_mailbox {
                 let Some(path) = path_by_id.get(&mailbox_id) else {
                     // Mailbox not yet known locally: nothing fetched, so retry
@@ -731,7 +724,6 @@ impl<
                 };
                 match self.fetch_message_bodies_bulk(&account_id, path, &entries).await {
                     Ok(missing) => {
-                        auth_failures = 0;
                         for message_id in missing {
                             let count = missing_counts.entry(message_id).or_insert(0);
                             *count += 1;
@@ -750,16 +742,11 @@ impl<
                             }
                         }
                     }
-                    // A rejected credential fails every remaining mailbox
-                    // identically. Stop and back off, instead of re-running the
-                    // queue against a server that is refusing us, forever.
+                    // The gate now holds the account's state: stop here and
+                    // let `ready` decide when to try again.
                     Err(e @ ApplicationError::Domain(DomainError::AuthenticationFailed(_))) => {
-                        auth_failures = auth_failures.saturating_add(1);
-                        warn!(
-                            %account_id, error = %e, attempts = auth_failures,
-                            "backfill: credential rejected, backing off"
-                        );
-                        auth_rejected = true;
+                        warn!(%account_id, error = %e, "backfill: credential rejected");
+                        fetch_failed = true;
                         break;
                     }
                     Err(e) => {
@@ -769,13 +756,6 @@ impl<
                         warn!(%account_id, error = %e, "backfill: bulk body fetch failed");
                         fetch_failed = true;
                     }
-                }
-            }
-
-            if auth_rejected {
-                tokio::select! {
-                    _ = shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(auth_backoff(auth_failures)) => continue,
                 }
             }
 
@@ -1665,21 +1645,11 @@ mod tests {
     use futures::Stream;
     use mc_domain::{
         Address, AggregateType, DomainError, EmailAddress, Envelope, EventEnvelope, Flag,
-        MailboxStatus, MailboxType, MessageEnvelopeSummary, OutgoingMessage,
+        LoginSecret, MailboxStatus, MailboxType, MessageEnvelopeSummary, OutgoingMessage,
         ProviderNotification,
     };
     use std::pin::Pin;
     use std::sync::Mutex;
-
-    #[test]
-    fn auth_backoff_grows_and_caps() {
-        assert_eq!(auth_backoff(1).as_secs(), 300, "first rejection waits 5 min");
-        assert_eq!(auth_backoff(2).as_secs(), 600);
-        assert_eq!(auth_backoff(4).as_secs(), 2400);
-        assert_eq!(auth_backoff(8).as_secs(), 3600, "caps at 1 hour");
-        // Must not overflow the shift on a long-dead account.
-        assert_eq!(auth_backoff(u32::MAX).as_secs(), 3600);
-    }
 
     #[test]
     fn backfill_paces_by_bytes_against_the_daily_cap() {
@@ -2453,7 +2423,10 @@ mod tests {
         let worker = {
             let service = service.clone();
             let shutdown = shutdown.clone();
-            tokio::spawn(async move { service.run_backfill(AccountId::new(), None, shutdown).await })
+            tokio::spawn(async move {
+                let gate = Arc::new(LoginSecret::Password(String::new()));
+                service.run_backfill(AccountId::new(), None, gate, shutdown).await
+            })
         };
 
         let event = rx.recv().await.expect("idle worker published its state");

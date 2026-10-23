@@ -125,17 +125,18 @@ pub async fn refresh(provider: OAuthProvider, refresh_token: &str) -> Result<OAu
 }
 
 /// Distinguishes a dead refresh token (revoked/invalid — the account needs a
-/// full user re-auth) from a transient failure (network hiccup, timeout,
-/// provider 5xx — safe to retry next cycle).
+/// full user re-auth) and a refused app (a configuration problem) from a
+/// transient failure (network hiccup, timeout, provider 5xx — safe to retry).
 fn classify_refresh_error<RE: std::error::Error + 'static>(
     e: oauth2::RequestTokenError<RE, oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>>,
 ) -> DomainError {
+    use oauth2::basic::BasicErrorResponseType::{InvalidClient, InvalidGrant, UnauthorizedClient};
     match e {
-        oauth2::RequestTokenError::ServerResponse(resp)
-            if matches!(resp.error(), oauth2::basic::BasicErrorResponseType::InvalidGrant) =>
-        {
-            DomainError::AuthenticationFailed(format!("refresh token invalid or revoked: {resp}"))
-        }
+        oauth2::RequestTokenError::ServerResponse(resp) => match resp.error() {
+            InvalidGrant => DomainError::AuthenticationFailed(format!("refresh token invalid or revoked: {resp}")),
+            InvalidClient | UnauthorizedClient => DomainError::OAuthClientInvalid(format!("{resp}")),
+            _ => DomainError::Provider(format!("OAuth token refresh failed: {resp}")),
+        },
         other => DomainError::Provider(format!("OAuth token refresh failed: {other}")),
     }
 }
@@ -185,6 +186,21 @@ mod tests {
         let classified = classify_refresh_error(err);
 
         assert!(matches!(classified, DomainError::AuthenticationFailed(_)));
+    }
+
+    #[test]
+    fn classify_a_refused_client_as_a_configuration_problem() {
+        for kind in [
+            oauth2::basic::BasicErrorResponseType::InvalidClient,
+            oauth2::basic::BasicErrorResponseType::UnauthorizedClient,
+        ] {
+            let err: oauth2::RequestTokenError<
+                std::io::Error,
+                oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>,
+            > = oauth2::RequestTokenError::ServerResponse(oauth2::StandardErrorResponse::new(kind, None, None));
+
+            assert!(matches!(classify_refresh_error(err), DomainError::OAuthClientInvalid(_)));
+        }
     }
 
     #[test]

@@ -82,11 +82,14 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
         DomainEvent::AccountRemoved { account_id } => {
             exec(tx, "DELETE FROM accounts WHERE id = ?1", [account_id.as_uuid()])?;
         }
-        DomainEvent::AccountAuthExpired { account_id, .. } => {
-            set_account_status(tx, account_id, AccountStatus::NeedsReauth)?;
+        DomainEvent::AccountAuthExpired { account_id, error } => {
+            set_account_status(tx, account_id, AccountStatus::NeedsReauth, Some(error), event.occurred_at)?;
+        }
+        DomainEvent::AccountCredentialsRejected { account_id, error } => {
+            set_account_status(tx, account_id, AccountStatus::CredentialsRejected, Some(error), event.occurred_at)?;
         }
         DomainEvent::AccountReauthenticated { account_id } => {
-            set_account_status(tx, account_id, AccountStatus::Active)?;
+            set_account_status(tx, account_id, AccountStatus::Active, None, event.occurred_at)?;
         }
         DomainEvent::AccountSyncStarted { .. }
         | DomainEvent::AccountSyncCompleted { .. }
@@ -334,11 +337,13 @@ fn set_account_status(
     tx: &Connection,
     account_id: &AccountId,
     status: AccountStatus,
+    error: Option<&String>,
+    since: DateTime<Utc>,
 ) -> Result<(), DomainError> {
     exec(
         tx,
-        "UPDATE accounts SET status = ?2 WHERE id = ?1",
-        params![account_id.as_uuid(), json(&status)?],
+        "UPDATE accounts SET status = ?2, status_error = ?3, status_since = ?4 WHERE id = ?1",
+        params![account_id.as_uuid(), json(&status)?, error, nanos(since)],
     )
     .map(drop)
 }

@@ -5,21 +5,23 @@ use chrono::Utc;
 use futures::stream::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::{CommandBus, QueryBus};
 use mc_application::projections::{ProjectionEventHandler, SearchProjectionHandler};
-use mc_application::{OAuthLoginTrigger, SyncConfig, SyncService, SyncTrigger};
+use mc_application::{
+    AuthGate, AuthGates, AuthState, Credential, EventPublisher, OAuthLoginTrigger, RefreshFn, SyncConfig,
+    SyncService, SyncTrigger,
+};
 use mc_domain::{
-    Account, AccountEventSource, AccountId, AccountReadRepository, AccountWriteRepository,
-    AuthConfig, ConnectionConfig, EmailAddress, Identity, MailboxId, MailboxPath,
-    ProviderNotification, ProviderRegistry, ProviderType, ProviderUid,
+    Account, AccountEventSource, AccountId, AccountReadRepository, AccountSecrets, AccountWriteRepository,
+    AggregateType, AuthConfig, ConnectionConfig, DomainError, DomainEvent, EmailAddress, EventEnvelope,
+    EventStore, Identity, LoginGate, MailboxId, MailboxPath, ProviderNotification, ProviderRegistry,
+    ProviderUid,
 };
 use mc_domain::model::account::{SmtpConnectionConfig, SmtpSecurity};
 use mc_infrastructure::{
-    email::imap::ImapCredential,
     email::smtp::SmtpSender,
     DownloadMeter, ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SqliteDb,
     SqliteEventStore, SqliteRepository, TantivySearchIndex,
@@ -28,9 +30,11 @@ use mc_interfaces::grpc::services::{
     AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
 };
 
-use crate::config::ServerConfig;
+use crate::config::{AccountConfig, ServerConfig};
 use crate::oauth_login::OAuthChallengeManager;
-use crate::oauth_refresh::{self, OAuthRuntimeState};
+
+/// How often an account is re-synced when nothing else prompts it.
+const SYNC_PERIOD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 // Type aliases for concrete implementations
 type ProviderRegistryImpl = InMemoryProviderRegistry<ImapEmailProvider>;
@@ -115,131 +119,8 @@ impl AppContext {
         );
         tracing::info!("Initialized search index at {}", config.index_path);
 
-        // Create provider registry and build providers from config
+        // Providers are registered once the accounts are resolved, below.
         let provider_registry = Arc::new(InMemoryProviderRegistry::new());
-        let mut providers_by_email: HashMap<String, Arc<ImapEmailProvider>> = HashMap::new();
-        let mut oauth_cells_by_email: HashMap<
-            String,
-            (
-                Arc<RwLock<String>>,
-                Arc<RwLock<String>>,
-                Arc<RwLock<chrono::DateTime<Utc>>>,
-                mc_domain::OAuthProvider,
-            ),
-        > = HashMap::new();
-        for account_config in &config.accounts {
-            tracing::info!("Creating IMAP provider for {}", account_config.email);
-
-            // Resolve secrets from the OS keychain (plaintext was migrated out
-            // of the config file at startup by secret_ingest).
-            let secrets = secret_store
-                .load(&account_config.email)
-                .with_context(|| format!("reading keychain secrets for {}", account_config.email))?
-                .unwrap_or_default();
-            let imap_password = secrets.imap_password.clone().unwrap_or_default();
-            // OAuth accounts authenticate with a token, not a password — don't
-            // warn about a missing keychain password for them (it's never set).
-            if imap_password.is_empty() && account_config.oauth_provider.is_none() {
-                tracing::warn!(
-                    "⚠ {}: nessuna password nel keychain di sistema — inserisci `password = \"...\"` in config.toml per importarla",
-                    account_config.email
-                );
-            }
-
-            // ── Resolve credential: OAuth2 token cell or plain password ────
-            let credential = if let Some(oauth_cfg) = account_config.oauth_provider {
-                let oauth_secrets = secrets.oauth.clone().unwrap_or_else(|| {
-                    tracing::warn!(
-                        "⚠ {}: nessun token OAuth nel keychain — esegui `mc accounts add-oauth`",
-                        account_config.email
-                    );
-                    mc_domain::OAuthSecrets {
-                        access_token: String::new(),
-                        refresh_token: String::new(),
-                        expires_at: Utc::now(),
-                    }
-                });
-                let access_token = Arc::new(RwLock::new(oauth_secrets.access_token.clone()));
-                let refresh_token = Arc::new(RwLock::new(oauth_secrets.refresh_token.clone()));
-                let expires_at = Arc::new(RwLock::new(oauth_secrets.expires_at));
-                oauth_cells_by_email.insert(
-                    account_config.email.clone(),
-                    (access_token.clone(), refresh_token, expires_at, oauth_cfg.into()),
-                );
-                ImapCredential::OAuthToken(access_token)
-            } else {
-                ImapCredential::Password(imap_password.clone())
-            };
-
-            // ── Build SMTP sender (optional) ──────────────────────────────
-            let smtp_sender = if let Some(smtp_cfg) = &account_config.smtp {
-                let domain_smtp = SmtpConnectionConfig {
-                    host: smtp_cfg.host.clone(),
-                    port: smtp_cfg.port,
-                    security: match smtp_cfg.security {
-                        crate::config::SmtpSecurityConfig::Smtps => SmtpSecurity::Smtps,
-                        crate::config::SmtpSecurityConfig::StartTls => SmtpSecurity::StartTls,
-                    },
-                    username: smtp_cfg.username.clone(),
-                    password: secrets.smtp_password.clone(),
-                };
-                let sender_result = match &credential {
-                    ImapCredential::OAuthToken(token) => {
-                        Ok(SmtpSender::build_oauth(&domain_smtp, &account_config.username, token.clone()))
-                    }
-                    ImapCredential::Password(_) => {
-                        SmtpSender::build(&domain_smtp, &account_config.username, &imap_password)
-                    }
-                };
-                match sender_result {
-                    Ok(sender) => {
-                        match sender.test_connection().await {
-                            Ok(true) => tracing::info!(
-                                "✓ SMTP {} ({}:{}) connessione OK",
-                                account_config.email, smtp_cfg.host, smtp_cfg.port
-                            ),
-                            Ok(false) => tracing::warn!(
-                                "⚠ SMTP {}: server raggiungibile ma NOOP fallito",
-                                account_config.email
-                            ),
-                            Err(e) => tracing::warn!(
-                                "⚠ SMTP {}: non raggiungibile — {e}",
-                                account_config.email
-                            ),
-                        }
-                        Some(sender)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "⚠ SMTP {}: configurazione non valida — {e}",
-                            account_config.email
-                        );
-                        None
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    "⚠ SMTP {}: nessun blocco [smtp] in config — invio disabilitato",
-                    account_config.email
-                );
-                None
-            };
-
-            let provider = Arc::new(ImapEmailProvider::new(
-                account_config.imap_host.clone(),
-                account_config.imap_port,
-                account_config.username.clone(),
-                credential,
-                account_config.use_tls,
-                smtp_sender,
-            )
-            .with_download_meter(DownloadMeter::new(db.clone(), &account_config.email)));
-            providers_by_email.insert(account_config.email.clone(), provider);
-        }
-        tracing::info!(
-            "Created {} email provider(s) from config",
-            providers_by_email.len()
-        );
 
         // ── Application Layer ───────────────────────────────────────────────
 
@@ -338,149 +219,114 @@ impl AppContext {
             .list_accounts()
             .await
             .context("failed to list existing accounts during startup")?;
-        let existing_emails: HashSet<String> = existing_accounts
-            .iter()
-            .map(|a| a.email.as_str().to_string())
-            .collect();
 
-        let mut registered_ids: Vec<(AccountId, String)> = Vec::new();
-        let mut oauth_states: Vec<OAuthRuntimeState> = Vec::new();
+        // Transitions that must survive a restart (re-login needed, password
+        // rejected, recovered) come out of the gates in order; appended below.
+        let (auth_events_tx, auth_events) = tokio::sync::mpsc::unbounded_channel();
+        let refresh: RefreshFn = Arc::new(|provider, refresh_token| {
+            Box::pin(async move { mc_infrastructure::oauth::refresh(provider, &refresh_token).await })
+        });
+        let mut auth_gates = AuthGates::new(refresh, secret_store.clone(), auth_events_tx);
+
+        let mut registered: Vec<(AccountId, String, Arc<AuthGate>)> = Vec::new();
+        let mut oauth_names: HashMap<AccountId, String> = HashMap::new();
         let mut created_new = false;
         // Per-account backfill rate override (falls back to the global default).
         let mut download_limits: HashMap<AccountId, Option<u64>> = HashMap::new();
 
         for account_config in &config.accounts {
-            let provider = providers_by_email
-                .remove(&account_config.email)
-                .expect("provider must exist for config account");
-
-            if existing_emails.contains(&account_config.email) {
-                // Already in DB — just register the provider
-                let summary = existing_accounts
-                    .iter()
-                    .find(|a| a.email.as_str() == account_config.email)
-                    .unwrap();
-                provider_registry.register_provider(summary.id, provider);
-                tracing::info!(
-                    "Registered provider for existing account '{}' ({})",
-                    summary.name,
-                    summary.email
-                );
-                registered_ids.push((summary.id, summary.name.clone()));
-                if let Some((access_token, refresh_token, expires_at, provider)) =
-                    oauth_cells_by_email.remove(&account_config.email)
-                {
-                    oauth_states.push(OAuthRuntimeState {
-                        account_id: summary.id,
-                        name: summary.name.clone(),
-                        email: account_config.email.clone(),
-                        provider,
-                        access_token,
-                        refresh_token,
-                        expires_at,
-                        needs_reauth: Arc::new(RwLock::new(
-                            summary.status == mc_domain::AccountStatus::NeedsReauth,
-                        )),
-                    });
+            let existing = existing_accounts
+                .iter()
+                .find(|a| a.email.as_str() == account_config.email);
+            let (account_id, name) = match existing {
+                Some(summary) => (summary.id, summary.name.clone()),
+                None => {
+                    let account_id = create_account(account_config, repository_arc.as_ref()).await?;
+                    created_new = true;
+                    (account_id, account_config.name.clone())
                 }
-                download_limits.insert(summary.id, account_config.daily_download_limit());
-            } else {
-                // Not in DB — create via aggregate + save
-                let email =
-                    EmailAddress::new(&account_config.email).context("invalid email in config")?;
-                let provider_type: ProviderType = account_config.provider_type.into();
-                let smtp_domain_config = account_config.smtp.as_ref().map(|s| SmtpConnectionConfig {
-                    host: s.host.clone(),
-                    port: s.port,
-                    security: match s.security {
-                        crate::config::SmtpSecurityConfig::Smtps => SmtpSecurity::Smtps,
-                        crate::config::SmtpSecurityConfig::StartTls => SmtpSecurity::StartTls,
-                    },
-                    username: s.username.clone(),
-                    // Secret lives in the keychain, not the persisted aggregate
-                    // (AuthConfig secret fields are #[serde(skip)]).
-                    password: None,
-                });
-                let connection_config = ConnectionConfig {
-                    imap_host: Some(account_config.imap_host.clone()),
-                    imap_port: Some(account_config.imap_port),
-                    use_tls: account_config.use_tls,
-                    auth: AuthConfig::Plain {
-                        username: account_config.username.clone(),
-                        password: String::new(), // resolved from keychain at runtime
-                    },
-                    smtp: smtp_domain_config,
-                    smtp_host: None,
-                    smtp_port: None,
-                };
-                let identity = Identity {
-                    display_name: account_config.name.clone(),
-                    email: email.clone(),
-                    signature_html: None,
-                    signature_text: None,
-                };
+            };
 
-                let (account, event) = Account::create(
-                    account_config.name.clone(),
-                    email,
-                    provider_type,
-                    connection_config,
-                    identity,
-                );
-                let account_id = account.id;
-
-                repository_arc
-                    .save(&account, vec![event])
-                    .await
-                    .context("failed to auto-create account")?;
-
-                provider_registry.register_provider(account_id, provider);
-                tracing::info!(
-                    "Auto-created account '{}' ({}) and registered provider",
-                    account_config.name,
-                    account_config.email
-                );
-                registered_ids.push((account_id, account_config.name.clone()));
-                if let Some((access_token, refresh_token, expires_at, provider)) =
-                    oauth_cells_by_email.remove(&account_config.email)
-                {
-                    oauth_states.push(OAuthRuntimeState {
-                        account_id,
-                        name: account_config.name.clone(),
-                        email: account_config.email.clone(),
-                        provider,
-                        access_token,
-                        refresh_token,
-                        expires_at,
-                        needs_reauth: Arc::new(RwLock::new(false)),
+            // Resolve secrets from the OS keychain (plaintext was migrated out
+            // of the config file at startup by secret_ingest).
+            let secrets = secret_store
+                .load(&account_config.email)
+                .with_context(|| format!("reading keychain secrets for {}", account_config.email))?
+                .unwrap_or_default();
+            let imap_password = secrets.imap_password.clone().unwrap_or_default();
+            let credential = match account_config.oauth_provider {
+                Some(oauth_cfg) => {
+                    oauth_names.insert(account_id, name.clone());
+                    // An empty refresh token makes the gate ask for a login on
+                    // first use instead of knocking with a token it cannot have.
+                    let tokens = secrets.oauth.clone().unwrap_or_else(|| {
+                        tracing::warn!(
+                            "⚠ {}: nessun token OAuth nel keychain — esegui `mc accounts add-oauth`",
+                            account_config.email
+                        );
+                        mc_domain::OAuthSecrets {
+                            access_token: String::new(),
+                            refresh_token: String::new(),
+                            expires_at: Utc::now(),
+                        }
                     });
+                    Credential::OAuth { provider: oauth_cfg.into(), tokens }
                 }
-                download_limits.insert(account_id, account_config.daily_download_limit());
-                created_new = true;
+                None => {
+                    if imap_password.is_empty() {
+                        tracing::warn!(
+                            "⚠ {}: nessuna password nel keychain di sistema — inserisci `password = \"...\"` in config.toml per importarla",
+                            account_config.email
+                        );
+                    }
+                    Credential::Password(imap_password.clone())
+                }
+            };
+            let gate = auth_gates.add(account_id, &account_config.email, credential);
+            if let Some(summary) = existing {
+                gate.restore(summary);
             }
+
+            let login_gate = gate.clone() as Arc<dyn LoginGate>;
+            let smtp_sender = build_smtp_sender(account_config, &secrets, &imap_password, &login_gate).await;
+            let provider = Arc::new(
+                ImapEmailProvider::new(
+                    account_config.imap_host.clone(),
+                    account_config.imap_port,
+                    account_config.username.clone(),
+                    login_gate,
+                    account_config.use_tls,
+                    smtp_sender,
+                )
+                .with_download_meter(DownloadMeter::new(db.clone(), &account_config.email)),
+            );
+            provider_registry.register_provider(account_id, provider);
+            tracing::info!("Registered provider for '{}' ({})", name, account_config.email);
+
+            download_limits.insert(account_id, account_config.daily_download_limit());
+            registered.push((account_id, name, gate));
         }
+        let auth_gates = Arc::new(auth_gates);
 
         // The port every OAuth login goes through — notification button, UI
-        // button, add-account dialog. It owns pushing a fresh token back into the
-        // live runtime state, so no caller has to remember to.
+        // button, add-account dialog. It owns handing a fresh token to the
+        // account's gate, so no caller has to remember to.
         let oauth_trigger = Arc::new(crate::oauth_reauth::ReauthTrigger::new(
             oauth_challenges,
-            oauth_states.clone(),
+            auth_gates.clone(),
+            oauth_names,
             secret_store.clone(),
-            event_store.clone() as Arc<dyn mc_domain::EventStore>,
-            repository_arc.clone() as Arc<dyn mc_domain::AccountWriteRepository>,
-            event_bus.clone() as Arc<dyn mc_application::EventPublisher>,
         )) as Arc<dyn OAuthLoginTrigger>;
 
         // ── Re-fire re-auth notification for accounts still needing it ──────────
-        // On a fresh boot, needs_reauth is seeded from the persisted read-model
-        // status above — so an account that died before the user re-authenticated
-        // (e.g. server restarted mid-outage) gets its "Ri-autentica" notification
-        // reissued immediately instead of staying silently orphaned.
-        for state in &oauth_states {
-            if *state.needs_reauth.read().await {
+        // An OAuth account that died before the user re-authenticated (e.g. server
+        // restarted mid-outage) gets its "Ri-autentica" notification reissued
+        // immediately instead of staying silently orphaned.
+        for account in existing_accounts.iter().filter(|a| a.status == mc_domain::AccountStatus::NeedsReauth) {
+            if let Some(gate) = auth_gates.get(&account.id).filter(|g| g.oauth_provider().is_some()) {
                 spawn_reauth_notification(
-                    state.clone(),
+                    account.id,
+                    gate.email().to_owned(),
                     "Autenticazione scaduta — accedi di nuovo".to_owned(),
                     oauth_trigger.clone(),
                 );
@@ -593,7 +439,7 @@ impl AppContext {
                 notif_ui_bin.clone(),
                 shutdown.clone(),
             );
-            let notif_oauth_states = oauth_states.clone();
+            let notif_gates = auth_gates.clone();
             let notif_oauth_trigger = oauth_trigger.clone();
             let sd = shutdown.clone();
             tokio::spawn(async move {
@@ -697,22 +543,34 @@ impl AppContext {
                             });
                         }
                         mc_domain::DomainEvent::AccountAuthExpired { account_id, error } => {
-                            let Some(state) = notif_oauth_states
-                                .iter()
-                                .find(|s| s.account_id == account_id)
-                                .cloned()
+                            // Only an OAuth account can be fixed by logging in again.
+                            let Some(gate) = notif_gates
+                                .get(&account_id)
+                                .filter(|g| g.oauth_provider().is_some())
                             else {
-                                tracing::warn!(
-                                    "AccountAuthExpired for unknown account {}",
-                                    account_id.as_uuid()
-                                );
                                 continue;
                             };
                             spawn_reauth_notification(
-                                state,
+                                account_id,
+                                gate.email().to_owned(),
                                 error,
                                 notif_oauth_trigger.clone(),
                             );
+                        }
+                        mc_domain::DomainEvent::AccountCredentialsRejected { account_id, .. } => {
+                            let Some(email) = notif_gates.get(&account_id).map(|g| g.email().to_owned()) else {
+                                continue;
+                            };
+                            tokio::task::spawn_blocking(move || {
+                                if let Err(e) = notify_rust::Notification::new()
+                                    .summary(&format!("Password rifiutata per {email}"))
+                                    .body("Aggiorna la password nelle impostazioni dell'account.")
+                                    .icon("dialog-error")
+                                    .show()
+                                {
+                                    tracing::warn!("Desktop notification failed: {e}");
+                                }
+                            });
                         }
                         _ => {}
                     }
@@ -720,6 +578,23 @@ impl AppContext {
                 tracing::info!("Notification subscriber exited");
             });
             tracing::info!("Desktop notification subscriber started");
+        }
+
+        // Spawned after the notification subscriber, so a transition at boot
+        // (the SMTP check) still pops its notification.
+        {
+            let event_store = event_store.clone() as Arc<dyn mc_domain::EventStore>;
+            let repository = repository_arc.clone() as Arc<dyn AccountWriteRepository>;
+            let publisher = event_bus.clone() as Arc<dyn mc_application::EventPublisher>;
+            let mut auth_events = auth_events;
+            tokio::spawn(async move {
+                while let Some((account_id, event)) = auth_events.recv().await {
+                    let name = event.event_name();
+                    if let Err(e) = append_account_event(account_id, event, &event_store, &repository, &publisher).await {
+                        tracing::error!("Failed recording {name} for {}: {e}", account_id.as_uuid());
+                    }
+                }
+            });
         }
 
         // Search-index maintenance runs through the search-index projection: the
@@ -748,144 +623,74 @@ impl AppContext {
                 .context("failed to catch up search index after account creation")?;
         }
 
-        // ── Auto-sync registered accounts in background ─────────────────
+        // ── Sync loop, one per account ──────────────────────────────────────
+        // Syncs at boot, then every 5 minutes, and as soon as the account
+        // recovers. Each pass waits on the gate: an account that needs the user
+        // stays quiet, an offline one follows the gate's retry schedule. The
+        // first pass is the account's first real login, so its state is known
+        // within seconds of startup.
         // After each sync, run the search-index catch-up: sync appends events in
         // bulk and the live bus drops under that load, so this lossless replay
         // from the event store is what makes synced messages searchable.
         // ponytail: concurrent per-account catch-ups are idempotent (writer is
         // mutex-guarded); redundant overlap is fine, no coordination needed.
-        for (account_id, name) in &registered_ids {
+        for (account_id, name, gate) in &registered {
             let sync = sync_service.clone();
             let id = *account_id;
             let account_name = name.clone();
+            let gate = gate.clone();
             let search = search_handler.clone();
             let es = event_store.clone();
-            tokio::spawn(async move {
-                match sync.start_sync(&id).await {
-                    Ok(events) => {
-                        tracing::info!(
-                            "Background sync done for '{}': {} event(s)",
-                            account_name,
-                            events.len()
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("Background sync failed for '{}': {}", account_name, e);
-                    }
-                }
-                if let Err(e) = search.catch_up(es.as_ref()).await {
-                    tracing::warn!("Search index catch-up after sync of '{}' failed: {}", account_name, e);
-                }
-            });
-        }
-        if !registered_ids.is_empty() {
-            tracing::info!(
-                "Launched background sync for {} account(s)",
-                registered_ids.len()
-            );
-        }
-
-        // ── Periodic re-sync (every 5 minutes) ──────────────────────────────
-        if !registered_ids.is_empty() {
-            let sync_periodic = sync_service.clone();
-            let ids: Vec<(AccountId, String)> = registered_ids.clone();
             let sd = shutdown.clone();
-            let search = search_handler.clone();
-            let es = event_store.clone();
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
-                interval.tick().await; // skip immediate first tick (initial sync already running)
-                // A rejected credential never recovers on its own, and Gmail keeps an
-                // account throttled for as long as we keep knocking every 5 minutes.
-                let mut auth_backoff: HashMap<AccountId, (u32, tokio::time::Instant)> =
-                    HashMap::new();
                 loop {
                     tokio::select! {
                         _ = sd.cancelled() => break,
-                        _ = interval.tick() => {}
+                        () = gate.ready() => {}
                     }
-                    tracing::info!("Periodic re-sync triggered for {} account(s)", ids.len());
-                    for (account_id, name) in &ids {
-                        if auth_backoff
-                            .get(account_id)
-                            .is_some_and(|&(_, retry_at)| tokio::time::Instant::now() < retry_at)
-                        {
-                            continue;
+                    let failed = match sync.start_sync(&id).await {
+                        Ok(events) => {
+                            tracing::info!("Sync done for '{}': {} event(s)", account_name, events.len());
+                            false
                         }
-                        match sync_periodic.start_sync(account_id).await {
-                            Err(
-                                e @ mc_application::ApplicationError::Domain(
-                                    mc_domain::DomainError::AuthenticationFailed(_),
-                                ),
-                            ) => {
-                                let failures =
-                                    auth_backoff.get(account_id).map_or(0, |&(f, _)| f) + 1;
-                                // 10, 20, 40 minutes, then hourly.
-                                let delay = tokio::time::Duration::from_secs(
-                                    ((5 * 60) << failures.min(4)).min(3600),
-                                );
-                                auth_backoff.insert(
-                                    *account_id,
-                                    (failures, tokio::time::Instant::now() + delay),
-                                );
-                                tracing::error!(
-                                    "Periodic sync for '{}' rejected credentials (attempt {}), next try in {}m: {}",
-                                    name,
-                                    failures,
-                                    delay.as_secs() / 60,
-                                    e
-                                );
-                            }
-                            Ok(events) => {
-                                auth_backoff.remove(account_id);
-                                tracing::info!(
-                                    "Periodic sync done for '{}': {} event(s)",
-                                    name,
-                                    events.len()
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    "Periodic sync failed for '{}': {}",
-                                    name,
-                                    e
-                                );
-                            }
+                        Err(e) => {
+                            tracing::error!("Sync failed for '{}': {}", account_name, e);
+                            true
                         }
-                    }
-                    // Heal the search index from anything the bus dropped during
-                    // the bulk sync above (checkpoint-driven, incremental).
+                    };
                     if let Err(e) = search.catch_up(es.as_ref()).await {
-                        tracing::warn!("Periodic search index catch-up failed: {e}");
+                        tracing::warn!("Search index catch-up after sync of '{}' failed: {}", account_name, e);
+                    }
+                    // Offline: straight back to `ready`, which waits for the next retry.
+                    if failed && matches!(gate.status().state, AuthState::Offline { .. }) {
+                        continue;
+                    }
+                    tokio::select! {
+                        _ = sd.cancelled() => break,
+                        _ = tokio::time::sleep(SYNC_PERIOD) => {}
+                        () = gate.recovered() => {}
                     }
                 }
-                tracing::info!("Periodic re-sync timer stopped");
+                tracing::info!("Sync loop stopped for '{}'", account_name);
             });
-            tracing::info!("Periodic re-sync timer started (every 5 minutes)");
         }
 
-        // ── Periodic OAuth token refresh (piggybacks the same 5-minute cadence) ──
-        oauth_refresh::spawn_refresh_loop(
-            oauth_states,
-            secret_store.clone(),
-            event_store.clone() as Arc<dyn mc_domain::EventStore>,
-            repository_arc.clone() as Arc<dyn mc_domain::AccountWriteRepository>,
-            event_bus.clone() as Arc<dyn mc_application::EventPublisher>,
-            shutdown.clone(),
-        );
+        // Keeps OAuth tokens ahead of expiry; logins refresh on their own too.
+        auth_gates.spawn_refresh_timer(shutdown.clone());
 
         // ── Background body backfill ─────────────────────────────────────────
         // The initial sync only pulls envelopes; message bodies are downloaded
         // here, newest-first, text only, paced by bytes against each account's
         // daily download cap (Gmail locks an account out past 2.5 GB/day).
         // Each fetch indexes the body for search and dequeues itself.
-        for (account_id, _name) in &registered_ids {
+        for (account_id, _name, gate) in &registered {
             let sync = Arc::clone(&sync_service);
             let id = *account_id;
             let sd = shutdown.clone();
             let limit = download_limits.get(account_id).copied().flatten();
+            let gate = gate.clone() as Arc<dyn LoginGate>;
             tokio::spawn(async move {
-                sync.run_backfill(id, limit, sd).await;
+                sync.run_backfill(id, limit, gate, sd).await;
             });
         }
 
@@ -906,7 +711,7 @@ impl AppContext {
         //
         // Subscribers on the bus (LiveProjector, DesktopNotifier, watch_mailbox
         // gRPC stream) react to domain events only — no parallel raw-event bus.
-        for (account_id, name) in &registered_ids {
+        for (account_id, name, _gate) in &registered {
             // Load local mailboxes once: used both to build path→MailboxId and
             // to get the server-correct INBOX MailboxPath (with the real delimiter).
             let local_mailboxes = match query_bus
@@ -943,23 +748,11 @@ impl AppContext {
                 let id = *account_id;
                 let account_name = name.clone();
                 let sd = shutdown.clone();
-                let watch_repository =
-                    repository_arc.clone() as Arc<dyn mc_domain::AccountWriteRepository>;
-                let watch_event_store = event_store.clone() as Arc<dyn mc_domain::EventStore>;
-                let watch_event_publisher =
-                    event_bus.clone() as Arc<dyn mc_application::EventPublisher>;
-
                 // Semaphore(1): at most one triggered sync in flight per account.
                 let sync_gate = Arc::new(tokio::sync::Semaphore::new(1));
 
                 tokio::spawn(async move {
                     tracing::info!("[Watcher] Started INBOX IDLE for '{}'", account_name);
-
-                    // The watcher keeps retrying (with backoff) after a credential
-                    // rejection, but the account must be flagged only once — otherwise
-                    // every retry appends another AccountAuthExpired and re-fires the
-                    // desktop notification.
-                    let mut auth_reported = false;
 
                     loop {
                     let result = tokio::select! {
@@ -1055,37 +848,6 @@ impl AppContext {
                                 // uid=0 FlagsChanged are spurious IMAP EXISTS echoes — ignore.
                                 ProviderNotification::FlagsChanged { .. } => {}
                             },
-                            // A rejected credential never recovers on its own. Flag the
-                            // account so it surfaces in the UI and drives the re-auth
-                            // flow, instead of rotting behind a WARN line forever.
-                            Err(mc_domain::DomainError::AuthenticationFailed(msg)) => {
-                                if auth_reported {
-                                    continue;
-                                }
-                                auth_reported = true;
-                                tracing::error!(
-                                    "[Watcher] '{}' rejected our credential ({msg}) — \
-                                     flagging account, backing off",
-                                    account_name
-                                );
-                                if let Err(e) = crate::oauth_refresh::append_account_event(
-                                    id,
-                                    mc_domain::DomainEvent::AccountAuthExpired {
-                                        account_id: id,
-                                        error: msg,
-                                    },
-                                    &watch_event_store,
-                                    &watch_repository,
-                                    &watch_event_publisher,
-                                )
-                                .await
-                                {
-                                    tracing::error!(
-                                        "[Watcher] '{}': failed recording AccountAuthExpired: {e}",
-                                        account_name
-                                    );
-                                }
-                            }
                             Err(e) => {
                                 tracing::warn!(
                                     "[Watcher] IDLE error for '{}': {e}",
@@ -1100,12 +862,7 @@ impl AppContext {
                 });
             }
         }
-        if !registered_ids.is_empty() {
-            tracing::info!(
-                "Started server-side mailbox watchers for {} account(s)",
-                registered_ids.len()
-            );
-        }
+        tracing::info!("Started server-side mailbox watchers for {} account(s)", registered.len());
 
         // ── Interface Layer ─────────────────────────────────────────────────
 
@@ -1113,6 +870,7 @@ impl AppContext {
         let account_service = AccountServiceImpl::new(command_bus.clone(), query_bus.clone())
             .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>)
             .with_oauth_trigger(oauth_trigger.clone())
+            .with_auth_gates(auth_gates.clone())
             .with_provisioner(Arc::new(
                 crate::account_provisioner::ConfigAccountProvisioner::new(
                     std::path::PathBuf::from(config_path),
@@ -1151,13 +909,14 @@ impl AppContext {
 /// OAuth refresh token is dead, and drives the full re-auth flow if the user clicks
 /// it. Fire-and-forget: spawns a blocking OS thread and returns immediately.
 fn spawn_reauth_notification(
-    state: OAuthRuntimeState,
+    account_id: AccountId,
+    email: String,
     error: String,
     trigger: Arc<dyn OAuthLoginTrigger>,
 ) {
     tokio::task::spawn_blocking(move || {
         let handle = match notify_rust::Notification::new()
-            .summary(&format!("{} richiede una nuova autenticazione", state.email))
+            .summary(&format!("{} richiede una nuova autenticazione", email))
             .body(&error)
             .icon("dialog-error")
             .action("reauth", "Ri-autentica")
@@ -1178,7 +937,7 @@ fn spawn_reauth_notification(
                 // The trigger owns reviving the account (tokens back into the
                 // live cells, needs_reauth cleared, AccountReauthenticated
                 // appended) — here we only drive the browser and report.
-                let mut progress = trigger.start_reauth(state.account_id);
+                let mut progress = trigger.start_reauth(account_id);
                 while let Some(update) = progress.recv().await {
                     match update {
                         mc_application::OAuthLoginProgress::AwaitingBrowser {
@@ -1195,7 +954,7 @@ fn spawn_reauth_notification(
                         }
                         mc_application::OAuthLoginProgress::Succeeded { .. } => {
                             let _ = notify_rust::Notification::new()
-                                .summary(&format!("{} ri-autenticato", state.email))
+                                .summary(&format!("{} ri-autenticato", email))
                                 .body("Account riattivato con successo.")
                                 .icon("dialog-information")
                                 .show();
@@ -1203,12 +962,12 @@ fn spawn_reauth_notification(
                         mc_application::OAuthLoginProgress::Failed { message } => {
                             tracing::warn!(
                                 "Re-auth failed for {}: {message}",
-                                state.email
+                                email
                             );
                             let _ = notify_rust::Notification::new()
                                 .summary(&format!(
                                     "Ri-autenticazione fallita per {}",
-                                    state.email
+                                    email
                                 ))
                                 .body(&message)
                                 .icon("dialog-error")
@@ -1219,6 +978,128 @@ fn spawn_reauth_notification(
             });
         });
     });
+}
+
+/// Creates the aggregate for an account declared in config but not yet in the
+/// database.
+async fn create_account(
+    account_config: &AccountConfig,
+    repository: &SqliteRepository,
+) -> anyhow::Result<AccountId> {
+    let email = EmailAddress::new(&account_config.email).context("invalid email in config")?;
+    let smtp = account_config.smtp.as_ref().map(|s| SmtpConnectionConfig {
+        host: s.host.clone(),
+        port: s.port,
+        security: smtp_security(s.security),
+        username: s.username.clone(),
+        // Secret lives in the keychain, not the persisted aggregate
+        // (AuthConfig secret fields are #[serde(skip)]).
+        password: None,
+    });
+    let connection_config = ConnectionConfig {
+        imap_host: Some(account_config.imap_host.clone()),
+        imap_port: Some(account_config.imap_port),
+        use_tls: account_config.use_tls,
+        auth: AuthConfig::Plain {
+            username: account_config.username.clone(),
+            password: String::new(), // resolved from keychain at runtime
+        },
+        smtp,
+        smtp_host: None,
+        smtp_port: None,
+    };
+    let identity = Identity {
+        display_name: account_config.name.clone(),
+        email: email.clone(),
+        signature_html: None,
+        signature_text: None,
+    };
+    let (account, event) = Account::create(
+        account_config.name.clone(),
+        email,
+        account_config.provider_type.into(),
+        connection_config,
+        identity,
+    );
+    repository.save(&account, vec![event]).await.context("failed to auto-create account")?;
+    tracing::info!("Auto-created account '{}' ({})", account_config.name, account_config.email);
+    Ok(account.id)
+}
+
+fn smtp_security(security: crate::config::SmtpSecurityConfig) -> SmtpSecurity {
+    match security {
+        crate::config::SmtpSecurityConfig::Smtps => SmtpSecurity::Smtps,
+        crate::config::SmtpSecurityConfig::StartTls => SmtpSecurity::StartTls,
+    }
+}
+
+/// The account's SMTP sender, checked once at boot. An OAuth sender logs in
+/// through the account's gate like IMAP does.
+async fn build_smtp_sender(
+    account_config: &AccountConfig,
+    secrets: &AccountSecrets,
+    imap_password: &str,
+    gate: &Arc<dyn LoginGate>,
+) -> Option<SmtpSender> {
+    let Some(smtp_cfg) = &account_config.smtp else {
+        tracing::warn!("⚠ SMTP {}: nessun blocco [smtp] in config — invio disabilitato", account_config.email);
+        return None;
+    };
+    let domain_smtp = SmtpConnectionConfig {
+        host: smtp_cfg.host.clone(),
+        port: smtp_cfg.port,
+        security: smtp_security(smtp_cfg.security),
+        username: smtp_cfg.username.clone(),
+        password: secrets.smtp_password.clone(),
+    };
+    let sender = if account_config.oauth_provider.is_some() {
+        SmtpSender::build_oauth(&domain_smtp, &account_config.username, gate.clone())
+    } else {
+        match SmtpSender::build(&domain_smtp, &account_config.username, imap_password) {
+            Ok(sender) => sender,
+            Err(e) => {
+                tracing::warn!("⚠ SMTP {}: configurazione non valida — {e}", account_config.email);
+                return None;
+            }
+        }
+    };
+    match sender.test_connection().await {
+        Ok(true) => tracing::info!(
+            "✓ SMTP {} ({}:{}) connessione OK",
+            account_config.email, smtp_cfg.host, smtp_cfg.port
+        ),
+        Ok(false) => tracing::warn!("⚠ SMTP {}: server raggiungibile ma NOOP fallito", account_config.email),
+        Err(e) => tracing::warn!("⚠ SMTP {}: non raggiungibile — {e}", account_config.email),
+    }
+    Some(sender)
+}
+
+/// Appends a single event to an `Account` aggregate and publishes it to the
+/// in-process event bus, mirroring `SyncService::append_and_project`'s
+/// append-then-publish pattern (repository `save()` alone does not publish).
+async fn append_account_event(
+    account_id: AccountId,
+    event: DomainEvent,
+    event_store: &Arc<dyn EventStore>,
+    account_repository: &Arc<dyn AccountWriteRepository>,
+    event_publisher: &Arc<dyn EventPublisher>,
+) -> Result<(), DomainError> {
+    let mut account = account_repository
+        .load(&account_id)
+        .await?
+        .ok_or_else(|| DomainError::AccountNotFound(account_id.to_string()))?;
+    let sequence_number = event_store.current_sequence(&account_id.to_string()).await? + 1;
+
+    account.apply(&event);
+    account_repository.save(&account, vec![event.clone()]).await?;
+
+    event_publisher.publish(EventEnvelope::new(
+        account_id.to_string(),
+        AggregateType::Account,
+        sequence_number,
+        event,
+    ));
+    Ok(())
 }
 
 /// Returns the path or name to use as the icon for desktop notifications.
