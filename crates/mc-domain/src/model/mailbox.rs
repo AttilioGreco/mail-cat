@@ -54,6 +54,8 @@ pub enum MailboxType {
     /// RFC 6154 `\All` — virtual "everything" folder. Gmail ships this instead of
     /// an Archive folder, so it is the archive target when `Archive` is absent.
     All,
+    /// Gmail's `\Important` label: copies of messages also in INBOX or `\All`.
+    Important,
     Custom,
 }
 

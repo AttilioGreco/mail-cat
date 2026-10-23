@@ -40,6 +40,8 @@ pub fn classify_mailbox(name: &str, attributes: &[NameAttribute<'_>]) -> Mailbox
             NameAttribute::Junk => MailboxType::Spam,
             NameAttribute::Archive => MailboxType::Archive,
             NameAttribute::All => MailboxType::All,
+            // Gmail's own attribute, not RFC 6154.
+            NameAttribute::Extension(name) if name.eq_ignore_ascii_case("\\Important") => MailboxType::Important,
             _ => continue,
         };
         return special;
@@ -233,6 +235,10 @@ mod tests {
         assert_eq!(
             classify_mailbox("[Gmail]/Posta inviata", &[NameAttribute::Sent]),
             MailboxType::Sent
+        );
+        assert_eq!(
+            classify_mailbox("[Gmail]/Importanti", &[NameAttribute::Extension("\\Important".into())]),
+            MailboxType::Important
         );
         // No attributes → fall back to the name.
         assert_eq!(
