@@ -42,6 +42,9 @@ fn offline_delay(round: u32) -> TimeDelta {
 /// the limit hit, so start at 5 minutes and double up to half an hour.
 const THROTTLED_FIRST_RETRY: TimeDelta = TimeDelta::minutes(5);
 const THROTTLED_MAX_RETRY: TimeDelta = TimeDelta::minutes(30);
+/// A limit is lifted only after a quiet while: a throttle within this long of
+/// the last one carries on its backoff instead of starting over at 5 minutes.
+const THROTTLE_MEMORY: TimeDelta = TimeDelta::minutes(10);
 
 fn throttled_delay(round: u32) -> TimeDelta {
     (THROTTLED_FIRST_RETRY * (1 << round.saturating_sub(1).min(4))).min(THROTTLED_MAX_RETRY)
@@ -112,6 +115,8 @@ struct Tracked {
     last_error: Option<String>,
     since: DateTime<Utc>,
     offline_rounds: u32,
+    throttle_rounds: u32,
+    last_throttled: Option<DateTime<Utc>>,
     smtp_error: Option<String>,
 }
 
@@ -421,8 +426,17 @@ impl AuthGate {
                     if t.state == AuthState::Active {
                         t.since = now;
                     }
-                    t.offline_rounds += 1;
-                    let delay = if throttled { throttled_delay(t.offline_rounds) } else { offline_delay(t.offline_rounds) };
+                    let delay = if throttled {
+                        if t.last_throttled.is_none_or(|at| now - at > THROTTLE_MEMORY) {
+                            t.throttle_rounds = 0;
+                        }
+                        t.throttle_rounds += 1;
+                        t.last_throttled = Some(now);
+                        throttled_delay(t.throttle_rounds)
+                    } else {
+                        t.offline_rounds += 1;
+                        offline_delay(t.offline_rounds)
+                    };
                     t.state = AuthState::Offline { next_retry: now + delay };
                     t.reason = Some(if throttled { "over the server's usage limit" } else { "server unreachable" }.into());
                 }
@@ -506,6 +520,17 @@ impl LoginGate for AuthGate {
         self.clear_offline();
     }
 
+    async fn smtp_token_refused(&self, rejected: &LoginSecret) -> bool {
+        // Offline or throttled, a refresh would end the backoff for every loop.
+        if matches!(self.tracked.borrow().state, AuthState::Offline { .. }) {
+            return false;
+        }
+        match rejected {
+            LoginSecret::OAuthToken(token) => self.refresh_rejected(token).await,
+            LoginSecret::Password(_) => false,
+        }
+    }
+
     fn smtp_login(&self, refused: Option<String>) {
         if self.tracked.send_if_modified(|t| std::mem::replace(&mut t.smtp_error, refused.clone()) != refused) {
             let _ = self.changes.send(self.account_id);
@@ -572,6 +597,8 @@ impl AuthGates {
                 last_error: None,
                 since: Utc::now(),
                 offline_rounds: 0,
+                throttle_rounds: 0,
+                last_throttled: None,
                 smtp_error: None,
             }),
             refresh: self.refresh.clone(),
@@ -851,6 +878,41 @@ mod tests {
         let down = DomainError::ConnectionFailed("TCP connection failed".into());
         gate.login_failed(&LoginSecret::Password("hunter2".into()), &down, false).await;
         tokio::time::timeout(Duration::from_secs(4), waiting).await.expect("woke at the 2s retry").unwrap();
+    }
+
+    #[tokio::test]
+    async fn smtp_never_refreshes_an_offline_account() {
+        let mut h = Harness::new(fresh);
+        let gate = h.oauth(TimeDelta::hours(1));
+        let busy = DomainError::Throttled("Too many simultaneous connections. (Failure)".into());
+        gate.went_offline(&busy);
+        let before = gate.status().state;
+
+        assert!(!gate.smtp_token_refused(&LoginSecret::OAuthToken("old".into())).await);
+
+        assert_eq!(h.refreshes(), 0);
+        assert_eq!(gate.status().state, before, "still offline, same retry time");
+    }
+
+    #[tokio::test]
+    async fn a_first_throttle_after_network_errors_starts_at_five_minutes() {
+        let mut h = Harness::new(fresh);
+        let gate = h.password();
+        let secret = LoginSecret::Password("hunter2".into());
+        let due = |gate: &AuthGate| gate.tracked.send_modify(|t| {
+            if let AuthState::Offline { next_retry } = &mut t.state {
+                *next_retry = Utc::now();
+            }
+        });
+        for _ in 0..4 {
+            due(&gate);
+            gate.login_failed(&secret, &DomainError::ConnectionFailed("down".into()), false).await;
+        }
+        due(&gate);
+        gate.login_failed(&secret, &DomainError::Throttled("busy".into()), false).await;
+
+        let AuthState::Offline { next_retry } = gate.status().state else { panic!("not offline") };
+        assert_eq!((next_retry - Utc::now() + TimeDelta::seconds(30)).num_minutes(), 5);
     }
 
     #[tokio::test]

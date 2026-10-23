@@ -48,6 +48,13 @@ pub trait LoginGate: Send + Sync {
     /// account's credential, so this never pauses anything.
     fn smtp_login(&self, _refused: Option<String>) {}
 
+    /// SMTP refused this OAuth token, which IMAP shares. `true` when a fresh
+    /// one is available to retry the send with; never changes the account's
+    /// state, and never refreshes while the account is offline.
+    async fn smtp_token_refused(&self, _rejected: &LoginSecret) -> bool {
+        false
+    }
+
     /// Resolves when background work may connect: at once while healthy, at the
     /// next scheduled retry while offline, after the user acts while paused.
     async fn ready(&self);

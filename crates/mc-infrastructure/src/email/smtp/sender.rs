@@ -129,10 +129,12 @@ impl SmtpSender {
         let context = "SMTP send error";
         match &self.backend {
             SmtpBackend::Static(t) => {
-                noted(self.gate.as_ref(), t.send(email).await.map(drop).map_err(|e| smtp_error(context, &e, false)))
+                let gate = self.gate.as_ref();
+                noted(gate, t.send(email).await.map(drop).map_err(|e| sent_error(gate, context, &e, false)))
             }
             SmtpBackend::Gated { host, port, security, username } => {
-                login_with(&SmtpView(self.gate.as_ref()), |secret| {
+                let gate = self.gate.as_ref();
+                login_with(&SmtpView(gate), |secret| {
                     let email = email.clone();
                     async move {
                         let oauth = matches!(secret, LoginSecret::OAuthToken(_));
@@ -140,7 +142,7 @@ impl SmtpSender {
                             .send(email)
                             .await
                             .map(drop)
-                            .map_err(|e| smtp_error(context, &e, oauth))
+                            .map_err(|e| sent_error(gate, context, &e, oauth))
                     }
                 })
                 .await
@@ -176,10 +178,7 @@ impl LoginGate for SmtpView<'_> {
         let DomainError::AuthenticationFailed(why) = error else { return false };
         self.0.smtp_login(Some(why.clone()));
         // The token is shared with IMAP: a refused one may be refreshed once.
-        // The gate never pauses on this; only the refresh's own verdict counts.
-        !retried
-            && matches!(secret, LoginSecret::OAuthToken(_))
-            && self.0.login_failed(secret, error, false).await
+        !retried && self.0.smtp_token_refused(secret).await
     }
 
     fn login_succeeded(&self) {
@@ -189,6 +188,16 @@ impl LoginGate for SmtpView<'_> {
     async fn ready(&self) {
         self.0.ready().await;
     }
+}
+
+/// A send that failed after the login (a refused recipient, a full mailbox)
+/// still proves the SMTP login works, so its earlier refusal is cleared.
+fn sent_error(gate: &dyn LoginGate, context: &str, e: &lettre::transport::smtp::Error, oauth: bool) -> DomainError {
+    // Replies outside the 53x authentication family come from MAIL/RCPT/DATA.
+    if e.status().is_some_and(|code| code.category != Category::Unspecified3) {
+        gate.smtp_login(None);
+    }
+    smtp_error(context, e, oauth)
 }
 
 /// 535: the server refused the credentials.
@@ -356,9 +365,12 @@ mod tests {
         async fn secret(&self) -> Result<LoginSecret, DomainError> {
             Ok(self.secret.lock().unwrap().clone().unwrap())
         }
-        async fn login_failed(&self, _: &LoginSecret, _: &DomainError, retried: bool) -> bool {
-            self.judged.lock().unwrap().push(retried);
-            true
+        async fn login_failed(&self, _: &LoginSecret, _: &DomainError, _: bool) -> bool {
+            panic!("SMTP must not judge the account");
+        }
+        async fn smtp_token_refused(&self, rejected: &LoginSecret) -> bool {
+            self.judged.lock().unwrap().push(matches!(rejected, LoginSecret::OAuthToken(_)));
+            matches!(rejected, LoginSecret::OAuthToken(_))
         }
         fn login_succeeded(&self) {
             panic!("SMTP must not report a login to the account state");
@@ -383,7 +395,7 @@ mod tests {
         let result: Result<(), _> = login_with(&SmtpView(&gate), |_| async { Err(refused()) }).await;
 
         assert!(matches!(result, Err(DomainError::AuthenticationFailed(_))));
-        assert!(gate.judged.lock().unwrap().is_empty(), "the account state was left alone");
+        assert_eq!(*gate.judged.lock().unwrap(), [false], "no refresh for a password, no verdict");
         assert_eq!(gate.smtp.lock().unwrap().len(), 1);
     }
 
@@ -401,7 +413,7 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(*attempts.lock().unwrap(), 2, "one retry after the forced refresh");
-        assert_eq!(*gate.judged.lock().unwrap(), [false], "only the refresh request reached the gate");
+        assert_eq!(*gate.judged.lock().unwrap(), [true], "one refresh request, nothing more");
     }
 
     fn addr(email: &str) -> Address {

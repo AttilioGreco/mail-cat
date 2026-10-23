@@ -27,6 +27,18 @@ use crate::bus::EventPublisher;
 use crate::error::ApplicationError;
 use crate::services::sync_trigger::SyncTrigger;
 
+/// A body fetch failure that would fail every other mailbox of the pass the
+/// same way: the account cannot log in or connect, or is over a usage limit.
+fn stops_the_pass(e: &DomainError) -> bool {
+    matches!(
+        e,
+        DomainError::AuthenticationFailed(_)
+            | DomainError::ConnectionFailed(_)
+            | DomainError::ConnectionTimeout(_)
+            | DomainError::Throttled(_)
+    )
+}
+
 /// Bodies the backfill downloads between two pauses at the fast rate. Once
 /// throttled it takes one at a time: the pause scales with the bytes, so the
 /// rate is the same, but progress moves per message instead of per minute.
@@ -562,9 +574,7 @@ impl<
             .fetch_bodies_bulk(mailbox_path, &uids)
             .await
             .map_err(|e| match e {
-                DomainError::AuthenticationFailed(_)
-                | DomainError::ConnectionFailed(_)
-                | DomainError::ConnectionTimeout(_) => ApplicationError::Domain(e),
+                e if stops_the_pass(&e) => ApplicationError::Domain(e),
                 other => ApplicationError::SyncFailed(format!(
                     "Failed to bulk fetch bodies: {other}"
                 )),
@@ -745,13 +755,7 @@ impl<
                     }
                     // The gate now holds the account's state: stop the pass here
                     // and let `ready` decide when to try again.
-                    Err(
-                        e @ ApplicationError::Domain(
-                            DomainError::AuthenticationFailed(_)
-                            | DomainError::ConnectionFailed(_)
-                            | DomainError::ConnectionTimeout(_),
-                        ),
-                    ) => {
+                    Err(ApplicationError::Domain(e)) if stops_the_pass(&e) => {
                         warn!(%account_id, error = %e, "backfill: cannot reach the account, pass stopped");
                         fetch_failed = true;
                         break;
@@ -1657,6 +1661,12 @@ mod tests {
     };
     use std::pin::Pin;
     use std::sync::Mutex;
+
+    #[test]
+    fn a_throttled_fetch_stops_the_backfill_pass() {
+        assert!(stops_the_pass(&DomainError::Throttled("bandwidth".into())));
+        assert!(!stops_the_pass(&DomainError::MessageNotFound("gone".into())));
+    }
 
     #[test]
     fn backfill_paces_by_bytes_against_the_daily_cap() {
