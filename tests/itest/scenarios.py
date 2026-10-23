@@ -178,7 +178,7 @@ def phone_moved_first(w):
     try:
         mc("messages", "move", stale, w.boxes["Archive"]["ID"])
     except Fail as e:
-        print(f"    (mc move of the stale row failed, tolerated: {str(e).splitlines()[0]})")
+        print("    (mc move of the stale row failed, tolerated: " + " ".join(str(e).splitlines()[1:]) + ")")
     time.sleep(3)  # background IMAP move
     w.sync()
     w.assert_where(7, {"Archive": (1, 1)})
