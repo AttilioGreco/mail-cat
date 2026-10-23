@@ -240,10 +240,12 @@ impl Message {
             DomainEvent::MessageReceived { .. } => {
                 // Initial state is set by the constructor.
             }
-            DomainEvent::MessageBodyFetched { attachments, .. } => {
+            // A text-only fetch carries no attachment info: keep the envelope's.
+            DomainEvent::MessageBodyFetched { attachments, .. } if !attachments.is_empty() => {
                 self.attachments = attachments.clone();
-                self.has_attachments = !self.attachments.is_empty();
+                self.has_attachments = true;
             }
+            DomainEvent::MessageBodyFetched { .. } => {}
             DomainEvent::MessageFlagged {
                 flags_added,
                 flags_removed,

@@ -195,12 +195,18 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             }
         }
         DomainEvent::MessageBodyFetched { message_id, attachments } => {
-            exec(
-                tx,
-                "UPDATE messages SET attachments = ?2, has_attachments = ?3, body_state = 'stored' \
-                 WHERE id = ?1",
-                params![message_id.as_uuid(), json(attachments)?, !attachments.is_empty()],
-            )?;
+            // A text-only fetch (backfill, a shared body) knows nothing of the
+            // attachments: the envelope's flag stays.
+            if attachments.is_empty() {
+                exec(tx, "UPDATE messages SET body_state = 'stored' WHERE id = ?1", params![message_id.as_uuid()])?;
+            } else {
+                exec(
+                    tx,
+                    "UPDATE messages SET attachments = ?2, has_attachments = 1, body_state = 'stored' \
+                     WHERE id = ?1",
+                    params![message_id.as_uuid(), json(attachments)?],
+                )?;
+            }
         }
         DomainEvent::MessageFlagged { message_id, flags_added, flags_removed, .. } => {
             flag_message(tx, message_id, flags_added, flags_removed)?;
