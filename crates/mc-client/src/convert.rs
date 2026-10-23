@@ -21,6 +21,32 @@ pub fn account_from_proto(a: pb::AccountSummary) -> Account {
         name: a.name,
         email: a.email.map(|e| e.email).unwrap_or_default(),
         status,
+        auth: a.auth.map(auth_status_from_proto),
+    }
+}
+
+pub fn auth_status_from_proto(s: pb::AccountAuthStatus) -> AuthStatus {
+    let time = |ts: Option<pb::Timestamp>| ts.and_then(|t| Utc.timestamp_opt(t.seconds, t.nanos as u32).single());
+    AuthStatus {
+        account_id: s.account_id,
+        state: match pb::AuthState::try_from(s.state) {
+            Ok(pb::AuthState::Active) => AuthState::Active,
+            Ok(pb::AuthState::Offline) => AuthState::Offline,
+            Ok(pb::AuthState::NeedsReauth) => AuthState::NeedsReauth,
+            Ok(pb::AuthState::CredentialsRejected) => AuthState::CredentialsRejected,
+            Ok(pb::AuthState::OauthClientInvalid) => AuthState::OAuthClientInvalid,
+            _ => AuthState::Unknown,
+        },
+        reason: s.reason,
+        last_error: s.last_error,
+        since: time(s.since),
+        next_retry: time(s.next_retry),
+        oauth_provider: match pb::OAuthProvider::try_from(s.oauth_provider) {
+            Ok(pb::OAuthProvider::OauthProviderGoogle) => Some(OAuthProvider::Google),
+            Ok(pb::OAuthProvider::OauthProviderMicrosoft) => Some(OAuthProvider::Microsoft),
+            _ => None,
+        },
+        token_expires_at: time(s.token_expires_at),
     }
 }
 
@@ -35,6 +61,7 @@ pub fn account_detail_from_proto(a: pb::AccountDetail) -> Account {
         status: a.status,
         created_at: a.created_at,
         updated_at: a.updated_at,
+        auth: None,
     })
 }
 

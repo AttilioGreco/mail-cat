@@ -47,6 +47,10 @@ service AccountService {
   // takes it at once (an account whose password was rejected resumes); SMTP
   // at the next server restart, when senders are rebuilt.
   rpc SetAccountPassword(SetAccountPasswordRequest) returns (SetAccountPasswordResponse);
+
+  // Live auth state of every account: one status per account on connect,
+  // then one per change, for as long as the stream stays open.
+  rpc WatchAuthStatus(WatchAuthStatusRequest) returns (stream AccountAuthStatus);
 }
 
 // Provider type for email account.
@@ -68,6 +72,36 @@ enum AccountStatus {
   // The server rejected the account's password: the user has to update it.
   ACCOUNT_STATUS_CREDENTIALS_REJECTED = 5;
 }
+
+// Live auth state, owned by the server's per-account auth gate.
+enum AuthState {
+  AUTH_STATE_UNSPECIFIED = 0;
+  AUTH_STATE_ACTIVE = 1;
+  // Server or token endpoint unreachable; retried at next_retry.
+  AUTH_STATE_OFFLINE = 2;
+  // The OAuth grant is gone or its token is refused: log in again.
+  AUTH_STATE_NEEDS_REAUTH = 3;
+  // The server refused the password: update it.
+  AUTH_STATE_CREDENTIALS_REJECTED = 4;
+  // The OAuth provider refused the app's client id: a configuration problem.
+  AUTH_STATE_OAUTH_CLIENT_INVALID = 5;
+}
+
+message AccountAuthStatus {
+  string account_id = 1;
+  AuthState state = 2;
+  // Why the account is in `state`; unset while active.
+  optional string reason = 3;
+  // The most recent failure, kept after the account recovers.
+  optional string last_error = 4;
+  Timestamp since = 5;
+  optional Timestamp next_retry = 6;
+  // Unspecified for a password account.
+  OAuthProvider oauth_provider = 7;
+  optional Timestamp token_expires_at = 8;
+}
+
+message WatchAuthStatusRequest {}
 
 enum OAuthProvider {
   OAUTH_PROVIDER_UNSPECIFIED = 0;
@@ -121,6 +155,8 @@ message AccountSummary {
   AccountStatus status = 5;
   Timestamp created_at = 6;
   Timestamp updated_at = 7;
+  // Unset when the server runs no auth gate for the account.
+  AccountAuthStatus auth = 8;
 }
 
 // Account detail (full view).

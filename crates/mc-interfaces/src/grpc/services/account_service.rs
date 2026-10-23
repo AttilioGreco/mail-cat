@@ -3,7 +3,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::{
-    application_error_to_status, domain_account_summary_to_detail, domain_account_summary_to_proto,
+    application_error_to_status, auth_status_to_proto, domain_account_summary_to_detail,
+    domain_account_summary_to_proto,
     proto_connection_to_domain, proto_email_to_domain, proto_oauth_provider_to_domain,
     proto_provider_type_to_domain,
 };
@@ -62,6 +63,11 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
     pub fn with_auth_gates(mut self, gates: Arc<AuthGates>) -> Self {
         self.auth_gates = Some(gates);
         self
+    }
+
+    fn auth_status(&self, account_id: &AccountId) -> Option<proto::AccountAuthStatus> {
+        let gate = self.auth_gates.as_ref()?.get(account_id)?;
+        Some(auth_status_to_proto(&gate.status()))
     }
 }
 
@@ -218,7 +224,10 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
 
         let summaries = accounts
             .iter()
-            .map(domain_account_summary_to_proto)
+            .map(|account| proto::AccountSummary {
+                auth: self.auth_status(&account.id),
+                ..domain_account_summary_to_proto(account)
+            })
             .collect();
 
         Ok(Response::new(ListAccountsResponse {
@@ -510,6 +519,38 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         }
 
         Ok(Response::new(proto::SetAccountPasswordResponse {}))
+    }
+
+    type WatchAuthStatusStream = ReceiverStream<Result<proto::AccountAuthStatus, Status>>;
+
+    async fn watch_auth_status(
+        &self,
+        _request: Request<proto::WatchAuthStatusRequest>,
+    ) -> Result<Response<Self::WatchAuthStatusStream>, Status> {
+        let gates = self
+            .auth_gates
+            .clone()
+            .ok_or_else(|| Status::unavailable("auth gates not configured"))?;
+        // Subscribe before the snapshot so no change falls between the two.
+        let mut changes = gates.subscribe();
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        tokio::spawn(async move {
+            let mut pending = gates.statuses();
+            loop {
+                for status in &pending {
+                    if tx.send(Ok(auth_status_to_proto(status))).await.is_err() {
+                        return; // client disconnected
+                    }
+                }
+                pending = match changes.recv().await {
+                    Ok(id) => gates.get(&id).map(|g| vec![g.status()]).unwrap_or_default(),
+                    // Missed changes: resend everyone, the latest status supersedes them.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => gates.statuses(),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                };
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 

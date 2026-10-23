@@ -578,6 +578,20 @@ impl MailCatClient {
         }))
     }
 
+    /// Every account's live auth state: one status each on connect, then one
+    /// per change.
+    pub async fn watch_auth_status(&self) -> Result<impl Stream<Item = Result<AuthStatus>>> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        let stream = client
+            .watch_auth_status(pb::WatchAuthStatusRequest {})
+            .await?
+            .into_inner();
+
+        Ok(tokio_stream::StreamExt::map(stream, |item| {
+            item.map(auth_status_from_proto).map_err(ClientError::Grpc)
+        }))
+    }
+
     /// Start an OAuth2 login (Google/Microsoft) for a new account. Streams an
     /// `AwaitingBrowser` event with the URL to open, then exactly one of
     /// `Succeeded`/`Failed` once the browser redirect completes.

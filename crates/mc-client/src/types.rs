@@ -22,6 +22,49 @@ pub struct Account {
     pub name: String,
     pub email: String,
     pub status: AccountStatus,
+    /// Live auth state; `None` when the server runs no gate for the account.
+    pub auth: Option<AuthStatus>,
+}
+
+/// An account's live auth state, as the server's auth gate sees it.
+#[derive(Debug, Clone)]
+pub struct AuthStatus {
+    pub account_id: String,
+    pub state: AuthState,
+    /// Why the account is in `state`; `None` while active.
+    pub reason: Option<String>,
+    /// The most recent failure, kept after the account recovers.
+    pub last_error: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    /// When an offline account is retried.
+    pub next_retry: Option<DateTime<Utc>>,
+    /// `None` for a password account.
+    pub oauth_provider: Option<OAuthProvider>,
+    pub token_expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthState {
+    Active,
+    Offline,
+    NeedsReauth,
+    CredentialsRejected,
+    OAuthClientInvalid,
+    Unknown,
+}
+
+impl AuthState {
+    /// Machine-readable tag, used as the wire value towards the desktop UI.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Offline => "offline",
+            Self::NeedsReauth => "needs_reauth",
+            Self::CredentialsRejected => "credentials_rejected",
+            Self::OAuthClientInvalid => "oauth_client_invalid",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Health of an account, as the server sees it.

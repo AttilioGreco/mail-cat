@@ -10,6 +10,8 @@ use tokio_stream::StreamExt;
 pub enum AccountsCmd {
     /// List all configured accounts
     List,
+    /// Show each account's live auth state (read-only)
+    Status,
     /// Connect a Gmail/Outlook account via OAuth2 (opens your browser)
     AddOauth {
         /// OAuth provider to sign in with
@@ -51,6 +53,7 @@ impl From<OauthProviderArg> for OAuthProvider {
 pub async fn run(cmd: AccountsCmd, client: MailCatClient) -> Result<()> {
     match cmd {
         AccountsCmd::List => list(client).await,
+        AccountsCmd::Status => status(client).await,
         AccountsCmd::AddOauth { provider, email, name } => {
             add_oauth(client, provider.into(), email, name).await
         }
@@ -140,11 +143,79 @@ async fn list(client: MailCatClient) -> Result<()> {
             status: match a.status {
                 mc_client::AccountStatus::Active => "active".green().to_string(),
                 mc_client::AccountStatus::NeedsReauth => "needs re-auth".yellow().to_string(),
+                mc_client::AccountStatus::CredentialsRejected => "password rejected".yellow().to_string(),
                 other => other.as_str().red().to_string(),
             },
         })
         .collect();
 
+    println!("{}", Table::new(rows));
+    Ok(())
+}
+
+#[derive(Tabled)]
+struct StatusRow {
+    #[tabled(rename = "Email")]
+    email: String,
+    #[tabled(rename = "State")]
+    state: String,
+    #[tabled(rename = "Reason")]
+    reason: String,
+    #[tabled(rename = "Since")]
+    since: String,
+    #[tabled(rename = "Last error")]
+    last_error: String,
+    #[tabled(rename = "Token expires")]
+    token_expires: String,
+    #[tabled(rename = "Next retry")]
+    next_retry: String,
+}
+
+async fn status(client: MailCatClient) -> Result<()> {
+    use mc_client::AuthState;
+
+    let local = |t: chrono::DateTime<chrono::Utc>| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string();
+    let dash = || "-".to_owned();
+    let rows: Vec<StatusRow> = client
+        .list_accounts()
+        .await?
+        .into_iter()
+        .map(|a| {
+            let Some(auth) = a.auth else {
+                return StatusRow {
+                    email: a.email,
+                    state: "unknown".red().to_string(),
+                    reason: "no auth gate on the server".into(),
+                    since: dash(),
+                    last_error: dash(),
+                    token_expires: dash(),
+                    next_retry: dash(),
+                };
+            };
+            let state = auth.state.as_str();
+            StatusRow {
+                email: a.email,
+                state: match auth.state {
+                    AuthState::Active => state.green(),
+                    AuthState::Offline => state.yellow(),
+                    _ => state.red(),
+                }
+                .to_string(),
+                reason: auth.reason.unwrap_or_else(dash),
+                since: auth.since.map_or_else(dash, local),
+                last_error: auth.last_error.unwrap_or_else(dash),
+                token_expires: auth.token_expires_at.map_or_else(dash, local),
+                next_retry: auth.next_retry.map_or_else(dash, |t| {
+                    format!("in {}s", (t - chrono::Utc::now()).num_seconds().max(0))
+                }),
+            }
+        })
+        .collect();
+
+    if rows.is_empty() {
+        println!("{}", "No accounts found.".yellow());
+        return Ok(());
+    }
     println!("{}", Table::new(rows));
     Ok(())
 }

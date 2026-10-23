@@ -161,6 +161,33 @@ pub fn domain_account_summary_to_proto(summary: &mc_domain::AccountSummary) -> A
         // AccountSummary doesn't have timestamps, use current time as placeholder
         created_at: Some(datetime_to_timestamp(&Utc::now())),
         updated_at: Some(datetime_to_timestamp(&Utc::now())),
+        auth: None,
+    }
+}
+
+pub fn auth_status_to_proto(status: &mc_application::AuthStatus) -> proto::AccountAuthStatus {
+    use mc_application::AuthState;
+
+    let (state, next_retry) = match status.state {
+        AuthState::Active => (proto::AuthState::Active, None),
+        AuthState::Offline { next_retry } => (proto::AuthState::Offline, Some(next_retry)),
+        AuthState::NeedsReauth => (proto::AuthState::NeedsReauth, None),
+        AuthState::CredentialsRejected => (proto::AuthState::CredentialsRejected, None),
+        AuthState::OAuthClientInvalid => (proto::AuthState::OauthClientInvalid, None),
+    };
+    proto::AccountAuthStatus {
+        account_id: status.account_id.to_string(),
+        state: state as i32,
+        reason: status.reason.clone(),
+        last_error: status.last_error.clone(),
+        since: Some(datetime_to_timestamp(&status.since)),
+        next_retry: next_retry.as_ref().map(datetime_to_timestamp),
+        oauth_provider: match status.oauth_provider {
+            Some(mc_domain::OAuthProvider::Google) => proto::OAuthProvider::OauthProviderGoogle,
+            Some(mc_domain::OAuthProvider::Microsoft) => proto::OAuthProvider::OauthProviderMicrosoft,
+            None => proto::OAuthProvider::OauthProviderUnspecified,
+        } as i32,
+        token_expires_at: status.token_expires_at.as_ref().map(datetime_to_timestamp),
     }
 }
 
