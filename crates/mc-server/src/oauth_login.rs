@@ -122,6 +122,10 @@ fn store_tokens(
 ) -> Result<(), String> {
     match verified {
         Ok(()) => {}
+        // Google asks for something first (a browser login…): say what, in its words.
+        Err(DomainError::AuthenticationFailed(detail)) if mc_infrastructure::email::imap::asks_the_user_to_act(&detail) => {
+            return Err(format!("{provider:?} chiede un'azione prima dell'accesso: {detail}"));
+        }
         Err(DomainError::AuthenticationFailed(detail)) => {
             tracing::warn!(%email, %detail, "IMAP rejected the newly granted OAuth token");
             return Err(format!(
@@ -275,6 +279,17 @@ mod tests {
 
         assert!(err.contains("me@gmail.com"));
         assert_eq!(store.load("me@gmail.com").unwrap(), Some(old));
+    }
+
+    #[test]
+    fn a_google_alert_is_shown_in_its_own_words() {
+        let store = MockStore::default();
+
+        let alert = Err(DomainError::AuthenticationFailed("Please log in via your web browser: https://x (Failure)".into()));
+        let err = store_tokens(&store, "me@gmail.com", OAuthProvider::Google, tokens("new"), alert).unwrap_err();
+
+        assert!(err.contains("Please log in via your web browser") && !err.contains("diverso"), "{err}");
+        assert_eq!(store.load("me@gmail.com").unwrap(), None);
     }
 
     #[test]

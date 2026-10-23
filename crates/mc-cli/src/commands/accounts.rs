@@ -212,7 +212,7 @@ async fn status(client: MailCatClient) -> Result<()> {
                     secs if secs > 0 => format!("in {secs}s"),
                     _ => "due now".into(),
                 }),
-                smtp: auth.smtp_error.map_or_else(|| "ok".into(), |e| format!("refused: {e}")),
+                smtp: auth.smtp_error.map_or_else(dash, |e| format!("refused: {e}")),
             }
         })
         .collect();

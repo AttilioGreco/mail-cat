@@ -117,6 +117,12 @@ const USER_ACTION_ALERTS: [&str; 2] = ["Application-specific password required",
 /// after a while, so the gate backs off harder than for a network fault.
 const THROTTLE_ALERTS: [&str; 2] = ["Too many simultaneous connections", "Account exceeded command or bandwidth limits"];
 
+/// Whether a refused login's text is one of Google's "do this first" alerts,
+/// rather than a plain refusal of the credential.
+pub fn asks_the_user_to_act(refusal: &str) -> bool {
+    refusal.starts_with("[WEBALERT") || USER_ACTION_ALERTS.iter().any(|a| refusal.contains(a))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum LoginVerdict {
     Refused,
@@ -145,7 +151,7 @@ fn read_no(reply: &str) -> (LoginVerdict, String) {
     let verdict = if text.contains("[AUTHENTICATIONFAILED]") || text.starts_with("[WEBALERT") {
         LoginVerdict::Refused
     } else if code == "Some(Alert)" {
-        if has(&USER_ACTION_ALERTS) {
+        if asks_the_user_to_act(&text) {
             LoginVerdict::Refused
         } else if has(&THROTTLE_ALERTS) {
             LoginVerdict::Throttled
