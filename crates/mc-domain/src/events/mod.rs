@@ -112,8 +112,8 @@ pub enum DomainEvent {
     },
 
     /// A background token refresh discovered the account's OAuth refresh
-    /// token is dead (revoked/invalid). Tokens have already been cleared
-    /// from the keychain by the time this is appended.
+    /// token is dead (revoked/invalid). The keychain keeps the old bundle
+    /// until a successful re-login replaces it.
     AccountAuthExpired {
         account_id: AccountId,
         error: String,
