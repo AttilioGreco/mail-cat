@@ -8,6 +8,7 @@
 //! unreachable server is retried on one schedule instead of per loop.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -146,8 +147,8 @@ impl AuthGate {
         }
     }
 
-    /// Takes over the state persisted before a restart, so an account that was
-    /// waiting for the user stays paused instead of knocking again at boot.
+    /// Takes over the state persisted before a restart: an account that was
+    /// waiting for the user stays paused, until [`Self::retry_after_restart`].
     pub fn restore(&self, account: &AccountSummary) {
         let oauth = self.oauth_provider().is_some();
         let state = match account.status {
@@ -164,10 +165,52 @@ impl AuthGate {
         });
     }
 
-    /// A fresh OAuth login stored `tokens` in the keychain.
-    pub fn reauthenticated(&self, tokens: Option<OAuthSecrets>) {
-        if let (Some(fresh), Credential::OAuth { tokens, .. }) = (tokens, &mut *self.credential()) {
-            *tokens = fresh;
+    /// The one real attempt a paused account gets per boot: the user may have
+    /// fixed things meanwhile (a password imported from config.toml, a grant
+    /// that works again). OAuth refreshes once and `login` runs once with the
+    /// result. Success resumes the account; a failure leaves it paused.
+    pub async fn retry_after_restart<F, Fut>(&self, login: F)
+    where
+        F: FnOnce(LoginSecret) -> Fut,
+        Fut: Future<Output = Result<(), DomainError>>,
+    {
+        if !self.tracked.borrow().state.is_paused() {
+            return;
+        }
+        let secret = if self.oauth_provider().is_some() {
+            let _one = self.refreshing.lock().await;
+            match self.refresh_now().await {
+                Ok(secret) => secret,
+                Err(_) => return, // refresh_now recorded why
+            }
+        } else {
+            match self.current_secret(TimeDelta::zero()) {
+                Some(secret) => secret,
+                None => return,
+            }
+        };
+        match login(secret).await {
+            Ok(()) => {
+                info!("{}: login works again after the restart, resuming", self.email);
+                self.recover();
+            }
+            Err(e) => {
+                info!("{}: still refused after the restart ({e})", self.email);
+                self.tracked.send_modify(|t| t.last_error = Some(e.to_string()));
+            }
+        }
+    }
+
+    /// A fresh OAuth login stored `tokens` in the keychain. Waits out a refresh
+    /// in flight and writes them again after it, so its older tokens can't
+    /// win in memory or in the keychain.
+    pub async fn reauthenticated(&self, tokens: Option<OAuthSecrets>) {
+        let _one = self.refreshing.lock().await;
+        if let Some(fresh) = tokens {
+            self.persist_tokens(&fresh);
+            if let Credential::OAuth { tokens, .. } = &mut *self.credential() {
+                *tokens = fresh;
+            }
         }
         self.recover();
     }
@@ -186,9 +229,18 @@ impl AuthGate {
             return Ok(secret);
         }
         let _one = self.refreshing.lock().await;
-        // Whoever held the lock before us may just have refreshed.
+        // Whoever held the lock before us may just have refreshed, or found the
+        // grant dead or the endpoint down: then don't ask again.
         if let Some(secret) = self.current_secret(margin) {
             return Ok(secret);
+        }
+        if let Some(e) = self.paused_error() {
+            return Err(e);
+        }
+        if let AuthState::Offline { next_retry } = self.tracked.borrow().state
+            && Utc::now() < next_retry
+        {
+            return Err(DomainError::ConnectionFailed(format!("offline, next retry at {next_retry}")));
         }
         self.refresh_now().await
     }
@@ -235,6 +287,8 @@ impl AuthGate {
                 if let Credential::OAuth { tokens, .. } = &mut *self.credential() {
                     *tokens = fresh;
                 }
+                // The token endpoint answered: whatever made us offline is over.
+                self.clear_offline();
                 Ok(LoginSecret::OAuthToken(token))
             }
             Err(e) => {
@@ -295,6 +349,12 @@ impl AuthGate {
 
     fn recover(&self) {
         self.transition(AuthState::Active, None, None);
+    }
+
+    fn clear_offline(&self) {
+        if matches!(self.tracked.borrow().state, AuthState::Offline { .. }) {
+            self.recover();
+        }
     }
 
     /// The only place the state changes. Appends the event when the persisted
@@ -411,9 +471,7 @@ impl LoginGate for AuthGate {
     }
 
     fn login_succeeded(&self) {
-        if matches!(self.tracked.borrow().state, AuthState::Offline { .. }) {
-            self.recover();
-        }
+        self.clear_offline();
     }
 
     async fn ready(&self) {
@@ -757,7 +815,7 @@ mod tests {
             let gate = gate.clone();
             async move { gate.ready().await }
         });
-        gate.reauthenticated(Some(tokens("new", TimeDelta::hours(1))));
+        gate.reauthenticated(Some(tokens("new", TimeDelta::hours(1)))).await;
         tokio::time::timeout(Duration::from_secs(1), waiting).await.unwrap().unwrap();
         login(&gate, "new", &seen).await.unwrap();
         assert_eq!(h.event_names(), ["AccountAuthExpired", "AccountReauthenticated"]);
@@ -789,6 +847,101 @@ mod tests {
         }
 
         assert_eq!(h.refreshes(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_logins_on_a_revoked_grant_share_one_refresh() {
+        let mut h = Harness::new(revoked);
+        let gate = h.oauth(TimeDelta::minutes(-1));
+        let seen = Mutex::new(vec![]);
+
+        let logins: Vec<_> = (0..5).map(|_| login(&gate, "new", &seen)).collect();
+        for result in futures::future::join_all(logins).await {
+            result.unwrap_err();
+        }
+
+        assert_eq!(h.refreshes(), 1, "the waiters saw the pause and stopped");
+        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(h.event_names(), ["AccountAuthExpired"]);
+    }
+
+    #[tokio::test]
+    async fn a_successful_refresh_ends_offline() {
+        let mut h = Harness::new(fresh);
+        let gate = h.oauth(TimeDelta::minutes(-1));
+        let down = DomainError::ConnectionFailed("TCP connection failed".into());
+        gate.went_offline(&down);
+        gate.tracked.send_modify(|t| t.state = AuthState::Offline { next_retry: Utc::now() });
+
+        gate.valid_secret(REFRESH_MARGIN).await.unwrap();
+
+        assert_eq!(gate.status().state, AuthState::Active);
+    }
+
+    #[tokio::test]
+    async fn a_relogin_wins_over_a_refresh_in_flight() {
+        let mut h = Harness::new(fresh);
+        let gate = h.oauth(TimeDelta::minutes(-1));
+        let relogin = tokens("relogin", TimeDelta::hours(1));
+
+        let refreshing = gate.valid_secret(REFRESH_MARGIN);
+        let reauth = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            gate.reauthenticated(Some(relogin.clone())).await;
+        };
+        let (refreshed, ()) = tokio::join!(refreshing, reauth);
+
+        assert_eq!(refreshed.unwrap(), LoginSecret::OAuthToken("new".into()), "the refresh did run");
+        assert_eq!(gate.secret().await.unwrap(), LoginSecret::OAuthToken("relogin".into()));
+        assert_eq!(h.keychain.load(EMAIL).unwrap().unwrap().oauth, Some(relogin));
+    }
+
+    #[tokio::test]
+    async fn a_paused_account_gets_one_login_per_boot() {
+        let mut h = Harness::new(fresh);
+        let gate = h.password();
+        let persisted = AccountSummary {
+            id: gate.account_id(),
+            name: "Work".into(),
+            email: mc_domain::EmailAddress::new("me@example.com").unwrap(),
+            provider_type: mc_domain::ProviderType::Imap,
+            status: AccountStatus::CredentialsRejected,
+            total_unread: 0,
+            status_error: Some("the server rejected the password".into()),
+            status_since: None,
+        };
+        gate.restore(&persisted);
+        let attempts = AtomicUsize::new(0);
+
+        gate.retry_after_restart(|_| async { attempts.fetch_add(1, Ordering::SeqCst); Err(rejected()) }).await;
+        assert_eq!(gate.status().state, AuthState::CredentialsRejected, "still refused: stays paused");
+        assert!(h.event_names().is_empty());
+
+        // The next boot, with the password imported from config.toml.
+        gate.retry_after_restart(|secret| async move {
+            assert_eq!(secret, LoginSecret::Password("hunter2".into()));
+            Ok(())
+        })
+        .await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.status().state, AuthState::Active);
+        assert_eq!(h.event_names(), ["AccountReauthenticated"]);
+    }
+
+    #[tokio::test]
+    async fn a_paused_oauth_account_refreshes_once_at_boot() {
+        let mut h = Harness::new(fresh);
+        let gate = h.oauth(TimeDelta::hours(1));
+        gate.tracked.send_modify(|t| t.state = AuthState::NeedsReauth);
+
+        gate.retry_after_restart(|secret| async move {
+            assert_eq!(secret, LoginSecret::OAuthToken("new".into()), "logs in with the refreshed token");
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(h.refreshes(), 1);
+        assert_eq!(gate.status().state, AuthState::Active);
     }
 
     #[tokio::test]

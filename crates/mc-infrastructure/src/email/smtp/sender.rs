@@ -7,7 +7,7 @@ use lettre::{
     },
     transport::smtp::{
         authentication::{Credentials, Mechanism},
-        response::{Category, Code, Severity},
+        response::{Category, Code, Detail, Severity},
     },
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
@@ -19,14 +19,13 @@ use mc_domain::{
         message::{Address, OutgoingAttachment, OutgoingMessage},
     },
 };
-/// Async SMTP sender. `Static` builds its transport once at startup (existing
-/// password-account behavior, unchanged). `OAuth` rebuilds the transport on
-/// every send/test with the token the account's gate hands out — the transport
-/// itself is cheap to construct (no I/O happens until
-/// `.send()`/`.test_connection()` runs).
+/// Async SMTP sender. `Static` builds its transport once at startup, for an
+/// SMTP password of its own. `Gated` logs in with the account's gate secret
+/// (the IMAP password or the OAuth token) and rebuilds the transport on every
+/// send/test — cheap, no I/O happens until `.send()`/`.test_connection()`.
 enum SmtpBackend {
     Static(AsyncSmtpTransport<Tokio1Executor>),
-    OAuth {
+    Gated {
         host: String,
         port: u16,
         security: SmtpSecurity,
@@ -40,9 +39,9 @@ pub struct SmtpSender {
 }
 
 impl SmtpSender {
-    /// Build an `SmtpSender` from the given SMTP config, falling back to
-    /// `fallback_username` / `fallback_password` when the config does not
-    /// provide its own credentials.
+    /// A sender with an SMTP password of its own. Its outcomes stay out of
+    /// the account's gate: a refused password fails the send as
+    /// AuthenticationFailed but never pauses the IMAP side.
     pub fn build(
         config: &SmtpConnectionConfig,
         fallback_username: &str,
@@ -57,15 +56,16 @@ impl SmtpSender {
         Ok(Self { backend: SmtpBackend::Static(transport) })
     }
 
-    /// OAuth-authenticated sender, logging in through the same gate as the
-    /// account's IMAP provider.
-    pub fn build_oauth(config: &SmtpConnectionConfig, username: &str, gate: Arc<dyn LoginGate>) -> Self {
+    /// A sender that logs in through the account's gate, like its IMAP
+    /// provider: an OAuth token gets the forced refresh and one retry, and a
+    /// refused password pauses the account.
+    pub fn build_gated(config: &SmtpConnectionConfig, fallback_username: &str, gate: Arc<dyn LoginGate>) -> Self {
         Self {
-            backend: SmtpBackend::OAuth {
+            backend: SmtpBackend::Gated {
                 host: config.host.clone(),
                 port: config.port,
                 security: config.security,
-                username: username.to_owned(),
+                username: config.username.clone().unwrap_or_else(|| fallback_username.to_owned()),
                 gate,
             },
         }
@@ -83,21 +83,21 @@ impl SmtpSender {
         }
     }
 
-    fn oauth_transport(
+    fn gated_transport(
         host: &str,
         port: u16,
         security: SmtpSecurity,
         username: &str,
         secret: LoginSecret,
     ) -> Result<AsyncSmtpTransport<Tokio1Executor>, DomainError> {
-        let (LoginSecret::OAuthToken(access_token) | LoginSecret::Password(access_token)) = secret;
-        let creds = Credentials::new(username.to_owned(), access_token);
-        let builder = Self::transport_builder(host, security)?;
-        Ok(builder
-            .port(port)
-            .credentials(creds)
-            .authentication(vec![Mechanism::Xoauth2])
-            .build())
+        let builder = Self::transport_builder(host, security)?.port(port);
+        Ok(match secret {
+            LoginSecret::Password(password) => builder.credentials(Credentials::new(username.to_owned(), password)),
+            LoginSecret::OAuthToken(token) => builder
+                .credentials(Credentials::new(username.to_owned(), token))
+                .authentication(vec![Mechanism::Xoauth2]),
+        }
+        .build())
     }
 
     /// Send a NOOP to verify the SMTP server is reachable.
@@ -105,9 +105,9 @@ impl SmtpSender {
         let context = "SMTP connection test failed";
         match &self.backend {
             SmtpBackend::Static(t) => t.test_connection().await.map_err(|e| smtp_error(context, &e)),
-            SmtpBackend::OAuth { host, port, security, username, gate } => {
-                login_with(gate.as_ref(), |secret| async move {
-                    Self::oauth_transport(host, *port, *security, username, secret)?
+            SmtpBackend::Gated { host, port, security, username, gate } => {
+                login_with(&AuthOutcomesOnly(gate.as_ref()), |secret| async move {
+                    Self::gated_transport(host, *port, *security, username, secret)?
                         .test_connection()
                         .await
                         .map_err(|e| smtp_error(context, &e))
@@ -117,7 +117,7 @@ impl SmtpSender {
         }
     }
 
-    /// Send an outgoing message via SMTP. An OAuth login the server refuses is
+    /// Send an outgoing message via SMTP. A login the server refuses is
     /// retried once with a refreshed token; the refusal comes before DATA, so
     /// the message is never sent twice.
     pub async fn send(&self, msg: &OutgoingMessage) -> Result<(), DomainError> {
@@ -125,11 +125,11 @@ impl SmtpSender {
         let context = "SMTP send error";
         match &self.backend {
             SmtpBackend::Static(t) => t.send(email).await.map(drop).map_err(|e| smtp_error(context, &e)),
-            SmtpBackend::OAuth { host, port, security, username, gate } => {
-                login_with(gate.as_ref(), |secret| {
+            SmtpBackend::Gated { host, port, security, username, gate } => {
+                login_with(&AuthOutcomesOnly(gate.as_ref()), |secret| {
                     let email = email.clone();
                     async move {
-                        Self::oauth_transport(host, *port, *security, username, secret)?
+                        Self::gated_transport(host, *port, *security, username, secret)?
                             .send(email)
                             .await
                             .map(drop)
@@ -142,17 +142,44 @@ impl SmtpSender {
     }
 }
 
-/// 53x is the authentication family (535 bad credentials, 534 Gmail's "log in
-/// via the web", 530 auth required).
+/// The account's gate as SMTP may use it: only a refused login is reported.
+/// An unreachable SMTP server says nothing about IMAP, so its connection
+/// faults and successes stay out of the shared offline state.
+struct AuthOutcomesOnly<'a>(&'a dyn LoginGate);
+
+#[allow(clippy::double_must_use)] // async_trait's expansion
+#[async_trait::async_trait]
+impl LoginGate for AuthOutcomesOnly<'_> {
+    async fn secret(&self) -> Result<LoginSecret, DomainError> {
+        self.0.secret().await
+    }
+
+    async fn login_failed(&self, secret: &LoginSecret, error: &DomainError, retried: bool) -> bool {
+        matches!(error, DomainError::AuthenticationFailed(_)) && self.0.login_failed(secret, error, retried).await
+    }
+
+    fn login_succeeded(&self) {}
+
+    async fn ready(&self) {
+        self.0.ready().await;
+    }
+}
+
+/// 535: the server refused the credentials.
 fn rejects_credentials(code: Code) -> bool {
-    code.severity == Severity::PermanentNegativeCompletion && code.category == Category::Unspecified3
+    code.severity == Severity::PermanentNegativeCompletion
+        && code.category == Category::Unspecified3
+        && code.detail == Detail::Five
 }
 
 /// Splits lettre's errors the way the login gate needs them: a refused login,
 /// a dead link, or anything else (a refused recipient, a malformed message).
 fn smtp_error(context: &str, e: &lettre::transport::smtp::Error) -> DomainError {
     let message = format!("{context}: {e}");
-    if e.status().is_some_and(rejects_credentials) {
+    // A refused XOAUTH2 token comes back as a 334 error challenge, which lettre
+    // fails on client-side before anything else is sent.
+    let refused_token = e.is_client() && e.to_string().contains("does not expect a challenge");
+    if refused_token || e.status().is_some_and(rejects_credentials) {
         DomainError::AuthenticationFailed(message)
     } else if e.is_timeout() {
         DomainError::ConnectionTimeout(message)
@@ -269,13 +296,22 @@ mod tests {
     use lettre::transport::smtp::response::Detail;
 
     #[test]
-    fn only_the_53x_family_rejects_credentials() {
+    fn only_535_rejects_credentials() {
         let code = |severity, category, detail| Code::new(severity, category, detail);
         use Severity::{PermanentNegativeCompletion as Permanent, TransientNegativeCompletion as Transient};
         assert!(rejects_credentials(code(Permanent, Category::Unspecified3, Detail::Five)));
-        assert!(rejects_credentials(code(Permanent, Category::Unspecified3, Detail::Four)));
+        assert!(!rejects_credentials(code(Permanent, Category::Unspecified3, Detail::Zero)), "530 asks to log in first");
         assert!(!rejects_credentials(code(Permanent, Category::MailSystem, Detail::Zero)), "550 refused recipient");
         assert!(!rejects_credentials(code(Transient, Category::Unspecified3, Detail::Four)));
+    }
+
+    #[test]
+    fn a_challenged_xoauth2_login_is_a_refused_token() {
+        // What lettre fails with when the server answers XOAUTH2 with its 334 error challenge.
+        let creds = Credentials::new("me@gmail.com".into(), "ya29.stale".into());
+        let e = Mechanism::Xoauth2.response(&creds, Some("eyJzdGF0dXMiOiI0MDAifQ==")).unwrap_err();
+        assert!(matches!(smtp_error("SMTP send error", &e), DomainError::AuthenticationFailed(_)));
+        assert!(!smtp_error("SMTP send error", &e).to_string().contains("ya29"), "never echoes the token");
     }
 
     fn addr(email: &str) -> Address {

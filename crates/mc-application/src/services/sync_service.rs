@@ -555,15 +555,16 @@ impl<
             .map(|e| ProviderUid::new(e.provider_uid))
             .collect();
 
-        // Keep AuthenticationFailed typed (via the transparent Domain variant) so
-        // callers can back off on a rejected credential. Stringifying it into
-        // SyncFailed here is what previously made a dead account indistinguishable
-        // from a flaky network, so it got retried forever.
+        // Keep login and link failures typed (via the transparent Domain variant)
+        // so the backfill stops its pass on them instead of retrying every
+        // mailbox against an account that cannot connect.
         let results = provider
             .fetch_bodies_bulk(mailbox_path, &uids)
             .await
             .map_err(|e| match e {
-                DomainError::AuthenticationFailed(_) => ApplicationError::Domain(e),
+                DomainError::AuthenticationFailed(_)
+                | DomainError::ConnectionFailed(_)
+                | DomainError::ConnectionTimeout(_) => ApplicationError::Domain(e),
                 other => ApplicationError::SyncFailed(format!(
                     "Failed to bulk fetch bodies: {other}"
                 )),
@@ -742,10 +743,16 @@ impl<
                             }
                         }
                     }
-                    // The gate now holds the account's state: stop here and
-                    // let `ready` decide when to try again.
-                    Err(e @ ApplicationError::Domain(DomainError::AuthenticationFailed(_))) => {
-                        warn!(%account_id, error = %e, "backfill: credential rejected");
+                    // The gate now holds the account's state: stop the pass here
+                    // and let `ready` decide when to try again.
+                    Err(
+                        e @ ApplicationError::Domain(
+                            DomainError::AuthenticationFailed(_)
+                            | DomainError::ConnectionFailed(_)
+                            | DomainError::ConnectionTimeout(_),
+                        ),
+                    ) => {
+                        warn!(%account_id, error = %e, "backfill: cannot reach the account, pass stopped");
                         fetch_failed = true;
                         break;
                     }

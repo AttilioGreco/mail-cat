@@ -59,7 +59,7 @@ impl OAuthLoginTrigger for ReauthTrigger {
                 if let OAuthLoginProgress::Succeeded { email } = &event
                     && let Some(gate) = gates.by_email(email)
                 {
-                    apply_fresh_tokens(gate, secret_store.as_ref());
+                    apply_fresh_tokens(gate, secret_store.as_ref()).await;
                 }
                 if tx.send(event).await.is_err() {
                     break; // caller dropped the stream
@@ -91,7 +91,7 @@ fn failed(message: String) -> mpsc::Receiver<OAuthLoginProgress> {
 
 /// Hands the keychain's freshly stored tokens to the gate, which resumes the
 /// account and records `AccountReauthenticated`.
-fn apply_fresh_tokens(gate: &AuthGate, secret_store: &dyn SecretStore) {
+async fn apply_fresh_tokens(gate: &AuthGate, secret_store: &dyn SecretStore) {
     let tokens = match secret_store.load(gate.email()) {
         Ok(bundle) => bundle.and_then(|b| b.oauth),
         Err(e) => {
@@ -101,7 +101,7 @@ fn apply_fresh_tokens(gate: &AuthGate, secret_store: &dyn SecretStore) {
     };
     // Resume even without tokens: the login just proved the account works, and
     // staying paused would need a restart to undo.
-    gate.reauthenticated(tokens);
+    gate.reauthenticated(tokens).await;
 }
 
 #[cfg(test)]
@@ -159,7 +159,7 @@ mod tests {
             .store("me@gmail.com", &AccountSecrets { oauth: Some(fresh), ..Default::default() })
             .unwrap();
 
-        apply_fresh_tokens(&gate, store.as_ref());
+        apply_fresh_tokens(&gate, store.as_ref()).await;
 
         assert_eq!(gate.status().state, AuthState::Active);
         assert_eq!(gate.secret().await.unwrap(), LoginSecret::OAuthToken("new-access".into()));

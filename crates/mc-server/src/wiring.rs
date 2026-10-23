@@ -35,6 +35,8 @@ use crate::oauth_login::OAuthChallengeManager;
 
 /// How often an account is re-synced when nothing else prompts it.
 const SYNC_PERIOD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Least wait before re-syncing after a failure the gate did not schedule.
+const SYNC_RETRY_FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
 
 // Type aliases for concrete implementations
 type ProviderRegistryImpl = InMemoryProviderRegistry<ImapEmailProvider>;
@@ -287,8 +289,8 @@ impl AppContext {
                 gate.restore(summary);
             }
 
+            let smtp_sender = build_smtp_sender(account_config, &secrets, &imap_password, &gate).await;
             let login_gate = gate.clone() as Arc<dyn LoginGate>;
-            let smtp_sender = build_smtp_sender(account_config, &secrets, &imap_password, &login_gate).await;
             let provider = Arc::new(
                 ImapEmailProvider::new(
                     account_config.imap_host.clone(),
@@ -302,6 +304,26 @@ impl AppContext {
             );
             provider_registry.register_provider(account_id, provider);
             tracing::info!("Registered provider for '{}' ({})", name, account_config.email);
+
+            // A pause persisted by an older run gets one real login now; the
+            // user may have fixed it meanwhile (e.g. a password in config.toml).
+            if gate.status().state.is_paused() {
+                let gate = gate.clone();
+                let (host, port, username, use_tls) = (
+                    account_config.imap_host.clone(),
+                    account_config.imap_port,
+                    account_config.username.clone(),
+                    account_config.use_tls,
+                );
+                tokio::spawn(async move {
+                    gate.retry_after_restart(|secret| async move {
+                        ImapEmailProvider::new(host, port, username, Arc::new(secret), use_tls, None)
+                            .verify_login()
+                            .await
+                    })
+                    .await;
+                });
+            }
 
             download_limits.insert(account_id, account_config.daily_download_limit());
             registered.push((account_id, name, gate));
@@ -661,8 +683,15 @@ impl AppContext {
                     if let Err(e) = search.catch_up(es.as_ref()).await {
                         tracing::warn!("Search index catch-up after sync of '{}' failed: {}", account_name, e);
                     }
-                    // Offline: straight back to `ready`, which waits for the next retry.
-                    if failed && matches!(gate.status().state, AuthState::Offline { .. }) {
+                    if failed && let AuthState::Offline { next_retry } = gate.status().state {
+                        // `ready` waits for the next retry. One already due means
+                        // the failure wasn't a login the gate rescheduled: don't spin.
+                        if next_retry <= Utc::now() {
+                            tokio::select! {
+                                _ = sd.cancelled() => break,
+                                _ = tokio::time::sleep(SYNC_RETRY_FLOOR) => {}
+                            }
+                        }
                         continue;
                     }
                     tokio::select! {
@@ -1033,13 +1062,15 @@ fn smtp_security(security: crate::config::SmtpSecurityConfig) -> SmtpSecurity {
     }
 }
 
-/// The account's SMTP sender, checked once at boot. An OAuth sender logs in
-/// through the account's gate like IMAP does.
+/// The account's SMTP sender, checked once at boot unless the account is
+/// paused. It logs in through the account's gate when it uses the account's
+/// own credential (the OAuth token, or the IMAP password); an SMTP password of
+/// its own stays outside the gate, and a refusal of it fails the send.
 async fn build_smtp_sender(
     account_config: &AccountConfig,
     secrets: &AccountSecrets,
     imap_password: &str,
-    gate: &Arc<dyn LoginGate>,
+    gate: &Arc<AuthGate>,
 ) -> Option<SmtpSender> {
     let Some(smtp_cfg) = &account_config.smtp else {
         tracing::warn!("⚠ SMTP {}: nessun blocco [smtp] in config — invio disabilitato", account_config.email);
@@ -1052,8 +1083,9 @@ async fn build_smtp_sender(
         username: smtp_cfg.username.clone(),
         password: secrets.smtp_password.clone(),
     };
-    let sender = if account_config.oauth_provider.is_some() {
-        SmtpSender::build_oauth(&domain_smtp, &account_config.username, gate.clone())
+    let own_password = secrets.smtp_password.as_deref().is_some_and(|p| p != imap_password);
+    let sender = if account_config.oauth_provider.is_some() || !own_password {
+        SmtpSender::build_gated(&domain_smtp, &account_config.username, gate.clone())
     } else {
         match SmtpSender::build(&domain_smtp, &account_config.username, imap_password) {
             Ok(sender) => sender,
@@ -1063,6 +1095,9 @@ async fn build_smtp_sender(
             }
         }
     };
+    if gate.status().state.is_paused() {
+        return Some(sender);
+    }
     match sender.test_connection().await {
         Ok(true) => tracing::info!(
             "✓ SMTP {} ({}:{}) connessione OK",
