@@ -8,12 +8,15 @@ any scenario fails. Usage: scenarios.py [name ...]   (default: all)
 Seed layout (seed.py defaults, tag = [itest-NNN] in the subject):
   INBOX 1 2 4 6 7 9 11 12 14 16 17 19 | Archive 3 8 13 18 | Projects 5 10 15 20
 """
+import imaplib
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
 from collections import Counter
+from email.message import EmailMessage
 
 import imapctl
 
@@ -227,7 +230,51 @@ def delete_twice(w):
     w.assert_consistent()
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice]
+def db(sql):
+    """One row of the isolated server's database, read-only."""
+    con = sqlite3.connect(f"file:{HERE / '.state' / 'mc' / 'mail-cat.db'}?mode=ro", uri=True)
+    try:
+        return con.execute(sql).fetchone()
+    finally:
+        con.close()
+
+
+def backfill_text_only(w):
+    """A 4 MB attachment and a 1 MB text part cost the backfill about 256 KiB:
+    only the start of the text comes down, flagged truncated, and opening the
+    message fetches the rest. An All Mail-style copy is never downloaded."""
+    big = EmailMessage()
+    big["Subject"], big["From"], big["To"] = "Big log [itest-901]", "carol@example.net", "alice@itest.local"
+    big["Message-ID"] = "<big901@example.net>"
+    big.set_content("a line of a long pasted log\n" * 40_000)  # ~1.1 MB of text
+    att = EmailMessage()
+    att["Subject"], att["From"], att["To"] = "Scans [itest-902]", "dan@example.org", "alice@itest.local"
+    att["Message-ID"] = "<att902@example.net>"
+    att.set_content("Scans attached.\n")
+    att.add_attachment(os.urandom(4 << 20), maintype="application", subtype="pdf", filename="scans.pdf")
+    m = imapctl.connect()
+    for box, msg in (("INBOX", big), ("INBOX", att), ("Archive", big)):
+        imapctl.check(m.append(imapctl.quote(box), "", imaplib.Time2Internaldate(time.time()), msg.as_bytes()))
+    m.logout()
+    before = db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0]
+    w.sync()
+    pending = "SELECT COUNT(*) FROM messages WHERE body_state = 'pending' AND provider_uid IS NOT NULL"
+    # The worker naps a minute when its queue runs dry.
+    wait(lambda: db(pending)[0] == 0, "every body backfilled", timeout=90)
+    spent = db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0] - before
+    if spent > 300 << 10:
+        raise Fail(f"backfill downloaded {spent} bytes for 3 new rows, want under 300 KiB")
+    truncated = db("SELECT COUNT(*) FROM message_bodies b JOIN messages m ON m.id = b.message_id "
+                   "WHERE m.rfc_message_id = '<big901@example.net>' AND b.truncated = 1")[0]
+    if truncated != 2:
+        raise Fail(f"{truncated} copies of the big text stored truncated, want both")
+    out = mc("messages", "get", "--text", w.mc_id("INBOX", 901))
+    if out.count("a line of a long pasted log") != 40_000:
+        raise Fail(f"opening the message did not fetch its whole text ({out.count('a line')} lines)")
+    w.assert_consistent()
+
+
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only]
 
 
 def fresh_world():
