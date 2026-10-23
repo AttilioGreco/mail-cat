@@ -194,8 +194,11 @@ pub struct BackfillEntry {
     pub message_id: MessageId,
     pub mailbox_id: MailboxId,
     pub provider_uid: u32,
-    /// Copies sharing it share one download (Gmail: a label folder and All Mail).
+    /// Copies sharing it, with the size and sender, share one download
+    /// (Gmail: a label folder and All Mail). A Message-ID alone proves nothing.
     pub rfc_message_id: Option<String>,
+    pub size_bytes: u64,
+    pub from_email: String,
 }
 
 /// Queue of message bodies still to be downloaded, drained newest-first.

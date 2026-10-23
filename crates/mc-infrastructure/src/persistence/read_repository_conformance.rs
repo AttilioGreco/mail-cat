@@ -1964,6 +1964,43 @@ macro_rules! read_repository_conformance {
             assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 1);
         }
 
+        #[tokio::test]
+        async fn a_text_only_body_fetch_keeps_the_attachment_flag() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox) = (AccountId::new(), MailboxId::new());
+            let (id, mut event) = received(account, inbox, 1, None, &[], false, at(0));
+            if let DomainEvent::MessageReceived { has_attachments, .. } = &mut event {
+                *has_attachments = true;
+            }
+            project_all(&repo, [discovered(account, inbox, "INBOX"), event]).await;
+
+            repo.put_body(&id, Some("text".into()), None, false).await.unwrap();
+            repo.project(&body_fetched(id)).await.unwrap();
+
+            let message = MessageReadRepository::get_message(&repo, &id).await.unwrap().unwrap();
+            assert!(message.has_attachments);
+        }
+
+        #[tokio::test]
+        async fn a_reused_message_id_with_another_size_shares_nothing() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox) = (AccountId::new(), MailboxId::new());
+            let (real, e1) = received(account, inbox, 1, Some("<m@x>"), &[], false, at(0));
+            let (forged, mut e2) = received(account, inbox, 2, Some("<m@x>"), &[], false, at(1));
+            if let DomainEvent::MessageReceived { size_bytes, .. } = &mut e2 {
+                *size_bytes = 999;
+            }
+            project_all(&repo, [discovered(account, inbox, "INBOX"), e1, e2]).await;
+
+            repo.put_body(&forged, Some("forged".into()), None, false).await.unwrap();
+            repo.project(&body_fetched(forged)).await.unwrap();
+
+            assert!(repo.share_bodies(&account, &["<m@x>".into()]).await.unwrap().is_empty());
+            assert_eq!(body_text(&repo, &real).await, None);
+            let pending = repo.list_pending_backfill(&account, 10).await.unwrap();
+            assert_eq!(pending.iter().map(|e| (e.message_id, e.size_bytes)).collect::<Vec<_>>(), [(real, 100)]);
+        }
+
         /// A Sent server copy drops its own placeholder — never a UID-less
         /// copy of the same Message-ID waiting in another mailbox.
         #[tokio::test]

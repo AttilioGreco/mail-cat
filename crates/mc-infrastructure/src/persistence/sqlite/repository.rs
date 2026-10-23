@@ -2,7 +2,7 @@
 //! the body store and the backfill queue. Projection arms live in
 //! `projector.rs`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -208,41 +208,51 @@ pub(super) fn store_body(
 
 /// The copies of one message (`rfc_id`) in an account that lack a body the
 /// best stored copy has, each given that body: blobs are copied, not shared,
-/// so every copy keeps its own row and is deleted with it.
+/// so every copy keeps its own row and is deleted with it. Copies are of one
+/// message only if size and sender agree too; anyone can reuse a Message-ID.
 fn share_body(conn: &Connection, account: Uuid, rfc_id: &str) -> Result<Vec<(MessageId, bool)>, DomainError> {
-    let copies = query_all(
+    let rows = query_all(
         conn,
-        "SELECT m.id, m.body_state = 'pending', b.truncated FROM messages m \
+        "SELECT m.id, m.body_state = 'pending', b.truncated, m.size_bytes, m.from_email FROM messages m \
          LEFT JOIN message_bodies b ON b.message_id = m.id \
          WHERE m.account_id = ?1 AND m.rfc_message_id = ?2",
         params![account, rfc_id],
-        |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, bool>(1)?, r.get::<_, Option<bool>>(2)?)),
+        |r| {
+            let copy = (r.get::<_, Uuid>(0)?, r.get::<_, bool>(1)?, r.get::<_, Option<bool>>(2)?);
+            Ok(((r.get::<_, i64>(3)?, r.get::<_, String>(4)?), copy))
+        },
     )?;
-    let Some((source, truncated)) = copies
-        .iter()
-        .filter_map(|&(id, _, truncated)| Some((id, truncated?)))
-        .min_by_key(|&(_, truncated)| truncated)
-    else {
-        return Ok(Vec::new());
-    };
+    let mut messages: HashMap<(i64, String), Vec<_>> = HashMap::new();
+    for (key, copy) in rows {
+        messages.entry(key).or_default().push(copy);
+    }
     let mut shared = Vec::new();
-    for (id, pending, has) in copies {
-        // A pending copy holding a body of its own lost its event: record it.
-        let wants = pending || has.is_some_and(|t| t && !truncated);
-        if !wants {
+    for copies in messages.into_values() {
+        let Some((source, truncated)) = copies
+            .iter()
+            .filter_map(|&(id, _, truncated)| Some((id, truncated?)))
+            .min_by_key(|&(_, truncated)| truncated)
+        else {
             continue;
+        };
+        for (id, pending, has) in copies {
+            // A pending copy holding a body of its own lost its event: record it.
+            let wants = pending || has.is_some_and(|t| t && !truncated);
+            if !wants {
+                continue;
+            }
+            if id != source {
+                exec(
+                    conn,
+                    "INSERT INTO message_bodies (message_id, text_zstd, html_zstd, truncated, fetched_at) \
+                     SELECT ?1, text_zstd, html_zstd, truncated, fetched_at FROM message_bodies WHERE message_id = ?2 \
+                     ON CONFLICT(message_id) DO UPDATE SET text_zstd = excluded.text_zstd, \
+                         html_zstd = excluded.html_zstd, truncated = excluded.truncated, fetched_at = excluded.fetched_at",
+                    params![id, source],
+                )?;
+            }
+            shared.push((MessageId::from_uuid(id), truncated));
         }
-        if id != source {
-            exec(
-                conn,
-                "INSERT INTO message_bodies (message_id, text_zstd, html_zstd, truncated, fetched_at) \
-                 SELECT ?1, text_zstd, html_zstd, truncated, fetched_at FROM message_bodies WHERE message_id = ?2 \
-                 ON CONFLICT(message_id) DO UPDATE SET text_zstd = excluded.text_zstd, \
-                     html_zstd = excluded.html_zstd, truncated = excluded.truncated, fetched_at = excluded.fetched_at",
-                params![id, source],
-            )?;
-        }
-        shared.push((MessageId::from_uuid(id), truncated));
     }
     Ok(shared)
 }
@@ -641,7 +651,8 @@ impl BodyBackfillQueue for SqliteRepository {
                 query_all(
                     conn,
                     &format!(
-                        "SELECT m.id, m.mailbox_id, m.provider_uid, m.rfc_message_id {BACKFILLABLE} \
+                        "SELECT m.id, m.mailbox_id, m.provider_uid, m.rfc_message_id, \
+                         m.size_bytes, m.from_email {BACKFILLABLE} \
                          ORDER BY CASE b.mailbox_type WHEN '\"Inbox\"' THEN 0 \
                              WHEN '\"All\"' THEN 2 WHEN '\"Important\"' THEN 2 ELSE 1 END, \
                              m.received_at DESC LIMIT ?2"
@@ -653,6 +664,8 @@ impl BodyBackfillQueue for SqliteRepository {
                             mailbox_id: MailboxId::from_uuid(r.get(1)?),
                             provider_uid: r.get(2)?,
                             rfc_message_id: r.get(3)?,
+                            size_bytes: r.get::<_, i64>(4)? as u64,
+                            from_email: r.get(5)?,
                         })
                     },
                 )

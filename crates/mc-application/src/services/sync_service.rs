@@ -1386,7 +1386,11 @@ impl<
             let batch: Vec<BackfillEntry> = pending
                 .into_iter()
                 .filter(|e| !abandoned.contains(&e.message_id) && !shared.contains(&e.message_id))
-                .filter(|e| e.rfc_message_id.as_ref().is_none_or(|id| seen.insert(id.clone())))
+                .filter(|e| {
+                    e.rfc_message_id
+                        .as_ref()
+                        .is_none_or(|id| seen.insert((id.clone(), e.size_bytes, e.from_email.clone())))
+                })
                 .take(BACKFILL_BATCH)
                 .collect();
             // A page of nothing but copies (All Mail, late in the queue) says
@@ -2127,7 +2131,9 @@ mod tests {
 
             let mut stored = self.stored.lock().unwrap();
             match &envelope.payload {
-                DomainEvent::MessageReceived { message_id, account_id, mailbox_id, provider_uid, message_rfc_id, flags, .. } => {
+                DomainEvent::MessageReceived {
+                    message_id, account_id, mailbox_id, provider_uid, message_rfc_id, flags, size_bytes, ..
+                } => {
                     stored.push(MessageSummary {
                         id: *message_id,
                         account_id: *account_id,
@@ -2139,7 +2145,7 @@ mod tests {
                         cc: vec![],
                         subject: String::new(),
                         flags: flags.clone(),
-                        size_bytes: 0,
+                        size_bytes: *size_bytes,
                         has_attachments: false,
                         received_at: chrono::Utc::now(),
                     });
@@ -2364,6 +2370,8 @@ mod tests {
                         mailbox_id: m.mailbox_id,
                         provider_uid: m.provider_uid?.value(),
                         rfc_message_id: rfc_ids.get(&m.id).cloned(),
+                        size_bytes: m.size_bytes,
+                        from_email: m.from_email.clone(),
                     })
                 })
                 .collect()
@@ -2692,6 +2700,8 @@ mod tests {
                 mailbox_id,
                 provider_uid: uid,
                 rfc_message_id: None,
+                size_bytes: 0,
+                from_email: String::new(),
             })
             .collect();
 
@@ -2783,6 +2793,29 @@ mod tests {
             .filter(|(_, e)| matches!(e, DomainEvent::MessageBodyFetched { .. }))
             .count();
         assert_eq!(fetched, 4, "every copy recorded as fetched");
+    }
+
+    #[tokio::test]
+    async fn backfill_downloads_both_when_a_message_id_is_reused_with_another_size() {
+        let account_id = AccountId::new();
+        let (inbox, discovered) = Mailbox::discover(account_id, MailboxPath::inbox(), MailboxType::Inbox);
+        let projector = Arc::new(MockProjector::new());
+        let mut events = vec![discovered];
+        for (uid, size) in [(1, 10), (2, 999)] {
+            let (_, event) = Message::receive(
+                account_id, inbox.id, ProviderUid::new(uid), Some("<a@x>".into()), None, vec![],
+                test_envelope(), vec![], size, false, chrono::Utc::now(),
+            );
+            events.push(event);
+        }
+        for event in events {
+            projector.project(&EventEnvelope::new(String::new(), AggregateType::Message, 1, event)).await.unwrap();
+        }
+
+        let service = make_service(MockEmailProvider::new(), Arc::new(MockEventStore::new()), projector);
+        let batch = service.next_backfill_batch(&account_id, &HashSet::new()).await.unwrap();
+
+        assert_eq!(batch.len(), 2);
     }
 
     #[tokio::test]
