@@ -149,9 +149,11 @@ impl AuthGate {
     /// Takes over the state persisted before a restart, so an account that was
     /// waiting for the user stays paused instead of knocking again at boot.
     pub fn restore(&self, account: &AccountSummary) {
+        let oauth = self.oauth_provider().is_some();
         let state = match account.status {
-            AccountStatus::NeedsReauth => AuthState::NeedsReauth,
-            AccountStatus::CredentialsRejected => AuthState::CredentialsRejected,
+            AccountStatus::NeedsReauth if oauth => AuthState::NeedsReauth,
+            // Older builds flagged a rejected password as NeedsReauth; no login fixes that.
+            AccountStatus::NeedsReauth | AccountStatus::CredentialsRejected => AuthState::CredentialsRejected,
             _ => return,
         };
         self.tracked.send_modify(|t| {
@@ -818,5 +820,26 @@ mod tests {
         assert!(gate.secret().await.is_err());
         assert_eq!(gate.status().reason.as_deref(), Some("refresh token revoked or expired"));
         assert!(h.event_names().is_empty(), "restoring records nothing new");
+    }
+
+    #[tokio::test]
+    async fn a_password_account_flagged_needs_reauth_by_older_builds_asks_for_the_password() {
+        let mut h = Harness::new(fresh);
+        let gate = h.password();
+        gate.restore(&AccountSummary {
+            id: gate.account_id(),
+            name: "Work".into(),
+            email: mc_domain::EmailAddress::new("me@example.com").unwrap(),
+            provider_type: mc_domain::ProviderType::Imap,
+            status: AccountStatus::NeedsReauth,
+            total_unread: 0,
+            status_error: None,
+            status_since: None,
+        });
+        assert_eq!(gate.status().state, AuthState::CredentialsRejected);
+
+        gate.set_password("new".into());
+        assert_eq!(gate.status().state, AuthState::Active);
+        assert_eq!(h.event_names(), ["AccountReauthenticated"]);
     }
 }
