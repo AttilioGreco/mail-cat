@@ -324,6 +324,14 @@ impl ImapEmailProvider {
         Ok(PooledSession { session, _permit: permit })
     }
 
+    /// One login and logout outside the pool, to prove the server accepts the
+    /// credential for this username before anyone relies on it.
+    pub async fn verify_login(&self) -> Result<(), DomainError> {
+        let mut session = self.create_imap_session().await?;
+        let _ = exchange(COMMAND_TIMEOUT, "LOGOUT", session.logout()).await;
+        Ok(())
+    }
+
     fn release(&self, pooled: PooledSession) {
         self.idle_sessions
             .lock()

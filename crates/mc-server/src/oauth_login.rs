@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mc_application::OAuthLoginProgress;
-use mc_domain::{OAuthProvider, SecretStore};
-use tokio::sync::mpsc;
+use mc_domain::{DomainError, OAuthProvider, OAuthSecrets, SecretStore};
+use mc_infrastructure::email::imap::ImapCredential;
+use mc_infrastructure::ImapEmailProvider;
+use tokio::sync::{mpsc, RwLock};
 use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
 #[derive(Clone)]
@@ -36,7 +38,7 @@ impl OAuthChallengeManager {
         let config_path = self.config_path.clone();
 
         tokio::spawn(async move {
-            let (authorize_url, pending) = match mc_infrastructure::oauth::begin_authorization(provider).await {
+            let (authorize_url, pending) = match mc_infrastructure::oauth::begin_authorization(provider, &email).await {
                 Ok(v) => v,
                 Err(e) => {
                     let _ = tx.send(OAuthLoginProgress::Failed { message: e.to_string() }).await;
@@ -73,20 +75,9 @@ impl OAuthChallengeManager {
                 }
             };
 
-            let mut bundle = match secret_store.load(&email) {
-                Ok(existing) => existing.unwrap_or_default(),
-                Err(e) => {
-                    let _ = tx
-                        .send(OAuthLoginProgress::Failed { message: format!("reading existing keychain entry: {e}") })
-                        .await;
-                    return;
-                }
-            };
-            bundle.oauth = Some(secrets);
-            if let Err(e) = secret_store.store(&email, &bundle) {
-                let _ = tx
-                    .send(OAuthLoginProgress::Failed { message: format!("storing tokens in keychain: {e}") })
-                    .await;
+            let verified = verify_imap_login(provider, &email, &secrets.access_token).await;
+            if let Err(message) = store_tokens(secret_store.as_ref(), &email, provider, secrets, verified) {
+                let _ = tx.send(OAuthLoginProgress::Failed { message }).await;
                 return;
             }
 
@@ -102,6 +93,52 @@ impl OAuthChallengeManager {
 
         rx
     }
+}
+
+/// The provider grants consent for whichever account the browser picked, which
+/// need not be `email`; only an IMAP login as `email` proves the token fits it.
+async fn verify_imap_login(provider: OAuthProvider, email: &str, access_token: &str) -> Result<(), DomainError> {
+    let preset = mc_infrastructure::oauth::provider_preset(provider);
+    ImapEmailProvider::new(
+        preset.imap_host.into(),
+        preset.imap_port,
+        email.into(),
+        ImapCredential::OAuthToken(Arc::new(RwLock::new(access_token.into()))),
+        true,
+        None,
+    )
+    .verify_login()
+    .await
+}
+
+/// Stores the new tokens unless IMAP rejected them, so a wrong-account consent
+/// never overwrites a keychain entry. A check that failed for any other reason
+/// (network, timeout) doesn't block the login.
+fn store_tokens(
+    secret_store: &dyn SecretStore,
+    email: &str,
+    provider: OAuthProvider,
+    secrets: OAuthSecrets,
+    verified: Result<(), DomainError>,
+) -> Result<(), String> {
+    match verified {
+        Ok(()) => {}
+        Err(DomainError::AuthenticationFailed(detail)) => {
+            tracing::warn!(%email, %detail, "IMAP rejected the newly granted OAuth token");
+            return Err(format!(
+                "{provider:?} ha autorizzato un account diverso da {email}: rifai il login scegliendo {email}"
+            ));
+        }
+        Err(e) => tracing::warn!(%email, error = %e, "could not verify the new OAuth token over IMAP, storing it anyway"),
+    }
+    let mut bundle = secret_store
+        .load(email)
+        .map_err(|e| format!("reading existing keychain entry: {e}"))?
+        .unwrap_or_default();
+    bundle.oauth = Some(secrets);
+    secret_store
+        .store(email, &bundle)
+        .map_err(|e| format!("storing tokens in keychain: {e}"))
 }
 
 /// Appends a new `[[accounts]]` table for an OAuth account to `config.toml`,
@@ -222,6 +259,34 @@ mod tests {
             1,
             "re-auth of an existing account must not duplicate its config entry"
         );
+    }
+
+    fn tokens(access_token: &str) -> OAuthSecrets {
+        OAuthSecrets { access_token: access_token.into(), refresh_token: "r".into(), expires_at: chrono::Utc::now() }
+    }
+
+    #[test]
+    fn rejected_verification_leaves_keychain_untouched() {
+        let store = MockStore::default();
+        let old = AccountSecrets { oauth: Some(tokens("old")), ..Default::default() };
+        store.store("me@gmail.com", &old).unwrap();
+
+        let rejected = Err(DomainError::AuthenticationFailed("400".into()));
+        let err = store_tokens(&store, "me@gmail.com", OAuthProvider::Google, tokens("new"), rejected).unwrap_err();
+
+        assert!(err.contains("me@gmail.com"));
+        assert_eq!(store.load("me@gmail.com").unwrap(), Some(old));
+    }
+
+    #[test]
+    fn unreachable_verification_still_stores_tokens() {
+        let store = MockStore::default();
+
+        let offline = Err(DomainError::Provider("TCP connection failed".into()));
+        store_tokens(&store, "me@gmail.com", OAuthProvider::Google, tokens("new"), offline).unwrap();
+
+        let stored = store.load("me@gmail.com").unwrap().unwrap().oauth.unwrap();
+        assert_eq!(stored.access_token, "new");
     }
 
     #[tokio::test]

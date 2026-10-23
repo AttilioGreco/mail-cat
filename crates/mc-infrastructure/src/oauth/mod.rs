@@ -27,8 +27,11 @@ pub struct PendingLogin {
 
 /// Binds the loopback listener and builds the provider's authorization URL.
 /// Returns the URL to show the user plus the handle needed to complete it.
+/// `login_hint` preselects that account, so the browser's signed-in account
+/// doesn't silently grant consent in its place.
 pub async fn begin_authorization(
     provider: OAuthProvider,
+    login_hint: &str,
 ) -> Result<(String, PendingLogin), DomainError> {
     let preset = provider_preset(provider);
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -65,6 +68,7 @@ pub async fn begin_authorization(
     for (k, v) in preset.auth_extra_params {
         request = request.add_extra_param(*k, *v);
     }
+    request = request.add_extra_param("login_hint", login_hint);
     let (authorize_url, csrf_token) = request.url();
 
     Ok((
@@ -155,7 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn begin_authorization_builds_google_url_with_scope_and_pkce() {
-        let (url, _pending) = begin_authorization(OAuthProvider::Google).await.unwrap();
+        let (url, _pending) = begin_authorization(OAuthProvider::Google, "me@gmail.com").await.unwrap();
         assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth"));
         assert!(url.contains("code_challenge"));
         assert!(url.contains("mail.google.com"));
@@ -163,6 +167,7 @@ mod tests {
         // re-authenticate every time the 1h access token dies.
         assert!(url.contains("access_type=offline"));
         assert!(url.contains("prompt=consent"));
+        assert!(url.contains("login_hint=me%40gmail.com"));
     }
 
     #[test]
