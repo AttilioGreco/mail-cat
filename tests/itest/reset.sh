@@ -31,10 +31,9 @@ stop_server() {
     local pidfile="$STATE/server.pid" pid
     [[ -f $pidfile ]] || return 0
     pid=$(<"$pidfile")
-    # Only kill the pid we started: the real server runs from another path.
-    # A rebuild unlinks the old binary, hence the " (deleted)" suffix.
-    local exe; exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || true
-    if [[ ${exe% (deleted)} == "$BIN" ]]; then
+    # Only kill the pid we started, recognised by our config in its environment
+    # (the binary path is no proof: CARGO_TARGET_DIR may differ between runs).
+    if tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qxF "MAIL_CAT_CONFIG=$STATE/config.toml"; then
         kill "$pid"
         wait_for 10 bash -c "! kill -0 $pid"
     fi
