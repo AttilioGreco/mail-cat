@@ -9,6 +9,34 @@ use tokio::sync::Mutex;
 /// Event carrying a deep link to an already-running window.
 const DEEP_LINK_EVENT: &str = "deep-link";
 
+/// Whether the main window gets the native titlebar (close/minimise/maximise,
+/// drag to move). Tiling compositors tile and frame windows themselves, so there
+/// the GTK titlebar is dead weight; floating desktops (GNOME, Cinnamon, KDE…)
+/// need it, since the frontend draws no titlebar of its own.
+/// `MAILCAT_DECORATIONS=0|1` overrides the detection.
+fn wants_decorations(env: impl Fn(&str) -> Option<String>) -> bool {
+    match env("MAILCAT_DECORATIONS").as_deref() {
+        Some("0" | "false" | "no" | "off") => return false,
+        Some("1" | "true" | "yes" | "on") => return true,
+        _ => {}
+    }
+    const TILING_SOCKETS: [&str; 4] = [
+        "SWAYSOCK",
+        "I3SOCK",
+        "HYPRLAND_INSTANCE_SIGNATURE",
+        "NIRI_SOCKET",
+    ];
+    const TILING_DESKTOPS: [&str; 6] = ["sway", "i3", "hyprland", "niri", "river", "bspwm"];
+    if TILING_SOCKETS.iter().any(|var| env(var).is_some()) {
+        return false;
+    }
+    // XDG_CURRENT_DESKTOP is a colon-separated list, e.g. "sway" or "X-Cinnamon".
+    let desktop = env("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_lowercase();
+    !desktop.split(':').any(|d| TILING_DESKTOPS.contains(&d))
+}
+
 #[tokio::main]
 async fn main() {
     // WebKitGTK's TLS stack enumerates every p11-kit PKCS#11 module at startup,
@@ -55,6 +83,16 @@ async fn main() {
                 None => tracing::debug!("Second instance with no deep link"),
             }
         }))
+        // tauri.conf.json starts the window undecorated (the tiling-WM case);
+        // turn the titlebar back on for floating desktops.
+        .setup(|app| {
+            if wants_decorations(|var| std::env::var(var).ok())
+                && let Some(window) = app.get_webview_window("main")
+            {
+                window.set_decorations(true)?;
+            }
+            Ok(())
+        })
         .manage(AppState {
             client: Mutex::new(None), // lazy connect on first command
             server_url,
@@ -101,4 +139,52 @@ async fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wants_decorations;
+
+    fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
+
+    #[test]
+    fn floating_desktops_get_a_titlebar() {
+        assert!(wants_decorations(env(&[("XDG_CURRENT_DESKTOP", "GNOME")])));
+        assert!(wants_decorations(env(&[(
+            "XDG_CURRENT_DESKTOP",
+            "X-Cinnamon"
+        )])));
+        assert!(wants_decorations(env(&[])));
+    }
+
+    #[test]
+    fn tiling_compositors_stay_undecorated() {
+        assert!(!wants_decorations(env(&[(
+            "SWAYSOCK",
+            "/run/user/1000/sway-ipc.sock"
+        )])));
+        assert!(!wants_decorations(env(&[("XDG_CURRENT_DESKTOP", "sway")])));
+        assert!(!wants_decorations(env(&[(
+            "XDG_CURRENT_DESKTOP",
+            "Hyprland"
+        )])));
+    }
+
+    #[test]
+    fn the_env_override_wins() {
+        assert!(wants_decorations(env(&[
+            ("SWAYSOCK", "x"),
+            ("MAILCAT_DECORATIONS", "1")
+        ])));
+        assert!(!wants_decorations(env(&[
+            ("XDG_CURRENT_DESKTOP", "GNOME"),
+            ("MAILCAT_DECORATIONS", "0")
+        ])));
+    }
 }
