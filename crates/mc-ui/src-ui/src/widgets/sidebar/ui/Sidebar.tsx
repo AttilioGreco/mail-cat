@@ -148,8 +148,12 @@ function AuthBanner({ account }: { account: Account }) {
         </p>
       );
     case 'needs_reauth':
-      // Only an OAuth account can be fixed by logging in again.
-      return account.auth?.oauthProvider ? (
+      // Only an OAuth account can be fixed by logging in again. Without the
+      // live status the auth type is unknown, so say nothing about it.
+      if (!account.auth) {
+        return <AuthAlert label="Accesso richiesto" action="Apri impostazioni" onAction={openSettings} />;
+      }
+      return account.auth.oauthProvider ? (
         <ReauthBanner accountId={account.id} label={label} />
       ) : (
         <AuthAlert label="Password rifiutata" detail={detail} action="Aggiorna password" onAction={openSettings} />

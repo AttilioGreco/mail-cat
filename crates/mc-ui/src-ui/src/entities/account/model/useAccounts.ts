@@ -65,6 +65,8 @@ export function useAuthStatusWatch() {
   useEffect(() => {
     invoke('start_auth_watch').catch((e) => console.error('[auth] start_auth_watch failed:', e));
 
+    // StrictMode unmounts before `listen` resolves: drop the late listener.
+    let cancelled = false;
     let unlisten: (() => void) | null = null;
     listen<AuthStatusDto>('account:auth', ({ payload }) => {
       const accounts = queryClient.getQueryData<Account[]>(['accounts']);
@@ -76,10 +78,12 @@ export function useAuthStatusWatch() {
         current?.map((a) => (a.id === payload.account_id ? { ...a, auth: authFromDto(payload) } : a)),
       );
     }).then((fn) => {
-      unlisten = fn;
+      if (cancelled) fn();
+      else unlisten = fn;
     });
 
     return () => {
+      cancelled = true;
       invoke('stop_auth_watch').catch(() => {});
       unlisten?.();
     };
