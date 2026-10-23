@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
-import type { ConversationSummary, ThreadMessage } from '@/entities/conversation';
+import { threadQuery, type ConversationSummary, type ThreadMessage } from '@/entities/conversation';
 import type { Mailbox } from '@/entities/mailbox';
 import type { MessageEnvelope } from '@/entities/message';
 import { useSessionStore, mailboxKey } from '@/entities/session';
@@ -205,6 +205,21 @@ export function useMarkMailboxRead() {
       qc.invalidateQueries({ queryKey: ['conversations'] });
     },
   });
+}
+
+// ── Trash Threads ───────────────────────────────────────────────────────────
+
+/** Trash whole conversations, given their sample message ids: every message
+ *  of each thread goes, as when one open thread is deleted. */
+export function useTrashThreads() {
+  const qc = useQueryClient();
+  const deleteMany = useDeleteMessages();
+  const trash = async (sampleIds: string[], permanently = false): Promise<BulkResult> => {
+    const threads = await Promise.all(sampleIds.map((id) => qc.fetchQuery(threadQuery(id))));
+    const ids = [...new Set([...sampleIds, ...threads.flat().map((m) => m.id)])];
+    return deleteMany.mutateAsync({ messageIds: ids, permanently });
+  };
+  return { trash, isPending: deleteMany.isPending };
 }
 
 // ── Move Message ────────────────────────────────────────────────────────────

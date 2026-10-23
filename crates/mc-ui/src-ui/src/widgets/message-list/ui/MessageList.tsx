@@ -1,5 +1,7 @@
+import { useEffect, useRef } from 'react';
 import { List, type RowComponentProps } from 'react-window';
-import { RefreshCw, Inbox, MailOpen, MessageSquare, List as ListIcon } from 'lucide-react';
+import { RefreshCw, Inbox, MailOpen, MessageSquare, List as ListIcon, Trash2, X } from 'lucide-react';
+import { toast } from 'sonner';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useMessages, MessageRow, type MessageEnvelope } from '@/entities/message';
 import { useMailboxes, type Mailbox } from '@/entities/mailbox';
@@ -18,6 +20,7 @@ import {
   useMarkMailboxRead,
   useSelectNeighbour,
   useDeleteMessages,
+  useTrashThreads,
 } from '@/features/message-actions';
 
 const MESSAGE_ROW_HEIGHT = 76;
@@ -27,7 +30,9 @@ export function MessageList() {
   const {
     selectedAccountId, selectedMailboxId,
     selectedMessageId, selectMessage, selectMailbox,
+    selectedMessageIds, toggleMessageInSelection, selectMessageRange,
     selectedThreadMessageId, selectThread,
+    selectedThreadIds, toggleThreadInSelection, selectThreadRange,
     conversationMode, setConversationMode,
     showUnreadOnly, toggleUnreadOnly,
   } = useSessionStore();
@@ -78,8 +83,89 @@ export function MessageList() {
   const markFolderRead = useMarkMailboxRead();
   const selectNeighbour = useSelectNeighbour();
   const deleteMany = useDeleteMessages();
+  const trashThreads = useTrashThreads();
 
   const selected = messages.find((m) => m.uid === selectedMessageId) ?? null;
+
+  // ── Multi-selection ───────────────────────────────────────────────────
+  // Shift-click spans from the last row clicked without Shift, so a second
+  // Shift-click re-spans from the same row instead of from the previous end.
+  const anchorRef = useRef<string | null>(null);
+
+  // The modifiers as the keyboard last reported them, in case a mouse event
+  // comes through without them: the row listens on mousedown because
+  // WebKitGTK fires no click at all for a Ctrl-click.
+  const heldRef = useRef({ ctrl: false, shift: false });
+  useEffect(() => {
+    const track = (e: KeyboardEvent) => {
+      heldRef.current = { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey };
+    };
+    const release = () => {
+      heldRef.current = { ctrl: false, shift: false };
+    };
+    window.addEventListener('keydown', track);
+    window.addEventListener('keyup', track);
+    window.addEventListener('blur', release);
+    return () => {
+      window.removeEventListener('keydown', track);
+      window.removeEventListener('keyup', track);
+      window.removeEventListener('blur', release);
+    };
+  }, []);
+
+  // Both list modes share the selection logic, each over its own rows: message
+  // uids, or the sample message ids that stand for conversations.
+  const rowIds = conversationMode
+    ? conversations.map((c) => c.sampleMessageId)
+    : messages.map((m) => m.uid);
+  const openId = conversationMode ? selectedThreadMessageId : selectedMessageId;
+  const multiIds = conversationMode ? selectedThreadIds : selectedMessageIds;
+  const openRow = conversationMode ? selectThread : selectMessage;
+
+  const clickRow = (id: string, e: React.MouseEvent | React.KeyboardEvent) => {
+    const ctrl = e.ctrlKey || e.metaKey || heldRef.current.ctrl;
+    const shift = e.shiftKey || heldRef.current.shift;
+    if (shift) {
+      const from = rowIds.indexOf(anchorRef.current ?? openId ?? '');
+      const to = rowIds.indexOf(id);
+      if (from !== -1 && to !== -1) {
+        const range = rowIds.slice(Math.min(from, to), Math.max(from, to) + 1);
+        if (conversationMode) selectThreadRange(range, id);
+        else selectMessageRange(range, id);
+        return;
+      }
+    }
+    anchorRef.current = id;
+    if (!ctrl) openRow(id);
+    else if (conversationMode) toggleThreadInSelection(id);
+    else toggleMessageInSelection(id);
+  };
+
+  /** Trash every selected row in one round trip, then open the first row
+   *  below the selection (or above it, when the selection reached the end). */
+  const trashSelection = (permanently = false) => {
+    const gone = new Set(multiIds);
+    const last = rowIds.reduce((at, id, i) => (gone.has(id) ? i : at), -1);
+    const next =
+      rowIds.slice(last + 1).find((id) => !gone.has(id)) ??
+      rowIds.slice(0, last).reverse().find((id) => !gone.has(id));
+    openRow(next ?? null);
+    const done = conversationMode
+      ? trashThreads.trash([...gone], permanently)
+      : deleteMany.mutateAsync({ messageIds: [...gone], permanently });
+    done.then(
+      ([, failed]) => {
+        if (failed > 0) toast.error(`${failed} messaggi non eliminati`);
+      },
+      (e) => toast.error(`Eliminazione non riuscita: ${String(e)}`),
+    );
+  };
+  const multiSelected = multiIds.length > 1;
+  const confirmPermanent = () => {
+    if (window.confirm(`Elimini definitivamente ${multiIds.length} ${conversationMode ? 'conversazioni' : 'messaggi'}?`)) {
+      trashSelection(true);
+    }
+  };
 
   /** Move the selection by `delta`, clamped, starting from the top when nothing
    *  is selected. Works on threads too when the list is in conversation mode. */
@@ -159,12 +245,14 @@ export function MessageList() {
     // These four take the message out of the list, so each hands the selection
     // on to the next row first — `messages` (not the cache) because it is the
     // filtered list the user is actually looking at.
-    deleteMessage: conversationMode ? undefined : () => {
+    // In conversation mode ThreadView owns these keys for the open thread and
+    // leaves them unbound while several threads are selected.
+    deleteMessage: multiSelected ? () => trashSelection() : conversationMode ? undefined : () => {
       if (!selected) return;
       selectNeighbour(selected.uid, messages);
       deleteMessage.mutate({ messageId: selected.uid });
     },
-    deletePermanently: conversationMode ? undefined : () => {
+    deletePermanently: multiSelected ? confirmPermanent : conversationMode ? undefined : () => {
       if (!selected) return;
       selectNeighbour(selected.uid, messages);
       deleteMessage.mutate({ messageId: selected.uid, permanently: true });
@@ -189,7 +277,31 @@ export function MessageList() {
       </div>
 
       {/* Toolbar */}
-      {hasContent && !isSearching && (
+      {multiSelected && !isSearching ? (
+        <div className="flex items-center justify-between border-b border-border px-3 py-1.5 gap-2">
+          <span className="text-sm font-semibold text-foreground truncate">
+            {multiIds.length} {conversationMode ? 'conversazioni' : 'messaggi'} selezionati
+          </span>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => trashSelection()}
+              disabled={deleteMany.isPending || trashThreads.isPending}
+              title="Sposta nel cestino (Canc)"
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-foreground hover:bg-accent transition-colors disabled:opacity-50"
+            >
+              <Trash2 size={12} />
+              Cestina
+            </button>
+            <button
+              onClick={() => openRow(openId)}
+              title="Annulla selezione"
+              className="flex items-center rounded p-1 text-muted hover:text-foreground hover:bg-accent transition-colors"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        </div>
+      ) : hasContent && !isSearching && (
         <div className="flex items-center justify-between border-b border-border px-3 py-1.5 gap-2">
           <span className="text-sm font-semibold text-foreground truncate">
             {selectedMailbox?.name ?? selectedMailbox?.path ?? (conversationMode ? 'Conversations' : 'Messages')}
@@ -250,7 +362,7 @@ export function MessageList() {
               rowComponent={ConvRow}
               rowCount={conversations.length}
               rowHeight={CONV_ROW_HEIGHT}
-              rowProps={{ conversations, selectedThreadMessageId, selectThread }}
+              rowProps={{ conversations, selectedThreadMessageId, selectedThreadIds, clickRow }}
             />
           </div>
         )
@@ -267,7 +379,7 @@ export function MessageList() {
               rowComponent={MsgRow}
               rowCount={messages.length}
               rowHeight={MESSAGE_ROW_HEIGHT}
-              rowProps={{ messages, selectedMessageId, selectMessage, openDraft }}
+              rowProps={{ messages, selectedMessageId, selectedMessageIds, clickRow, openDraft }}
             />
           </div>
         )
@@ -281,17 +393,18 @@ export function MessageList() {
 interface ConvRowData {
   conversations: ConversationSummary[];
   selectedThreadMessageId: string | null;
-  selectThread: (id: string | null) => void;
+  selectedThreadIds: string[];
+  clickRow: (id: string, e: React.MouseEvent | React.KeyboardEvent) => void;
 }
 
-function ConvRow({ index, style, conversations, selectedThreadMessageId, selectThread }: RowComponentProps<ConvRowData>) {
+function ConvRow({ index, style, conversations, selectedThreadMessageId, selectedThreadIds, clickRow }: RowComponentProps<ConvRowData>) {
   const conv = conversations[index];
   return (
     <div style={style}>
       <ConversationRow
         conversation={conv}
-        isSelected={selectedThreadMessageId === conv.sampleMessageId}
-        onClick={() => selectThread(conv.sampleMessageId)}
+        isSelected={selectedThreadMessageId === conv.sampleMessageId || selectedThreadIds.includes(conv.sampleMessageId)}
+        onSelect={(e) => clickRow(conv.sampleMessageId, e)}
       />
     </div>
   );
@@ -302,17 +415,18 @@ function ConvRow({ index, style, conversations, selectedThreadMessageId, selectT
 interface MsgRowData {
   messages: MessageEnvelope[];
   selectedMessageId: string | null;
-  selectMessage: (id: string | null) => void;
+  selectedMessageIds: string[];
+  clickRow: (id: string, e: React.MouseEvent | React.KeyboardEvent) => void;
   openDraft?: (id: string) => void;
 }
 
-function MsgRow({ index, style, messages, selectedMessageId, selectMessage, openDraft }: RowComponentProps<MsgRowData>) {
+function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds, clickRow, openDraft }: RowComponentProps<MsgRowData>) {
   const message = messages[index];
   return (
     <MessageRow
       message={message}
-      isSelected={selectedMessageId === message.uid}
-      onSelect={() => selectMessage(message.uid)}
+      isSelected={selectedMessageId === message.uid || selectedMessageIds.includes(message.uid)}
+      onSelect={(e) => clickRow(message.uid, e)}
       onOpen={openDraft && (() => openDraft(message.uid))}
       style={style}
     />
