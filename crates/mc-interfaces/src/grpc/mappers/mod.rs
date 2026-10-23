@@ -26,6 +26,7 @@ pub fn domain_error_to_status(error: DomainError) -> Status {
         | DomainError::Validation(msg) => Status::invalid_argument(msg),
         DomainError::AuthenticationFailed(msg) => Status::unauthenticated(msg),
         DomainError::OAuthClientInvalid(msg) => Status::failed_precondition(msg),
+        DomainError::Throttled(msg) => Status::resource_exhausted(msg),
         DomainError::ConcurrencyConflict { expected, actual } => Status::aborted(format!(
             "Concurrency conflict: expected {}, found {}",
             expected, actual

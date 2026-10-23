@@ -43,7 +43,9 @@ async-graphql-axum = "7"
 axum = "0.8"
 
 # Email
-async-imap = "0.11"
+# Pinned: the IMAP login classifier reads the NO text async-imap formats
+# (`code: …, info: …`); a bump must re-run its raw-reply tests.
+async-imap = "=0.11.2"
 async-native-tls = "0.6"
 lettre = { version = "0.11", features = ["tokio1-native-tls"] }
 mailparse = "0.16"

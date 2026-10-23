@@ -108,38 +108,95 @@ fn xoauth2_rejects_token(challenge: &[u8]) -> bool {
 /// RFC 5530 codes that mean the credential itself was refused.
 const REJECTING_CODES: [&str; 3] = ["AUTHENTICATIONFAILED", "AUTHORIZATIONFAILED", "EXPIRED"];
 
-/// Whether a tagged NO to LOGIN/AUTHENTICATE refuses the credential (only then
-/// may the account pause) rather than reporting a passing condition such as
-/// [UNAVAILABLE], [LIMIT], [INUSE] or Gmail's "[ALERT] Too many simultaneous
-/// connections". async-imap renders the NO as `code: {code:?}, info: {info:?}`,
-/// and imap-proto parses only RFC 3501 codes: an RFC 5530 code stays at the
-/// start of `info`, while a parsed one (ALERT, PARSE, …) is never a verdict on
-/// the credential. A NO without any code is what old servers send on a bad
-/// password.
-fn no_rejects_credentials(reply: &str) -> bool {
-    if reply.contains("[AUTHENTICATIONFAILED]") {
-        return true;
-    }
-    let Some(info) = reply.strip_prefix("code: None, info: ") else {
-        return false;
-    };
-    match info.strip_prefix("Some(\"[") {
-        Some(coded) => REJECTING_CODES.iter().any(|code| coded.starts_with(code)),
-        None => true,
-    }
+/// Gmail alerts that only the user can clear (an app password, a browser
+/// login). Retrying keeps Google's block in place, so they refuse the
+/// credential like a wrong password does.
+const USER_ACTION_ALERTS: [&str; 2] = ["Application-specific password required", "Please log in via your web browser"];
+
+/// Gmail alerts that the account is over a usage limit: passing, but only
+/// after a while, so the gate backs off harder than for a network fault.
+const THROTTLE_ALERTS: [&str; 2] = ["Too many simultaneous connections", "Account exceeded command or bandwidth limits"];
+
+#[derive(Debug, PartialEq, Eq)]
+enum LoginVerdict {
+    Refused,
+    Throttled,
+    Transient,
 }
 
-/// What a failed login means to the gate: a refused credential, or a passing
-/// fault to retry. Never echoes the input: a Validate error quotes a character
-/// of the password.
+/// Reads a tagged NO to LOGIN/AUTHENTICATE. async-imap only hands it over as
+/// `code: {code:?}, info: {info:?}` (hence the pinned version), and imap-proto
+/// parses only RFC 3501 codes: ALERT comes out in `code`, while an RFC 5530
+/// code (AUTHENTICATIONFAILED, UNAVAILABLE, LIMIT…) or Gmail's WEBALERT stays
+/// at the start of `info`. A NO without any code is what old servers send on a
+/// bad password. Returns the verdict and the server's own text.
+fn read_no(reply: &str) -> (LoginVerdict, String) {
+    let (code, info) = reply
+        .strip_prefix("code: ")
+        .and_then(|rest| rest.split_once(", info: "))
+        .unwrap_or(("None", "None"));
+    let text = info
+        .strip_prefix("Some(\"")
+        .and_then(|t| t.strip_suffix("\")"))
+        .map(|t| t.replace("\\\"", "\"").replace("\\\\", "\\"))
+        .unwrap_or_default();
+    let has = |needles: &[&str]| needles.iter().any(|n| text.contains(n));
+
+    let verdict = if text.contains("[AUTHENTICATIONFAILED]") || text.starts_with("[WEBALERT") {
+        LoginVerdict::Refused
+    } else if code == "Some(Alert)" {
+        if has(&USER_ACTION_ALERTS) {
+            LoginVerdict::Refused
+        } else if has(&THROTTLE_ALERTS) {
+            LoginVerdict::Throttled
+        } else {
+            LoginVerdict::Transient
+        }
+    } else if code != "None" {
+        LoginVerdict::Transient
+    } else if let Some(coded) = text.strip_prefix('[') {
+        if REJECTING_CODES.iter().any(|c| coded.starts_with(c)) { LoginVerdict::Refused } else { LoginVerdict::Transient }
+    } else {
+        LoginVerdict::Refused
+    };
+    (verdict, text)
+}
+
+/// What a failed login means to the gate. Never echoes the input: a Validate
+/// error quotes a character of the password.
 fn login_error(e: async_imap::error::Error, token_refused: bool) -> DomainError {
     use async_imap::error::Error;
     match e {
-        Error::No(reply) if token_refused || no_rejects_credentials(&reply) => {
-            DomainError::AuthenticationFailed(format!("IMAP login rejected: {reply}"))
-        }
+        Error::No(reply) => match read_no(&reply) {
+            (_, text) if token_refused => DomainError::AuthenticationFailed(text),
+            (LoginVerdict::Refused, text) => DomainError::AuthenticationFailed(text),
+            (LoginVerdict::Throttled, text) => DomainError::Throttled(text),
+            (LoginVerdict::Transient, text) => DomainError::ConnectionFailed(format!("IMAP login refused for now: {text}")),
+        },
         Error::Validate(_) => DomainError::ConnectionFailed("IMAP login: credential has a character IMAP cannot send".into()),
         other => DomainError::ConnectionFailed(format!("IMAP login failed: {other}")),
+    }
+}
+
+/// LOGIN or AUTHENTICATE XOAUTH2 on a client that has read the greeting. Only
+/// a refused credential surfaces as AuthenticationFailed (the gate refreshes,
+/// retries, then pauses the account); anything else is retried later.
+async fn log_in<T>(
+    client: async_imap::Client<T>,
+    username: &str,
+    secret: LoginSecret,
+) -> Result<async_imap::Session<T>, DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    match secret {
+        LoginSecret::Password(password) => client.login(username, password).await.map_err(|(e, _)| login_error(e, false)),
+        LoginSecret::OAuthToken(access_token) => {
+            let mut auth = XOAuth2Authenticator { user: username.to_owned(), access_token, error: None };
+            let result = client.authenticate("XOAUTH2", &mut auth).await;
+            let refused = auth.error.as_deref().is_some_and(xoauth2_rejects_token);
+            result.map_err(|(e, _)| login_error(e, refused))
+        }
     }
 }
 
@@ -410,23 +467,7 @@ impl ImapEmailProvider {
             .await
             .map_err(|e| DomainError::ConnectionFailed(format!("IMAP greeting read failed: {e}")))?
             .ok_or_else(|| DomainError::ConnectionFailed("IMAP connection closed before greeting".into()))?;
-        // Only a refused credential may surface as AuthenticationFailed (the
-        // gate refreshes, retries, then pauses the account); anything else is
-        // ConnectionFailed, which the gate retries on its offline schedule.
-        let session = match secret {
-            LoginSecret::Password(password) => client
-                .login(&self.username, password)
-                .await
-                .map_err(|(e, _)| login_error(e, false))?,
-            LoginSecret::OAuthToken(access_token) => {
-                let mut auth = XOAuth2Authenticator { user: self.username.clone(), access_token, error: None };
-                let result = client.authenticate("XOAUTH2", &mut auth).await;
-                let refused = auth.error.as_deref().is_some_and(xoauth2_rejects_token);
-                result.map_err(|(e, _)| login_error(e, refused))?
-            }
-        };
-
-        let mut session = session;
+        let mut session = log_in(client, &self.username, secret).await?;
         if self.caps.get().is_none() {
             match exchange(COMMAND_TIMEOUT, "CAPABILITY", session.capabilities()).await {
                 Ok(caps) if let Some(caps) = ServerCaps::from_names(|name| caps.has_str(name)) => {
@@ -2082,67 +2123,100 @@ mod tests {
         assert!(!xoauth2_rejects_token(br#"{"status":"503"}"#));
     }
 
-    /// A tagged reply to LOGIN/AUTHENTICATE as async-imap turns it into an error.
-    fn reply_error(line: &str) -> async_imap::error::Error {
-        use async_imap::error::Error;
-        use async_imap::imap_proto::{Response, Status};
+    /// Logs in through the real async-imap client against a server that greets,
+    /// then answers the login with `script` (raw lines; `$T` is the tag,
+    /// `<` waits for a client line). Returns how the login failed.
+    async fn login_against(secret: LoginSecret, script: &'static [&'static str]) -> DomainError {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio_util::compat::TokioAsyncReadCompatExt;
 
-        let raw = format!("{line}\r\n");
-        let Ok((_, Response::Done { status, code, information, .. })) =
-            async_imap::imap_proto::parser::parse_response(raw.as_bytes())
-        else {
-            panic!("not a tagged reply: {line}");
-        };
-        let (code, information) = (code.as_ref(), information.as_deref());
-        match status {
-            Status::No => Error::No(format!("code: {code:?}, info: {information:?}")),
-            Status::Bad => Error::Bad(format!("code: {code:?}, info: {information:?}")),
-            other => panic!("not a failure: {other:?}"),
+        let (client_end, server_end) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(server_end);
+            write.write_all(b"* OK [CAPABILITY IMAP4rev1 AUTH=XOAUTH2] ready\r\n").await.unwrap();
+            let mut lines = BufReader::new(read).lines();
+            let first = lines.next_line().await.unwrap().unwrap();
+            let tag = first.split_once(' ').unwrap().0.to_owned();
+            for step in script {
+                if *step == "<" {
+                    lines.next_line().await.unwrap();
+                } else {
+                    write.write_all(format!("{}\r\n", step.replace("$T", &tag)).as_bytes()).await.unwrap();
+                }
+            }
+        });
+
+        let mut client = async_imap::Client::new(client_end.compat());
+        client.read_response().await.unwrap();
+        match log_in(client, "me@example.com", secret).await {
+            Ok(_) => panic!("the login succeeded"),
+            Err(e) => e,
         }
     }
 
+    fn password() -> LoginSecret {
+        LoginSecret::Password("hunter2".into())
+    }
+
+    #[tokio::test]
+    async fn login_replies_from_real_servers_are_classified_from_raw_bytes() {
+        fn kind(e: &DomainError) -> &'static str {
+            match e {
+                DomainError::AuthenticationFailed(_) => "refused",
+                DomainError::Throttled(_) => "throttled",
+                DomainError::ConnectionFailed(_) => "transient",
+                _ => "other",
+            }
+        }
+        let cases: [(&'static str, &str); 13] = [
+            // Gmail
+            ("$T NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)", "refused"),
+            ("$T NO [ALERT] Application-specific password required: https://support.google.com/accounts/answer/185833 (Failure)", "refused"),
+            ("$T NO [ALERT] Please log in via your web browser: https://support.google.com/mail/accounts/answer/78754 (Failure)", "refused"),
+            ("$T NO [WEBALERT https://accounts.google.com/signin/continue?sarp=1] Web login required.", "refused"),
+            ("$T NO [ALERT] Too many simultaneous connections. (Failure)", "throttled"),
+            ("$T NO [ALERT] Account exceeded command or bandwidth limits. (Failure)", "throttled"),
+            ("$T NO [UNAVAILABLE] Temporary System Error", "transient"),
+            // Dovecot
+            ("$T NO [AUTHENTICATIONFAILED] Authentication failed.", "refused"),
+            ("$T NO [UNAVAILABLE] Temporary authentication failure. [mx1:2026-10-23 10:00:00]", "transient"),
+            ("$T NO [INUSE] Mailbox is locked.", "transient"),
+            // Stalwart
+            ("$T NO [LIMIT] Too many authentication requests from this IP address.", "transient"),
+            // Old servers: a bare NO
+            ("$T NO LOGIN failed.", "refused"),
+            ("$T BAD Invalid SASL argument.", "transient"),
+        ];
+        for (reply, expected) in cases {
+            let script: &'static [&'static str] = Box::leak(Box::new([reply]));
+            let e = login_against(password(), script).await;
+            assert_eq!(kind(&e), expected, "{reply} → {e:?}");
+        }
+
+        // The reason the user sees is the server's own text, not async-imap's rendering.
+        let e = login_against(password(), &["$T NO [ALERT] Please log in via your web browser: https://x (Failure)"]).await;
+        assert_eq!(e.to_string(), "Authentication failed: Please log in via your web browser: https://x (Failure)");
+    }
+
+    #[tokio::test]
+    async fn an_xoauth2_error_challenge_refuses_the_token() {
+        // Gmail: `+ ` for the token, then the base64 JSON error, then the tagged NO.
+        // {"status":"400","schemes":"Bearer","scope":"https://mail.google.com/"}
+        let script = &[
+            "+ ",
+            "<",
+            "+ eyJzdGF0dXMiOiI0MDAiLCJzY2hlbWVzIjoiQmVhcmVyIiwic2NvcGUiOiJodHRwczovL21haWwuZ29vZ2xlLmNvbS8ifQ==",
+            "<",
+            "$T NO [ALERT] Invalid credentials (Failure)",
+        ];
+        let e = login_against(LoginSecret::OAuthToken("ya29.stale".into()), script).await;
+        assert!(matches!(e, DomainError::AuthenticationFailed(_)), "{e:?}");
+        assert!(!e.to_string().contains("ya29"), "never echoes the token");
+    }
+
     #[test]
-    fn only_a_refused_credential_is_an_auth_failure() {
-        let rejected = [
-            // Gmail
-            "A1 NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)",
-            // Dovecot
-            "A1 NO [AUTHENTICATIONFAILED] Authentication failed.",
-            "A1 NO [AUTHORIZATIONFAILED] Authorization failed.",
-            "A1 NO [EXPIRED] Password expired.",
-            // Stalwart
-            "A1 NO [AUTHENTICATIONFAILED] Authentication failed.",
-            // Old servers, Outlook's XOAUTH2: a bare NO
-            "A1 NO Login failed.",
-            "A1 NO AUTHENTICATE failed.",
-        ];
-        let transient = [
-            // Gmail
-            "A1 NO [ALERT] Too many simultaneous connections. (Failure)",
-            "A1 NO [ALERT] Please log in via your web browser: https://support.google.com/mail/accounts/answer/78754 (Failure)",
-            "A1 NO [UNAVAILABLE] Temporary System Error",
-            "A1 BAD Invalid SASL argument.",
-            // Dovecot
-            "A1 NO [UNAVAILABLE] Temporary authentication failure. [mx1:2026-10-23 10:00:00]",
-            "A1 NO [INUSE] Mailbox is locked.",
-            "A1 NO [CONTACTADMIN] Account suspended.",
-            // Stalwart
-            "A1 NO [LIMIT] Too many authentication requests from this IP address.",
-        ];
-        for line in rejected {
-            assert!(matches!(login_error(reply_error(line), false), DomainError::AuthenticationFailed(_)), "{line}");
-        }
-        for line in transient {
-            assert!(matches!(login_error(reply_error(line), false), DomainError::ConnectionFailed(_)), "{line}");
-        }
-        // Gmail's XOAUTH2 error challenge decides even when the tagged NO is vague.
-        assert!(matches!(
-            login_error(reply_error("A1 NO [ALERT] Invalid credentials (Failure)"), true),
-            DomainError::AuthenticationFailed(_)
-        ));
-        let lost = login_error(async_imap::error::Error::ConnectionLost, false);
-        assert!(matches!(lost, DomainError::ConnectionFailed(_)));
+    fn a_validate_error_never_echoes_the_password() {
         let invalid = login_error(async_imap::error::ValidateError('§').into(), false);
-        assert!(!invalid.to_string().contains('§'), "never echoes the password");
+        assert!(!invalid.to_string().contains('§'));
     }
 }

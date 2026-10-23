@@ -44,6 +44,10 @@ pub enum DomainError {
     #[error("Connection timeout: {0}")]
     ConnectionTimeout(String),
 
+    /// The server refused for now because the account is over a usage limit.
+    #[error("Throttled by the server: {0}")]
+    Throttled(String),
+
     #[error("Operation not supported by provider: {0}")]
     NotSupported(String),
 
