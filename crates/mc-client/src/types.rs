@@ -41,6 +41,8 @@ pub struct AuthStatus {
     /// `None` for a password account.
     pub oauth_provider: Option<OAuthProvider>,
     pub token_expires_at: Option<DateTime<Utc>>,
+    /// Why the last SMTP login was refused; never affects `state`.
+    pub smtp_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

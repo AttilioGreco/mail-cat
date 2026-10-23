@@ -142,6 +142,8 @@ pub struct AuthStatusDto {
     /// "google" | "microsoft"; `None` for a password account.
     pub oauth_provider: Option<String>,
     pub token_expires_at: Option<String>,
+    /// Why the last SMTP login was refused; sending only.
+    pub smtp_error: Option<String>,
 }
 
 /// Download progress for one account.
@@ -245,6 +247,7 @@ fn auth_status_to_dto(s: AuthStatus) -> AuthStatusDto {
             OAuthProvider::Microsoft => "microsoft".to_owned(),
         }),
         token_expires_at: s.token_expires_at.map(|t| t.to_rfc3339()),
+        smtp_error: s.smtp_error,
     }
 }
 

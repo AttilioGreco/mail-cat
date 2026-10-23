@@ -99,6 +99,9 @@ message AccountAuthStatus {
   // Unspecified for a password account.
   OAuthProvider oauth_provider = 7;
   optional Timestamp token_expires_at = 8;
+  // Why the last SMTP login was refused. Sending only: it never changes
+  // `state`, which IMAP alone decides.
+  optional string smtp_error = 9;
 }
 
 message WatchAuthStatusRequest {}

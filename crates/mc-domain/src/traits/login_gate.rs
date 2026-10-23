@@ -43,6 +43,11 @@ pub trait LoginGate: Send + Sync {
 
     fn login_succeeded(&self);
 
+    /// How the account's last SMTP login went: why it was refused, or `None`
+    /// once one is accepted. Shown to the user only: IMAP alone judges the
+    /// account's credential, so this never pauses anything.
+    fn smtp_login(&self, _refused: Option<String>) {}
+
     /// Resolves when background work may connect: at once while healthy, at the
     /// next scheduled retry while offline, after the user acts while paused.
     async fn ready(&self);

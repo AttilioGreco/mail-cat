@@ -124,6 +124,11 @@ function AccountRow({
         <ChevronDown size={12} className="shrink-0 text-muted" />
       </button>
       <AuthBanner account={account} />
+      {account.auth?.smtpError && (
+        <p className="mx-2.5 mb-1 truncate text-[10px] text-amber-500" title={account.auth.smtpError}>
+          Invio bloccato: il server SMTP rifiuta l'accesso
+        </p>
+      )}
     </>
   );
 }

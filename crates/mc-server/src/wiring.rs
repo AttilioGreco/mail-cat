@@ -673,6 +673,8 @@ impl AppContext {
                     let failed = match sync.start_sync(&id).await {
                         Ok(events) => {
                             tracing::info!("Sync done for '{}': {} event(s)", account_name, events.len());
+                            // IMAP answered, even over a pooled session: not offline.
+                            gate.login_succeeded();
                             false
                         }
                         Err(e) => {
@@ -683,21 +685,24 @@ impl AppContext {
                     if let Err(e) = search.catch_up(es.as_ref()).await {
                         tracing::warn!("Search index catch-up after sync of '{}' failed: {}", account_name, e);
                     }
-                    if failed && let AuthState::Offline { next_retry } = gate.status().state {
-                        // `ready` waits for the next retry. One already due means
-                        // the failure wasn't a login the gate rescheduled: don't spin.
-                        if next_retry <= Utc::now() {
-                            tokio::select! {
-                                _ = sd.cancelled() => break,
-                                _ = tokio::time::sleep(SYNC_RETRY_FLOOR) => {}
-                            }
+                    // A failure while the retry is already due wasn't a login the
+                    // gate rescheduled: don't spin on it.
+                    if failed
+                        && let AuthState::Offline { next_retry } = gate.status().state
+                        && next_retry <= Utc::now()
+                    {
+                        tokio::select! {
+                            _ = sd.cancelled() => break,
+                            _ = tokio::time::sleep(SYNC_RETRY_FLOOR) => {}
                         }
                         continue;
                     }
+                    // Offline, the gate's schedule (2s, 5s, …) beats the 5-minute period.
                     tokio::select! {
                         _ = sd.cancelled() => break,
                         _ = tokio::time::sleep(SYNC_PERIOD) => {}
                         () = gate.recovered() => {}
+                        () = gate.retry_due() => {}
                     }
                 }
                 tracing::info!("Sync loop stopped for '{}'", account_name);
@@ -1063,9 +1068,10 @@ fn smtp_security(security: crate::config::SmtpSecurityConfig) -> SmtpSecurity {
 }
 
 /// The account's SMTP sender, checked once at boot unless the account is
-/// paused. It logs in through the account's gate when it uses the account's
-/// own credential (the OAuth token, or the IMAP password); an SMTP password of
-/// its own stays outside the gate, and a refusal of it fails the send.
+/// paused. It takes the account's own credential from the gate (the OAuth
+/// token, or the IMAP password) unless it has an SMTP password of its own.
+/// Either way a refused SMTP login only shows up as the status's SMTP error:
+/// IMAP alone decides whether the account's credential works.
 async fn build_smtp_sender(
     account_config: &AccountConfig,
     secrets: &AccountSecrets,
@@ -1087,7 +1093,7 @@ async fn build_smtp_sender(
     let sender = if account_config.oauth_provider.is_some() || !own_password {
         SmtpSender::build_gated(&domain_smtp, &account_config.username, gate.clone())
     } else {
-        match SmtpSender::build(&domain_smtp, &account_config.username, imap_password) {
+        match SmtpSender::build(&domain_smtp, &account_config.username, imap_password, gate.clone()) {
             Ok(sender) => sender,
             Err(e) => {
                 tracing::warn!("⚠ SMTP {}: configurazione non valida — {e}", account_config.email);

@@ -30,6 +30,8 @@ export interface AccountAuth {
   /** null for a password account. */
   oauthProvider: OAuthProviderId | null;
   tokenExpiresAt: string | null;
+  /** Why the last SMTP login was refused: sending is blocked, the account state is not. */
+  smtpError: string | null;
 }
 
 export interface Account {

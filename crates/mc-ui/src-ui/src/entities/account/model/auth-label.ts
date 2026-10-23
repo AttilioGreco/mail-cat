@@ -16,7 +16,8 @@ export function authLabel(account: Account, secondsLeft: number | null): string 
     case 'active':
       return 'OK';
     case 'offline':
-      return secondsLeft === null ? 'Offline' : `Offline · nuovo tentativo tra ${secondsLeft}s`;
+      if (secondsLeft === null) return 'Offline';
+      return secondsLeft > 0 ? `Offline · nuovo tentativo tra ${secondsLeft}s` : 'Offline · nuovo tentativo in corso';
     case 'needs_reauth': {
       const provider = account.auth?.oauthProvider;
       return provider ? `Login richiesto (${PROVIDER_NAMES[provider]})` : 'Login richiesto';

@@ -37,6 +37,16 @@ fn offline_delay(round: u32) -> TimeDelta {
     TimeDelta::seconds(SECS.get(round.saturating_sub(1) as usize).copied().unwrap_or(300))
 }
 
+/// Retry delays once the server says the account is over a usage limit
+/// (Gmail: too many connections, bandwidth): knocking every few seconds keeps
+/// the limit hit, so start at 5 minutes and double up to half an hour.
+const THROTTLED_FIRST_RETRY: TimeDelta = TimeDelta::minutes(5);
+const THROTTLED_MAX_RETRY: TimeDelta = TimeDelta::minutes(30);
+
+fn throttled_delay(round: u32) -> TimeDelta {
+    (THROTTLED_FIRST_RETRY * (1 << round.saturating_sub(1).min(4))).min(THROTTLED_MAX_RETRY)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthState {
     Active,
@@ -82,6 +92,9 @@ pub struct AuthStatus {
     pub since: DateTime<Utc>,
     pub oauth_provider: Option<OAuthProvider>,
     pub token_expires_at: Option<DateTime<Utc>>,
+    /// Why the last SMTP login was refused; sending only, the account's
+    /// state is IMAP's.
+    pub smtp_error: Option<String>,
 }
 
 /// Exchanges a refresh token for fresh tokens at the provider.
@@ -99,6 +112,7 @@ struct Tracked {
     last_error: Option<String>,
     since: DateTime<Utc>,
     offline_rounds: u32,
+    smtp_error: Option<String>,
 }
 
 pub struct AuthGate {
@@ -144,6 +158,7 @@ impl AuthGate {
             since: tracked.since,
             oauth_provider,
             token_expires_at,
+            smtp_error: tracked.smtp_error.clone(),
         }
     }
 
@@ -395,6 +410,7 @@ impl AuthGate {
 
     fn went_offline(&self, error: &DomainError) {
         warn!("{}: server unreachable ({error})", self.email);
+        let throttled = matches!(error, DomainError::Throttled(_));
         let now = Utc::now();
         let changed = self.tracked.send_if_modified(|t| {
             t.last_error = Some(error.to_string());
@@ -406,8 +422,9 @@ impl AuthGate {
                         t.since = now;
                     }
                     t.offline_rounds += 1;
-                    t.state = AuthState::Offline { next_retry: now + offline_delay(t.offline_rounds) };
-                    t.reason = Some("server unreachable".into());
+                    let delay = if throttled { throttled_delay(t.offline_rounds) } else { offline_delay(t.offline_rounds) };
+                    t.state = AuthState::Offline { next_retry: now + delay };
+                    t.reason = Some(if throttled { "over the server's usage limit" } else { "server unreachable" }.into());
                 }
                 _ => {}
             }
@@ -420,6 +437,23 @@ impl AuthGate {
 }
 
 impl AuthGate {
+    /// Resolves once the account is offline and its next retry has come.
+    pub async fn retry_due(&self) {
+        let mut rx = self.tracked.subscribe();
+        loop {
+            let state = rx.borrow_and_update().state;
+            if let AuthState::Offline { next_retry } = state {
+                let wait = (next_retry - Utc::now()).to_std().unwrap_or_default();
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => return,
+                    _ = rx.changed() => continue,
+                }
+            }
+            // The sender lives as long as `self`, so this only returns on a change.
+            let _ = rx.changed().await;
+        }
+    }
+
     /// Resolves the next time the account comes back to `Active` after being
     /// offline or paused.
     pub async fn recovered(&self) {
@@ -447,22 +481,20 @@ impl LoginGate for AuthGate {
 
     async fn login_failed(&self, secret: &LoginSecret, error: &DomainError, retried: bool) -> bool {
         match (error, secret) {
-            (DomainError::AuthenticationFailed(_), LoginSecret::Password(_)) => {
-                self.enter(AuthState::CredentialsRejected, "the server rejected the password", error);
+            (DomainError::AuthenticationFailed(text), LoginSecret::Password(_)) => {
+                let reason = format!("the server rejected the password: {text}");
+                self.enter(AuthState::CredentialsRejected, &reason, error);
                 false
             }
             (DomainError::AuthenticationFailed(_), LoginSecret::OAuthToken(rejected)) if !retried => {
                 self.refresh_rejected(rejected).await
             }
-            (DomainError::AuthenticationFailed(_), LoginSecret::OAuthToken(_)) => {
-                self.enter(
-                    AuthState::NeedsReauth,
-                    "the server rejects a freshly refreshed token for this account",
-                    error,
-                );
+            (DomainError::AuthenticationFailed(text), LoginSecret::OAuthToken(_)) => {
+                let reason = format!("the server rejects a freshly refreshed token for this account: {text}");
+                self.enter(AuthState::NeedsReauth, &reason, error);
                 false
             }
-            (DomainError::ConnectionFailed(_) | DomainError::ConnectionTimeout(_), _) => {
+            (DomainError::ConnectionFailed(_) | DomainError::ConnectionTimeout(_) | DomainError::Throttled(_), _) => {
                 self.went_offline(error);
                 false
             }
@@ -472,6 +504,12 @@ impl LoginGate for AuthGate {
 
     fn login_succeeded(&self) {
         self.clear_offline();
+    }
+
+    fn smtp_login(&self, refused: Option<String>) {
+        if self.tracked.send_if_modified(|t| std::mem::replace(&mut t.smtp_error, refused.clone()) != refused) {
+            let _ = self.changes.send(self.account_id);
+        }
     }
 
     async fn ready(&self) {
@@ -534,6 +572,7 @@ impl AuthGates {
                 last_error: None,
                 since: Utc::now(),
                 offline_rounds: 0,
+                smtp_error: None,
             }),
             refresh: self.refresh.clone(),
             secret_store: self.secret_store.clone(),
@@ -726,7 +765,8 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 2, "exactly one retry");
         let status = gate.status();
         assert_eq!(status.state, AuthState::NeedsReauth);
-        assert!(status.reason.unwrap().contains("freshly refreshed"));
+        let reason = status.reason.unwrap();
+        assert!(reason.contains("freshly refreshed") && reason.contains("AUTHENTICATIONFAILED"), "{reason}");
         assert_eq!(h.event_names(), ["AccountAuthExpired"]);
     }
 
@@ -795,6 +835,45 @@ mod tests {
         gate.login_failed(&secret, &down, false).await;
         assert_eq!((delay(&gate) + 500) / 1000, 2, "the schedule starts over");
         assert!(h.event_names().is_empty(), "offline is not persisted");
+    }
+
+    #[tokio::test]
+    async fn a_sleeping_loop_wakes_at_the_fast_retry() {
+        let mut h = Harness::new(fresh);
+        let gate = h.password();
+        let waiting = tokio::spawn({
+            let gate = gate.clone();
+            async move { gate.retry_due().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "active: nothing to retry");
+
+        let down = DomainError::ConnectionFailed("TCP connection failed".into());
+        gate.login_failed(&LoginSecret::Password("hunter2".into()), &down, false).await;
+        tokio::time::timeout(Duration::from_secs(4), waiting).await.expect("woke at the 2s retry").unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_throttled_account_backs_off_in_minutes() {
+        let mut h = Harness::new(fresh);
+        let gate = h.password();
+        let busy = DomainError::Throttled("Too many simultaneous connections. (Failure)".into());
+        let secret = LoginSecret::Password("hunter2".into());
+
+        let mut delays = vec![];
+        for _ in 0..5 {
+            gate.tracked.send_modify(|t| {
+                if let AuthState::Offline { next_retry } = &mut t.state {
+                    *next_retry = Utc::now();
+                }
+            });
+            gate.login_failed(&secret, &busy, false).await;
+            let AuthState::Offline { next_retry } = gate.status().state else { panic!("not offline") };
+            delays.push((next_retry - Utc::now() + TimeDelta::seconds(30)).num_minutes());
+        }
+        assert_eq!(delays, [5, 10, 20, 30, 30]);
+        assert_eq!(gate.status().reason.as_deref(), Some("over the server's usage limit"));
+        assert!(h.event_names().is_empty());
     }
 
     #[tokio::test]

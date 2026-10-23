@@ -13,6 +13,7 @@ interface AuthStatusDto {
   next_retry: string | null;
   oauth_provider: OAuthProviderId | null;
   token_expires_at: string | null;
+  smtp_error: string | null;
 }
 
 interface AccountDto {
@@ -32,6 +33,7 @@ function authFromDto(d: AuthStatusDto): AccountAuth {
     nextRetry: d.next_retry,
     oauthProvider: d.oauth_provider,
     tokenExpiresAt: d.token_expires_at,
+    smtpError: d.smtp_error,
   };
 }
 

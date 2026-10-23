@@ -169,6 +169,8 @@ struct StatusRow {
     token_expires: String,
     #[tabled(rename = "Next retry")]
     next_retry: String,
+    #[tabled(rename = "SMTP")]
+    smtp: String,
 }
 
 async fn status(client: MailCatClient) -> Result<()> {
@@ -190,6 +192,7 @@ async fn status(client: MailCatClient) -> Result<()> {
                     last_error: dash(),
                     token_expires: dash(),
                     next_retry: dash(),
+                    smtp: dash(),
                 };
             };
             let state = auth.state.as_str();
@@ -205,9 +208,11 @@ async fn status(client: MailCatClient) -> Result<()> {
                 since: auth.since.map_or_else(dash, local),
                 last_error: auth.last_error.unwrap_or_else(dash),
                 token_expires: auth.token_expires_at.map_or_else(dash, local),
-                next_retry: auth.next_retry.map_or_else(dash, |t| {
-                    format!("in {}s", (t - chrono::Utc::now()).num_seconds().max(0))
+                next_retry: auth.next_retry.map_or_else(dash, |t| match (t - chrono::Utc::now()).num_seconds() {
+                    secs if secs > 0 => format!("in {secs}s"),
+                    _ => "due now".into(),
                 }),
+                smtp: auth.smtp_error.map_or_else(|| "ok".into(), |e| format!("refused: {e}")),
             }
         })
         .collect();

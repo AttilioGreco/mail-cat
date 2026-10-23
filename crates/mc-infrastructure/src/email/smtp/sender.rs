@@ -30,22 +30,24 @@ enum SmtpBackend {
         port: u16,
         security: SmtpSecurity,
         username: String,
-        gate: Arc<dyn LoginGate>,
     },
 }
 
+/// Either way the account's gate hears how SMTP logins go, for the user to
+/// see; a refused SMTP login fails the send and never changes the account's
+/// state (IMAP alone judges the credential).
 pub struct SmtpSender {
     backend: SmtpBackend,
+    gate: Arc<dyn LoginGate>,
 }
 
 impl SmtpSender {
-    /// A sender with an SMTP password of its own. Its outcomes stay out of
-    /// the account's gate: a refused password fails the send as
-    /// AuthenticationFailed but never pauses the IMAP side.
+    /// A sender with an SMTP password of its own.
     pub fn build(
         config: &SmtpConnectionConfig,
         fallback_username: &str,
         fallback_password: &str,
+        gate: Arc<dyn LoginGate>,
     ) -> Result<Self, DomainError> {
         let username = config.username.as_deref().unwrap_or(fallback_username);
         let password = config.password.as_deref().unwrap_or(fallback_password);
@@ -53,12 +55,11 @@ impl SmtpSender {
 
         let builder = Self::transport_builder(&config.host, config.security)?;
         let transport = builder.port(config.port).credentials(creds).build();
-        Ok(Self { backend: SmtpBackend::Static(transport) })
+        Ok(Self { backend: SmtpBackend::Static(transport), gate })
     }
 
-    /// A sender that logs in through the account's gate, like its IMAP
-    /// provider: an OAuth token gets the forced refresh and one retry, and a
-    /// refused password pauses the account.
+    /// A sender that logs in with the account's own credential from its gate:
+    /// a refused OAuth token gets the forced refresh and one retry.
     pub fn build_gated(config: &SmtpConnectionConfig, fallback_username: &str, gate: Arc<dyn LoginGate>) -> Self {
         Self {
             backend: SmtpBackend::Gated {
@@ -66,8 +67,8 @@ impl SmtpSender {
                 port: config.port,
                 security: config.security,
                 username: config.username.clone().unwrap_or_else(|| fallback_username.to_owned()),
-                gate,
             },
+            gate,
         }
     }
 
@@ -104,36 +105,42 @@ impl SmtpSender {
     pub async fn test_connection(&self) -> Result<bool, DomainError> {
         let context = "SMTP connection test failed";
         match &self.backend {
-            SmtpBackend::Static(t) => t.test_connection().await.map_err(|e| smtp_error(context, &e)),
-            SmtpBackend::Gated { host, port, security, username, gate } => {
-                login_with(&AuthOutcomesOnly(gate.as_ref()), |secret| async move {
+            SmtpBackend::Static(t) => {
+                noted(self.gate.as_ref(), t.test_connection().await.map_err(|e| smtp_error(context, &e, false)))
+            }
+            SmtpBackend::Gated { host, port, security, username } => {
+                login_with(&SmtpView(self.gate.as_ref()), |secret| async move {
+                    let oauth = matches!(secret, LoginSecret::OAuthToken(_));
                     Self::gated_transport(host, *port, *security, username, secret)?
                         .test_connection()
                         .await
-                        .map_err(|e| smtp_error(context, &e))
+                        .map_err(|e| smtp_error(context, &e, oauth))
                 })
                 .await
             }
         }
     }
 
-    /// Send an outgoing message via SMTP. A login the server refuses is
-    /// retried once with a refreshed token; the refusal comes before DATA, so
-    /// the message is never sent twice.
+    /// Send an outgoing message via SMTP. A refused OAuth token is retried
+    /// once with a refreshed one; the refusal comes before DATA, so the
+    /// message is never sent twice.
     pub async fn send(&self, msg: &OutgoingMessage) -> Result<(), DomainError> {
         let email = build_message(msg, false)?;
         let context = "SMTP send error";
         match &self.backend {
-            SmtpBackend::Static(t) => t.send(email).await.map(drop).map_err(|e| smtp_error(context, &e)),
-            SmtpBackend::Gated { host, port, security, username, gate } => {
-                login_with(&AuthOutcomesOnly(gate.as_ref()), |secret| {
+            SmtpBackend::Static(t) => {
+                noted(self.gate.as_ref(), t.send(email).await.map(drop).map_err(|e| smtp_error(context, &e, false)))
+            }
+            SmtpBackend::Gated { host, port, security, username } => {
+                login_with(&SmtpView(self.gate.as_ref()), |secret| {
                     let email = email.clone();
                     async move {
+                        let oauth = matches!(secret, LoginSecret::OAuthToken(_));
                         Self::gated_transport(host, *port, *security, username, secret)?
                             .send(email)
                             .await
                             .map(drop)
-                            .map_err(|e| smtp_error(context, &e))
+                            .map_err(|e| smtp_error(context, &e, oauth))
                     }
                 })
                 .await
@@ -142,23 +149,42 @@ impl SmtpSender {
     }
 }
 
-/// The account's gate as SMTP may use it: only a refused login is reported.
-/// An unreachable SMTP server says nothing about IMAP, so its connection
-/// faults and successes stay out of the shared offline state.
-struct AuthOutcomesOnly<'a>(&'a dyn LoginGate);
+/// Tells the gate how a Static sender's login went.
+fn noted<T>(gate: &dyn LoginGate, result: Result<T, DomainError>) -> Result<T, DomainError> {
+    match &result {
+        Ok(_) => gate.smtp_login(None),
+        Err(DomainError::AuthenticationFailed(why)) => gate.smtp_login(Some(why.clone())),
+        Err(_) => {}
+    }
+    result
+}
+
+/// The account's gate as SMTP may use it. SMTP never judges the account: a
+/// refused password or a token still refused after the refresh is reported
+/// for the user to see and fails the send; connection faults stay out of the
+/// shared offline state, which belongs to IMAP.
+struct SmtpView<'a>(&'a dyn LoginGate);
 
 #[allow(clippy::double_must_use)] // async_trait's expansion
 #[async_trait::async_trait]
-impl LoginGate for AuthOutcomesOnly<'_> {
+impl LoginGate for SmtpView<'_> {
     async fn secret(&self) -> Result<LoginSecret, DomainError> {
         self.0.secret().await
     }
 
     async fn login_failed(&self, secret: &LoginSecret, error: &DomainError, retried: bool) -> bool {
-        matches!(error, DomainError::AuthenticationFailed(_)) && self.0.login_failed(secret, error, retried).await
+        let DomainError::AuthenticationFailed(why) = error else { return false };
+        self.0.smtp_login(Some(why.clone()));
+        // The token is shared with IMAP: a refused one may be refreshed once.
+        // The gate never pauses on this; only the refresh's own verdict counts.
+        !retried
+            && matches!(secret, LoginSecret::OAuthToken(_))
+            && self.0.login_failed(secret, error, false).await
     }
 
-    fn login_succeeded(&self) {}
+    fn login_succeeded(&self) {
+        self.0.smtp_login(None);
+    }
 
     async fn ready(&self) {
         self.0.ready().await;
@@ -174,11 +200,11 @@ fn rejects_credentials(code: Code) -> bool {
 
 /// Splits lettre's errors the way the login gate needs them: a refused login,
 /// a dead link, or anything else (a refused recipient, a malformed message).
-fn smtp_error(context: &str, e: &lettre::transport::smtp::Error) -> DomainError {
+fn smtp_error(context: &str, e: &lettre::transport::smtp::Error, oauth: bool) -> DomainError {
     let message = format!("{context}: {e}");
     // A refused XOAUTH2 token comes back as a 334 error challenge, which lettre
     // fails on client-side before anything else is sent.
-    let refused_token = e.is_client() && e.to_string().contains("does not expect a challenge");
+    let refused_token = oauth && e.is_client() && e.to_string().contains("does not expect a challenge");
     if refused_token || e.status().is_some_and(rejects_credentials) {
         DomainError::AuthenticationFailed(message)
     } else if e.is_timeout() {
@@ -293,7 +319,7 @@ fn to_mailbox(addr: &Address) -> Result<Mailbox, DomainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lettre::transport::smtp::response::Detail;
+    use std::sync::Mutex;
 
     #[test]
     fn only_535_rejects_credentials() {
@@ -310,8 +336,72 @@ mod tests {
         // What lettre fails with when the server answers XOAUTH2 with its 334 error challenge.
         let creds = Credentials::new("me@gmail.com".into(), "ya29.stale".into());
         let e = Mechanism::Xoauth2.response(&creds, Some("eyJzdGF0dXMiOiI0MDAifQ==")).unwrap_err();
-        assert!(matches!(smtp_error("SMTP send error", &e), DomainError::AuthenticationFailed(_)));
-        assert!(!smtp_error("SMTP send error", &e).to_string().contains("ya29"), "never echoes the token");
+        assert!(matches!(smtp_error("SMTP send error", &e, true), DomainError::AuthenticationFailed(_)));
+        assert!(!smtp_error("SMTP send error", &e, true).to_string().contains("ya29"), "never echoes the token");
+        // The same client error on a PLAIN login is not a refused token.
+        assert!(!matches!(smtp_error("SMTP send error", &e, false), DomainError::AuthenticationFailed(_)));
+    }
+
+    /// Records what SMTP tells the account's gate.
+    #[derive(Default)]
+    struct Recorder {
+        secret: Mutex<Option<LoginSecret>>,
+        judged: Mutex<Vec<bool>>,
+        smtp: Mutex<Vec<Option<String>>>,
+    }
+
+    #[allow(clippy::double_must_use)]
+    #[async_trait::async_trait]
+    impl LoginGate for Recorder {
+        async fn secret(&self) -> Result<LoginSecret, DomainError> {
+            Ok(self.secret.lock().unwrap().clone().unwrap())
+        }
+        async fn login_failed(&self, _: &LoginSecret, _: &DomainError, retried: bool) -> bool {
+            self.judged.lock().unwrap().push(retried);
+            true
+        }
+        fn login_succeeded(&self) {
+            panic!("SMTP must not report a login to the account state");
+        }
+        async fn ready(&self) {}
+        fn smtp_login(&self, refused: Option<String>) {
+            self.smtp.lock().unwrap().push(refused);
+        }
+    }
+
+    fn refused() -> DomainError {
+        DomainError::AuthenticationFailed("permanent error (535): 5.7.8 Username and Password not accepted".into())
+    }
+
+    /// A wrong `[accounts.smtp] username`: the send fails, the user is told,
+    /// and the account's state is never asked to change.
+    #[tokio::test]
+    async fn a_refused_smtp_password_never_judges_the_account() {
+        let gate = Recorder::default();
+        *gate.secret.lock().unwrap() = Some(LoginSecret::Password("hunter2".into()));
+
+        let result: Result<(), _> = login_with(&SmtpView(&gate), |_| async { Err(refused()) }).await;
+
+        assert!(matches!(result, Err(DomainError::AuthenticationFailed(_))));
+        assert!(gate.judged.lock().unwrap().is_empty(), "the account state was left alone");
+        assert_eq!(gate.smtp.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_smtp_token_is_refreshed_once_and_never_pauses() {
+        let gate = Recorder::default();
+        *gate.secret.lock().unwrap() = Some(LoginSecret::OAuthToken("ya29.a".into()));
+        let attempts = Mutex::new(0);
+
+        let result: Result<(), _> = login_with(&SmtpView(&gate), |_| {
+            *attempts.lock().unwrap() += 1;
+            async { Err(refused()) }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(*attempts.lock().unwrap(), 2, "one retry after the forced refresh");
+        assert_eq!(*gate.judged.lock().unwrap(), [false], "only the refresh request reached the gate");
     }
 
     fn addr(email: &str) -> Address {

@@ -188,6 +188,7 @@ pub fn auth_status_to_proto(status: &mc_application::AuthStatus) -> proto::Accou
             None => proto::OAuthProvider::OauthProviderUnspecified,
         } as i32,
         token_expires_at: status.token_expires_at.as_ref().map(datetime_to_timestamp),
+        smtp_error: status.smtp_error.clone(),
     }
 }
 
