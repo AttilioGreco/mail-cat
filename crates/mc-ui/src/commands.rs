@@ -8,7 +8,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use mc_client::{
-    Account, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit, ConversationSummary,
+    Account, AuthStatus, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit, ConversationSummary,
     ImapAccountParams, MailCatClient, Mailbox, MailboxNotificationKind, MessageBody, MessageFlag,
     MessageSummary, OAuthLoginEvent, OAuthProvider, SearchHit, Suggestion, SyncPhase,
     SyncProgress, ThreadMessage,
@@ -123,8 +123,25 @@ pub struct AccountDto {
     pub id: String,
     pub name: String,
     pub email: String,
-    /// "active" | "disabled" | "error" | "needs_reauth" | "unknown"
+    /// "active" | "disabled" | "error" | "needs_reauth" | "credentials_rejected" | "unknown"
     pub status: String,
+    pub auth: Option<AuthStatusDto>,
+}
+
+/// An account's live auth state, also emitted as the `account:auth` Tauri event.
+#[derive(Serialize, Clone)]
+pub struct AuthStatusDto {
+    pub account_id: String,
+    /// "active" | "offline" | "needs_reauth" | "credentials_rejected" | "oauth_client_invalid" | "unknown"
+    pub state: String,
+    pub reason: Option<String>,
+    pub last_error: Option<String>,
+    /// RFC 3339, like every timestamp below.
+    pub since: Option<String>,
+    pub next_retry: Option<String>,
+    /// "google" | "microsoft"; `None` for a password account.
+    pub oauth_provider: Option<String>,
+    pub token_expires_at: Option<String>,
 }
 
 /// Download progress for one account.
@@ -211,6 +228,23 @@ fn account_to_dto(a: Account) -> AccountDto {
         name: a.name,
         email: a.email,
         status: a.status.as_str().to_string(),
+        auth: a.auth.map(auth_status_to_dto),
+    }
+}
+
+fn auth_status_to_dto(s: AuthStatus) -> AuthStatusDto {
+    AuthStatusDto {
+        account_id: s.account_id,
+        state: s.state.as_str().to_owned(),
+        reason: s.reason,
+        last_error: s.last_error,
+        since: s.since.map(|t| t.to_rfc3339()),
+        next_retry: s.next_retry.map(|t| t.to_rfc3339()),
+        oauth_provider: s.oauth_provider.map(|p| match p {
+            OAuthProvider::Google => "google".to_owned(),
+            OAuthProvider::Microsoft => "microsoft".to_owned(),
+        }),
+        token_expires_at: s.token_expires_at.map(|t| t.to_rfc3339()),
     }
 }
 
@@ -498,6 +532,70 @@ pub async fn start_sync_watch(
 #[tauri::command]
 pub async fn stop_sync_watch(watch_state: State<'_, WatchState>) -> Result<(), String> {
     stop_watching(SYNC_WATCH_KEY.to_string(), watch_state).await
+}
+
+const AUTH_WATCH_KEY: &str = "__auth_status__";
+
+/// Stream every account's auth state into `account:auth` Tauri events: one per
+/// account on (re)connect, then one per change. Ref-counted like the others.
+#[tauri::command]
+pub async fn start_auth_watch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    watch_state: State<'_, WatchState>,
+) -> Result<(), String> {
+    let mut watchers = watch_state.watchers.lock().await;
+    if let Some((_, ref_count)) = watchers.get_mut(AUTH_WATCH_KEY) {
+        *ref_count += 1;
+        return Ok(());
+    }
+
+    let client = get_or_connect(&state).await?;
+    let token = CancellationToken::new();
+    watchers.insert(AUTH_WATCH_KEY.to_string(), (token.clone(), 1));
+    drop(watchers);
+
+    tokio::spawn(async move {
+        let mut backoff = INITIAL_WATCH_BACKOFF;
+        'reconnect: while !token.is_cancelled() {
+            match client.watch_auth_status().await {
+                Ok(stream) => {
+                    backoff = INITIAL_WATCH_BACKOFF;
+                    tokio::pin!(stream);
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break 'reconnect,
+                            item = stream.next() => match item {
+                                Some(Ok(status)) => {
+                                    if let Err(e) = app.emit("account:auth", auth_status_to_dto(status)) {
+                                        tracing::warn!("Failed to emit account:auth: {e}");
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    tracing::warn!("auth status stream error: {e}, reconnecting");
+                                    break;
+                                }
+                                None => break,
+                            },
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("watch_auth_status failed: {e}, retrying"),
+            }
+            tokio::select! {
+                _ = token.cancelled() => break 'reconnect,
+                _ = tokio::time::sleep(backoff) => {}
+            }
+            backoff = next_backoff(backoff);
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_auth_watch(watch_state: State<'_, WatchState>) -> Result<(), String> {
+    stop_watching(AUTH_WATCH_KEY.to_string(), watch_state).await
 }
 
 /// Run an OAuth2 login. Opens the system browser when the server hands us the

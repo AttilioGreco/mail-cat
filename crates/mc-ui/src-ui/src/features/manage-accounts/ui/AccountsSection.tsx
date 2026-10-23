@@ -5,8 +5,11 @@ import {
   useAccountStats,
   progressPercent,
   useSyncStore,
+  authLabel,
+  authState,
+  useSecondsUntil,
   type Account,
-  type AccountStatus,
+  type AuthState,
   type BodyBatch,
 } from '@/entities/account';
 import {
@@ -118,7 +121,8 @@ function AccountCard({
   const syncNow = useSyncNow();
   const removeAccount = useRemoveAccount();
   const [confirming, setConfirming] = useState(false);
-  const [editingPassword, setEditingPassword] = useState(false);
+  // A rejected password is what the user came here to fix.
+  const [editingPassword, setEditingPassword] = useState(() => authState(account) === 'credentials_rejected');
 
   const livePercent = progressPercent(progress);
   // The body backfill worker runs continuously in the background and never
@@ -139,7 +143,7 @@ function AccountCard({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium text-foreground">{account.name}</span>
-            <StatusBadge status={account.status} />
+            <StatusBadge account={account} />
           </div>
           <p className="truncate text-xs text-muted">{account.email}</p>
         </div>
@@ -356,28 +360,26 @@ function ProgressRow({
   );
 }
 
-function StatusBadge({ status }: { status: AccountStatus }) {
-  const styles: Record<AccountStatus, string> = {
+function StatusBadge({ account }: { account: Account }) {
+  const state = authState(account);
+  const secondsLeft = useSecondsUntil(state === 'offline' ? account.auth?.nextRetry : null);
+  const styles: Record<AuthState, string> = {
     active: 'border-accent/40 text-accent',
+    offline: 'border-border text-muted',
     needs_reauth: 'border-amber-500/40 text-amber-500',
-    error: 'border-destructive/40 text-destructive',
-    disabled: 'border-border text-muted',
+    credentials_rejected: 'border-amber-500/40 text-amber-500',
+    oauth_client_invalid: 'border-destructive/40 text-destructive',
     unknown: 'border-border text-muted',
   };
-  const labels: Record<AccountStatus, string> = {
-    active: 'attivo',
-    needs_reauth: 'ri-autenticazione richiesta',
-    error: 'errore',
-    disabled: 'disattivato',
-    unknown: 'sconosciuto',
-  };
+  const needsUser = state === 'needs_reauth' || state === 'credentials_rejected';
 
   return (
     <span
-      className={`flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] ${styles[status]}`}
+      title={account.auth?.lastError ?? undefined}
+      className={`flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] ${styles[state]}`}
     >
-      {status === 'needs_reauth' && <KeyRound size={9} />}
-      {labels[status]}
+      {needsUser && <KeyRound size={9} />}
+      {authLabel(account, secondsLeft)}
     </span>
   );
 }

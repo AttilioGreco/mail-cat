@@ -1,5 +1,13 @@
-export { useAccounts, useAccountStats } from './model/useAccounts';
-export type { Account, AccountStats, AccountStatus } from './model/types';
+export { useAccounts, useAccountStats, useAuthStatusWatch } from './model/useAccounts';
+export { authLabel, authState, useSecondsUntil } from './model/auth-label';
+export type {
+  Account,
+  AccountAuth,
+  AccountStats,
+  AccountStatus,
+  AuthState,
+  OAuthProviderId,
+} from './model/types';
 export {
   useSyncProgress,
   useSyncStore,

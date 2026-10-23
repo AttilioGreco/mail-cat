@@ -6,7 +6,7 @@ import { useShortcuts, useShortcutsStore, ShortcutsOverlay } from '@/features/ke
 import { useComposeStore } from '@/features/compose-message';
 import { useSyncNow } from '@/features/manage-accounts';
 import { useSessionStore } from '@/entities/session';
-import { useSyncProgress } from '@/entities/account';
+import { useAuthStatusWatch, useSyncProgress } from '@/entities/account';
 import { Toaster } from '@/shared/ui/sonner';
 import { QueryProvider } from './providers/QueryProvider';
 import { ThemeProvider } from './providers/ThemeProvider';
@@ -37,6 +37,7 @@ function Router() {
   // Mounted above both screens: switching to settings must not drop the
   // subscription, or the page would open with no progress to show.
   useSyncProgress();
+  useAuthStatusWatch();
 
   // Only the shortcuts that need no list context — the rest are bound where
   // their data lives (message list, message viewer).

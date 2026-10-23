@@ -69,6 +69,8 @@ async fn main() {
             commands::sync_now,
             commands::start_sync_watch,
             commands::stop_sync_watch,
+            commands::start_auth_watch,
+            commands::stop_auth_watch,
             commands::start_oauth_login,
             commands::reauth_account,
             commands::set_account_password,

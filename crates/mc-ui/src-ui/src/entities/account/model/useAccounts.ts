@@ -1,12 +1,38 @@
-import { useQuery } from '@tanstack/react-query';
+import { useEffect } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
-import type { Account, AccountStats, AccountStatus } from './types';
+import { listen } from '@tauri-apps/api/event';
+import type { Account, AccountAuth, AccountStats, AccountStatus, AuthState, OAuthProviderId } from './types';
+
+interface AuthStatusDto {
+  account_id: string;
+  state: AuthState;
+  reason: string | null;
+  last_error: string | null;
+  since: string | null;
+  next_retry: string | null;
+  oauth_provider: OAuthProviderId | null;
+  token_expires_at: string | null;
+}
 
 interface AccountDto {
   id: string;
   name: string;
   email: string;
   status: AccountStatus;
+  auth: AuthStatusDto | null;
+}
+
+function authFromDto(d: AuthStatusDto): AccountAuth {
+  return {
+    state: d.state,
+    reason: d.reason,
+    lastError: d.last_error,
+    since: d.since,
+    nextRetry: d.next_retry,
+    oauthProvider: d.oauth_provider,
+    tokenExpiresAt: d.token_expires_at,
+  };
 }
 
 async function fetchAccounts(): Promise<Account[]> {
@@ -16,6 +42,7 @@ async function fetchAccounts(): Promise<Account[]> {
     name: d.name,
     email: d.email,
     status: d.status,
+    auth: d.auth && authFromDto(d.auth),
   }));
 }
 
@@ -25,6 +52,38 @@ export function useAccounts() {
     queryFn: fetchAccounts,
     staleTime: 60_000,
   });
+}
+
+/**
+ * Keeps each account's auth state live: the server pushes every change, which
+ * is patched straight into the cached account list instead of waiting for it
+ * to go stale.
+ */
+export function useAuthStatusWatch() {
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    invoke('start_auth_watch').catch((e) => console.error('[auth] start_auth_watch failed:', e));
+
+    let unlisten: (() => void) | null = null;
+    listen<AuthStatusDto>('account:auth', ({ payload }) => {
+      const accounts = queryClient.getQueryData<Account[]>(['accounts']);
+      if (!accounts?.some((a) => a.id === payload.account_id)) {
+        queryClient.invalidateQueries({ queryKey: ['accounts'] });
+        return;
+      }
+      queryClient.setQueryData<Account[]>(['accounts'], (current) =>
+        current?.map((a) => (a.id === payload.account_id ? { ...a, auth: authFromDto(payload) } : a)),
+      );
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      invoke('stop_auth_watch').catch(() => {});
+      unlisten?.();
+    };
+  }, [queryClient]);
 }
 
 interface AccountStatsDto {
