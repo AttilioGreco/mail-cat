@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use async_imap::imap_proto::types::{BodyStructure, ContentEncoding, SectionPath};
+use async_imap::imap_proto::types::{AttributeValue, BodyStructure, ContentEncoding, Response, SectionPath};
 use async_imap::types::Seq;
 use async_trait::async_trait;
 use futures::Stream;
@@ -1357,7 +1357,91 @@ async fn exchange<T>(
     what: &str,
     fut: impl std::future::Future<Output = Result<T, async_imap::error::Error>>,
 ) -> Result<T, DomainError> {
-    timed(limit, what, async { fut.await.map_err(|e| DomainError::Provider(format!("{what} failed: {e}"))) }).await
+    timed(limit, what, async { fut.await.map_err(|e| exchange_error(what, e)) }).await
+}
+
+/// What the backfill reads of one FETCH response, copied out because
+/// async-imap keeps its response type to itself.
+struct Fetched {
+    uid: Option<u32>,
+    text_parts: Option<Vec<TextPart>>,
+    /// `BODY[..]` data by part number; `None` is the whole message.
+    sections: Vec<(Option<Vec<u32>>, Vec<u8>)>,
+}
+
+impl Fetched {
+    fn new(attributes: &[AttributeValue<'_>]) -> Self {
+        let mut fetched = Fetched { uid: None, text_parts: None, sections: Vec::new() };
+        for attribute in attributes {
+            match attribute {
+                AttributeValue::Uid(uid) => fetched.uid = Some(*uid),
+                AttributeValue::BodyStructure(structure) => fetched.text_parts = Some(text_parts(structure)),
+                AttributeValue::BodySection { section: None, data: Some(data), .. } => {
+                    fetched.sections.push((None, data.to_vec()));
+                }
+                AttributeValue::BodySection { section: Some(SectionPath::Part(part, None)), data: Some(data), .. } => {
+                    fetched.sections.push((Some(part.clone()), data.to_vec()));
+                }
+                _ => {}
+            }
+        }
+        fetched
+    }
+
+    fn section(&self, part: Option<&[u32]>) -> Option<&[u8]> {
+        self.sections.iter().find(|(p, _)| p.as_deref() == part).map(|(_, data)| data.as_slice())
+    }
+}
+
+/// async-imap's `uid_fetch` drops the tagged reply, so a server that refuses
+/// the FETCH looks like one with nothing to return. Reading the reply here
+/// keeps the refusal.
+async fn fetch_checked<T>(
+    session: &mut async_imap::Session<T>,
+    uid_set: &str,
+    query: &str,
+) -> Result<Vec<Fetched>, async_imap::error::Error>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    use async_imap::error::Error;
+    use async_imap::imap_proto::Status;
+
+    let id = session.run_command(format!("UID FETCH {uid_set} {query}")).await?;
+    let mut fetched = Vec::new();
+    loop {
+        let response = session.read_response().await?.ok_or(Error::ConnectionLost)?;
+        match response.parsed() {
+            Response::Done { tag, status, code, information, .. } if *tag == id => {
+                let reply = format!("code: {code:?}, info: {information:?}");
+                return match status {
+                    Status::Ok => Ok(fetched),
+                    Status::No => Err(Error::No(reply)),
+                    _ => Err(Error::Bad(reply)),
+                };
+            }
+            Response::Fetch(_, attributes) => fetched.push(Fetched::new(attributes)),
+            _ => {}
+        }
+    }
+}
+
+/// A reply the parser rejects is the only failure that points at one message,
+/// so it alone is a `Serialization` error; a NO about quota or bandwidth is
+/// the server asking for a pause.
+fn exchange_error(what: &str, e: async_imap::error::Error) -> DomainError {
+    use async_imap::error::Error;
+    match e {
+        // The stream reports a response it can't parse as an `Other` io error.
+        Error::Parse(_) => DomainError::Serialization(format!("{what}: {e}")),
+        Error::Io(ref io) if io.kind() == std::io::ErrorKind::Other && io.to_string().contains(" during parsing of ") => {
+            DomainError::Serialization(format!("{what}: {e}"))
+        }
+        Error::No(ref reply) if ["[OVERQUOTA]", "[LIMIT]", "andwidth limit"].iter().any(|n| reply.contains(n)) => {
+            DomainError::Throttled(format!("{what}: {reply}"))
+        }
+        e => DomainError::Provider(format!("{what} failed: {e}")),
+    }
 }
 
 /// `UID STORE`, its reply read to the end so the connection can be reused.
@@ -1459,19 +1543,20 @@ async fn text_bodies<T>(
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
-    use futures::TryStreamExt;
-
     let uid_set = ImapEmailProvider::compress_uid_ranges(uids);
-    let structures: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Body structure fetch", async {
-        session.uid_fetch(&uid_set, "(UID BODYSTRUCTURE)").await?.try_collect().await
-    })
+    let structures = exchange(
+        BODY_FETCH_TIMEOUT,
+        "Body structure fetch",
+        fetch_checked(session, &uid_set, "(UID BODYSTRUCTURE)"),
+    )
     .await?;
+    let structure_count = structures.len();
 
     let parts_by_uid: HashMap<u32, Vec<TextPart>> = structures
-        .iter()
+        .into_iter()
         // An unsolicited FLAGS update for the same UID carries no structure:
         // skipping it keeps the real one. A UID with none comes back missing.
-        .filter_map(|item| Some((item.uid?, text_parts(item.bodystructure()?))))
+        .filter_map(|item| Some((item.uid?, item.text_parts?)))
         .collect();
     // Messages laid out alike share one FETCH of the same sections.
     let mut layouts: HashMap<Vec<Vec<u32>>, Vec<u32>> = HashMap::new();
@@ -1479,10 +1564,10 @@ where
         layouts.entry(parts.iter().map(|p| p.section.clone()).collect()).or_default().push(*uid);
     }
     // ponytail: a BODYSTRUCTURE reply's size isn't exposed; 1 KiB is a typical one.
-    let mut bytes = structures.len() as u64 * 1024;
+    let mut bytes = structure_count as u64 * 1024;
     let range = cap.map_or_else(String::new, |n| format!("<0.{n}>"));
 
-    let mut results = Vec::with_capacity(structures.len());
+    let mut results = Vec::with_capacity(structure_count);
     for (sections, message_uids) in layouts {
         if sections.is_empty() {
             results.extend(message_uids.into_iter().map(|uid| MessageBodyResult {
@@ -1497,13 +1582,15 @@ where
             .iter()
             .map(|s| format!("BODY.PEEK[{}]{range}", s.iter().map(u32::to_string).collect::<Vec<_>>().join(".")))
             .collect();
-        let fetched: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Body fetch", async {
-            session
-                .uid_fetch(ImapEmailProvider::compress_uid_ranges(&message_uids), format!("(UID {})", wanted.join(" ")))
-                .await?
-                .try_collect()
-                .await
-        })
+        let fetched = exchange(
+            BODY_FETCH_TIMEOUT,
+            "Body fetch",
+            fetch_checked(
+                session,
+                &ImapEmailProvider::compress_uid_ranges(&message_uids),
+                &format!("(UID {})", wanted.join(" ")),
+            ),
+        )
         .await?;
         for item in &fetched {
             let Some((uid, parts)) = item.uid.and_then(|uid| Some((uid, parts_by_uid.get(&uid)?))) else {
@@ -1516,7 +1603,7 @@ where
                 truncated: false,
             };
             for part in parts {
-                let Some(data) = item.section(&SectionPath::Part(part.section.clone(), None)) else {
+                let Some(data) = item.section(Some(&part.section)) else {
                     continue;
                 };
                 bytes += data.len() as u64;
@@ -1552,24 +1639,26 @@ async fn message_start<T>(
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
-    use futures::TryStreamExt;
-
-    let fetched: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Partial raw fetch", async {
-        session.uid_fetch(uid.to_string(), format!("(UID BODY.PEEK[]<0.{cap}>)")).await?.try_collect().await
-    })
+    let fetched = exchange(
+        BODY_FETCH_TIMEOUT,
+        "Partial raw fetch",
+        fetch_checked(session, &uid.to_string(), &format!("(UID BODY.PEEK[]<0.{cap}>)")),
+    )
     .await?;
-    let Some(raw) = fetched.iter().find_map(|f| f.body()) else { return Ok((None, 0)) };
+    let Some(raw) = fetched.iter().find_map(|f| f.section(None)) else { return Ok((None, 0)) };
     let truncated = raw.len() >= cap as usize;
     let (body_text, body_html) = whole_message_text(if truncated { whole_lines(raw) } else { raw });
     let result = MessageBodyResult { provider_uid: ProviderUid::new(uid), body_text, body_html, truncated };
     Ok((Some(result), raw.len() as u64))
 }
 
-/// `fetch` over `uids`; a set that fails is split in halves until the
-/// message failing it is alone, which gets `fallback`. One message the server
-/// or the parser chokes on costs a few retries, not one per message of its
-/// set. Both return an outer error for a connection that couldn't be had,
-/// which fails the lot, and an inner one for the fetch itself.
+/// `fetch` over `uids`; a set the parser rejected is split in halves until the
+/// message failing it is alone, which gets `fallback`. One unreadable message
+/// costs a few retries, not one per message of its set. Any other failure (a
+/// refusal, a dropped connection) would hit every message alike: it fails the
+/// lot, so the caller backs off instead of hammering the server. Both return
+/// an outer error for a connection that couldn't be had and an inner one for
+/// the fetch itself.
 async fn isolating<'a, F, FF, G, GF>(
     uids: &'a [u32],
     mut fetch: F,
@@ -1589,9 +1678,8 @@ where
                 results.extend(found);
                 continue;
             }
-            // A silent server stays silent: no retry round on it.
-            Err(e @ DomainError::ConnectionTimeout(_)) => return Err(e),
-            Err(e) => e,
+            Err(e @ DomainError::Serialization(_)) => e,
+            Err(e) => return Err(e),
         };
         let [uid] = set else {
             debug!(uids = set.len(), error = %error, "body fetch failed, splitting the set");
@@ -1602,9 +1690,7 @@ where
         warn!(uid, error = %error, "body fetch failed for one message, fetching the start of it");
         match fallback(*uid).await? {
             Ok(found) => results.extend(found),
-            Err(e @ DomainError::ConnectionTimeout(_)) => return Err(e),
-            // Left out: the backfill retries it a few times, then gives up.
-            Err(e) => warn!(uid, error = %e, "message text unavailable"),
+            Err(e) => return Err(e),
         }
     }
     Ok(results)
@@ -1704,7 +1790,7 @@ async fn transfer<T>(
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
-    use async_imap::imap_proto::{Response, Status};
+    use async_imap::imap_proto::Status;
 
     let failed = |e: &dyn std::fmt::Display| DomainError::Provider(format!("{verb} failed: {e}"));
     let tag = session
@@ -2247,6 +2333,50 @@ mod tests {
         assert_eq!(raw, ["UID FETCH 3 (UID BODY.PEEK[]<0.262144>)"]);
         // Halving, not one retry per message: 1:5, 1:2, 3:5, 3, 4:5.
         assert_eq!(commands.iter().filter(|c| c.ends_with("(UID BODYSTRUCTURE)")).count(), 5, "{commands:#?}");
+    }
+
+    /// `isolating` over sessions that all answer with `reply`; the commands
+    /// the server saw are returned with the outcome.
+    async fn isolated_against(reply: fn(&str) -> &'static str) -> (Result<usize, DomainError>, Vec<String>) {
+        let sessions = Arc::new(Mutex::new(Vec::new()));
+        let connect = || {
+            let sessions = Arc::clone(&sessions);
+            async move {
+                let (session, commands) = scripted(reply).await;
+                sessions.lock().unwrap().push(commands);
+                session
+            }
+        };
+        let found = isolating(
+            &[1, 2, 3, 4, 5],
+            |set| {
+                let session = connect();
+                async move { Ok(text_bodies(&mut session.await, set, Some(TEXT_PART_CAP)).await.map(|(r, _)| r)) }
+            },
+            |uid| {
+                let session = connect();
+                async move { Ok(message_start(&mut session.await, uid, TEXT_PART_CAP).await.map(|(r, _)| r)) }
+            },
+        )
+        .await;
+        let commands = sessions.lock().unwrap().iter().flat_map(|c| uid_commands(c)).collect();
+        (found.map(|r| r.len()), commands)
+    }
+
+    #[tokio::test]
+    async fn a_server_refusing_every_fetch_is_asked_once() {
+        let (found, commands) = isolated_against(|_| "$T NO [SERVERBUG] try later\r\n").await;
+
+        assert!(matches!(found, Err(DomainError::Provider(_))), "{found:?}");
+        assert_eq!(commands.len(), 1, "{commands:#?}");
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_quota_is_a_throttle() {
+        let (found, commands) = isolated_against(|_| "$T NO [OVERQUOTA] Account exceeded bandwidth limits.\r\n").await;
+
+        assert!(matches!(found, Err(DomainError::Throttled(_))), "{found:?}");
+        assert_eq!(commands.len(), 1);
     }
 
     #[test]
