@@ -37,7 +37,7 @@ export function Sidebar() {
   }, [accounts, selectedAccountId, selectAccount]);
 
   return (
-    <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-border bg-surface">
+    <aside className="flex h-full w-full flex-col bg-surface">
       <div className="border-b border-border p-2">
         <button
           type="button"
@@ -69,7 +69,7 @@ export function Sidebar() {
         ))}
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2">
+      <div className="flex-1 overflow-hidden p-2">
         {selectedAccountId ? (
           <FolderTree
             accountId={selectedAccountId}
