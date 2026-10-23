@@ -210,17 +210,20 @@ def reappear(w):
 
 
 def delete_twice(w):
-    """Two deletes of the same message back to back (double click): no error,
-    at most one copy left, both sides agree."""
+    """Two deletes of the same message at once (double click): the second,
+    asked while it was still in INBOX, must not purge it from Trash. Both
+    succeed, it ends in Trash, both sides agree. (Sequential deletes are a
+    different case: the second one is asked with the message in Trash.)"""
     mid = w.mc_id("INBOX", 12)
-    mc("messages", "delete", mid)
-    mc("messages", "delete", mid)
-    time.sleep(3)  # background IMAP ops
+    clicks = [subprocess.Popen(MC + ["messages", "delete", mid], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, env=ENV) for _ in range(2)]
+    for p in clicks:
+        out, _ = p.communicate()
+        if p.returncode:
+            raise Fail(f"a delete of the double click exited {p.returncode}:\n{out}")
+    wait(lambda: on_server(w, 12, "Trash") and not on_server(w, 12, "INBOX"), "tag 12 in Trash on server")
     w.sync()
-    got = w.where(12)
-    print(f"    (tag 12 ended up in {got or 'nowhere'})")
-    if "INBOX" in got or sum(s for s, _ in got.values()) > 1:
-        raise Fail(f"tag 12 after double delete: {got}")
+    w.assert_where(12, {"Trash": (1, 1)})
     w.assert_consistent()
 
 

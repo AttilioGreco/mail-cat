@@ -305,7 +305,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     /// Trash folder (Thunderbird-style). Only a permanent delete, a delete of
     /// a message already in Trash, or the absence of a Trash folder actually
     /// expunges it. Like a move, it acts on the message where it is when the
-    /// account's turn comes.
+    /// account's turn comes, except that a message an earlier delete put in
+    /// Trash meanwhile stays there: a double click must not purge it.
     pub async fn handle_delete(
         &self,
         message_id: MessageId,
@@ -321,9 +322,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     /// One message's move/delete; `destination` as in [`Self::apply_many`].
     /// A message (or its mailbox) gone by its turn is nothing left to do,
     /// as when the same delete is sent twice.
-    async fn apply_one(&self, message_id: MessageId, destination: impl Fn(&Mailbox, &[Mailbox]) -> Destination) -> Result<(), ApplicationError> {
-        let account_id = match self.load_message(&message_id).await {
-            Ok((message, _)) => message.account_id,
+    async fn apply_one(&self, message_id: MessageId, destination: impl Fn(MailboxId, &Mailbox, &[Mailbox]) -> Destination) -> Result<(), ApplicationError> {
+        let (account_id, requested_in) = match self.load_message(&message_id).await {
+            Ok((message, _)) => (message.account_id, message.mailbox_id),
             Err(ApplicationError::NotFound(..)) => return Ok(()),
             Err(e) => return Err(e),
         };
@@ -336,7 +337,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let Some(source) = mailboxes.iter().find(|m| m.id == message.mailbox_id) else {
             return Ok(());
         };
-        let Some(dest) = destination(source, &mailboxes) else {
+        let Some(dest) = destination(requested_in, source, &mailboxes) else {
             return Ok(());
         };
         let uid = self.remote_uid(&mut message, &mut seq, &source.path).await?;
@@ -381,13 +382,13 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     async fn apply_many(
         &self,
         message_ids: Vec<MessageId>,
-        destination: impl Fn(&Mailbox, &[Mailbox]) -> Destination,
+        destination: impl Fn(MailboxId, &Mailbox, &[Mailbox]) -> Destination,
     ) -> Result<CommandResult, ApplicationError> {
         let (mut failed, mut succeeded) = (0u32, 0u32);
-        let mut by_account: HashMap<AccountId, Vec<MessageId>> = HashMap::new();
+        let mut by_account: HashMap<AccountId, Vec<(MessageId, MailboxId)>> = HashMap::new();
         for message_id in message_ids {
             match self.load_message(&message_id).await {
-                Ok((message, _)) => by_account.entry(message.account_id).or_default().push(message_id),
+                Ok((message, _)) => by_account.entry(message.account_id).or_default().push((message_id, message.mailbox_id)),
                 Err(_) => failed += 1,
             }
         }
@@ -397,7 +398,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             let _turn = self.turn(account_id).await;
             let mailboxes = self.message_read_repo.list_mailboxes(&account_id).await?;
             let mut groups: HashMap<Group, Vec<(MessageId, ProviderUid)>> = HashMap::new();
-            for message_id in ids {
+            for (message_id, requested_in) in ids {
                 // Gone while it waited for its turn: an earlier action took it.
                 let Ok((mut message, mut seq)) = self.load_message(&message_id).await else {
                     continue;
@@ -406,7 +407,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                     failed += 1;
                     continue;
                 };
-                let Some(dest) = destination(source, &mailboxes) else {
+                let Some(dest) = destination(requested_in, source, &mailboxes) else {
                     continue;
                 };
                 let Ok(provider_uid) = self.remote_uid(&mut message, &mut seq, &source.path).await else {
@@ -1121,15 +1122,23 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 type Destination = Option<Option<(MailboxId, MailboxPath)>>;
 
 /// Moving a message to the folder it already sits in is a no-op, not a copy.
-fn to_mailbox(id: MailboxId, path: MailboxPath) -> impl Fn(&Mailbox, &[Mailbox]) -> Destination {
-    move |source, _| (source.id != id).then(|| Some((id, path.clone())))
+fn to_mailbox(id: MailboxId, path: MailboxPath) -> impl Fn(MailboxId, &Mailbox, &[Mailbox]) -> Destination {
+    move |_, source, _| (source.id != id).then(|| Some((id, path.clone())))
 }
 
-fn to_trash_or_expunged(permanently: bool) -> impl Fn(&Mailbox, &[Mailbox]) -> Destination {
-    move |source, mailboxes| {
+/// `requested_in`: where the message was when the delete was asked for. A
+/// delete expunges from Trash only when asked there: one that finds the
+/// message moved to Trash since (the first of a double delete) is done.
+fn to_trash_or_expunged(permanently: bool) -> impl Fn(MailboxId, &Mailbox, &[Mailbox]) -> Destination {
+    move |requested_in, source, mailboxes| {
+        if permanently {
+            return Some(None);
+        }
+        if source.mailbox_type == MailboxType::Trash {
+            return (source.id == requested_in).then_some(None);
+        }
         let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
-        let to_trash = !permanently && source.mailbox_type != MailboxType::Trash;
-        Some(to_trash.then_some(trash).flatten().map(|t| (t.id, t.path.clone())))
+        Some(trash.map(|t| (t.id, t.path.clone())))
     }
 }
 
@@ -2694,6 +2703,51 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
         let again = m.handler.handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), true).await;
 
         assert!(matches!(again, Ok(CommandResult::MessageDeleted)), "{again:?}");
+    }
+
+    /// A double click on delete: the second one, asked while the message was
+    /// still in INBOX, finds it in Trash by its turn and leaves it there.
+    /// Asked again once it is in Trash, a delete does purge it.
+    #[tokio::test]
+    async fn a_double_delete_leaves_the_message_in_trash() {
+        let msg = make_test_message();
+        let m = moving(&msg, MockEmailProvider::moving_to(900));
+        let turn = m.handler.turn(msg.account_id).await;
+        let deletes: Vec<_> = (0..2)
+            .map(|_| {
+                let handler = m.handler.clone();
+                tokio::spawn(async move { handler.handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), false).await })
+            })
+            .collect();
+        drain_spawned().await;
+        drop(turn);
+        for delete in deletes {
+            assert!(matches!(delete.await.unwrap(), Ok(CommandResult::MessageDeleted)));
+        }
+        assert_eq!(m.location(msg.id).await, (m.trash.id, Some(ProviderUid::new(900))));
+
+        m.handler.handle_delete(msg.id, m.trash.id, m.trash.path.clone(), false).await.unwrap();
+        assert!(matches!(m.handler.load_message(&msg.id).await, Err(ApplicationError::NotFound(..))));
+    }
+
+    /// The same for bulk delete.
+    #[tokio::test]
+    async fn a_double_bulk_delete_leaves_the_message_in_trash() {
+        let msg = make_test_message();
+        let m = moving(&msg, MockEmailProvider::moving_to(900));
+        let turn = m.handler.turn(msg.account_id).await;
+        let deletes: Vec<_> = (0..2)
+            .map(|_| {
+                let handler = m.handler.clone();
+                tokio::spawn(async move { handler.handle_delete_many(vec![msg.id], false).await })
+            })
+            .collect();
+        drain_spawned().await;
+        drop(turn);
+        for delete in deletes {
+            delete.await.unwrap().unwrap();
+        }
+        assert_eq!(m.location(msg.id).await, (m.trash.id, Some(ProviderUid::new(900))));
     }
 
     /// The connection dropped after the MOVE went out: it may have been
