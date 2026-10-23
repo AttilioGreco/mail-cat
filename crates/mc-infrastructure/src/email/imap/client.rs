@@ -45,6 +45,10 @@ const BODY_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 /// IDLE is re-issued this often: RFC 2177 has servers drop it after 30
 /// minutes, and NATs often forget a silent connection sooner.
 const IDLE_REISSUE: Duration = Duration::from_secs(25 * 60);
+/// What the backfill downloads of each text part: all of nearly any mail,
+/// while a huge HTML newsletter or pasted log can't eat the daily cap.
+/// Opening the message fetches the rest.
+const TEXT_PART_CAP: u32 = 256 * 1024;
 /// APPEND gets `COMMAND_TIMEOUT` plus a second per this many bytes.
 const UPLOAD_FLOOR_BYTES_PER_SEC: u64 = 64 * 1024;
 
@@ -263,84 +267,42 @@ impl ImapEmailProvider {
         }
     }
 
-    /// Downloads only the text a body needs — its first non-attachment
-    /// text/plain and text/html parts — never attachments: one BODYSTRUCTURE
-    /// round trip, then one fetch per distinct part layout. Every UID that
-    /// came back gets a result (bodiless if it has no text), so it dequeues.
-    async fn fetch_text_bodies(
+    /// The text of `uids` in `mailbox_name` on a pooled connection (see
+    /// [`text_bodies`]). The outer error is the connection or SELECT failing,
+    /// the inner one this fetch.
+    async fn text_bodies_in(
         &self,
-        session: &mut ImapSession,
+        mailbox_name: &str,
         uids: &[u32],
-    ) -> Result<Vec<MessageBodyResult>, DomainError> {
-        use futures::TryStreamExt;
-
-        let structures: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Body structure fetch", async {
-            session.uid_fetch(Self::compress_uid_ranges(uids), "(UID BODYSTRUCTURE)").await?.try_collect().await
-        })
-        .await?;
-
-        let parts_by_uid: HashMap<u32, Vec<TextPart>> = structures
-            .iter()
-            // An unsolicited FLAGS update for the same UID carries no structure:
-            // skipping it keeps the real one. A UID with none comes back missing.
-            .filter_map(|item| Some((item.uid?, text_parts(item.bodystructure()?))))
-            .collect();
-        // Messages laid out alike share one FETCH of the same sections.
-        let mut layouts: HashMap<Vec<Vec<u32>>, Vec<u32>> = HashMap::new();
-        for (uid, parts) in &parts_by_uid {
-            layouts.entry(parts.iter().map(|p| p.section.clone()).collect()).or_default().push(*uid);
-        }
-        // ponytail: a BODYSTRUCTURE reply's size isn't exposed; 1 KiB is a typical one.
-        let mut bytes = structures.len() as u64 * 1024;
-
-        let mut results = Vec::with_capacity(structures.len());
-        for (sections, message_uids) in layouts {
-            if sections.is_empty() {
-                results.extend(message_uids.into_iter().map(|uid| MessageBodyResult {
-                    provider_uid: ProviderUid::new(uid),
-                    body_text: None,
-                    body_html: None,
-                }));
-                continue;
-            }
-            let wanted: Vec<String> = sections
-                .iter()
-                .map(|s| format!("BODY.PEEK[{}]", s.iter().map(u32::to_string).collect::<Vec<_>>().join(".")))
-                .collect();
-            let fetched: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Body fetch", async {
-                session
-                    .uid_fetch(Self::compress_uid_ranges(&message_uids), format!("(UID {})", wanted.join(" ")))
-                    .await?
-                    .try_collect()
-                    .await
-            })
-            .await?;
-            for item in &fetched {
-                let Some((uid, parts)) = item.uid.and_then(|uid| Some((uid, parts_by_uid.get(&uid)?))) else {
-                    continue;
-                };
-                let mut result = MessageBodyResult {
-                    provider_uid: ProviderUid::new(uid),
-                    body_text: None,
-                    body_html: None,
-                };
-                for part in parts {
-                    let Some(data) = item.section(&SectionPath::Part(part.section.clone(), None)) else {
-                        continue;
-                    };
-                    bytes += data.len() as u64;
-                    let text = part.decode(data);
-                    if part.html {
-                        result.body_html = text;
-                    } else {
-                        result.body_text = text;
-                    }
-                }
-                results.push(result);
-            }
-        }
+        cap: Option<u32>,
+    ) -> Result<Result<Vec<MessageBodyResult>, DomainError>, DomainError> {
+        let mut session = self.selected(mailbox_name).await?;
+        // A failed response may be half-read: that connection is dropped, never
+        // pooled, and before the caller checks out the next one.
+        let (found, bytes) = match text_bodies(&mut session, uids, cap).await {
+            Ok(fetched) => fetched,
+            Err(e) => return Ok(Err(e)),
+        };
+        self.release(session);
         self.metered(bytes).await;
-        Ok(results)
+        Ok(Ok(found))
+    }
+
+    /// [`message_start`] on a pooled connection, errors split as in
+    /// [`Self::text_bodies_in`].
+    async fn message_start_in(
+        &self,
+        mailbox_name: &str,
+        uid: u32,
+    ) -> Result<Result<Option<MessageBodyResult>, DomainError>, DomainError> {
+        let mut session = self.selected(mailbox_name).await?;
+        let (found, bytes) = match message_start(&mut session, uid, TEXT_PART_CAP).await {
+            Ok(fetched) => fetched,
+            Err(e) => return Ok(Err(e)),
+        };
+        self.release(session);
+        self.metered(bytes).await;
+        Ok(Ok(found))
     }
 
     async fn selected(&self, mailbox_name: &str) -> Result<PooledSession, DomainError> {
@@ -349,36 +311,28 @@ impl ImapEmailProvider {
         Ok(session)
     }
 
-    /// One message's text, on fresh connections: the text parts if its
-    /// BODYSTRUCTURE parses, else the whole message. Some servers send
-    /// structures the parser rejects; without this such a message would never
-    /// get a body and would block the backfill behind it for good.
+    /// One message's whole text, for a reader who opened it: the text parts
+    /// if its BODYSTRUCTURE parses, else the whole message. Some servers send
+    /// structures the parser rejects; without this such a message could never
+    /// be read.
     async fn fetch_one_body(
         &self,
         mailbox_name: &str,
         uid: u32,
     ) -> Result<Option<MessageBodyResult>, DomainError> {
-        let mut session = self.selected(mailbox_name).await?;
-        match self.fetch_text_bodies(&mut session, &[uid]).await {
-            Ok(found) => {
-                self.release(session);
-                return Ok(found.into_iter().next());
-            }
+        match self.text_bodies_in(mailbox_name, &[uid], None).await? {
+            Ok(found) => return Ok(found.into_iter().next()),
             // A silent server stays silent: no fallback round on it.
             Err(e @ DomainError::ConnectionTimeout(_)) => return Err(e),
             Err(_) => {}
         }
-        // The failed response may be half-read: that connection is dropped —
-        // before checking out the next, or callers falling back at once hold
-        // every pool permit while each waits for one more, and all hang.
-        drop(session);
         let mut session = self.selected(mailbox_name).await?;
         let raw = Self::fetch_whole(&mut session, uid).await?;
         self.release(session);
         let Some(raw) = raw else { return Ok(None) };
         self.metered(raw.len() as u64).await;
         let (body_text, body_html) = whole_message_text(&raw);
-        Ok(Some(MessageBodyResult { provider_uid: ProviderUid::new(uid), body_text, body_html }))
+        Ok(Some(MessageBodyResult { provider_uid: ProviderUid::new(uid), body_text, body_html, truncated: false }))
     }
 
     async fn fetch_whole(session: &mut ImapSession, uid: u32) -> Result<Option<Vec<u8>>, DomainError> {
@@ -814,30 +768,19 @@ impl EmailProvider for ImapEmailProvider {
         }
 
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
-        let mut session = self.selected(&mailbox_name).await?;
-
         let uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
         let mut results = Vec::with_capacity(uids.len());
         for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
             debug!("Bulk body fetch: {} UIDs", chunk.len());
-            match self.fetch_text_bodies(&mut session, chunk).await {
-                Ok(found) => results.extend(found),
-                Err(e @ DomainError::ConnectionTimeout(_)) => return Err(e),
-                // One message the parser rejects fails its whole chunk: go one by one.
-                Err(e) => {
-                    warn!(mailbox = %mailbox_name, error = %e, "bulk text fetch failed, retrying message by message");
-                    // Same pool rule as `fetch_one_body`: never hold a
-                    // connection while it checks out more.
-                    drop(session);
-                    for &uid in chunk {
-                        results.extend(self.fetch_one_body(&mailbox_name, uid).await?);
-                    }
-                    session = self.selected(&mailbox_name).await?;
-                }
-            }
+            results.extend(
+                isolating(
+                    chunk,
+                    |set| self.text_bodies_in(&mailbox_name, set, Some(TEXT_PART_CAP)),
+                    |uid| self.message_start_in(&mailbox_name, uid),
+                )
+                .await?,
+            );
         }
-
-        self.release(session);
         Ok(results)
     }
 
@@ -1503,6 +1446,170 @@ where
     Ok(fetches)
 }
 
+/// The text `uids` need — their first non-attachment text/plain and
+/// text/html parts, each cut at `cap` when given — never attachments: one
+/// BODYSTRUCTURE round trip, then one fetch per distinct part layout. Every
+/// UID that came back gets a result (bodiless if it has no text), so it
+/// dequeues. Also returns the bytes downloaded.
+async fn text_bodies<T>(
+    session: &mut async_imap::Session<T>,
+    uids: &[u32],
+    cap: Option<u32>,
+) -> Result<(Vec<MessageBodyResult>, u64), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    use futures::TryStreamExt;
+
+    let uid_set = ImapEmailProvider::compress_uid_ranges(uids);
+    let structures: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Body structure fetch", async {
+        session.uid_fetch(&uid_set, "(UID BODYSTRUCTURE)").await?.try_collect().await
+    })
+    .await?;
+
+    let parts_by_uid: HashMap<u32, Vec<TextPart>> = structures
+        .iter()
+        // An unsolicited FLAGS update for the same UID carries no structure:
+        // skipping it keeps the real one. A UID with none comes back missing.
+        .filter_map(|item| Some((item.uid?, text_parts(item.bodystructure()?))))
+        .collect();
+    // Messages laid out alike share one FETCH of the same sections.
+    let mut layouts: HashMap<Vec<Vec<u32>>, Vec<u32>> = HashMap::new();
+    for (uid, parts) in &parts_by_uid {
+        layouts.entry(parts.iter().map(|p| p.section.clone()).collect()).or_default().push(*uid);
+    }
+    // ponytail: a BODYSTRUCTURE reply's size isn't exposed; 1 KiB is a typical one.
+    let mut bytes = structures.len() as u64 * 1024;
+    let range = cap.map_or_else(String::new, |n| format!("<0.{n}>"));
+
+    let mut results = Vec::with_capacity(structures.len());
+    for (sections, message_uids) in layouts {
+        if sections.is_empty() {
+            results.extend(message_uids.into_iter().map(|uid| MessageBodyResult {
+                provider_uid: ProviderUid::new(uid),
+                body_text: None,
+                body_html: None,
+                truncated: false,
+            }));
+            continue;
+        }
+        let wanted: Vec<String> = sections
+            .iter()
+            .map(|s| format!("BODY.PEEK[{}]{range}", s.iter().map(u32::to_string).collect::<Vec<_>>().join(".")))
+            .collect();
+        let fetched: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Body fetch", async {
+            session
+                .uid_fetch(ImapEmailProvider::compress_uid_ranges(&message_uids), format!("(UID {})", wanted.join(" ")))
+                .await?
+                .try_collect()
+                .await
+        })
+        .await?;
+        for item in &fetched {
+            let Some((uid, parts)) = item.uid.and_then(|uid| Some((uid, parts_by_uid.get(&uid)?))) else {
+                continue;
+            };
+            let mut result = MessageBodyResult {
+                provider_uid: ProviderUid::new(uid),
+                body_text: None,
+                body_html: None,
+                truncated: false,
+            };
+            for part in parts {
+                let Some(data) = item.section(&SectionPath::Part(part.section.clone(), None)) else {
+                    continue;
+                };
+                bytes += data.len() as u64;
+                let cut = cap.is_some_and(|n| part.octets > n);
+                result.truncated |= cut;
+                let text = part.decode(if cut { whole_lines(data) } else { data });
+                if part.html {
+                    result.body_html = text;
+                } else {
+                    result.body_text = text;
+                }
+            }
+            results.push(result);
+        }
+    }
+    Ok((results, bytes))
+}
+
+/// A cut part up to its last line break: a base64 line or quoted-printable
+/// escape split in two would fail the whole part's decoding.
+fn whole_lines(data: &[u8]) -> &[u8] {
+    data.iter().rposition(|&b| b == b'\n').map_or(data, |end| &data[..=end])
+}
+
+/// The first `cap` bytes of a message, headers included, read like a whole
+/// one: the text of a message whose BODYSTRUCTURE can't be read, without
+/// ever pulling a multi-MB attachment. Also returns the bytes downloaded.
+async fn message_start<T>(
+    session: &mut async_imap::Session<T>,
+    uid: u32,
+    cap: u32,
+) -> Result<(Option<MessageBodyResult>, u64), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    use futures::TryStreamExt;
+
+    let fetched: Vec<async_imap::types::Fetch> = exchange(BODY_FETCH_TIMEOUT, "Partial raw fetch", async {
+        session.uid_fetch(uid.to_string(), format!("(UID BODY.PEEK[]<0.{cap}>)")).await?.try_collect().await
+    })
+    .await?;
+    let Some(raw) = fetched.iter().find_map(|f| f.body()) else { return Ok((None, 0)) };
+    let truncated = raw.len() >= cap as usize;
+    let (body_text, body_html) = whole_message_text(if truncated { whole_lines(raw) } else { raw });
+    let result = MessageBodyResult { provider_uid: ProviderUid::new(uid), body_text, body_html, truncated };
+    Ok((Some(result), raw.len() as u64))
+}
+
+/// `fetch` over `uids`; a set that fails is split in halves until the
+/// message failing it is alone, which gets `fallback`. One message the server
+/// or the parser chokes on costs a few retries, not one per message of its
+/// set. Both return an outer error for a connection that couldn't be had,
+/// which fails the lot, and an inner one for the fetch itself.
+async fn isolating<'a, F, FF, G, GF>(
+    uids: &'a [u32],
+    mut fetch: F,
+    mut fallback: G,
+) -> Result<Vec<MessageBodyResult>, DomainError>
+where
+    F: FnMut(&'a [u32]) -> FF,
+    FF: std::future::Future<Output = Result<Result<Vec<MessageBodyResult>, DomainError>, DomainError>>,
+    G: FnMut(u32) -> GF,
+    GF: std::future::Future<Output = Result<Result<Option<MessageBodyResult>, DomainError>, DomainError>>,
+{
+    let mut results = Vec::with_capacity(uids.len());
+    let mut todo = vec![uids];
+    while let Some(set) = todo.pop() {
+        let error = match fetch(set).await? {
+            Ok(found) => {
+                results.extend(found);
+                continue;
+            }
+            // A silent server stays silent: no retry round on it.
+            Err(e @ DomainError::ConnectionTimeout(_)) => return Err(e),
+            Err(e) => e,
+        };
+        let [uid] = set else {
+            debug!(uids = set.len(), error = %error, "body fetch failed, splitting the set");
+            let (head, tail) = set.split_at(set.len() / 2);
+            todo.extend([tail, head]);
+            continue;
+        };
+        warn!(uid, error = %error, "body fetch failed for one message, fetching the start of it");
+        match fallback(*uid).await? {
+            Ok(found) => results.extend(found),
+            Err(e @ DomainError::ConnectionTimeout(_)) => return Err(e),
+            // Left out: the backfill retries it a few times, then gives up.
+            Err(e) => warn!(uid, error = %e, "message text unavailable"),
+        }
+    }
+    Ok(results)
+}
+
 /// APPEND's limit: a slow uplink must still get a big attachment through.
 fn append_timeout(bytes: usize) -> Duration {
     COMMAND_TIMEOUT + Duration::from_secs(bytes as u64 / UPLOAD_FLOOR_BYTES_PER_SEC)
@@ -1734,6 +1841,8 @@ struct TextPart {
     /// IMAP part number, `[1, 2]` = `BODY[1.2]`.
     section: Vec<u32>,
     html: bool,
+    /// Its size on the server, encoded.
+    octets: u32,
     /// MIME headers rebuilt from BODYSTRUCTURE, so mailparse can undo the
     /// transfer encoding and charset.
     headers: String,
@@ -1791,6 +1900,7 @@ fn text_parts(structure: &BodyStructure) -> Vec<TextPart> {
                     // A single-part message's body is part 1 (RFC 3501 §6.4.5).
                     section: if path.is_empty() { vec![1] } else { path.clone() },
                     html,
+                    octets: other.octets,
                     headers: format!(
                         "Content-Type: text/{}; charset=\"{charset}\"\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n",
                         common.ty.subtype
@@ -2013,6 +2123,130 @@ mod tests {
             uid_commands(&commands),
             ["UID SEARCH ALL", "UID FETCH 1:5000 (FLAGS)", "UID FETCH 5001:5002 (FLAGS)"]
         );
+    }
+
+    /// The UIDs of a `UID FETCH <set> ...` command.
+    fn fetched_uids(command: &str) -> Vec<u32> {
+        let set = command.split(' ').nth(2).unwrap();
+        set.split(',')
+            .flat_map(|range| match range.split_once(':') {
+                Some((a, b)) => (a.parse().unwrap()..=b.parse().unwrap()).collect::<Vec<u32>>(),
+                None => vec![range.parse().unwrap()],
+            })
+            .collect()
+    }
+
+    fn leaked(reply: String) -> &'static str {
+        Box::leak(reply.into_boxed_str())
+    }
+
+    /// One plain-text part of `octets` bytes per UID, except UID 3, whose
+    /// structure the parser rejects. Bodies are `body-<uid>`.
+    fn backfill_server(command: &str) -> &'static str {
+        let uids = || fetched_uids(command);
+        let mut reply = String::new();
+        if command.ends_with("(UID BODYSTRUCTURE)") {
+            for uid in uids() {
+                reply += &if uid == 3 {
+                    "* 3 FETCH (UID 3 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"utf-8\") NIL NIL \"7BIT\" x))\r\n".to_owned()
+                } else {
+                    format!("* {uid} FETCH (UID {uid} BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"utf-8\") NIL NIL \"7BIT\" 900000 1 NIL NIL NIL))\r\n")
+                };
+            }
+        } else if command.contains("BODY.PEEK[1]") {
+            for uid in uids() {
+                let body = format!("body-{uid}\r\ncut");
+                reply += &format!("* {uid} FETCH (UID {uid} BODY[1]<0> {{{}}}\r\n{body})\r\n", body.len());
+            }
+        } else if command.contains("BODY.PEEK[]") {
+            let raw = "Subject: odd\r\nContent-Type: text/plain\r\n\r\nhello\r\n";
+            reply += &format!("* 3 FETCH (UID 3 BODY[]<0> {{{}}}\r\n{raw})\r\n", raw.len());
+        }
+        leaked(reply + "$T OK Done\r\n")
+    }
+
+    #[tokio::test]
+    async fn text_parts_are_fetched_up_to_the_cap_and_marked_truncated() {
+        let (mut session, commands) = scripted(backfill_server).await;
+
+        let (found, bytes) = text_bodies(&mut session, &[7], Some(TEXT_PART_CAP)).await.unwrap();
+
+        assert_eq!(
+            uid_commands(&commands),
+            ["UID FETCH 7 (UID BODYSTRUCTURE)", "UID FETCH 7 (UID BODY.PEEK[1]<0.262144>)"]
+        );
+        assert!(found[0].truncated, "a 900 kB part past the cap");
+        // Up to its last whole line: the rest is fetched when it is opened.
+        assert_eq!(found[0].body_text.as_deref(), Some("body-7\r\n"));
+        assert_eq!(bytes, 1024 + 11);
+    }
+
+    #[tokio::test]
+    async fn without_a_cap_the_whole_part_is_fetched() {
+        let (mut session, commands) = scripted(backfill_server).await;
+
+        let (found, _) = text_bodies(&mut session, &[7], None).await.unwrap();
+
+        assert_eq!(uid_commands(&commands)[1], "UID FETCH 7 (UID BODY.PEEK[1])");
+        assert!(!found[0].truncated);
+    }
+
+    #[tokio::test]
+    async fn a_message_with_only_attachments_gets_an_empty_body() {
+        let (mut session, commands) = scripted(|command| {
+            if command.ends_with("(UID BODYSTRUCTURE)") {
+                "* 1 FETCH (UID 9 BODYSTRUCTURE ((\"APPLICATION\" \"PDF\" (\"NAME\" \"big.pdf\") NIL NIL \"BASE64\" 9000000 NIL (\"ATTACHMENT\" (\"FILENAME\" \"big.pdf\")) NIL) \"MIXED\" (\"BOUNDARY\" \"b1\") NIL NIL))\r\n$T OK Done\r\n"
+            } else {
+                "$T OK Done\r\n"
+            }
+        })
+        .await;
+
+        let (found, _) = text_bodies(&mut session, &[9], Some(TEXT_PART_CAP)).await.unwrap();
+
+        // A result all the same, so the message is stored empty and dequeued.
+        assert_eq!(found.len(), 1);
+        assert!(found[0].body_text.is_none() && found[0].body_html.is_none());
+        assert_eq!(uid_commands(&commands).len(), 1, "nothing to download");
+    }
+
+    #[tokio::test]
+    async fn one_unreadable_structure_costs_only_its_own_message() {
+        let sessions = Arc::new(Mutex::new(Vec::new()));
+        let connect = || {
+            let sessions = Arc::clone(&sessions);
+            async move {
+                let (session, commands) = scripted(backfill_server).await;
+                sessions.lock().unwrap().push(commands);
+                session
+            }
+        };
+
+        let found = isolating(
+            &[1, 2, 3, 4, 5],
+            |set| {
+                let session = connect();
+                async move { Ok(text_bodies(&mut session.await, set, Some(TEXT_PART_CAP)).await.map(|(r, _)| r)) }
+            },
+            |uid| {
+                let session = connect();
+                async move { Ok(message_start(&mut session.await, uid, TEXT_PART_CAP).await.map(|(r, _)| r)) }
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut texts: Vec<_> = found.iter().map(|r| (r.provider_uid.value(), r.body_text.clone().unwrap())).collect();
+        texts.sort();
+        assert_eq!(texts[2], (3, "hello\r\n".to_owned()));
+        assert_eq!(texts.iter().filter(|(_, t)| t.starts_with("body-")).count(), 4);
+
+        let commands: Vec<String> = sessions.lock().unwrap().iter().flat_map(|c| uid_commands(c)).collect();
+        let raw: Vec<&String> = commands.iter().filter(|c| c.contains("BODY.PEEK[]")).collect();
+        // Only the bad one goes raw, and never past the cap.
+        assert_eq!(raw, ["UID FETCH 3 (UID BODY.PEEK[]<0.262144>)"]);
+        // Halving, not one retry per message: 1:5, 1:2, 3:5, 3, 4:5.
+        assert_eq!(commands.iter().filter(|c| c.ends_with("(UID BODYSTRUCTURE)")).count(), 5, "{commands:#?}");
     }
 
     #[test]

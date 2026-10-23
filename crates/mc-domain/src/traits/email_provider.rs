@@ -51,6 +51,8 @@ pub trait EmailProvider: Send + Sync {
     ) -> Result<Message, DomainError>;
 
     /// Fetch bodies for multiple messages in bulk (single IMAP connection, batched UID FETCH).
+    /// Text only, each part cut at a size cap (see `MessageBodyResult::truncated`):
+    /// this feeds the background backfill, which must never pull attachments.
     /// Returns one result per UID; errors on individual messages are returned inline.
     async fn fetch_bodies_bulk(
         &self,
@@ -224,6 +226,8 @@ pub struct MessageBodyResult {
     pub provider_uid: ProviderUid,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
+    /// Only the start of a long text part was downloaded.
+    pub truncated: bool,
 }
 
 /// Mailbox metadata for sync comparison.

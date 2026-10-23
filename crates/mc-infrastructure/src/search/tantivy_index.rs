@@ -402,6 +402,7 @@ mod tests {
             },
             body_text: Some(body.to_string()),
             body_html: None,
+            body_truncated: false,
             flags: vec![],
             size_bytes: 1024,
             has_attachments: false,

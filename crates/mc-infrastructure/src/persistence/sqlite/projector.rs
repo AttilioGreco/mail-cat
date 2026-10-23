@@ -251,7 +251,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 },
             )?;
             if inserted {
-                store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), *sent_at)?;
+                store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), false, *sent_at)?;
                 refresh_conversation(tx, account_id.as_uuid(), thread_id.value())?;
             }
             note_sent_once(tx, account_id, message_id, message_rfc_id.as_deref(), envelope, *sent_at)?;
@@ -278,7 +278,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     body_state: "stored",
                 },
             )?;
-            store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), event.occurred_at)?;
+            store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), false, event.occurred_at)?;
         }
         DomainEvent::DraftDiscarded { message_id } => {
             exec(tx, "DELETE FROM messages WHERE id = ?1", [message_id.as_uuid()])?;

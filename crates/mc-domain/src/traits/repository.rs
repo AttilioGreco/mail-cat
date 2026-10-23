@@ -236,6 +236,7 @@ pub trait MessageBodyStore: Send + Sync {
         message_id: &MessageId,
         body_text: Option<String>,
         body_html: Option<String>,
+        truncated: bool,
     ) -> Result<(), DomainError>;
 }
 

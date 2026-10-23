@@ -120,7 +120,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
         // Body before the event, as in SyncService::store_body.
         self.message_read_repo
-            .put_body(&message_id, detail.body_text.clone(), detail.body_html.clone())
+            .put_body(&message_id, detail.body_text.clone(), detail.body_html.clone(), false)
             .await?;
 
         self.append_and_publish(&message_id, AggregateType::Message, seq, event)
@@ -852,7 +852,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let fetched = message.set_body(outgoing.body_text.clone(), outgoing.body_html.clone(), attachments);
         // Body before the event, as in SyncService::store_body.
         self.message_read_repo
-            .put_body(&id, outgoing.body_text.clone(), outgoing.body_html.clone())
+            .put_body(&id, outgoing.body_text.clone(), outgoing.body_html.clone(), false)
             .await?;
         self.append_and_publish(&id, AggregateType::Message, 1, fetched).await?;
         Ok(id)
@@ -1515,6 +1515,7 @@ mod tests {
             message_id: &MessageId,
             body_text: Option<String>,
             body_html: Option<String>,
+            _truncated: bool,
         ) -> Result<(), DomainError> {
             self.stored_bodies.lock().unwrap().push((*message_id, body_text, body_html));
             Ok(())

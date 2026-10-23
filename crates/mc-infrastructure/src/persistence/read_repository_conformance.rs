@@ -619,7 +619,7 @@ macro_rules! read_repository_conformance {
             assert_eq!(page.items[0].from_email, "sender@example.com");
 
             // Project MessageBodyFetched.
-            repo.put_body(&message_id, Some("Hello plain".into()), Some("<p>Hello</p>".into()))
+            repo.put_body(&message_id, Some("Hello plain".into()), Some("<p>Hello</p>".into()), false)
                 .await
                 .unwrap();
             let env = make_event_envelope(
@@ -1048,7 +1048,7 @@ macro_rules! read_repository_conformance {
                 .await
                 .unwrap();
 
-            repo.put_body(&message_id, Some("plain".into()), Some("<p>html</p>".into()))
+            repo.put_body(&message_id, Some("plain".into()), Some("<p>html</p>".into()), false)
                 .await
                 .unwrap();
 
@@ -1063,7 +1063,7 @@ macro_rules! read_repository_conformance {
         #[tokio::test]
         async fn put_body_on_unknown_message_is_a_noop() {
             let (_guard, _es, repo) = $make;
-            repo.put_body(&MessageId::new(), Some("x".into()), None).await.unwrap();
+            repo.put_body(&MessageId::new(), Some("x".into()), None, false).await.unwrap();
         }
 
         #[tokio::test]
@@ -1075,7 +1075,7 @@ macro_rules! read_repository_conformance {
                 .await
                 .unwrap();
 
-            repo.put_body(&message_id, Some("plain".into()), None).await.unwrap();
+            repo.put_body(&message_id, Some("plain".into()), None, false).await.unwrap();
 
             // Only the appended MessageBodyFetched marks the body done; if that
             // append failed, the message must still be fetched again.
@@ -1090,7 +1090,7 @@ macro_rules! read_repository_conformance {
             repo.project(&received_event(account_id, message_id, chrono::Utc::now()))
                 .await
                 .unwrap();
-            repo.put_body(&message_id, Some("plain".into()), None).await.unwrap();
+            repo.put_body(&message_id, Some("plain".into()), None, false).await.unwrap();
 
             let fetched = make_event_envelope(
                 2,
@@ -1132,7 +1132,7 @@ macro_rules! read_repository_conformance {
             let message_id = MessageId::new();
             let received = received_event(account_id, message_id, chrono::Utc::now());
             repo.project(&received).await.unwrap();
-            repo.put_body(&message_id, Some("plain".into()), None).await.unwrap();
+            repo.put_body(&message_id, Some("plain".into()), None, false).await.unwrap();
             repo.project(&body_fetched(message_id)).await.unwrap();
 
             // Boot catch-up replays everything since the last saved checkpoint.
@@ -1741,7 +1741,7 @@ macro_rules! read_repository_conformance {
             for event in &log {
                 repo.project(event).await.unwrap();
             }
-            repo.put_body(&root, Some("hello".into()), None).await.unwrap();
+            repo.put_body(&root, Some("hello".into()), None, false).await.unwrap();
             // Server counts are transient: they reach the read model only through project().
             project_all(
                 &repo,
@@ -1848,7 +1848,7 @@ macro_rules! read_repository_conformance {
             for event in &log {
                 repo.project(event).await.unwrap();
             }
-            repo.put_body(&root, Some("hello".into()), None).await.unwrap();
+            repo.put_body(&root, Some("hello".into()), None, false).await.unwrap();
             let mailboxes = [inbox, trash, archive, labels];
             let state = || async {
                 let mut out = snapshot(&repo, &account, &mailboxes).await;

@@ -362,6 +362,7 @@ mod tests {
             attachments: vec![],
             body_text: None,
             body_html: None,
+            body_truncated: false,
             received_at: now,
             internal_date: now,
         }

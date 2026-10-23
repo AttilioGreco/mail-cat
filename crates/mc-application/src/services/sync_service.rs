@@ -538,6 +538,7 @@ impl<
             message_id,
             fetched.body_text.clone(),
             fetched.body_html.clone(),
+            false,
             fetched.attachments.clone(),
         )
         .await?;
@@ -595,6 +596,7 @@ impl<
                 &entry.message_id,
                 result.body_text.clone(),
                 result.body_html.clone(),
+                result.truncated,
                 vec![],
             )
             .await?;
@@ -1029,7 +1031,7 @@ impl<
                     for body in bodies {
                         // Search indexing is owned by the search-index projection.
                         if let Some(message_id) = uid_to_msg.get(&body.provider_uid)
-                            && let Err(e) = self.store_body(message_id, body.body_text, body.body_html, vec![]).await
+                            && let Err(e) = self.store_body(message_id, body.body_text, body.body_html, body.truncated, vec![]).await
                         {
                             warn!(%message_id, error = %e, "Failed to project body");
                         }
@@ -1346,10 +1348,11 @@ impl<
         message_id: &MessageId,
         body_text: Option<String>,
         body_html: Option<String>,
+        truncated: bool,
         attachments: Vec<Attachment>,
     ) -> Result<(), ApplicationError> {
         self.projector
-            .put_body(message_id, body_text, body_html)
+            .put_body(message_id, body_text, body_html, truncated)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("Failed to store body: {e}")))?;
         let event = DomainEvent::MessageBodyFetched { message_id: *message_id, attachments };
@@ -1913,6 +1916,7 @@ mod tests {
                     provider_uid: ProviderUid::new(uid),
                     body_text: Some(format!("body-{uid}")),
                     body_html: None,
+                    truncated: false,
                 })
                 .collect())
         }
@@ -2280,6 +2284,7 @@ mod tests {
             message_id: &MessageId,
             body_text: Option<String>,
             body_html: Option<String>,
+            _truncated: bool,
         ) -> Result<(), DomainError> {
             self.bodies.lock().unwrap().insert(*message_id, (body_text, body_html));
             Ok(())

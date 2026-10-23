@@ -552,6 +552,7 @@ mod tests {
             attachments: vec![],
             body_text: Some("the quarterly numbers".into()),
             body_html: None,
+            body_truncated: false,
             received_at: date,
             internal_date: date,
         };

@@ -46,6 +46,10 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
+    /// The stored body is only the start of a long text part (the backfill
+    /// caps what it downloads); opening the message fetches the rest.
+    #[serde(default)]
+    pub body_truncated: bool,
     pub received_at: DateTime<Utc>,
     pub internal_date: DateTime<Utc>,
 }
@@ -99,6 +103,7 @@ impl Message {
             attachments: Vec::new(),
             body_text: None,
             body_html: None,
+            body_truncated: false,
             received_at,
             internal_date: received_at,
         };
@@ -307,6 +312,7 @@ impl Message {
             attachments: Vec::new(),
             body_text: None,
             body_html: None,
+            body_truncated: false,
             received_at: *received_at,
             internal_date: *received_at,
         };

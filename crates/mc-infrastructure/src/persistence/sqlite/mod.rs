@@ -165,6 +165,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // password rejected), so a restart keeps the reason.
     "ALTER TABLE accounts ADD COLUMN status_error TEXT;
     ALTER TABLE accounts ADD COLUMN status_since INTEGER;",
+    // 7: a body the backfill cut at its size cap; opening the message fetches
+    // the rest. Bodies stored before are whole.
+    "ALTER TABLE message_bodies ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

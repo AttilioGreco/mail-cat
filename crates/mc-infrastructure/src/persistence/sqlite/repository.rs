@@ -192,15 +192,16 @@ pub(super) fn store_body(
     id: &MessageId,
     text: Option<&str>,
     html: Option<&str>,
+    truncated: bool,
     fetched_at: DateTime<Utc>,
 ) -> Result<(), DomainError> {
     exec(
         conn,
-        "INSERT INTO message_bodies (message_id, text_zstd, html_zstd, fetched_at) \
-         SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?1) \
+        "INSERT INTO message_bodies (message_id, text_zstd, html_zstd, truncated, fetched_at) \
+         SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?1) \
          ON CONFLICT(message_id) DO UPDATE SET text_zstd = excluded.text_zstd, \
-             html_zstd = excluded.html_zstd, fetched_at = excluded.fetched_at",
-        params![id.as_uuid(), compress(text)?, compress(html)?, nanos(fetched_at)],
+             html_zstd = excluded.html_zstd, truncated = excluded.truncated, fetched_at = excluded.fetched_at",
+        params![id.as_uuid(), compress(text)?, compress(html)?, truncated, nanos(fetched_at)],
     )
     .map(drop)
 }
@@ -231,7 +232,7 @@ fn select_messages(rest: &str) -> String {
 
 fn select_messages_with_body(rest: &str) -> String {
     format!(
-        "SELECT {MESSAGE_COLUMNS}, b.text_zstd, b.html_zstd FROM messages m \
+        "SELECT {MESSAGE_COLUMNS}, b.text_zstd, b.html_zstd, b.truncated FROM messages m \
          LEFT JOIN message_bodies b ON b.message_id = m.id {rest}"
     )
 }
@@ -263,6 +264,7 @@ fn message_from_row(row: &Row) -> rusqlite::Result<Message> {
         attachments: json_col(row, 12)?,
         body_text: None,
         body_html: None,
+        body_truncated: false,
         received_at: time_col(row, 14)?,
         internal_date: time_col(row, 15)?,
     })
@@ -272,6 +274,7 @@ fn message_with_body(row: &Row) -> rusqlite::Result<Message> {
     let mut message = message_from_row(row)?;
     message.body_text = body_col(row, 16)?;
     message.body_html = body_col(row, 17)?;
+    message.body_truncated = row.get::<_, Option<bool>>(18)?.unwrap_or_default();
     Ok(message)
 }
 
@@ -539,11 +542,12 @@ impl MessageBodyStore for SqliteRepository {
         message_id: &MessageId,
         body_text: Option<String>,
         body_html: Option<String>,
+        truncated: bool,
     ) -> Result<(), DomainError> {
         let id = *message_id;
         self.db
             .write(move |conn| {
-                store_body(conn, &id, body_text.as_deref(), body_html.as_deref(), Utc::now())
+                store_body(conn, &id, body_text.as_deref(), body_html.as_deref(), truncated, Utc::now())
             })
             .await
     }
@@ -1224,7 +1228,7 @@ mod tests {
         repo.project(&at_position(1, event)).await.unwrap();
         let text = "the same line again\n".repeat(1000);
 
-        repo.put_body(&id, Some(text.clone()), None).await.unwrap();
+        repo.put_body(&id, Some(text.clone()), None, false).await.unwrap();
 
         let stored: i64 = repo
             .db
@@ -1291,7 +1295,7 @@ mod tests {
         let (_dir, repo) = open();
         let (id, event) = received(AccountId::new(), MailboxId::new(), "<a@x>");
         repo.project(&at_position(1, event)).await.unwrap();
-        repo.put_body(&id, Some("x".into()), None).await.unwrap();
+        repo.put_body(&id, Some("x".into()), None, false).await.unwrap();
 
         let deleted = DomainEvent::MessageDeleted {
             message_id: id,
@@ -1451,6 +1455,7 @@ mod tests {
             .write(|c| c.execute_batch(
                 "DROP TABLE address_usage; DROP TABLE sent_counted; DROP TABLE downloads; \
                  ALTER TABLE accounts DROP COLUMN status_error; ALTER TABLE accounts DROP COLUMN status_since; \
+                 ALTER TABLE message_bodies DROP COLUMN truncated; \
                  PRAGMA user_version = 2;",
             ).map_err(repo_err))
             .await
