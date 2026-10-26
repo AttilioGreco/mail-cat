@@ -37,12 +37,11 @@ impl ProviderPreset {
     }
 
     pub fn client_secret(&self) -> Option<String> {
-        if let Some(env) = self.client_secret_env {
-            if let Ok(v) = std::env::var(env) {
-                if !v.is_empty() {
-                    return Some(v);
-                }
-            }
+        if let Some(env) = self.client_secret_env
+            && let Ok(v) = std::env::var(env)
+            && !v.is_empty()
+        {
+            return Some(v);
         }
         self.client_secret_baked.map(String::from)
     }
