@@ -18,7 +18,7 @@ use mc_domain::{
     AccountWriteRepository, Address, AggregateType, BackfillEntry, BodyBackfillQueue, Contact,
     ContactId, ContactReadRepository, ContactSummary, ContactWriteRepository, Conversation,
     ConversationReadRepository, ConversationSummary, DomainError, DomainEvent, EmailAddress,
-    Envelope, EventEnvelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Membership, Message,
+    Envelope, EventEnvelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, MailboxType, Membership, Message,
     MessageBodyStore, MessageId, MessageReadRepository, MessageSummary, ProjectionCheckpoint,
     ReadModelProjector,
     ProviderUid, SuggestScope, Suggestion, ThreadId,
@@ -26,7 +26,7 @@ use mc_domain::{
 use mc_shared::pagination::{PagedResult, Pagination};
 
 use super::event_store::SqliteEventStore;
-use super::projector::refresh_conversation;
+use super::threading::{COUNTED, refresh_conversation};
 use super::{SqliteDb, repo_err};
 
 /// Spec §3.
@@ -417,7 +417,7 @@ const SELECT_CONVERSATION: &str = "SELECT thread_id, account_id, subject, messag
 
 fn conversation_from_row(row: &Row) -> rusqlite::Result<ConversationSummary> {
     Ok(ConversationSummary {
-        thread_id: ThreadId::new(row.get::<_, String>(0)?),
+        thread_id: ThreadId::from_uuid(row.get(0)?),
         account_id: AccountId::from_uuid(row.get(1)?),
         subject: row.get(2)?,
         message_count: row.get(3)?,
@@ -440,7 +440,7 @@ const MAILBOX_CONVERSATIONS: &str = "SELECT m.thread_id, m.account_id, m.subject
 fn mailbox_conversation_from_row(row: &Row) -> rusqlite::Result<ConversationSummary> {
     let subject: String = row.get(2)?;
     Ok(ConversationSummary {
-        thread_id: ThreadId::new(row.get::<_, String>(0)?),
+        thread_id: ThreadId::from_uuid(row.get(0)?),
         account_id: AccountId::from_uuid(row.get(1)?),
         subject: Conversation::normalize_subject(&subject),
         message_count: row.get(3)?,
@@ -894,18 +894,20 @@ impl MessageReadRepository for SqliteRepository {
                     conn,
                     "SELECT account_id, thread_id FROM messages WHERE id = ?1",
                     [id],
-                    |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, Option<String>>(1)?)),
+                    |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, Option<Uuid>>(1)?)),
                 )?
                 else {
                     return Ok(Vec::new());
                 };
                 match thread {
+                    // Trash and Junk stay out unless the caller opened one of them.
                     Some(thread) => query_all(
                         conn,
-                        &select_messages_with_body(
-                            "WHERE m.account_id = ?1 AND m.thread_id = ?2 ORDER BY m.received_at, m.id",
-                        ),
-                        params![account, thread],
+                        &select_messages_with_body(&format!(
+                            "WHERE m.account_id = ?1 AND m.thread_id = ?2 AND (m.id = ?5 OR {COUNTED}) \
+                             ORDER BY m.received_at, m.id"
+                        )),
+                        params![account, thread, json(&MailboxType::Trash)?, json(&MailboxType::Spam)?, id],
                         message_with_body,
                     ),
                     None => query_all(conn, &select_messages_with_body("WHERE m.id = ?1"), [id], message_with_body),
@@ -1072,7 +1074,7 @@ impl ConversationReadRepository for SqliteRepository {
         thread_id: &ThreadId,
         account_id: &AccountId,
     ) -> Result<Option<ConversationSummary>, DomainError> {
-        let (thread, account) = (thread_id.value().to_owned(), *account_id.as_uuid());
+        let (thread, account) = (*thread_id.as_uuid(), *account_id.as_uuid());
         self.db
             .read(move |conn| {
                 query_one(
@@ -1140,7 +1142,7 @@ impl ConversationReadRepository for SqliteRepository {
                     &tx,
                     "SELECT DISTINCT account_id, thread_id FROM messages WHERE thread_id IS NOT NULL",
                     [],
-                    |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, String>(1)?)),
+                    |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, Uuid>(1)?)),
                 )?;
                 for (account, thread) in &threads {
                     refresh_conversation(&tx, account, thread)?;

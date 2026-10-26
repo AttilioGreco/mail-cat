@@ -285,7 +285,7 @@ where
             .items
             .iter()
             .map(|c| crate::grpc::proto::ConversationSummary {
-                thread_id: c.thread_id.value().to_string(),
+                thread_id: c.thread_id.to_string(),
                 account_id: c.account_id.to_string(),
                 subject: c.subject.clone(),
                 message_count: c.message_count,

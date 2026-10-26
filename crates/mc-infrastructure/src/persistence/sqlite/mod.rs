@@ -9,6 +9,7 @@ use rusqlite::{Connection, OpenFlags};
 pub mod event_store;
 mod projector;
 pub mod repository;
+mod threading;
 
 /// Schema migrations, applied in order; `PRAGMA user_version` counts how many
 /// have run. Append only once the first release ships; until then the schema
@@ -58,7 +59,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         rfc_message_id  TEXT,
         in_reply_to     TEXT,
         refs            TEXT NOT NULL,
-        thread_id       TEXT,
+        thread_id       BLOB,
         subject         TEXT NOT NULL,
         from_name       TEXT,
         from_email      TEXT NOT NULL,
@@ -93,7 +94,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE TABLE conversations (
         account_id        BLOB NOT NULL,
-        thread_id         TEXT NOT NULL,
+        thread_id         BLOB NOT NULL,
         subject           TEXT NOT NULL,
         message_count     INTEGER NOT NULL,
         unread_count      INTEGER NOT NULL,
@@ -102,6 +103,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         sample_message_id BLOB NOT NULL,
         PRIMARY KEY (account_id, thread_id)
     );
+    -- Every Message-ID seen in a header (own, In-Reply-To, References) -> its
+    -- thread. No FK to messages: ids of messages we never downloaded link too.
+    CREATE TABLE thread_links (
+        account_id BLOB NOT NULL,
+        rfc_id     TEXT NOT NULL,
+        thread_id  BLOB NOT NULL,
+        PRIMARY KEY (account_id, rfc_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX thread_links_thread ON thread_links(account_id, thread_id);
     CREATE INDEX conversations_recent ON conversations(account_id, last_message_at DESC);
     CREATE TABLE contacts (
         id            BLOB PRIMARY KEY,

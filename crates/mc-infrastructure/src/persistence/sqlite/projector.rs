@@ -10,14 +10,15 @@ use rusqlite::{Connection, params};
 use uuid::Uuid;
 
 use mc_domain::{
-    AccountId, AccountStatus, ContactEmail, ContactId, Conversation, DomainError, DomainEvent,
+    AccountId, AccountStatus, ContactEmail, ContactId, DomainError, DomainEvent,
     Envelope, EventEnvelope, Flag, MailboxId, MailboxType, Membership, MessageId, ProviderUid, ReadModelProjector,
 };
 
 use super::repo_err;
+use super::threading::{assign_thread, refresh_conversation, threads_in_mailbox};
 use super::repository::{
     Addresses, SqliteRepository, exec, json, nanos, query_all, query_one, save_checkpoint_in,
-    sender_display, sql_int, store_body,
+    sql_int, store_body,
 };
 
 #[async_trait]
@@ -120,6 +121,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 "UPDATE mailboxes SET mailbox_type = ?2 WHERE id = ?1",
                 params![mailbox_id.as_uuid(), json(mailbox_type)?],
             )?;
+            refresh_threads(tx, &threads_in_mailbox(tx, mailbox_id.as_uuid())?)?;
         }
         DomainEvent::MailboxCountsUpdated { mailbox_id, total_messages, unread_messages } => {
             exec(
@@ -149,10 +151,12 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 [mailbox_id.as_uuid()],
                 |r| r.get::<_, Uuid>(0),
             )?;
+            let threads = threads_in_mailbox(tx, mailbox_id.as_uuid())?;
             for id in only_here {
                 delete_message(tx, &MessageId::from_uuid(id))?;
             }
             exec(tx, "DELETE FROM message_mailboxes WHERE mailbox_id = ?1", [mailbox_id.as_uuid()])?;
+            refresh_threads(tx, &threads)?;
             exec(tx, "DELETE FROM mailboxes WHERE id = ?1", [mailbox_id.as_uuid()])?;
         }
 
@@ -171,12 +175,8 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             received_at,
             ..
         } => {
-            let thread_id = Conversation::resolve_thread_id(
-                message_rfc_id.as_deref(),
-                in_reply_to.as_deref(),
-                references,
-                &message_id.to_string(),
-            );
+            let thread_id =
+                assign_thread(tx, account_id.as_uuid(), message_rfc_id.as_deref(), in_reply_to.as_deref(), references)?;
             let inserted = insert_message(
                 tx,
                 &NewMessage {
@@ -185,7 +185,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     rfc_message_id: message_rfc_id.as_deref(),
                     in_reply_to: in_reply_to.as_deref(),
                     references,
-                    thread_id: Some(thread_id.value()),
+                    thread_id: Some(thread_id),
                     envelope,
                     flags,
                     size_bytes: *size_bytes,
@@ -201,7 +201,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 if !flags.contains(&Flag::Seen) {
                     adjust_unread(tx, mailbox_id.as_uuid(), 1)?;
                 }
-                refresh_conversation(tx, account_id.as_uuid(), thread_id.value())?;
+                refresh_conversation(tx, account_id.as_uuid(), &thread_id)?;
                 note_synced_message(tx, account_id, mailbox_id, message_id, message_rfc_id.as_deref(), envelope, *received_at)?;
             }
         }
@@ -238,12 +238,8 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             body_html,
             sent_at,
         } => {
-            let thread_id = Conversation::resolve_thread_id(
-                message_rfc_id.as_deref(),
-                in_reply_to.as_deref(),
-                references,
-                &message_id.to_string(),
-            );
+            let thread_id =
+                assign_thread(tx, account_id.as_uuid(), message_rfc_id.as_deref(), in_reply_to.as_deref(), references)?;
             // The server copy can sync into Sent before this lands (Gmail files
             // it during SMTP): it already is the message, a placeholder would
             // only duplicate it.
@@ -256,7 +252,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     rfc_message_id: message_rfc_id.as_deref(),
                     in_reply_to: in_reply_to.as_deref(),
                     references,
-                    thread_id: Some(thread_id.value()),
+                    thread_id: Some(thread_id),
                     envelope,
                     flags: &[Flag::Seen],
                     size_bytes: 0,
@@ -268,7 +264,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             if inserted {
                 upsert_membership(tx, message_id, mailbox_id, None)?;
                 store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), false, *sent_at)?;
-                refresh_conversation(tx, account_id.as_uuid(), thread_id.value())?;
+                refresh_conversation(tx, account_id.as_uuid(), &thread_id)?;
             }
             note_sent_once(tx, account_id, message_id, message_rfc_id.as_deref(), envelope, *sent_at)?;
         }
@@ -368,7 +364,7 @@ struct NewMessage<'a> {
     rfc_message_id: Option<&'a str>,
     in_reply_to: Option<&'a str>,
     references: &'a [String],
-    thread_id: Option<&'a str>,
+    thread_id: Option<Uuid>,
     envelope: &'a Envelope,
     flags: &'a [Flag],
     size_bytes: u64,
@@ -566,7 +562,7 @@ fn flag_message(
         tx,
         "SELECT flags, account_id, thread_id FROM messages WHERE id = ?1",
         [id.as_uuid()],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Uuid>(1)?, r.get::<_, Option<String>>(2)?)),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Uuid>(1)?, r.get::<_, Option<Uuid>>(2)?)),
     )?
     else {
         return Ok(());
@@ -648,9 +644,26 @@ fn change_mailboxes(
     )?
     .is_none();
     if orphan {
-        delete_message(tx, id)?;
+        return delete_message(tx, id);
+    }
+    // Moving to or from Trash changes what counts.
+    if let Some((account, thread)) = thread_of(tx, id)? {
+        refresh_conversation(tx, &account, &thread)?;
     }
     Ok(())
+}
+
+fn thread_of(tx: &Connection, id: &MessageId) -> Result<Option<(Uuid, Uuid)>, DomainError> {
+    query_one(
+        tx,
+        "SELECT account_id, thread_id FROM messages WHERE id = ?1 AND thread_id IS NOT NULL",
+        [id.as_uuid()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
+fn refresh_threads(tx: &Connection, threads: &[(Uuid, Uuid)]) -> Result<(), DomainError> {
+    threads.iter().try_for_each(|(account, thread)| refresh_conversation(tx, account, thread))
 }
 
 fn delete_message(tx: &Connection, id: &MessageId) -> Result<(), DomainError> {
@@ -658,7 +671,7 @@ fn delete_message(tx: &Connection, id: &MessageId) -> Result<(), DomainError> {
         tx,
         "SELECT account_id, thread_id, seen FROM messages WHERE id = ?1",
         [id.as_uuid()],
-        |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, bool>(2)?)),
+        |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, Option<Uuid>>(1)?, r.get::<_, bool>(2)?)),
     )?
     else {
         return Ok(());
@@ -677,70 +690,6 @@ fn delete_message(tx: &Connection, id: &MessageId) -> Result<(), DomainError> {
         refresh_conversation(tx, &account_id, &thread_id)?;
     }
     Ok(())
-}
-
-/// Recomputes a thread's row from its messages, so it converges after any
-/// sequence of replays. Copies of one RFC message in several mailboxes
-/// (Gmail labels) count once.
-pub(super) fn refresh_conversation(
-    tx: &Connection,
-    account_id: &Uuid,
-    thread_id: &str,
-) -> Result<(), DomainError> {
-    let (count, unread): (u32, u32) = tx
-        .query_row(
-            "SELECT COUNT(DISTINCT COALESCE(rfc_message_id, hex(id))), \
-                    COUNT(DISTINCT CASE WHEN seen = 0 THEN COALESCE(rfc_message_id, hex(id)) END) \
-             FROM messages WHERE account_id = ?1 AND thread_id = ?2",
-            params![account_id, thread_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .map_err(repo_err)?;
-    if count == 0 {
-        exec(
-            tx,
-            "DELETE FROM conversations WHERE account_id = ?1 AND thread_id = ?2",
-            params![account_id, thread_id],
-        )?;
-        return Ok(());
-    }
-    let (sample, last_at, from_name, from_email): (Uuid, i64, Option<String>, String) = tx
-        .query_row(
-            "SELECT id, received_at, from_name, from_email FROM messages \
-             WHERE account_id = ?1 AND thread_id = ?2 ORDER BY received_at DESC, id DESC LIMIT 1",
-            params![account_id, thread_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .map_err(repo_err)?;
-    let subject: String = tx
-        .query_row(
-            "SELECT subject FROM messages WHERE account_id = ?1 AND thread_id = ?2 \
-             ORDER BY received_at, id LIMIT 1",
-            params![account_id, thread_id],
-            |r| r.get(0),
-        )
-        .map_err(repo_err)?;
-    exec(
-        tx,
-        "INSERT INTO conversations (account_id, thread_id, subject, message_count, unread_count, \
-             last_message_at, latest_sender, sample_message_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-         ON CONFLICT(account_id, thread_id) DO UPDATE SET subject = excluded.subject, \
-             message_count = excluded.message_count, unread_count = excluded.unread_count, \
-             last_message_at = excluded.last_message_at, latest_sender = excluded.latest_sender, \
-             sample_message_id = excluded.sample_message_id",
-        params![
-            account_id,
-            thread_id,
-            Conversation::normalize_subject(&subject),
-            count,
-            unread,
-            last_at,
-            sender_display(from_name, from_email),
-            sample
-        ],
-    )
-    .map(drop)
 }
 
 fn primary_email(emails: &[ContactEmail]) -> Result<&str, DomainError> {

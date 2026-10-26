@@ -11,7 +11,7 @@ macro_rules! read_repository_conformance {
             EventEnvelope, EventStore, Flag, Identity, IncomingServer, MailboxId, MailboxPath,
             MailboxReadRepository, MailboxType, Membership, MessageBodyStore, MessageId,
             MessageReadRepository, ProjectionCheckpoint, ProviderType, ProviderUid,
-            ReadModelProjector, SuggestScope, ThreadId,
+            ReadModelProjector, SuggestScope,
         };
         use mc_shared::pagination::Pagination;
 
@@ -1738,19 +1738,14 @@ macro_rules! read_repository_conformance {
                 .items
                 .iter()
                 .map(|c| {
-                    (
-                        c.thread_id.clone(),
-                        c.message_count,
-                        c.unread_count,
-                        c.sample_message_id,
-                    )
+                    (c.message_count, c.unread_count, c.sample_message_id)
                 })
                 .collect();
             assert_eq!(
                 stats,
                 [
-                    (ThreadId::new("<root@x>"), 2, 1, reply),
-                    (ThreadId::new("<solo@x>"), 1, 0, solo)
+                    (2, 1, reply),
+                    (1, 0, solo)
                 ]
             );
 
@@ -1763,19 +1758,14 @@ macro_rules! read_repository_conformance {
                 .items
                 .iter()
                 .map(|c| {
-                    (
-                        c.thread_id.clone(),
-                        c.message_count,
-                        c.unread_count,
-                        c.sample_message_id,
-                    )
+                    (c.message_count, c.unread_count, c.sample_message_id)
                 })
                 .collect();
             assert_eq!(
                 stats,
                 [
-                    (ThreadId::new("<solo@x>"), 1, 0, solo),
-                    (ThreadId::new("<root@x>"), 1, 1, root)
+                    (1, 0, solo),
+                    (1, 1, root)
                 ]
             );
             assert_eq!(in_inbox.items[1].last_message_at, at(0));
@@ -1799,12 +1789,15 @@ macro_rules! read_repository_conformance {
             let (_b, e_b) = received(account, all_mail, 9, Some("<same@x>"), &[], false, at(0));
             project_all(&repo, [e_a, e_b]).await;
 
-            let conv = repo
-                .get_conversation(&ThreadId::new("<same@x>"), &account)
+            let convs = repo
+                .list_conversations(&account, None, &first_page())
                 .await
-                .unwrap()
                 .unwrap();
-            assert_eq!((conv.message_count, conv.unread_count), (1, 1));
+            assert_eq!(convs.items.len(), 1);
+            assert_eq!(
+                (convs.items[0].message_count, convs.items[0].unread_count),
+                (1, 1)
+            );
         }
 
         #[tokio::test]
@@ -1829,7 +1822,12 @@ macro_rules! read_repository_conformance {
             for event in &log {
                 repo.project(event).await.unwrap();
             }
-            let thread = ThreadId::new("<root@x>");
+            let thread = repo
+                .list_conversations(&account, None, &first_page())
+                .await
+                .unwrap()
+                .items[0]
+                .thread_id;
             let before = repo
                 .get_conversation(&thread, &account)
                 .await

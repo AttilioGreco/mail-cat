@@ -238,12 +238,12 @@ async fn deleting_one_rfc_copy_keeps_the_conversation() {
     };
     repo.project(&at_position(3, deleted)).await.unwrap();
 
-    let conv = repo
-        .get_conversation(&ThreadId::new("<same@x>"), &account)
+    let convs = repo
+        .list_conversations(&account, None, &Pagination::new(1, 10))
         .await
-        .unwrap()
-        .expect("the other copy still holds the thread");
-    assert_eq!(conv.message_count, 1);
+        .unwrap();
+    assert_eq!(convs.items.len(), 1, "the other copy still holds the thread");
+    assert_eq!(convs.items[0].message_count, 1);
 }
 
 #[tokio::test]

@@ -6,7 +6,8 @@ use crate::value_objects::flag::Flag;
 use crate::value_objects::message_id::MessageId;
 use crate::value_objects::thread_id::ThreadId;
 
-/// A conversation groups one or more messages that share the same RFC thread.
+/// A conversation groups the messages of one connected component of the
+/// Message-ID graph (own id, In-Reply-To, References).
 ///
 /// This is a **read model** projected from `MessageReceived` (and flag-change)
 /// events. It is NOT an aggregate — its state is entirely derived from messages.
@@ -27,31 +28,6 @@ pub struct Conversation {
 }
 
 impl Conversation {
-    /// Determine the thread root ID from a message's RFC threading headers.
-    ///
-    /// Algorithm (RFC 5256 simplified):
-    /// 1. First entry in `references` is the oldest ancestor → root.
-    /// 2. Else `in_reply_to` → treat that message as the root.
-    /// 3. Else use `message_rfc_id` itself (this message IS the root).
-    /// 4. Fallback: use the internal message_id string as synthetic root.
-    pub fn resolve_thread_id(
-        message_rfc_id: Option<&str>,
-        in_reply_to: Option<&str>,
-        references: &[String],
-        fallback_id: &str,
-    ) -> ThreadId {
-        if let Some(root) = references.first() {
-            return ThreadId::new(root.clone());
-        }
-        if let Some(parent) = in_reply_to {
-            return ThreadId::new(parent);
-        }
-        if let Some(own_id) = message_rfc_id {
-            return ThreadId::new(own_id);
-        }
-        ThreadId::new(fallback_id)
-    }
-
     /// Normalise a subject line by stripping Re:/Fwd:/Fw: prefixes.
     pub fn normalize_subject(subject: &str) -> String {
         let mut s = subject.trim();
