@@ -1,20 +1,21 @@
 use super::datetime_to_timestamp;
 use crate::grpc::proto::{
     self, AccountDetail, AccountStatus as ProtoAccountStatus, AccountSummary, AppPasswordAuth,
-    AuthConfig as ProtoAuthConfig, ConnectionConfig as ProtoConnectionConfig, OAuth2Auth,
-    PlainAuth, ProviderType as ProtoProviderType,
+    AuthConfig as ProtoAuthConfig, ConnectionConfig as ProtoConnectionConfig, ImapServer,
+    IncomingServer as ProtoIncomingServer, JmapServer, OAuth2Auth, PlainAuth,
+    ProviderType as ProtoProviderType, SmtpServer,
 };
 use mc_domain::model::account::{
     Account, AccountStatus as DomainAccountStatus, AuthConfig as DomainAuthConfig,
-    ConnectionConfig as DomainConnectionConfig, ProviderType as DomainProviderType,
+    ConnectionConfig as DomainConnectionConfig, IncomingServer, ProviderType as DomainProviderType,
+    SmtpConnectionConfig, SmtpSecurity,
 };
 
 /// Convert domain ProviderType to proto ProviderType.
 pub fn domain_provider_type_to_proto(provider: &DomainProviderType) -> i32 {
     match provider {
         DomainProviderType::Imap => ProtoProviderType::Imap as i32,
-        DomainProviderType::GmailApi => ProtoProviderType::GmailApi as i32,
-        DomainProviderType::OutlookApi => ProtoProviderType::OutlookApi as i32,
+        DomainProviderType::Jmap => ProtoProviderType::Jmap as i32,
     }
 }
 
@@ -22,8 +23,7 @@ pub fn domain_provider_type_to_proto(provider: &DomainProviderType) -> i32 {
 pub fn proto_provider_type_to_domain(provider: i32) -> Result<DomainProviderType, String> {
     match ProtoProviderType::try_from(provider).ok() {
         Some(ProtoProviderType::Imap) => Ok(DomainProviderType::Imap),
-        Some(ProtoProviderType::GmailApi) => Ok(DomainProviderType::GmailApi),
-        Some(ProtoProviderType::OutlookApi) => Ok(DomainProviderType::OutlookApi),
+        Some(ProtoProviderType::Jmap) => Ok(DomainProviderType::Jmap),
         _ => Err(format!("Invalid provider type: {}", provider)),
     }
 }
@@ -46,7 +46,9 @@ pub fn proto_account_status_to_domain(status: i32) -> Result<DomainAccountStatus
         Some(ProtoAccountStatus::Disabled) => Ok(DomainAccountStatus::Disabled),
         Some(ProtoAccountStatus::Error) => Ok(DomainAccountStatus::Error),
         Some(ProtoAccountStatus::NeedsReauth) => Ok(DomainAccountStatus::NeedsReauth),
-        Some(ProtoAccountStatus::CredentialsRejected) => Ok(DomainAccountStatus::CredentialsRejected),
+        Some(ProtoAccountStatus::CredentialsRejected) => {
+            Ok(DomainAccountStatus::CredentialsRejected)
+        }
         _ => Err(format!("Invalid account status: {}", status)),
     }
 }
@@ -113,15 +115,48 @@ pub fn proto_auth_to_domain(auth: &ProtoAuthConfig) -> Result<DomainAuthConfig, 
     }
 }
 
+fn domain_incoming_to_proto(incoming: &IncomingServer) -> ProtoIncomingServer {
+    let kind = match incoming {
+        IncomingServer::Imap {
+            host,
+            port,
+            use_tls,
+        } => proto::incoming_server::Kind::Imap(ImapServer {
+            host: host.clone(),
+            port: u32::from(*port),
+            use_tls: *use_tls,
+        }),
+        IncomingServer::Jmap { session_url } => proto::incoming_server::Kind::Jmap(JmapServer {
+            session_url: session_url.clone(),
+        }),
+    };
+    ProtoIncomingServer { kind: Some(kind) }
+}
+
+fn proto_incoming_to_domain(incoming: &ProtoIncomingServer) -> Result<IncomingServer, String> {
+    match &incoming.kind {
+        Some(proto::incoming_server::Kind::Imap(imap)) => Ok(IncomingServer::Imap {
+            host: imap.host.clone(),
+            port: u16::try_from(imap.port)
+                .map_err(|_| format!("Invalid IMAP port: {}", imap.port))?,
+            use_tls: imap.use_tls,
+        }),
+        Some(proto::incoming_server::Kind::Jmap(jmap)) => Ok(IncomingServer::Jmap {
+            session_url: jmap.session_url.clone(),
+        }),
+        None => Err("Missing incoming server".to_string()),
+    }
+}
+
 /// Convert domain ConnectionConfig to proto ConnectionConfig.
 pub fn domain_connection_to_proto(config: &DomainConnectionConfig) -> ProtoConnectionConfig {
     ProtoConnectionConfig {
-        imap_host: config.imap_host.clone(),
-        imap_port: config.imap_port.map(|p| p as u32),
-        smtp_host: config.smtp_host.clone(),
-        smtp_port: config.smtp_port.map(|p| p as u32),
-        use_tls: config.use_tls,
+        incoming: Some(domain_incoming_to_proto(&config.incoming)),
         auth: Some(domain_auth_to_proto(&config.auth)),
+        smtp: config.smtp.as_ref().map(|smtp| SmtpServer {
+            host: smtp.host.clone(),
+            port: u32::from(smtp.port),
+        }),
     }
 }
 
@@ -129,19 +164,39 @@ pub fn domain_connection_to_proto(config: &DomainConnectionConfig) -> ProtoConne
 pub fn proto_connection_to_domain(
     config: &ProtoConnectionConfig,
 ) -> Result<DomainConnectionConfig, String> {
+    let incoming = config
+        .incoming
+        .as_ref()
+        .ok_or_else(|| "Missing incoming server".to_string())?;
     let auth = config
         .auth
         .as_ref()
         .ok_or_else(|| "Missing auth config".to_string())?;
+    let smtp = config
+        .smtp
+        .as_ref()
+        .map(|smtp| {
+            let port = u16::try_from(smtp.port)
+                .map_err(|_| format!("Invalid SMTP port: {}", smtp.port))?;
+            Ok::<_, String>(SmtpConnectionConfig {
+                host: smtp.host.clone(),
+                port,
+                // 465 is implicit TLS; everything else (587, 25) negotiates with STARTTLS.
+                security: if port == 465 {
+                    SmtpSecurity::Smtps
+                } else {
+                    SmtpSecurity::StartTls
+                },
+                username: None,
+                password: None,
+            })
+        })
+        .transpose()?;
 
     Ok(DomainConnectionConfig {
-        imap_host: config.imap_host.clone(),
-        imap_port: config.imap_port.map(|p| p as u16),
-        use_tls: config.use_tls,
+        incoming: proto_incoming_to_domain(incoming)?,
         auth: proto_auth_to_domain(auth)?,
-        smtp: None, // SMTP config is managed via server config file, not proto
-        smtp_host: config.smtp_host.clone(),
-        smtp_port: config.smtp_port.map(|p| p as u16),
+        smtp,
     })
 }
 
@@ -184,7 +239,9 @@ pub fn auth_status_to_proto(status: &mc_application::AuthStatus) -> proto::Accou
         next_retry: next_retry.as_ref().map(datetime_to_timestamp),
         oauth_provider: match status.oauth_provider {
             Some(mc_domain::OAuthProvider::Google) => proto::OAuthProvider::OauthProviderGoogle,
-            Some(mc_domain::OAuthProvider::Microsoft) => proto::OAuthProvider::OauthProviderMicrosoft,
+            Some(mc_domain::OAuthProvider::Microsoft) => {
+                proto::OAuthProvider::OauthProviderMicrosoft
+            }
             None => proto::OAuthProvider::OauthProviderUnspecified,
         } as i32,
         token_expires_at: status.token_expires_at.as_ref().map(datetime_to_timestamp),

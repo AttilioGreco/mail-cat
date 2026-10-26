@@ -94,19 +94,18 @@ message MessageDetail {
   string id = 1;
   string account_id = 2;
   string mailbox_id = 3;
-  optional uint32 provider_uid = 4;
-  optional string message_rfc_id = 5;
-  optional string in_reply_to = 6;
-  repeated string references = 7;
-  MessageEnvelope envelope = 8;
-  repeated Flag flags = 9;
-  uint64 size_bytes = 10;
-  repeated AttachmentInfo attachments = 11;
-  optional string body_text = 12;
-  optional string body_html = 13;
-  optional string raw_headers = 14;
-  Timestamp received_at = 15;
-  Timestamp internal_date = 16;
+  optional string message_rfc_id = 4;
+  optional string in_reply_to = 5;
+  repeated string references = 6;
+  MessageEnvelope envelope = 7;
+  repeated Flag flags = 8;
+  uint64 size_bytes = 9;
+  repeated AttachmentInfo attachments = 10;
+  optional string body_text = 11;
+  optional string body_html = 12;
+  optional string raw_headers = 13;
+  Timestamp received_at = 14;
+  Timestamp internal_date = 15;
 }
 
 // === Requests/Responses ===

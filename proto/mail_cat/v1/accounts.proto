@@ -57,8 +57,7 @@ service AccountService {
 enum ProviderType {
   PROVIDER_TYPE_UNSPECIFIED = 0;
   PROVIDER_TYPE_IMAP = 1;
-  PROVIDER_TYPE_GMAIL_API = 2;
-  PROVIDER_TYPE_OUTLOOK_API = 3;
+  PROVIDER_TYPE_JMAP = 2;
 }
 
 // Account status.
@@ -139,14 +138,35 @@ message AppPasswordAuth {
   string app_password = 2;
 }
 
-// Connection configuration for IMAP/SMTP.
+// Where an account's mail is fetched from.
+message IncomingServer {
+  oneof kind {
+    ImapServer imap = 1;
+    JmapServer jmap = 2;
+  }
+}
+
+message ImapServer {
+  string host = 1;
+  uint32 port = 2;
+  bool use_tls = 3;
+}
+
+message JmapServer {
+  string session_url = 1;
+}
+
+message SmtpServer {
+  string host = 1;
+  uint32 port = 2;
+}
+
+// Connection configuration of an account.
 message ConnectionConfig {
-  optional string imap_host = 1;
-  optional uint32 imap_port = 2;
-  optional string smtp_host = 3;
-  optional uint32 smtp_port = 4;
-  bool use_tls = 5;
-  AuthConfig auth = 6;
+  IncomingServer incoming = 1;
+  AuthConfig auth = 2;
+  // Unset: outbound sending is disabled.
+  optional SmtpServer smtp = 3;
 }
 
 // Account summary (list view).

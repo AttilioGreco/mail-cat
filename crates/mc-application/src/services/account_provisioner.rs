@@ -10,28 +10,27 @@
 //! [`SyncTrigger`](crate::services::sync_trigger::SyncTrigger).
 
 use async_trait::async_trait;
+use mc_domain::IncomingServer;
+use mc_domain::model::account::SmtpConnectionConfig;
 
 use crate::error::ApplicationError;
 
-/// Everything needed to declare a password-authenticated IMAP account.
+/// Everything needed to declare a password-authenticated account.
 #[derive(Debug, Clone)]
-pub struct ImapProvisionParams {
+pub struct ProvisionParams {
     pub name: String,
     pub email: String,
-    pub imap_host: String,
-    pub imap_port: u16,
-    pub use_tls: bool,
+    pub incoming: IncomingServer,
     pub username: String,
     pub password: String,
-    pub smtp_host: Option<String>,
-    pub smtp_port: Option<u16>,
+    pub smtp: Option<SmtpConnectionConfig>,
 }
 
 #[async_trait]
 pub trait AccountProvisioner: Send + Sync {
-    /// Record an IMAP account in the server's configuration, storing its
+    /// Record a password account in the server's configuration, storing its
     /// password in the keychain rather than on disk.
-    async fn provision_imap(&self, params: ImapProvisionParams) -> Result<(), ApplicationError>;
+    async fn provision(&self, params: ProvisionParams) -> Result<(), ApplicationError>;
 
     /// Drop an account from the server's configuration and forget its secrets.
     /// Without this a removed account comes back on the next restart.

@@ -4,10 +4,10 @@ use super::{
 };
 use crate::grpc::proto::{self, AttachmentInfo, MessageDetail, MessageEnvelope, MessageSummary};
 use mc_application::compose::{ComposeInput, ComposeMode, ComposeView};
-use mc_domain::{AccountId, MessageId, OutgoingAttachment};
 use mc_domain::model::attachment::Attachment as DomainAttachment;
 use mc_domain::model::message::{Envelope as DomainEnvelope, Message};
 use mc_domain::value_objects::flag::Flag as DomainFlag;
+use mc_domain::{AccountId, MessageId, OutgoingAttachment};
 
 /// Convert domain Envelope to proto MessageEnvelope.
 pub fn domain_envelope_to_proto(envelope: &DomainEnvelope) -> MessageEnvelope {
@@ -85,7 +85,6 @@ pub fn domain_message_to_detail(message: &Message) -> MessageDetail {
         id: message.id.to_string(),
         account_id: message.account_id.to_string(),
         mailbox_id: message.mailbox_id.to_string(),
-        provider_uid: message.provider_uid.map(|u| u.value()),
         message_rfc_id: message.message_rfc_id.clone(),
         in_reply_to: message.in_reply_to.clone(),
         references: message.references.clone(),
@@ -124,7 +123,8 @@ pub fn proto_compose_mode(mode: &str) -> Result<ComposeMode, String> {
 /// Convert a proto ComposeInput (send / save draft) to the application one.
 pub fn proto_compose_input_to_app(input: proto::ComposeInput) -> Result<ComposeInput, String> {
     let message_id = |field, id: Option<String>| -> Result<Option<MessageId>, String> {
-        id.map(|id| parse_uuid(field, &id).map(MessageId::from_uuid)).transpose()
+        id.map(|id| parse_uuid(field, &id).map(MessageId::from_uuid))
+            .transpose()
     };
     Ok(ComposeInput {
         draft_id: message_id("draft_id", input.draft_id)?,
@@ -185,7 +185,11 @@ pub fn compose_view_to_proto(view: ComposeView) -> proto::ComposeView {
             .inline_images
             .into_iter()
             .filter_map(|a| {
-                Some(proto::InlineImage { content_id: a.content_id?, mime_type: a.mime_type, data: a.data })
+                Some(proto::InlineImage {
+                    content_id: a.content_id?,
+                    mime_type: a.mime_type,
+                    data: a.data,
+                })
             })
             .collect(),
         mode: view.mode.as_str().to_owned(),

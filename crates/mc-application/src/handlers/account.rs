@@ -199,16 +199,16 @@ mod tests {
 
     fn test_config() -> ConnectionConfig {
         ConnectionConfig {
-            imap_host: Some("imap.example.com".into()),
-            imap_port: Some(993),
-            use_tls: true,
+            incoming: mc_domain::IncomingServer::Imap {
+                host: "imap.example.com".into(),
+                port: 993,
+                use_tls: true,
+            },
             auth: AuthConfig::Plain {
                 username: "user@example.com".into(),
                 password: "secret".into(),
             },
             smtp: None,
-            smtp_host: None,
-            smtp_port: None,
         }
     }
 

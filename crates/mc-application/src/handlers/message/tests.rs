@@ -836,23 +836,23 @@ async fn handle_nonexistent_message_returns_not_found() {
     assert!(matches!(err, ApplicationError::NotFound(..)));
 }
 
-fn test_account(email: &str, imap_host: &str) -> Account {
+fn test_account(email: &str, host: &str) -> Account {
     let email = EmailAddress::new(email).unwrap();
     Account::create(
         "Lavoro".into(),
         email.clone(),
         mc_domain::ProviderType::Imap,
         mc_domain::ConnectionConfig {
-            imap_host: Some(imap_host.into()),
-            imap_port: Some(993),
-            use_tls: true,
+            incoming: mc_domain::IncomingServer::Imap {
+                host: host.into(),
+                port: 993,
+                use_tls: true,
+            },
             auth: mc_domain::AuthConfig::Plain {
                 username: "u".into(),
                 password: String::new(),
             },
             smtp: None,
-            smtp_host: None,
-            smtp_port: None,
         },
         mc_domain::Identity {
             display_name: "Mario Rossi".into(),
@@ -923,8 +923,8 @@ struct Fixture {
     >,
 }
 
-fn fixture(imap_host: &str, seed: impl FnOnce(AccountId, MailboxId) -> Option<Message>) -> Fixture {
-    let account = test_account("mario@example.com", imap_host);
+fn fixture(host: &str, seed: impl FnOnce(AccountId, MailboxId) -> Option<Message>) -> Fixture {
+    let account = test_account("mario@example.com", host);
     let inbox = test_mailbox(account.id, "INBOX", MailboxType::Inbox);
     let seeded = seed(account.id, inbox.id);
     let sent_box = test_mailbox(account.id, "Sent", MailboxType::Sent);

@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mc_application::{AccountProvisioner, ApplicationError, ImapProvisionParams};
-use mc_domain::SecretStore;
+use mc_application::{AccountProvisioner, ApplicationError, ProvisionParams};
+use mc_domain::model::account::SmtpSecurity;
+use mc_domain::{IncomingServer, SecretStore};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 pub struct ConfigAccountProvisioner {
@@ -29,7 +30,10 @@ impl ConfigAccountProvisioner {
 
 #[async_trait]
 impl AccountProvisioner for ConfigAccountProvisioner {
-    async fn provision_imap(&self, params: ImapProvisionParams) -> Result<(), ApplicationError> {
+    async fn provision(&self, params: ProvisionParams) -> Result<(), ApplicationError> {
+        if !matches!(params.incoming, IncomingServer::Imap { .. }) {
+            return Err(ApplicationError::Internal("JMAP not supported yet".into()));
+        }
         // Keychain first: a crash between the two steps leaves an unused secret
         // (harmless), where the reverse order would leave an account that cannot
         // authenticate.
@@ -38,7 +42,7 @@ impl AccountProvisioner for ConfigAccountProvisioner {
             .load(&params.email)
             .map_err(|e| ApplicationError::Internal(format!("keychain read failed: {e}")))?
             .unwrap_or_default();
-        secrets.imap_password = Some(params.password.clone());
+        secrets.password = Some(params.password.clone());
         // Same credential for submission unless the user says otherwise — the
         // overwhelmingly common IMAP/SMTP setup.
         secrets.smtp_password = Some(params.password.clone());
@@ -46,7 +50,7 @@ impl AccountProvisioner for ConfigAccountProvisioner {
             .store(&params.email, &secrets)
             .map_err(|e| ApplicationError::Internal(format!("keychain write failed: {e}")))?;
 
-        append_imap_account(&self.config_path, &params)
+        append_account(&self.config_path, &params)
             .map_err(|e| ApplicationError::Internal(format!("config write failed: {e}")))
     }
 
@@ -65,8 +69,8 @@ impl AccountProvisioner for ConfigAccountProvisioner {
             .load(email)
             .map_err(|e| ApplicationError::Internal(format!("keychain read failed: {e}")))?
             .unwrap_or_default();
-        // Mirrors provision_imap: one credential for both IMAP and SMTP.
-        secrets.imap_password = Some(password.to_owned());
+        // Mirrors provision: one credential for both IMAP and SMTP.
+        secrets.password = Some(password.to_owned());
         secrets.smtp_password = Some(password.to_owned());
         self.secrets
             .store(email, &secrets)
@@ -75,8 +79,17 @@ impl AccountProvisioner for ConfigAccountProvisioner {
 }
 
 /// Append an `[[accounts]]` table for a password-authenticated IMAP account.
+/// Fails for any other incoming server: config.toml only describes IMAP.
 /// Format-preserving, and a no-op when the email is already declared.
-fn append_imap_account(config_path: &Path, params: &ImapProvisionParams) -> anyhow::Result<()> {
+fn append_account(config_path: &Path, params: &ProvisionParams) -> anyhow::Result<()> {
+    let IncomingServer::Imap {
+        host,
+        port,
+        use_tls,
+    } = &params.incoming
+    else {
+        anyhow::bail!("JMAP not supported yet");
+    };
     let mut doc = load_document(config_path)?;
 
     if doc.get("accounts").is_none() {
@@ -99,17 +112,19 @@ fn append_imap_account(config_path: &Path, params: &ImapProvisionParams) -> anyh
     table["name"] = value(&params.name);
     table["email"] = value(&params.email);
     table["provider_type"] = value("imap");
-    table["imap_host"] = value(&params.imap_host);
-    table["imap_port"] = value(params.imap_port as i64);
-    table["use_tls"] = value(params.use_tls);
+    table["imap_host"] = value(host);
+    table["imap_port"] = value(*port as i64);
+    table["use_tls"] = value(*use_tls);
     table["username"] = value(&params.username);
 
-    if let (Some(host), Some(port)) = (&params.smtp_host, params.smtp_port) {
+    if let Some(config) = &params.smtp {
         let mut smtp = Table::new();
-        smtp["host"] = value(host);
-        smtp["port"] = value(port as i64);
-        // 465 is implicit TLS; everything else (587, 25) negotiates with STARTTLS.
-        smtp["security"] = value(if port == 465 { "smtps" } else { "start_tls" });
+        smtp["host"] = value(&config.host);
+        smtp["port"] = value(config.port as i64);
+        smtp["security"] = value(match config.security {
+            SmtpSecurity::Smtps => "smtps",
+            SmtpSecurity::StartTls => "start_tls",
+        });
         table["smtp"] = Item::Table(smtp);
     }
 
@@ -151,18 +166,26 @@ fn load_document(config_path: &Path) -> anyhow::Result<DocumentMut> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mc_domain::model::account::SmtpConnectionConfig;
 
-    fn params(email: &str) -> ImapProvisionParams {
-        ImapProvisionParams {
+    fn params(email: &str) -> ProvisionParams {
+        ProvisionParams {
             name: "Work".into(),
             email: email.into(),
-            imap_host: "mail.example.com".into(),
-            imap_port: 993,
-            use_tls: true,
+            incoming: IncomingServer::Imap {
+                host: "mail.example.com".into(),
+                port: 993,
+                use_tls: true,
+            },
             username: email.into(),
             password: "hunter2".into(),
-            smtp_host: Some("mail.example.com".into()),
-            smtp_port: Some(587),
+            smtp: Some(SmtpConnectionConfig {
+                host: "mail.example.com".into(),
+                port: 587,
+                security: SmtpSecurity::StartTls,
+                username: None,
+                password: None,
+            }),
         }
     }
 
@@ -172,7 +195,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "grpc_addr = \"127.0.0.1:50051\"\n").unwrap();
 
-        append_imap_account(&path, &params("me@example.com")).unwrap();
+        append_account(&path, &params("me@example.com")).unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -192,8 +215,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        append_imap_account(&path, &params("me@example.com")).unwrap();
-        append_imap_account(&path, &params("me@example.com")).unwrap();
+        append_account(&path, &params("me@example.com")).unwrap();
+        append_account(&path, &params("me@example.com")).unwrap();
 
         let parsed: crate::config::ServerConfig =
             toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -204,8 +227,8 @@ mod tests {
     fn removal_drops_only_the_matching_account() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        append_imap_account(&path, &params("a@example.com")).unwrap();
-        append_imap_account(&path, &params("b@example.com")).unwrap();
+        append_account(&path, &params("a@example.com")).unwrap();
+        append_account(&path, &params("b@example.com")).unwrap();
 
         remove_account_table(&path, "a@example.com").unwrap();
 
@@ -219,7 +242,7 @@ mod tests {
     fn removing_an_unknown_email_is_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        append_imap_account(&path, &params("a@example.com")).unwrap();
+        append_account(&path, &params("a@example.com")).unwrap();
 
         remove_account_table(&path, "ghost@example.com").unwrap();
 

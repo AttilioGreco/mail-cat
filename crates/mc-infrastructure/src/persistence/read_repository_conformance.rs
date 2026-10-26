@@ -8,24 +8,25 @@ macro_rules! read_repository_conformance {
             AccountWriteRepository, Address, AggregateType, AuthConfig, BodyBackfillQueue,
             ConnectionConfig, ContactEmail, ContactEmailLabel, ContactId, ContactReadRepository,
             ContactSource, ConversationReadRepository, DomainEvent, EmailAddress, Envelope,
-            EventEnvelope, EventStore, Flag, Identity, MailboxId, MailboxPath,
+            EventEnvelope, EventStore, Flag, Identity, IncomingServer, MailboxId, MailboxPath,
             MailboxReadRepository, MailboxType, MessageBodyStore, MessageId, MessageReadRepository,
-            ProjectionCheckpoint, ProviderType, ProviderUid, ReadModelProjector, SuggestScope, ThreadId,
+            ProjectionCheckpoint, ProviderType, ProviderUid, ReadModelProjector, SuggestScope,
+            ThreadId,
         };
         use mc_shared::pagination::Pagination;
 
         fn test_config() -> ConnectionConfig {
             ConnectionConfig {
-                imap_host: Some("imap.example.com".into()),
-                imap_port: Some(993),
-                use_tls: true,
+                incoming: IncomingServer::Imap {
+                    host: "imap.example.com".into(),
+                    port: 993,
+                    use_tls: true,
+                },
                 auth: AuthConfig::Plain {
                     username: "user@example.com".into(),
                     password: "secret".into(),
                 },
                 smtp: None,
-                smtp_host: None,
-                smtp_port: None,
             }
         }
 
@@ -52,10 +53,15 @@ macro_rules! read_repository_conformance {
             let account_id = account.id;
 
             // Save through write repo.
-            AccountWriteRepository::save(&repo, &account, vec![event]).await.unwrap();
+            AccountWriteRepository::save(&repo, &account, vec![event])
+                .await
+                .unwrap();
 
             // Load through write repo (rehydrate from event store).
-            let loaded = AccountWriteRepository::load(&repo, &account_id).await.unwrap().unwrap();
+            let loaded = AccountWriteRepository::load(&repo, &account_id)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(loaded.name, "Work");
 
             // Read through read repo (projected summary).
@@ -79,7 +85,9 @@ macro_rules! read_repository_conformance {
                     test_config(),
                     test_identity(),
                 );
-                AccountWriteRepository::save(&repo, &account, vec![event]).await.unwrap();
+                AccountWriteRepository::save(&repo, &account, vec![event])
+                    .await
+                    .unwrap();
             }
 
             let accounts = AccountReadRepository::list_accounts(&repo).await.unwrap();
@@ -89,7 +97,9 @@ macro_rules! read_repository_conformance {
         #[tokio::test]
         async fn load_nonexistent_account_returns_none() {
             let (_guard, _es, repo) = $make;
-            let result = AccountWriteRepository::load(&repo, &AccountId::new()).await.unwrap();
+            let result = AccountWriteRepository::load(&repo, &AccountId::new())
+                .await
+                .unwrap();
             assert!(result.is_none());
         }
 
@@ -143,7 +153,10 @@ macro_rules! read_repository_conformance {
                 &newer.to_string(),
                 AggregateType::Message,
                 2,
-                DomainEvent::MessageBodyFetched { message_id: newer, attachments: vec![] },
+                DomainEvent::MessageBodyFetched {
+                    message_id: newer,
+                    attachments: vec![],
+                },
             ))
             .await
             .unwrap();
@@ -222,7 +235,10 @@ macro_rules! read_repository_conformance {
                 &stored.to_string(),
                 AggregateType::Message,
                 2,
-                DomainEvent::MessageBodyFetched { message_id: stored, attachments: vec![] },
+                DomainEvent::MessageBodyFetched {
+                    message_id: stored,
+                    attachments: vec![],
+                },
             ))
             .await
             .unwrap();
@@ -343,9 +359,7 @@ macro_rules! read_repository_conformance {
                 &account_id.to_string(),
                 AggregateType::Account,
                 3,
-                DomainEvent::AccountRemoved {
-                    account_id,
-                },
+                DomainEvent::AccountRemoved { account_id },
             );
             repo.project(&env).await.unwrap();
 
@@ -423,7 +437,10 @@ macro_rules! read_repository_conformance {
                 .unwrap()
                 .unwrap();
             assert_eq!(mailbox.mailbox_type, MailboxType::Archive);
-            assert_eq!(mailbox.total_messages, 42, "counts must survive reclassification");
+            assert_eq!(
+                mailbox.total_messages, 42,
+                "counts must survive reclassification"
+            );
 
             // Verify list_mailboxes by account works.
             let mailboxes = MailboxReadRepository::list_mailboxes(&repo, &account_id)
@@ -619,15 +636,23 @@ macro_rules! read_repository_conformance {
             assert_eq!(page.items[0].from_email, "sender@example.com");
 
             // Project MessageBodyFetched.
-            repo.put_body(&message_id, Some("Hello plain".into()), Some("<p>Hello</p>".into()), false)
-                .await
-                .unwrap();
+            repo.put_body(
+                &message_id,
+                Some("Hello plain".into()),
+                Some("<p>Hello</p>".into()),
+                false,
+            )
+            .await
+            .unwrap();
             let env = make_event_envelope(
                 2,
                 &message_id.to_string(),
                 AggregateType::Message,
                 2,
-                DomainEvent::MessageBodyFetched { message_id, attachments: vec![] },
+                DomainEvent::MessageBodyFetched {
+                    message_id,
+                    attachments: vec![],
+                },
             );
             repo.project(&env).await.unwrap();
 
@@ -738,22 +763,36 @@ macro_rules! read_repository_conformance {
             };
 
             // Two messages in the same thread (a reply to the root).
-            repo.project(&received(root_id, 1, "<a@x>", None)).await.unwrap();
-            repo.project(&received(reply_id, 2, "<b@x>", Some("<a@x>"))).await.unwrap();
+            repo.project(&received(root_id, 1, "<a@x>", None))
+                .await
+                .unwrap();
+            repo.project(&received(reply_id, 2, "<b@x>", Some("<a@x>")))
+                .await
+                .unwrap();
 
-            let page = Pagination { page: 1, page_size: 10 };
+            let page = Pagination {
+                page: 1,
+                page_size: 10,
+            };
 
             // One conversation, two messages, both unread.
-            let convs = mc_domain::traits::repository::ConversationReadRepository::list_conversations(
-                &repo, &account_id, None, &page,
-            )
-            .await
-            .unwrap();
+            let convs =
+                mc_domain::traits::repository::ConversationReadRepository::list_conversations(
+                    &repo,
+                    &account_id,
+                    None,
+                    &page,
+                )
+                .await
+                .unwrap();
             assert_eq!(convs.items.len(), 1);
             assert_eq!(convs.items[0].message_count, 2);
             assert_eq!(convs.items[0].unread_count, 2);
             assert_eq!(
-                MessageReadRepository::get_thread(&repo, &root_id).await.unwrap().len(),
+                MessageReadRepository::get_thread(&repo, &root_id)
+                    .await
+                    .unwrap()
+                    .len(),
                 2
             );
 
@@ -763,20 +802,34 @@ macro_rules! read_repository_conformance {
                 &reply_id.to_string(),
                 AggregateType::Message,
                 2,
-                DomainEvent::MessageDeleted { message_id: reply_id, mailbox_id, permanently: false },
+                DomainEvent::MessageDeleted {
+                    message_id: reply_id,
+                    mailbox_id,
+                    permanently: false,
+                },
             ))
             .await
             .unwrap();
 
-            let convs = mc_domain::traits::repository::ConversationReadRepository::list_conversations(
-                &repo, &account_id, None, &page,
-            )
-            .await
-            .unwrap();
-            assert_eq!(convs.items.len(), 1, "conversation still present with 1 message");
+            let convs =
+                mc_domain::traits::repository::ConversationReadRepository::list_conversations(
+                    &repo,
+                    &account_id,
+                    None,
+                    &page,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                convs.items.len(),
+                1,
+                "conversation still present with 1 message"
+            );
             assert_eq!(convs.items[0].message_count, 1);
             assert_eq!(convs.items[0].unread_count, 1);
-            let thread = MessageReadRepository::get_thread(&repo, &root_id).await.unwrap();
+            let thread = MessageReadRepository::get_thread(&repo, &root_id)
+                .await
+                .unwrap();
             assert_eq!(thread.len(), 1, "deleted reply no longer in thread");
             assert_eq!(thread[0].id, root_id);
 
@@ -786,19 +839,30 @@ macro_rules! read_repository_conformance {
                 &root_id.to_string(),
                 AggregateType::Message,
                 2,
-                DomainEvent::MessageDeleted { message_id: root_id, mailbox_id, permanently: false },
+                DomainEvent::MessageDeleted {
+                    message_id: root_id,
+                    mailbox_id,
+                    permanently: false,
+                },
             ))
             .await
             .unwrap();
 
-            let convs = mc_domain::traits::repository::ConversationReadRepository::list_conversations(
-                &repo, &account_id, None, &page,
-            )
-            .await
-            .unwrap();
+            let convs =
+                mc_domain::traits::repository::ConversationReadRepository::list_conversations(
+                    &repo,
+                    &account_id,
+                    None,
+                    &page,
+                )
+                .await
+                .unwrap();
             assert!(convs.items.is_empty(), "empty conversation removed");
             assert!(
-                MessageReadRepository::get_thread(&repo, &root_id).await.unwrap().is_empty(),
+                MessageReadRepository::get_thread(&repo, &root_id)
+                    .await
+                    .unwrap()
+                    .is_empty(),
                 "thread fully cleaned"
             );
         }
@@ -884,7 +948,10 @@ macro_rules! read_repository_conformance {
             assert_eq!(archive_msgs.total_count, 1);
             // The inbox UID means nothing in archive.
             assert_eq!(msg.provider_uid, None);
-            assert_eq!(repo.uidless_messages(&archive_id).await.unwrap(), [message_id]);
+            assert_eq!(
+                repo.uidless_messages(&archive_id).await.unwrap(),
+                [message_id]
+            );
 
             // The UID learned after the move lands on the same row.
             let env = make_event_envelope(
@@ -908,7 +975,12 @@ macro_rules! read_repository_conformance {
                 .await
                 .unwrap();
             assert_eq!(held, [ProviderUid::new(77)].into());
-            assert!(repo.held_uids(&inbox_id, &[ProviderUid::new(77)]).await.unwrap().is_empty());
+            assert!(
+                repo.held_uids(&inbox_id, &[ProviderUid::new(77)])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
 
         /// Regression test for the "reply shows no content / doesn't attach to
@@ -987,17 +1059,25 @@ macro_rules! read_repository_conformance {
             let sent_list = MessageReadRepository::list_messages(
                 &repo,
                 &sent_mailbox_id,
-                &Pagination { page: 1, page_size: 10 },
+                &Pagination {
+                    page: 1,
+                    page_size: 10,
+                },
             )
             .await
             .unwrap();
             assert_eq!(sent_list.total_count, 1);
             assert_eq!(sent_list.items[0].from_email, "sender@example.com");
-            assert_eq!(sent_list.items[0].to, vec!["recipient@example.com".to_string()]);
+            assert_eq!(
+                sent_list.items[0].to,
+                vec!["recipient@example.com".to_string()]
+            );
 
             // (3) Reply must thread with the root message, not fork into a new
             // conversation.
-            let thread = MessageReadRepository::get_thread(&repo, &root_id).await.unwrap();
+            let thread = MessageReadRepository::get_thread(&repo, &root_id)
+                .await
+                .unwrap();
             let thread_ids: Vec<_> = thread.iter().map(|m| m.id).collect();
             assert!(thread_ids.contains(&root_id));
             assert!(thread_ids.contains(&reply_id));
@@ -1048,9 +1128,14 @@ macro_rules! read_repository_conformance {
                 .await
                 .unwrap();
 
-            repo.put_body(&message_id, Some("plain".into()), Some("<p>html</p>".into()), false)
-                .await
-                .unwrap();
+            repo.put_body(
+                &message_id,
+                Some("plain".into()),
+                Some("<p>html</p>".into()),
+                false,
+            )
+            .await
+            .unwrap();
 
             let msg = MessageReadRepository::get_message(&repo, &message_id)
                 .await
@@ -1063,7 +1148,9 @@ macro_rules! read_repository_conformance {
         #[tokio::test]
         async fn put_body_on_unknown_message_is_a_noop() {
             let (_guard, _es, repo) = $make;
-            repo.put_body(&MessageId::new(), Some("x".into()), None, false).await.unwrap();
+            repo.put_body(&MessageId::new(), Some("x".into()), None, false)
+                .await
+                .unwrap();
         }
 
         #[tokio::test]
@@ -1075,7 +1162,9 @@ macro_rules! read_repository_conformance {
                 .await
                 .unwrap();
 
-            repo.put_body(&message_id, Some("plain".into()), None, false).await.unwrap();
+            repo.put_body(&message_id, Some("plain".into()), None, false)
+                .await
+                .unwrap();
 
             // Only the appended MessageBodyFetched marks the body done; if that
             // append failed, the message must still be fetched again.
@@ -1090,14 +1179,19 @@ macro_rules! read_repository_conformance {
             repo.project(&received_event(account_id, message_id, chrono::Utc::now()))
                 .await
                 .unwrap();
-            repo.put_body(&message_id, Some("plain".into()), None, false).await.unwrap();
+            repo.put_body(&message_id, Some("plain".into()), None, false)
+                .await
+                .unwrap();
 
             let fetched = make_event_envelope(
                 2,
                 &message_id.to_string(),
                 AggregateType::Message,
                 2,
-                DomainEvent::MessageBodyFetched { message_id, attachments: vec![] },
+                DomainEvent::MessageBodyFetched {
+                    message_id,
+                    attachments: vec![],
+                },
             );
             // Twice: catch-up and rebuild replay events that were already projected.
             repo.project(&fetched).await.unwrap();
@@ -1117,12 +1211,19 @@ macro_rules! read_repository_conformance {
                 &message_id.to_string(),
                 AggregateType::Message,
                 2,
-                DomainEvent::MessageBodyFetched { message_id, attachments: vec![] },
+                DomainEvent::MessageBodyFetched {
+                    message_id,
+                    attachments: vec![],
+                },
             )
         }
 
         async fn body_text(repo: &impl MessageReadRepository, id: &MessageId) -> Option<String> {
-            MessageReadRepository::get_message(repo, id).await.unwrap().unwrap().body_text
+            MessageReadRepository::get_message(repo, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .body_text
         }
 
         #[tokio::test]
@@ -1132,14 +1233,19 @@ macro_rules! read_repository_conformance {
             let message_id = MessageId::new();
             let received = received_event(account_id, message_id, chrono::Utc::now());
             repo.project(&received).await.unwrap();
-            repo.put_body(&message_id, Some("plain".into()), None, false).await.unwrap();
+            repo.put_body(&message_id, Some("plain".into()), None, false)
+                .await
+                .unwrap();
             repo.project(&body_fetched(message_id)).await.unwrap();
 
             // Boot catch-up replays everything since the last saved checkpoint.
             repo.project(&received).await.unwrap();
             repo.project(&body_fetched(message_id)).await.unwrap();
 
-            assert_eq!(body_text(&repo, &message_id).await.as_deref(), Some("plain"));
+            assert_eq!(
+                body_text(&repo, &message_id).await.as_deref(),
+                Some("plain")
+            );
             assert_eq!(repo.count_pending_backfill(&account_id).await.unwrap(), 0);
         }
 
@@ -1164,7 +1270,10 @@ macro_rules! read_repository_conformance {
 
         /// Appends to the real store (one aggregate per type) and returns the
         /// log as the store numbered it.
-        async fn append_all<ES: EventStore>(store: &ES, events: Vec<DomainEvent>) -> Vec<EventEnvelope> {
+        async fn append_all<ES: EventStore>(
+            store: &ES,
+            events: Vec<DomainEvent>,
+        ) -> Vec<EventEnvelope> {
             for event in events {
                 let ty = event.aggregate_type();
                 let id = ty.to_string();
@@ -1213,8 +1322,18 @@ macro_rules! read_repository_conformance {
             }
         }
 
-        fn flagged(message_id: MessageId, mailbox_id: MailboxId, add: Vec<Flag>, remove: Vec<Flag>) -> DomainEvent {
-            DomainEvent::MessageFlagged { message_id, mailbox_id, flags_added: add, flags_removed: remove }
+        fn flagged(
+            message_id: MessageId,
+            mailbox_id: MailboxId,
+            add: Vec<Flag>,
+            remove: Vec<Flag>,
+        ) -> DomainEvent {
+            DomainEvent::MessageFlagged {
+                message_id,
+                mailbox_id,
+                flags_added: add,
+                flags_removed: remove,
+            }
         }
 
         fn email(raw: &str) -> EmailAddress {
@@ -1243,17 +1362,38 @@ macro_rules! read_repository_conformance {
             let mut out = format!("{:?}\n", repo.list_accounts().await.unwrap());
             for mailbox in mailboxes {
                 out += &format!("{:?}\n", repo.get_mailbox(mailbox).await.unwrap());
-                out += &format!("{:?}\n", repo.list_messages(mailbox, &page).await.unwrap().items);
-                out += &format!("{:?}\n", repo.find_unread_by_mailbox(mailbox).await.unwrap());
                 out += &format!(
                     "{:?}\n",
-                    repo.list_conversations(account_id, Some(mailbox), &page).await.unwrap().items
+                    repo.list_messages(mailbox, &page).await.unwrap().items
+                );
+                out += &format!(
+                    "{:?}\n",
+                    repo.find_unread_by_mailbox(mailbox).await.unwrap()
+                );
+                out += &format!(
+                    "{:?}\n",
+                    repo.list_conversations(account_id, Some(mailbox), &page)
+                        .await
+                        .unwrap()
+                        .items
                 );
             }
-            out += &format!("{:?}\n", repo.scan_all_messages(Some(account_id)).await.unwrap());
-            out += &format!("{:?}\n", repo.list_conversations(account_id, None, &page).await.unwrap().items);
+            out += &format!(
+                "{:?}\n",
+                repo.scan_all_messages(Some(account_id)).await.unwrap()
+            );
+            out += &format!(
+                "{:?}\n",
+                repo.list_conversations(account_id, None, &page)
+                    .await
+                    .unwrap()
+                    .items
+            );
             out += &format!("{:?}\n", repo.list_contacts(&page).await.unwrap().items);
-            out += &format!("{:?}\n", repo.count_pending_backfill(account_id).await.unwrap());
+            out += &format!(
+                "{:?}\n",
+                repo.count_pending_backfill(account_id).await.unwrap()
+            );
             out
         }
 
@@ -1263,15 +1403,29 @@ macro_rules! read_repository_conformance {
             let (account, inbox) = (AccountId::new(), MailboxId::new());
             let mut msgs = Vec::new();
             for minute in 0..5 {
-                let (id, event) = received(account, inbox, minute as u32 + 1, None, &[], false, at(minute));
+                let (id, event) = received(
+                    account,
+                    inbox,
+                    minute as u32 + 1,
+                    None,
+                    &[],
+                    false,
+                    at(minute),
+                );
                 repo.project(&env_of(event)).await.unwrap();
                 msgs.push(id);
             }
 
-            let page = repo.list_messages(&inbox, &Pagination::new(1, 2)).await.unwrap();
+            let page = repo
+                .list_messages(&inbox, &Pagination::new(1, 2))
+                .await
+                .unwrap();
             assert_eq!(page.total_count, 5);
             assert_eq!(ids(&page.items, |m| m.id), [msgs[4], msgs[3]]);
-            let last = repo.list_messages(&inbox, &Pagination::new(3, 2)).await.unwrap();
+            let last = repo
+                .list_messages(&inbox, &Pagination::new(3, 2))
+                .await
+                .unwrap();
             assert_eq!(ids(&last.items, |m| m.id), [msgs[0]]);
         }
 
@@ -1280,9 +1434,26 @@ macro_rules! read_repository_conformance {
             let (_guard, _es, repo) = $make;
             let (account, inbox) = (AccountId::new(), MailboxId::new());
             let (root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
-            let (late, e_late) = received(account, inbox, 3, Some("<late@x>"), &["<root@x>"], false, at(20));
-            let (mid, e_mid) = received(account, inbox, 2, Some("<mid@x>"), &["<root@x>"], false, at(10));
-            let (_other, e_other) = received(account, inbox, 4, Some("<other@x>"), &[], false, at(5));
+            let (late, e_late) = received(
+                account,
+                inbox,
+                3,
+                Some("<late@x>"),
+                &["<root@x>"],
+                false,
+                at(20),
+            );
+            let (mid, e_mid) = received(
+                account,
+                inbox,
+                2,
+                Some("<mid@x>"),
+                &["<root@x>"],
+                false,
+                at(10),
+            );
+            let (_other, e_other) =
+                received(account, inbox, 4, Some("<other@x>"), &[], false, at(5));
             project_all(&repo, [e_root, e_late, e_mid, e_other]).await;
 
             let thread = repo.get_thread(&late).await.unwrap();
@@ -1303,7 +1474,12 @@ macro_rules! read_repository_conformance {
             let found = repo.find_by_provider_uid(&inbox, 7).await.unwrap().unwrap();
             assert_eq!(found.id, new);
             assert_eq!(found.provider_uid, Some(ProviderUid::new(7)));
-            assert!(repo.find_by_provider_uid(&inbox, 8).await.unwrap().is_none());
+            assert!(
+                repo.find_by_provider_uid(&inbox, 8)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
             assert_ne!(found.id, old);
         }
 
@@ -1320,7 +1496,12 @@ macro_rules! read_repository_conformance {
             assert_eq!(ids(&found, |m| m.id), [unread]);
 
             project_all(&repo, [flagged(unread, inbox, vec![Flag::Seen], vec![])]).await;
-            assert!(repo.find_unread_by_mailbox(&inbox).await.unwrap().is_empty());
+            assert!(
+                repo.find_unread_by_mailbox(&inbox)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
 
         #[tokio::test]
@@ -1328,39 +1509,76 @@ macro_rules! read_repository_conformance {
             let (_guard, _es, repo) = $make;
             let (account, inbox, archive) = (AccountId::new(), MailboxId::new(), MailboxId::new());
             let (root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
-            let (reply, e_reply) = received(account, archive, 2, Some("<reply@x>"), &["<root@x>"], true, at(10));
+            let (reply, e_reply) = received(
+                account,
+                archive,
+                2,
+                Some("<reply@x>"),
+                &["<root@x>"],
+                true,
+                at(10),
+            );
             let (solo, e_solo) = received(account, inbox, 3, Some("<solo@x>"), &[], true, at(5));
             project_all(&repo, [e_root, e_reply, e_solo]).await;
             let page = first_page();
 
-            let all = repo.list_conversations(&account, None, &page).await.unwrap();
+            let all = repo
+                .list_conversations(&account, None, &page)
+                .await
+                .unwrap();
             assert_eq!(all.total_count, 2);
             let stats: Vec<_> = all
                 .items
                 .iter()
-                .map(|c| (c.thread_id.clone(), c.message_count, c.unread_count, c.sample_message_id))
+                .map(|c| {
+                    (
+                        c.thread_id.clone(),
+                        c.message_count,
+                        c.unread_count,
+                        c.sample_message_id,
+                    )
+                })
                 .collect();
             assert_eq!(
                 stats,
-                [(ThreadId::new("<root@x>"), 2, 1, reply), (ThreadId::new("<solo@x>"), 1, 0, solo)]
+                [
+                    (ThreadId::new("<root@x>"), 2, 1, reply),
+                    (ThreadId::new("<solo@x>"), 1, 0, solo)
+                ]
             );
 
-            let in_inbox = repo.list_conversations(&account, Some(&inbox), &page).await.unwrap();
+            let in_inbox = repo
+                .list_conversations(&account, Some(&inbox), &page)
+                .await
+                .unwrap();
             assert_eq!(in_inbox.total_count, 2);
             let stats: Vec<_> = in_inbox
                 .items
                 .iter()
-                .map(|c| (c.thread_id.clone(), c.message_count, c.unread_count, c.sample_message_id))
+                .map(|c| {
+                    (
+                        c.thread_id.clone(),
+                        c.message_count,
+                        c.unread_count,
+                        c.sample_message_id,
+                    )
+                })
                 .collect();
             assert_eq!(
                 stats,
-                [(ThreadId::new("<solo@x>"), 1, 0, solo), (ThreadId::new("<root@x>"), 1, 1, root)]
+                [
+                    (ThreadId::new("<solo@x>"), 1, 0, solo),
+                    (ThreadId::new("<root@x>"), 1, 1, root)
+                ]
             );
             assert_eq!(in_inbox.items[1].last_message_at, at(0));
             assert_eq!(in_inbox.items[1].subject, "Hello World");
             assert_eq!(in_inbox.items[1].latest_sender, "Sender");
 
-            let in_archive = repo.list_conversations(&account, Some(&archive), &page).await.unwrap();
+            let in_archive = repo
+                .list_conversations(&account, Some(&archive), &page)
+                .await
+                .unwrap();
             assert_eq!(in_archive.total_count, 1);
             assert_eq!(in_archive.items[0].sample_message_id, reply);
             assert_eq!(in_archive.items[0].unread_count, 0);
@@ -1387,21 +1605,41 @@ macro_rules! read_repository_conformance {
             let (_guard, store, repo) = $make;
             let (account, inbox) = (AccountId::new(), MailboxId::new());
             let (_root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
-            let (reply, e_reply) = received(account, inbox, 2, Some("<reply@x>"), &["<root@x>"], false, at(10));
+            let (reply, e_reply) = received(
+                account,
+                inbox,
+                2,
+                Some("<reply@x>"),
+                &["<root@x>"],
+                false,
+                at(10),
+            );
             let log = append_all(
                 store.as_ref(),
-                vec![e_root, e_reply, flagged(reply, inbox, vec![Flag::Seen], vec![])],
+                vec![
+                    e_root,
+                    e_reply,
+                    flagged(reply, inbox, vec![Flag::Seen], vec![]),
+                ],
             )
             .await;
             for event in &log {
                 repo.project(event).await.unwrap();
             }
             let thread = ThreadId::new("<root@x>");
-            let before = repo.get_conversation(&thread, &account).await.unwrap().unwrap();
+            let before = repo
+                .get_conversation(&thread, &account)
+                .await
+                .unwrap()
+                .unwrap();
 
             assert!(repo.rebuild_index().await.unwrap() > 0);
 
-            let after = repo.get_conversation(&thread, &account).await.unwrap().unwrap();
+            let after = repo
+                .get_conversation(&thread, &account)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!((after.message_count, after.unread_count), (2, 1));
             assert_eq!(format!("{after:?}"), format!("{before:?}"));
         }
@@ -1425,7 +1663,13 @@ macro_rules! read_repository_conformance {
             let stored = repo.get_message(&draft).await.unwrap().unwrap();
             assert_eq!(stored.body_text.as_deref(), Some("draft"));
             assert!(stored.flags.contains(&Flag::Draft));
-            assert_eq!(repo.list_messages(&inbox, &first_page()).await.unwrap().total_count, 0);
+            assert_eq!(
+                repo.list_messages(&inbox, &first_page())
+                    .await
+                    .unwrap()
+                    .total_count,
+                0
+            );
             assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 0);
 
             project_all(&repo, [DomainEvent::DraftDiscarded { message_id: draft }]).await;
@@ -1437,8 +1681,14 @@ macro_rules! read_repository_conformance {
             let (_guard, _es, repo) = $make;
             let (account, inbox, sent) = (AccountId::new(), MailboxId::new(), MailboxId::new());
             let mail = |from: &str, to: &str| Envelope {
-                from: vec![Address { name: None, email: email(from) }],
-                to: vec![Address { name: None, email: email(to) }],
+                from: vec![Address {
+                    name: None,
+                    email: email(from),
+                }],
+                to: vec![Address {
+                    name: None,
+                    email: email(to),
+                }],
                 ..test_envelope()
             };
             let contact = |name: &str, addr: &str| DomainEvent::ContactAdded {
@@ -1516,9 +1766,19 @@ macro_rules! read_repository_conformance {
             };
             assert_eq!(
                 names(repo.search_contacts("ANN", 10).await.unwrap()),
-                ["Anne Wu", "Ann Vega", "Zoe Annabel", "Bob Ann", "Zed", "Joanna"],
+                [
+                    "Anne Wu",
+                    "Ann Vega",
+                    "Zoe Annabel",
+                    "Bob Ann",
+                    "Zed",
+                    "Joanna"
+                ],
             );
-            assert_eq!(names(repo.search_contacts("ann", 2).await.unwrap()), ["Anne Wu", "Ann Vega"]);
+            assert_eq!(
+                names(repo.search_contacts("ann", 2).await.unwrap()),
+                ["Anne Wu", "Ann Vega"]
+            );
         }
 
         #[tokio::test]
@@ -1532,7 +1792,11 @@ macro_rules! read_repository_conformance {
                     display_name: "Ada Lovelace".into(),
                     emails: vec![
                         ContactEmail::primary(email("ada@example.com")),
-                        ContactEmail::new(email("ada@work.example.com"), ContactEmailLabel::Work, false),
+                        ContactEmail::new(
+                            email("ada@work.example.com"),
+                            ContactEmailLabel::Work,
+                            false,
+                        ),
                     ],
                     source: ContactSource::Local,
                     external_id: None,
@@ -1547,21 +1811,43 @@ macro_rules! read_repository_conformance {
             assert_eq!(summary.emails.len(), 2);
             assert_eq!(summary.organization, None);
             assert_eq!(summary.account_scope, Some(account));
-            let found = repo.find_by_email(&email("ada@work.example.com")).await.unwrap();
+            let found = repo
+                .find_by_email(&email("ada@work.example.com"))
+                .await
+                .unwrap();
             assert_eq!(found.iter().map(|c| c.id).collect::<Vec<_>>(), [contact]);
-            assert_eq!(repo.find_by_email_in_account(&email("ada@example.com"), &account).await.unwrap().len(), 1);
-            assert!(repo.find_by_email_in_account(&email("ada@example.com"), &AccountId::new()).await.unwrap().is_empty());
+            assert_eq!(
+                repo.find_by_email_in_account(&email("ada@example.com"), &account)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(
+                repo.find_by_email_in_account(&email("ada@example.com"), &AccountId::new())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             // A name match suggests each of the person's addresses.
             let addresses = |hits: Vec<mc_domain::ContactSummary>| {
-                hits.into_iter().map(|c| c.primary_email.as_str().to_owned()).collect::<Vec<_>>()
+                hits.into_iter()
+                    .map(|c| c.primary_email.as_str().to_owned())
+                    .collect::<Vec<_>>()
             };
             assert_eq!(
                 addresses(repo.search_contacts("lovelace", 10).await.unwrap()),
                 ["ada@example.com", "ada@work.example.com"],
             );
-            assert_eq!(repo.search_contacts("ADA@EXAMPLE", 10).await.unwrap().len(), 1);
+            assert_eq!(
+                repo.search_contacts("ADA@EXAMPLE", 10).await.unwrap().len(),
+                1
+            );
             // Autocomplete must find a contact by any of its addresses.
-            assert_eq!(addresses(repo.search_contacts("ada@work", 10).await.unwrap()), ["ada@work.example.com"]);
+            assert_eq!(
+                addresses(repo.search_contacts("ada@work", 10).await.unwrap()),
+                ["ada@work.example.com"]
+            );
             assert!(repo.search_contacts("nobody", 10).await.unwrap().is_empty());
 
             project_all(
@@ -1581,14 +1867,42 @@ macro_rules! read_repository_conformance {
             assert_eq!(summary.display_name, "Ada King");
             assert_eq!(summary.primary_email, email("ada@king.example.com"));
             assert_eq!(summary.organization.as_deref(), Some("Analytical"));
-            assert!(repo.find_by_email(&email("ada@work.example.com")).await.unwrap().is_empty());
-            assert_eq!(repo.find_by_email(&email("ada@king.example.com")).await.unwrap().len(), 1);
-            assert_eq!(repo.list_contacts(&first_page()).await.unwrap().total_count, 1);
+            assert!(
+                repo.find_by_email(&email("ada@work.example.com"))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                repo.find_by_email(&email("ada@king.example.com"))
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                repo.list_contacts(&first_page()).await.unwrap().total_count,
+                1
+            );
 
-            project_all(&repo, [DomainEvent::ContactRemoved { contact_id: contact }]).await;
+            project_all(
+                &repo,
+                [DomainEvent::ContactRemoved {
+                    contact_id: contact,
+                }],
+            )
+            .await;
             assert!(repo.get_contact(&contact).await.unwrap().is_none());
-            assert!(repo.find_by_email(&email("ada@king.example.com")).await.unwrap().is_empty());
-            assert_eq!(repo.list_contacts(&first_page()).await.unwrap().total_count, 0);
+            assert!(
+                repo.find_by_email(&email("ada@king.example.com"))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                repo.list_contacts(&first_page()).await.unwrap().total_count,
+                0
+            );
         }
 
         #[tokio::test]
@@ -1596,19 +1910,32 @@ macro_rules! read_repository_conformance {
             let (_guard, _es, repo) = $make;
             let (account, other_account) = (AccountId::new(), AccountId::new());
             let (c1, c2, c3) = (ContactId::new(), ContactId::new(), ContactId::new());
-            let added = |id: ContactId, emails: Vec<ContactEmail>, scope: AccountId| DomainEvent::ContactAdded {
-                contact_id: id,
-                display_name: id.to_string(),
-                emails,
-                source: ContactSource::LocalEmail,
-                external_id: None,
-                account_scope: Some(scope),
+            let added = |id: ContactId, emails: Vec<ContactEmail>, scope: AccountId| {
+                DomainEvent::ContactAdded {
+                    contact_id: id,
+                    display_name: id.to_string(),
+                    emails,
+                    source: ContactSource::LocalEmail,
+                    external_id: None,
+                    account_scope: Some(scope),
+                }
             };
             let shared = || ContactEmail::primary(email("shared@example.com"));
             project_all(
                 &repo,
                 [
-                    added(c1, vec![shared(), ContactEmail::new(email("one@example.com"), ContactEmailLabel::Home, false)], account),
+                    added(
+                        c1,
+                        vec![
+                            shared(),
+                            ContactEmail::new(
+                                email("one@example.com"),
+                                ContactEmailLabel::Home,
+                                false,
+                            ),
+                        ],
+                        account,
+                    ),
                     added(c2, vec![shared()], account),
                     added(c3, vec![shared()], other_account),
                 ],
@@ -1630,18 +1957,28 @@ macro_rules! read_repository_conformance {
                 if a < b { (a, b) } else { (b, a) }
             };
 
-            let scoped = pair_ids(repo.find_duplicate_candidates(Some(&account)).await.unwrap());
+            let scoped = pair_ids(
+                repo.find_duplicate_candidates(Some(&account))
+                    .await
+                    .unwrap(),
+            );
             assert_eq!(scoped, [sorted(c1, c2)]);
             let mut everywhere = vec![sorted(c1, c2), sorted(c1, c3), sorted(c2, c3)];
             everywhere.sort();
-            assert_eq!(pair_ids(repo.find_duplicate_candidates(None).await.unwrap()), everywhere);
+            assert_eq!(
+                pair_ids(repo.find_duplicate_candidates(None).await.unwrap()),
+                everywhere
+            );
 
             project_all(
                 &repo,
                 [DomainEvent::ContactMerged {
                     kept_id: c1,
                     discarded_id: c2,
-                    merged_emails: vec![shared(), ContactEmail::new(email("one@example.com"), ContactEmailLabel::Home, false)],
+                    merged_emails: vec![
+                        shared(),
+                        ContactEmail::new(email("one@example.com"), ContactEmailLabel::Home, false),
+                    ],
                 }],
             )
             .await;
@@ -1657,7 +1994,12 @@ macro_rules! read_repository_conformance {
             let mut expected = vec![c1.to_string(), c3.to_string()];
             expected.sort();
             assert_eq!(holders, expected);
-            assert!(repo.find_duplicate_candidates(Some(&account)).await.unwrap().is_empty());
+            assert!(
+                repo.find_duplicate_candidates(Some(&account))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
 
         #[tokio::test]
@@ -1668,7 +2010,11 @@ macro_rules! read_repository_conformance {
                 &repo,
                 [
                     discovered(account, inbox, "INBOX"),
-                    DomainEvent::MailboxCountsUpdated { mailbox_id: inbox, total_messages: 10, unread_messages: 4 },
+                    DomainEvent::MailboxCountsUpdated {
+                        mailbox_id: inbox,
+                        total_messages: 10,
+                        unread_messages: 4,
+                    },
                     discovered(account, inbox, "INBOX"),
                 ],
             )
@@ -1685,7 +2031,15 @@ macro_rules! read_repository_conformance {
             let (_guard, store, repo) = $make;
             let (account, inbox, archive) = (AccountId::new(), MailboxId::new(), MailboxId::new());
             let (root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
-            let (reply, e_reply) = received(account, inbox, 2, Some("<reply@x>"), &["<root@x>"], false, at(10));
+            let (reply, e_reply) = received(
+                account,
+                inbox,
+                2,
+                Some("<reply@x>"),
+                &["<root@x>"],
+                false,
+                at(10),
+            );
             let (gone, e_gone) = received(account, inbox, 3, Some("<gone@x>"), &[], false, at(20));
             let (sent, contact) = (MessageId::new(), ContactId::new());
             let log = append_all(
@@ -1702,10 +2056,22 @@ macro_rules! read_repository_conformance {
                     e_root,
                     e_reply,
                     e_gone,
-                    DomainEvent::MessageBodyFetched { message_id: root, attachments: vec![] },
+                    DomainEvent::MessageBodyFetched {
+                        message_id: root,
+                        attachments: vec![],
+                    },
                     flagged(root, inbox, vec![Flag::Seen], vec![]),
-                    DomainEvent::MessageMoved { message_id: reply, from_mailbox_id: inbox, to_mailbox_id: archive, provider_uid: None },
-                    DomainEvent::MessageDeleted { message_id: gone, mailbox_id: inbox, permanently: false },
+                    DomainEvent::MessageMoved {
+                        message_id: reply,
+                        from_mailbox_id: inbox,
+                        to_mailbox_id: archive,
+                        provider_uid: None,
+                    },
+                    DomainEvent::MessageDeleted {
+                        message_id: gone,
+                        mailbox_id: inbox,
+                        permanently: false,
+                    },
                     DomainEvent::MessageSent {
                         message_id: sent,
                         message_rfc_id: None,
@@ -1741,11 +2107,17 @@ macro_rules! read_repository_conformance {
             for event in &log {
                 repo.project(event).await.unwrap();
             }
-            repo.put_body(&root, Some("hello".into()), None, false).await.unwrap();
+            repo.put_body(&root, Some("hello".into()), None, false)
+                .await
+                .unwrap();
             // Server counts are transient: they reach the read model only through project().
             project_all(
                 &repo,
-                [DomainEvent::MailboxCountsUpdated { mailbox_id: inbox, total_messages: 10, unread_messages: 4 }],
+                [DomainEvent::MailboxCountsUpdated {
+                    mailbox_id: inbox,
+                    total_messages: 10,
+                    unread_messages: 4,
+                }],
             )
             .await;
             let live = snapshot(&repo, &account, &[inbox, archive]).await;
@@ -1756,7 +2128,11 @@ macro_rules! read_repository_conformance {
 
             assert_eq!(snapshot(&repo, &account, &[inbox, archive]).await, live);
             assert_eq!(
-                repo.get_mailbox(&inbox).await.unwrap().unwrap().unread_messages,
+                repo.get_mailbox(&inbox)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unread_messages,
                 4,
                 "replaying the received+deleted pair must not move the badge"
             );
@@ -1767,14 +2143,38 @@ macro_rules! read_repository_conformance {
         #[tokio::test]
         async fn replaying_any_suffix_over_live_state_changes_nothing() {
             let (_guard, store, repo) = $make;
-            let (account, inbox, trash, archive, labels) =
-                (AccountId::new(), MailboxId::new(), MailboxId::new(), MailboxId::new(), MailboxId::new());
+            let (account, inbox, trash, archive, labels) = (
+                AccountId::new(),
+                MailboxId::new(),
+                MailboxId::new(),
+                MailboxId::new(),
+                MailboxId::new(),
+            );
             let (root, e_root) = received(account, inbox, 1, Some("<root@x>"), &[], false, at(0));
-            let (mid, e_mid) = received(account, inbox, 2, Some("<mid@x>"), &["<root@x>"], false, at(10));
-            let (newest, e_newest) = received(account, inbox, 3, Some("<new@x>"), &["<root@x>"], false, at(20));
-            let (copy_a, e_copy_a) = received(account, inbox, 4, Some("<copy@x>"), &[], false, at(30));
-            let (_copy_b, e_copy_b) = received(account, labels, 9, Some("<copy@x>"), &[], false, at(30));
-            let (roamer, e_roamer) = received(account, inbox, 5, Some("<roam@x>"), &[], false, at(40));
+            let (mid, e_mid) = received(
+                account,
+                inbox,
+                2,
+                Some("<mid@x>"),
+                &["<root@x>"],
+                false,
+                at(10),
+            );
+            let (newest, e_newest) = received(
+                account,
+                inbox,
+                3,
+                Some("<new@x>"),
+                &["<root@x>"],
+                false,
+                at(20),
+            );
+            let (copy_a, e_copy_a) =
+                received(account, inbox, 4, Some("<copy@x>"), &[], false, at(30));
+            let (_copy_b, e_copy_b) =
+                received(account, labels, 9, Some("<copy@x>"), &[], false, at(30));
+            let (roamer, e_roamer) =
+                received(account, inbox, 5, Some("<roam@x>"), &[], false, at(40));
             let sent = MessageId::new();
             let (kept, merged, removed) = (ContactId::new(), ContactId::new(), ContactId::new());
             let contact = |id: ContactId, raw: &str| DomainEvent::ContactAdded {
@@ -1809,14 +2209,35 @@ macro_rules! read_repository_conformance {
                     e_copy_a,
                     e_copy_b,
                     e_roamer,
-                    DomainEvent::MessageBodyFetched { message_id: root, attachments: vec![] },
+                    DomainEvent::MessageBodyFetched {
+                        message_id: root,
+                        attachments: vec![],
+                    },
                     flagged(mid, inbox, vec![Flag::Seen], vec![]),
                     flagged(mid, inbox, vec![], vec![Flag::Seen]),
                     flagged(mid, inbox, vec![Flag::Seen], vec![]),
-                    DomainEvent::MessageDeleted { message_id: newest, mailbox_id: inbox, permanently: false },
-                    DomainEvent::MessageDeleted { message_id: copy_a, mailbox_id: inbox, permanently: false },
-                    DomainEvent::MessageMoved { message_id: roamer, from_mailbox_id: inbox, to_mailbox_id: trash, provider_uid: None },
-                    DomainEvent::MessageMoved { message_id: roamer, from_mailbox_id: trash, to_mailbox_id: archive, provider_uid: None },
+                    DomainEvent::MessageDeleted {
+                        message_id: newest,
+                        mailbox_id: inbox,
+                        permanently: false,
+                    },
+                    DomainEvent::MessageDeleted {
+                        message_id: copy_a,
+                        mailbox_id: inbox,
+                        permanently: false,
+                    },
+                    DomainEvent::MessageMoved {
+                        message_id: roamer,
+                        from_mailbox_id: inbox,
+                        to_mailbox_id: trash,
+                        provider_uid: None,
+                    },
+                    DomainEvent::MessageMoved {
+                        message_id: roamer,
+                        from_mailbox_id: trash,
+                        to_mailbox_id: archive,
+                        provider_uid: None,
+                    },
                     DomainEvent::MessageSent {
                         message_id: sent,
                         message_rfc_id: None,
@@ -1837,18 +2258,26 @@ macro_rules! read_repository_conformance {
                         discarded_id: merged,
                         merged_emails: vec![
                             ContactEmail::primary(email("ada@example.com")),
-                            ContactEmail::new(email("ada@work.example.com"), ContactEmailLabel::Work, false),
+                            ContactEmail::new(
+                                email("ada@work.example.com"),
+                                ContactEmailLabel::Work,
+                                false,
+                            ),
                         ],
                     },
                     contact(removed, "bob@example.com"),
-                    DomainEvent::ContactRemoved { contact_id: removed },
+                    DomainEvent::ContactRemoved {
+                        contact_id: removed,
+                    },
                 ],
             )
             .await;
             for event in &log {
                 repo.project(event).await.unwrap();
             }
-            repo.put_body(&root, Some("hello".into()), None, false).await.unwrap();
+            repo.put_body(&root, Some("hello".into()), None, false)
+                .await
+                .unwrap();
             let mailboxes = [inbox, trash, archive, labels];
             let state = || async {
                 let mut out = snapshot(&repo, &account, &mailboxes).await;
@@ -1867,7 +2296,11 @@ macro_rules! read_repository_conformance {
                 for event in &log[from..] {
                     repo.project(event).await.unwrap();
                 }
-                assert_eq!(state().await, live, "replay from log[{from}..] changed the read model");
+                assert_eq!(
+                    state().await,
+                    live,
+                    "replay from log[{from}..] changed the read model"
+                );
             }
         }
 
@@ -1875,7 +2308,8 @@ macro_rules! read_repository_conformance {
         async fn backfill_skips_messages_waiting_for_their_uid() {
             let (_guard, _es, repo) = $make;
             let (account, archive) = (AccountId::new(), MailboxId::new());
-            let (waiting, e_waiting) = received(account, archive, 4, Some("<w@x>"), &[], true, at(0));
+            let (waiting, e_waiting) =
+                received(account, archive, 4, Some("<w@x>"), &[], true, at(0));
             let (_ready, e_ready) = received(account, archive, 5, Some("<r@x>"), &[], true, at(1));
             project_all(
                 &repo,
@@ -1894,7 +2328,10 @@ macro_rules! read_repository_conformance {
             .await;
 
             let pending = repo.list_pending_backfill(&account, 10).await.unwrap();
-            assert_eq!(pending.iter().map(|e| e.provider_uid).collect::<Vec<_>>(), [5]);
+            assert_eq!(
+                pending.iter().map(|e| e.provider_uid).collect::<Vec<_>>(),
+                [5]
+            );
             assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 1);
         }
 
@@ -1919,7 +2356,16 @@ macro_rules! read_repository_conformance {
             let (spam, e_spam) = typed("[Gmail]/Spam", MailboxType::Spam);
             let (trash, e_trash) = typed("[Gmail]/Cestino", MailboxType::Trash);
             // Newest in the folders that must wait, oldest in INBOX.
-            let messages = [(all, 1, 9), (important, 2, 8), (spam, 3, 7), (trash, 4, 6), (work, 5, 2), (work, 6, 3), (inbox, 7, 0), (inbox, 8, 1)];
+            let messages = [
+                (all, 1, 9),
+                (important, 2, 8),
+                (spam, 3, 7),
+                (trash, 4, 6),
+                (work, 5, 2),
+                (work, 6, 3),
+                (inbox, 7, 0),
+                (inbox, 8, 1),
+            ];
             let mut events = vec![e_all, e_important, e_work, e_inbox, e_spam, e_trash];
             for (mailbox, uid, minutes) in messages {
                 events.push(received(account, mailbox, uid, None, &[], false, at(minutes)).1);
@@ -1927,9 +2373,15 @@ macro_rules! read_repository_conformance {
             project_all(&repo, events).await;
 
             let pending = repo.list_pending_backfill(&account, 10).await.unwrap();
-            assert_eq!(pending.iter().map(|e| e.provider_uid).collect::<Vec<_>>(), [8, 7, 6, 5, 1, 2]);
+            assert_eq!(
+                pending.iter().map(|e| e.provider_uid).collect::<Vec<_>>(),
+                [8, 7, 6, 5, 1, 2]
+            );
             assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 6);
-            assert_eq!(repo.account_stats(&account).await.unwrap().pending_bodies, 6);
+            assert_eq!(
+                repo.account_stats(&account).await.unwrap().pending_bodies,
+                6
+            );
         }
 
         #[tokio::test]
@@ -1939,25 +2391,69 @@ macro_rules! read_repository_conformance {
             let (in_inbox, e1) = received(account, inbox, 1, Some("<m@x>"), &[], false, at(0));
             let (in_all, e2) = received(account, all, 7, Some("<m@x>"), &[], false, at(0));
             let (other, e3) = received(account, all, 8, None, &[], false, at(0));
-            project_all(&repo, [discovered(account, inbox, "INBOX"), discovered(account, all, "All"), e1, e2, e3]).await;
+            project_all(
+                &repo,
+                [
+                    discovered(account, inbox, "INBOX"),
+                    discovered(account, all, "All"),
+                    e1,
+                    e2,
+                    e3,
+                ],
+            )
+            .await;
 
             // Nothing stored yet: nothing to share.
-            assert!(repo.share_bodies(&account, &["<m@x>".into()]).await.unwrap().is_empty());
+            assert!(
+                repo.share_bodies(&account, &["<m@x>".into()])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
 
-            repo.put_body(&in_inbox, Some("start".into()), None, true).await.unwrap();
+            repo.put_body(&in_inbox, Some("start".into()), None, true)
+                .await
+                .unwrap();
             repo.project(&body_fetched(in_inbox)).await.unwrap();
-            let shared = repo.share_bodies(&account, &["<m@x>".into()]).await.unwrap();
+            let shared = repo
+                .share_bodies(&account, &["<m@x>".into()])
+                .await
+                .unwrap();
             assert_eq!(shared, [(in_all, true)]);
             repo.project(&body_fetched(in_all)).await.unwrap();
-            let copy = MessageReadRepository::get_message(&repo, &in_all).await.unwrap().unwrap();
-            assert_eq!((copy.body_text.as_deref(), copy.body_truncated), (Some("start"), true));
+            let copy = MessageReadRepository::get_message(&repo, &in_all)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (copy.body_text.as_deref(), copy.body_truncated),
+                (Some("start"), true)
+            );
 
             // Opening one fetches the whole text; the other copy gets it too.
-            repo.put_body(&in_all, Some("start and the rest".into()), None, false).await.unwrap();
-            assert_eq!(repo.share_bodies(&account, &["<m@x>".into()]).await.unwrap(), [(in_inbox, false)]);
-            let first = MessageReadRepository::get_message(&repo, &in_inbox).await.unwrap().unwrap();
-            assert_eq!((first.body_text.as_deref(), first.body_truncated), (Some("start and the rest"), false));
-            assert!(repo.share_bodies(&account, &["<m@x>".into(), "<>".into()]).await.unwrap().is_empty());
+            repo.put_body(&in_all, Some("start and the rest".into()), None, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.share_bodies(&account, &["<m@x>".into()])
+                    .await
+                    .unwrap(),
+                [(in_inbox, false)]
+            );
+            let first = MessageReadRepository::get_message(&repo, &in_inbox)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (first.body_text.as_deref(), first.body_truncated),
+                (Some("start and the rest"), false)
+            );
+            assert!(
+                repo.share_bodies(&account, &["<m@x>".into(), "<>".into()])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
 
             // A message without a Message-ID shares with nothing.
             assert_eq!(body_text(&repo, &other).await, None);
@@ -1969,15 +2465,23 @@ macro_rules! read_repository_conformance {
             let (_guard, _es, repo) = $make;
             let (account, inbox) = (AccountId::new(), MailboxId::new());
             let (id, mut event) = received(account, inbox, 1, None, &[], false, at(0));
-            if let DomainEvent::MessageReceived { has_attachments, .. } = &mut event {
+            if let DomainEvent::MessageReceived {
+                has_attachments, ..
+            } = &mut event
+            {
                 *has_attachments = true;
             }
             project_all(&repo, [discovered(account, inbox, "INBOX"), event]).await;
 
-            repo.put_body(&id, Some("text".into()), None, false).await.unwrap();
+            repo.put_body(&id, Some("text".into()), None, false)
+                .await
+                .unwrap();
             repo.project(&body_fetched(id)).await.unwrap();
 
-            let message = MessageReadRepository::get_message(&repo, &id).await.unwrap().unwrap();
+            let message = MessageReadRepository::get_message(&repo, &id)
+                .await
+                .unwrap()
+                .unwrap();
             assert!(message.has_attachments);
         }
 
@@ -1992,13 +2496,26 @@ macro_rules! read_repository_conformance {
             }
             project_all(&repo, [discovered(account, inbox, "INBOX"), e1, e2]).await;
 
-            repo.put_body(&forged, Some("forged".into()), None, false).await.unwrap();
+            repo.put_body(&forged, Some("forged".into()), None, false)
+                .await
+                .unwrap();
             repo.project(&body_fetched(forged)).await.unwrap();
 
-            assert!(repo.share_bodies(&account, &["<m@x>".into()]).await.unwrap().is_empty());
+            assert!(
+                repo.share_bodies(&account, &["<m@x>".into()])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             assert_eq!(body_text(&repo, &real).await, None);
             let pending = repo.list_pending_backfill(&account, 10).await.unwrap();
-            assert_eq!(pending.iter().map(|e| (e.message_id, e.size_bytes)).collect::<Vec<_>>(), [(real, 100)]);
+            assert_eq!(
+                pending
+                    .iter()
+                    .map(|e| (e.message_id, e.size_bytes))
+                    .collect::<Vec<_>>(),
+                [(real, 100)]
+            );
         }
 
         /// A Sent server copy drops its own placeholder — never a UID-less
@@ -2007,8 +2524,10 @@ macro_rules! read_repository_conformance {
         async fn sent_copy_drops_only_placeholders_in_sent() {
             let (_guard, _es, repo) = $make;
             let (account, sent, archive) = (AccountId::new(), MailboxId::new(), MailboxId::new());
-            let (waiting, e_waiting) = received(account, archive, 4, Some("<me@x>"), &[], true, at(0));
-            let (server_copy, e_server_copy) = received(account, sent, 9, Some("<me@x>"), &[], true, at(1));
+            let (waiting, e_waiting) =
+                received(account, archive, 4, Some("<me@x>"), &[], true, at(0));
+            let (server_copy, e_server_copy) =
+                received(account, sent, 9, Some("<me@x>"), &[], true, at(1));
             project_all(
                 &repo,
                 [
@@ -2031,7 +2550,10 @@ macro_rules! read_repository_conformance {
             )
             .await;
 
-            assert!(repo.get_message(&waiting).await.unwrap().is_some(), "not a placeholder");
+            assert!(
+                repo.get_message(&waiting).await.unwrap().is_some(),
+                "not a placeholder"
+            );
             assert!(repo.get_message(&server_copy).await.unwrap().is_some());
         }
 
@@ -2039,9 +2561,13 @@ macro_rules! read_repository_conformance {
         async fn suggest_groups_matching_values_by_field_most_frequent_first() {
             let (_guard, _es, repo) = $make;
             let (account, inbox) = (AccountId::new(), MailboxId::new());
-            let addr = |name: Option<&str>, raw: &str| Address { name: name.map(str::to_owned), email: email(raw) };
+            let addr = |name: Option<&str>, raw: &str| Address {
+                name: name.map(str::to_owned),
+                email: email(raw),
+            };
             let mail = |uid: u32, from: Address, to: &str, subject: &str| {
-                let (_, mut event) = received(account, inbox, uid, None, &[], false, at(uid as i64));
+                let (_, mut event) =
+                    received(account, inbox, uid, None, &[], false, at(uid as i64));
                 if let DomainEvent::MessageReceived { envelope, .. } = &mut event {
                     envelope.from = vec![from];
                     envelope.to = vec![addr(None, to)];
@@ -2052,15 +2578,37 @@ macro_rules! read_repository_conformance {
             project_all(
                 &repo,
                 [
-                    mail(1, addr(Some("Ada Lovelace"), "ada@example.com"), "me@example.com", "Notes"),
-                    mail(2, addr(Some("Ada Lovelace"), "ada@example.com"), "me@example.com", "More notes"),
-                    mail(3, addr(Some("Bob"), "bob@example.com"), "adam@example.com", "Adaptive design"),
-                    mail(4, addr(None, "carol@example.com"), "me@example.com", "Lunch"),
+                    mail(
+                        1,
+                        addr(Some("Ada Lovelace"), "ada@example.com"),
+                        "me@example.com",
+                        "Notes",
+                    ),
+                    mail(
+                        2,
+                        addr(Some("Ada Lovelace"), "ada@example.com"),
+                        "me@example.com",
+                        "More notes",
+                    ),
+                    mail(
+                        3,
+                        addr(Some("Bob"), "bob@example.com"),
+                        "adam@example.com",
+                        "Adaptive design",
+                    ),
+                    mail(
+                        4,
+                        addr(None, "carol@example.com"),
+                        "me@example.com",
+                        "Lunch",
+                    ),
                 ],
             )
             .await;
             let found = |s: Vec<mc_domain::Suggestion>| {
-                s.into_iter().map(|s| (s.field, s.value, s.doc_count)).collect::<Vec<_>>()
+                s.into_iter()
+                    .map(|s| (s.field, s.value, s.doc_count))
+                    .collect::<Vec<_>>()
             };
             let row = |field: &str, value: &str, n: u32| (field.to_owned(), value.to_owned(), n);
 
@@ -2074,14 +2622,30 @@ macro_rules! read_repository_conformance {
                 ]
             );
             assert_eq!(
-                found(repo.suggest("example", Some(SuggestScope::From), 2).await.unwrap()),
-                [row("from_email", "ada@example.com", 2), row("from_email", "bob@example.com", 1)]
+                found(
+                    repo.suggest("example", Some(SuggestScope::From), 2)
+                        .await
+                        .unwrap()
+                ),
+                [
+                    row("from_email", "ada@example.com", 2),
+                    row("from_email", "bob@example.com", 1)
+                ]
             );
             assert_eq!(
-                found(repo.suggest("me@", Some(SuggestScope::To), 5).await.unwrap()),
+                found(
+                    repo.suggest("me@", Some(SuggestScope::To), 5)
+                        .await
+                        .unwrap()
+                ),
                 [row("to", "me@example.com", 3)]
             );
-            assert!(repo.suggest("notes", Some(SuggestScope::Body), 5).await.unwrap().is_empty());
+            assert!(
+                repo.suggest("notes", Some(SuggestScope::Body), 5)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             assert!(repo.suggest("", None, 5).await.unwrap().is_empty());
         }
     };

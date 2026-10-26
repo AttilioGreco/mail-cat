@@ -9,7 +9,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Datelike, TimeZone};
 use mailparse::{DispositionType, MailAddr, MailHeader, MailHeaderMap, ParsedMail};
-use mc_domain::{Account, AccountId, Address, EmailAddress, Envelope, MessageId, OutgoingAttachment};
+use mc_domain::{
+    Account, AccountId, Address, EmailAddress, Envelope, IncomingServer, MessageId,
+    OutgoingAttachment,
+};
 use pulldown_cmark::{Event, Options, Parser};
 
 use crate::error::ApplicationError;
@@ -136,11 +139,11 @@ pub fn sender_address(account: &Account) -> Address {
 /// Gmail files every SMTP submission into "Sent Mail" itself; appending our
 /// own copy there would show the message twice.
 pub fn saves_sent_copy_itself(account: &Account) -> bool {
-    account.provider_type == mc_domain::ProviderType::GmailApi
-        || account.connection_config.imap_host.as_deref().is_some_and(|h| {
-            let h = h.to_ascii_lowercase();
-            h.ends_with("gmail.com") || h.ends_with("googlemail.com")
-        })
+    let IncomingServer::Imap { host, .. } = &account.connection_config.incoming else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    host.ends_with("gmail.com") || host.ends_with("googlemail.com")
 }
 
 pub fn new_message_rfc_id(from: &EmailAddress) -> String {
@@ -160,7 +163,10 @@ pub fn strip_subject_prefixes(subject: &str) -> &str {
         let tag = rest[..colon].trim_end();
         // "Re[2]:" counters some clients add.
         let tag = match tag.split_once('[') {
-            Some((t, n)) if n.strip_suffix(']').is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())) => {
+            Some((t, n))
+                if n.strip_suffix(']')
+                    .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())) =>
+            {
                 t.trim_end()
             }
             _ => tag,
@@ -193,7 +199,11 @@ pub fn format_address(a: &Address) -> String {
         // RFC 5322 specials can't appear in a bare phrase; '.' is tolerated
         // there (obs-phrase) and every parser accepts "J. Smith".
         Some(n) if n.contains(['(', ')', '<', '>', '[', ']', ':', ';', '@', '\\', ',', '"']) => {
-            format!("\"{}\" <{}>", n.replace('\\', "\\\\").replace('"', "\\\""), a.email)
+            format!(
+                "\"{}\" <{}>",
+                n.replace('\\', "\\\\").replace('"', "\\\""),
+                a.email
+            )
         }
         Some(n) => format!("{n} <{}>", a.email),
         None => a.email.to_string(),
@@ -202,7 +212,8 @@ pub fn format_address(a: &Address) -> String {
 
 /// Parse one recipient as typed or picked in the UI.
 pub fn parse_address(raw: &str) -> Result<Address, ApplicationError> {
-    let invalid = || ApplicationError::PreconditionFailed(format!("Indirizzo non valido: «{}»", raw.trim()));
+    let invalid =
+        || ApplicationError::PreconditionFailed(format!("Indirizzo non valido: «{}»", raw.trim()));
     let list = mailparse::addrparse(raw.trim()).map_err(|_| invalid())?;
     let [MailAddr::Single(info)] = list.as_slice() else {
         return Err(invalid());
@@ -237,17 +248,38 @@ pub fn reply_sender(accounts: &[Account], original: &Envelope, fallback: Account
 }
 
 /// (To, Cc) of a reply. `own` are all configured account addresses.
-pub fn reply_recipients(original: &Envelope, own: &[EmailAddress], all: bool) -> (Vec<String>, Vec<String>) {
-    let primary = if original.reply_to.is_empty() { &original.from } else { &original.reply_to };
+pub fn reply_recipients(
+    original: &Envelope,
+    own: &[EmailAddress],
+    all: bool,
+) -> (Vec<String>, Vec<String>) {
+    let primary = if original.reply_to.is_empty() {
+        &original.from
+    } else {
+        &original.reply_to
+    };
     // Replying to something we sent goes back to the people we sent it to.
     let sender = primary;
-    let primary = if primary.iter().all(|a| own.contains(&a.email)) { &original.to } else { primary };
+    let primary = if primary.iter().all(|a| own.contains(&a.email)) {
+        &original.to
+    } else {
+        primary
+    };
 
     let mut seen = HashSet::new();
     let mut keep = |a: &&Address| !own.contains(&a.email) && seen.insert(a.email.clone());
     let others: &[Address] = if all { &original.to } else { &[] };
-    let to: Vec<Address> = primary.iter().chain(others).filter(&mut keep).cloned().collect();
-    let cc: Vec<Address> = if all { original.cc.iter().filter(&mut keep).cloned().collect() } else { vec![] };
+    let to: Vec<Address> = primary
+        .iter()
+        .chain(others)
+        .filter(&mut keep)
+        .cloned()
+        .collect();
+    let cc: Vec<Address> = if all {
+        original.cc.iter().filter(&mut keep).cloned().collect()
+    } else {
+        vec![]
+    };
     if to.is_empty() && cc.is_empty() {
         // A note to self: Apple Mail replies to ourselves rather than to nobody.
         return (format_addresses(sender), vec![]);
@@ -257,7 +289,9 @@ pub fn reply_recipients(original: &Envelope, own: &[EmailAddress], all: bool) ->
 
 // ── Quoting ──────────────────────────────────────────────────────────────────
 
-const MONTHS: [&str; 12] = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"];
+const MONTHS: [&str; 12] = [
+    "gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic",
+];
 
 /// "12 ott 2026, 09:05"
 pub fn format_date<Tz: TimeZone>(date: &DateTime<Tz>) -> String
@@ -284,7 +318,11 @@ pub fn reply_quote<Tz: TimeZone>(original: &Envelope, date: &DateTime<Tz>, body_
 where
     Tz::Offset: std::fmt::Display,
 {
-    let sender = original.from.first().map(format_address).unwrap_or_default();
+    let sender = original
+        .from
+        .first()
+        .map(format_address)
+        .unwrap_or_default();
     let attribution = format!("Il {}, {sender} ha scritto:", format_date(date));
     Quote {
         html: format!(
@@ -328,7 +366,10 @@ where
         html: format!(
             "<div>Inizio messaggio inoltrato:</div><blockquote type=\"cite\">{header_html}<br>{content}</blockquote>"
         ),
-        text: format!("Inizio messaggio inoltrato:\n\n{header_text}\n{}", quote_lines(body_text)),
+        text: format!(
+            "Inizio messaggio inoltrato:\n\n{header_text}\n{}",
+            quote_lines(body_text)
+        ),
     }
 }
 
@@ -341,8 +382,15 @@ pub fn quote_for(mode: ComposeMode, source: &mc_domain::Message) -> Option<Quote
         .unwrap_or_default();
     let date = source.envelope.date.with_timezone(&chrono::Local);
     match mode {
-        ComposeMode::Reply | ComposeMode::ReplyAll => Some(reply_quote(&source.envelope, &date, &text)),
-        ComposeMode::Forward => Some(forward_quote(&source.envelope, &date, source.body_html.as_deref(), &text)),
+        ComposeMode::Reply | ComposeMode::ReplyAll => {
+            Some(reply_quote(&source.envelope, &date, &text))
+        }
+        ComposeMode::Forward => Some(forward_quote(
+            &source.envelope,
+            &date,
+            source.body_html.as_deref(),
+            &text,
+        )),
         ComposeMode::New | ComposeMode::Draft => None,
     }
 }
@@ -384,7 +432,10 @@ pub fn body_inner_html(html: &str) -> String {
         .find("<body")
         .and_then(|i| lower[i..].find('>').map(|j| i + j + 1))
         .unwrap_or(0);
-    let end = lower.rfind("</body>").filter(|&e| e >= start).unwrap_or(html.len());
+    let end = lower
+        .rfind("</body>")
+        .filter(|&e| e >= start)
+        .unwrap_or(html.len());
     strip_elements(&html[start..end], &["script"])
 }
 
@@ -396,7 +447,9 @@ fn strip_elements(html: &str, tags: &[&str]) -> String {
         loop {
             // ASCII lowercasing keeps byte offsets valid for `out`.
             let lower = out.to_ascii_lowercase();
-            let Some(start) = find_tag(&lower, 0, &open) else { break };
+            let Some(start) = find_tag(&lower, 0, &open) else {
+                break;
+            };
             let tag_end = |at: usize| lower[at..].find('>').map_or(out.len(), |gt| at + gt + 1);
             let open_end = tag_end(start);
             let end = if lower[..open_end].ends_with("/>") {
@@ -434,9 +487,27 @@ pub fn html_to_text(html: &str) -> String {
             rest = "";
             break;
         };
-        let tag = rest[lt + 1..lt + gt].trim_start_matches('/').to_ascii_lowercase();
-        let name = tag.split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("");
-        if matches!(name, "br" | "p" | "div" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote") {
+        let tag = rest[lt + 1..lt + gt]
+            .trim_start_matches('/')
+            .to_ascii_lowercase();
+        let name = tag
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or("");
+        if matches!(
+            name,
+            "br" | "p"
+                | "div"
+                | "tr"
+                | "li"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+                | "blockquote"
+        ) {
             text.push('\n');
         }
         rest = &rest[lt + gt + 1..];
@@ -453,7 +524,11 @@ pub fn html_to_text(html: &str) -> String {
     let mut out = String::new();
     let mut blank_run = 0;
     for line in text.lines().map(str::trim_end) {
-        blank_run = if line.trim().is_empty() { blank_run + 1 } else { 0 };
+        blank_run = if line.trim().is_empty() {
+            blank_run + 1
+        } else {
+            0
+        };
         if blank_run <= 1 {
             out.push_str(line);
             out.push('\n');
@@ -467,7 +542,8 @@ pub fn html_to_text(html: &str) -> String {
 /// GFM-flavoured markdown to HTML. Single newlines become `<br>`: people type
 /// mail line by line and expect Enter to start a new line.
 pub fn markdown_to_html(md: &str) -> String {
-    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let events = Parser::new_ext(md, options).map(|e| match e {
         Event::SoftBreak => Event::HardBreak,
         e => e,
@@ -525,7 +601,11 @@ pub struct DraftMeta {
     pub body_md: Option<String>,
 }
 
-pub fn draft_headers(mode: ComposeMode, source: Option<MessageId>, body_md: &str) -> Vec<(String, String)> {
+pub fn draft_headers(
+    mode: ComposeMode,
+    source: Option<MessageId>,
+    body_md: &str,
+) -> Vec<(String, String)> {
     // Split into words so the header encoder can fold the base64 under the
     // 998-octet line limit; whitespace is dropped again when decoding.
     let encoded = BASE64.encode(body_md);
@@ -548,7 +628,10 @@ pub fn draft_headers(mode: ComposeMode, source: Option<MessageId>, body_md: &str
 fn draft_meta(headers: &[MailHeader]) -> DraftMeta {
     let body_md = headers.get_first_value(MARKDOWN_HEADER).and_then(|v| {
         let compact: String = v.split_whitespace().collect();
-        BASE64.decode(compact).ok().and_then(|b| String::from_utf8(b).ok())
+        BASE64
+            .decode(compact)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
     });
     DraftMeta {
         mode: headers
@@ -594,7 +677,10 @@ pub fn parse_source(raw: &[u8]) -> Result<ParsedSource, ApplicationError> {
                 MailAddr::Group(g) => g.addrs.clone(),
             })
             .map(|s| match EmailAddress::new(&s.addr) {
-                Ok(email) => format_address(&Address { name: s.display_name, email }),
+                Ok(email) => format_address(&Address {
+                    name: s.display_name,
+                    email,
+                }),
                 Err(_) => s.addr,
             })
             .collect()
@@ -628,7 +714,8 @@ fn collect_parts(part: &ParsedMail, out: &mut ParsedSource) {
         .get("filename")
         .or_else(|| part.ctype.params.get("name"))
         .cloned();
-    let is_attachment = disposition.disposition == DispositionType::Attachment || filename.is_some();
+    let is_attachment =
+        disposition.disposition == DispositionType::Attachment || filename.is_some();
     if !is_attachment {
         if mime == "text/plain" && out.text.is_none() {
             out.text = part.get_body().ok();
@@ -639,14 +726,18 @@ fn collect_parts(part: &ParsedMail, out: &mut ParsedSource) {
             return;
         }
     }
-    let content_id = part
-        .headers
-        .get_first_value("Content-ID")
-        .map(|v| v.trim().trim_start_matches('<').trim_end_matches('>').to_owned());
+    let content_id = part.headers.get_first_value("Content-ID").map(|v| {
+        v.trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .to_owned()
+    });
     if !is_attachment && content_id.is_none() {
         return;
     }
-    let Ok(data) = part.get_body_raw() else { return };
+    let Ok(data) = part.get_body_raw() else {
+        return;
+    };
     out.parts.push(OutgoingAttachment {
         filename: filename.unwrap_or_else(|| "allegato".to_owned()),
         mime_type: mime,
@@ -657,7 +748,9 @@ fn collect_parts(part: &ParsedMail, out: &mut ParsedSource) {
 
 /// Is this part shown inline by `html` (so it travels with it, unlisted)?
 pub fn referenced_inline(part: &OutgoingAttachment, html: &str) -> bool {
-    part.content_id.as_ref().is_some_and(|cid| html.contains(&format!("cid:{cid}")))
+    part.content_id
+        .as_ref()
+        .is_some_and(|cid| html.contains(&format!("cid:{cid}")))
 }
 
 /// Content fingerprint of a part. Attachment ids carry it instead of a MIME
@@ -672,7 +765,11 @@ pub fn part_fingerprint(part: &OutgoingAttachment) -> String {
 }
 
 /// The parts the user sees and may drop: everything not shown inline.
-pub fn listable_parts(message_id: MessageId, parsed: &ParsedSource, html: &str) -> Vec<ForwardedAttachment> {
+pub fn listable_parts(
+    message_id: MessageId,
+    parsed: &ParsedSource,
+    html: &str,
+) -> Vec<ForwardedAttachment> {
     parsed
         .parts
         .iter()

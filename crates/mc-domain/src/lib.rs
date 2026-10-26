@@ -8,7 +8,8 @@ pub mod value_objects;
 pub use error::DomainError;
 pub use events::{AggregateType, DomainEvent, EventEnvelope};
 pub use model::account::{
-    Account, AccountId, AccountStatus, AuthConfig, ConnectionConfig, OAuthProvider, ProviderType,
+    Account, AccountId, AccountStatus, AuthConfig, ConnectionConfig, IncomingServer, OAuthProvider,
+    ProviderType,
 };
 pub use model::attachment::{Attachment, AttachmentId};
 pub use model::identity::Identity;

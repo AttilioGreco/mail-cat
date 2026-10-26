@@ -5,12 +5,9 @@ use crate::{
     convert::*,
     error::{ClientError, Result},
     proto::mail_cat::v1::{
-        self as pb,
-        account_service_client::AccountServiceClient,
-        contact_service_client::ContactServiceClient,
-        mailbox_service_client::MailboxServiceClient,
-        message_service_client::MessageServiceClient,
-        search_service_client::SearchServiceClient,
+        self as pb, account_service_client::AccountServiceClient,
+        contact_service_client::ContactServiceClient, mailbox_service_client::MailboxServiceClient,
+        message_service_client::MessageServiceClient, search_service_client::SearchServiceClient,
     },
     types::*,
 };
@@ -50,7 +47,10 @@ impl MailCatClient {
         let mut client = AccountServiceClient::new(self.channel.clone());
         let resp = client
             .list_accounts(pb::ListAccountsRequest {
-                pagination: Some(pb::Pagination { page: 1, page_size: 100 }),
+                pagination: Some(pb::Pagination {
+                    page: 1,
+                    page_size: 100,
+                }),
             })
             .await?
             .into_inner();
@@ -69,11 +69,19 @@ impl MailCatClient {
                 email: params.email,
                 provider_type: pb::ProviderType::Imap as i32,
                 connection_config: Some(pb::ConnectionConfig {
-                    imap_host: Some(params.imap_host),
-                    imap_port: Some(params.imap_port as u32),
-                    smtp_host: params.smtp_host,
-                    smtp_port: params.smtp_port.map(|p| p as u32),
-                    use_tls: params.use_tls,
+                    incoming: Some(pb::IncomingServer {
+                        kind: Some(pb::incoming_server::Kind::Imap(pb::ImapServer {
+                            host: params.imap_host,
+                            port: u32::from(params.imap_port),
+                            use_tls: params.use_tls,
+                        })),
+                    }),
+                    smtp: params.smtp_host.zip(params.smtp_port).map(|(host, port)| {
+                        pb::SmtpServer {
+                            host,
+                            port: u32::from(port),
+                        }
+                    }),
                     auth: Some(pb::AuthConfig {
                         auth_type: Some(pb::auth_config::AuthType::Plain(pb::PlainAuth {
                             username: params.username,
@@ -171,12 +179,19 @@ impl MailCatClient {
         let resp = client
             .list_messages(pb::ListMessagesRequest {
                 mailbox_id: mailbox_id.to_owned(),
-                pagination: Some(pb::Pagination { page: 1, page_size: 200 }),
+                pagination: Some(pb::Pagination {
+                    page: 1,
+                    page_size: 200,
+                }),
             })
             .await?
             .into_inner();
 
-        Ok(resp.messages.into_iter().map(message_summary_from_proto).collect())
+        Ok(resp
+            .messages
+            .into_iter()
+            .map(message_summary_from_proto)
+            .collect())
     }
 
     /// List conversation summaries for an account (newest first).
@@ -214,7 +229,11 @@ impl MailCatClient {
             .await?
             .into_inner();
 
-        Ok(resp.messages.into_iter().map(crate::convert::thread_message_from_proto).collect())
+        Ok(resp
+            .messages
+            .into_iter()
+            .map(crate::convert::thread_message_from_proto)
+            .collect())
     }
 
     /// Wipe and rebuild the conversation/thread index by replaying all stored events.
@@ -237,9 +256,9 @@ impl MailCatClient {
             .await?
             .into_inner();
 
-        let detail = resp
-            .message
-            .ok_or_else(|| ClientError::InvalidResponse("missing message in GetMessageResponse".into()))?;
+        let detail = resp.message.ok_or_else(|| {
+            ClientError::InvalidResponse("missing message in GetMessageResponse".into())
+        })?;
 
         Ok(message_body_from_proto(detail))
     }
@@ -263,9 +282,9 @@ impl MailCatClient {
             .await?
             .into_inner();
 
-        let summary = resp
-            .message
-            .ok_or_else(|| ClientError::InvalidResponse("missing message in SetFlagsResponse".into()))?;
+        let summary = resp.message.ok_or_else(|| {
+            ClientError::InvalidResponse("missing message in SetFlagsResponse".into())
+        })?;
 
         Ok(message_summary_from_proto(summary))
     }
@@ -298,19 +317,15 @@ impl MailCatClient {
             .await?
             .into_inner();
 
-        let summary = resp
-            .message
-            .ok_or_else(|| ClientError::InvalidResponse("missing message in MoveMessageResponse".into()))?;
+        let summary = resp.message.ok_or_else(|| {
+            ClientError::InvalidResponse("missing message in MoveMessageResponse".into())
+        })?;
 
         Ok(message_summary_from_proto(summary))
     }
 
     /// Delete a message. If `permanently` is true, expunge immediately.
-    pub async fn delete_message(
-        &self,
-        message_id: &str,
-        permanently: bool,
-    ) -> Result<()> {
+    pub async fn delete_message(&self, message_id: &str, permanently: bool) -> Result<()> {
         let mut client = MessageServiceClient::new(self.channel.clone());
         client
             .delete_message(pb::DeleteMessageRequest {
@@ -407,7 +422,9 @@ impl MailCatClient {
 
     pub async fn discard_draft(&self, draft_id: &str) -> Result<()> {
         self.compose_client()
-            .discard_draft(pb::DiscardDraftRequest { draft_id: draft_id.to_owned() })
+            .discard_draft(pb::DiscardDraftRequest {
+                draft_id: draft_id.to_owned(),
+            })
             .await?;
         Ok(())
     }
@@ -451,10 +468,7 @@ impl MailCatClient {
 
     /// Rebuild the server-side contact search index from stored contact data.
     /// Returns the number of contacts that were indexed.
-    pub async fn rebuild_contact_index(
-        &self,
-        account_id: Option<String>,
-    ) -> Result<u32> {
+    pub async fn rebuild_contact_index(&self, account_id: Option<String>) -> Result<u32> {
         let mut client = ContactServiceClient::new(self.channel.clone());
         let resp = client
             .rebuild_contact_index(pb::RebuildContactIndexRequest { account_id })
@@ -478,7 +492,10 @@ impl MailCatClient {
                 query: query.to_owned(),
                 account_id: account_id.map(|s| s.to_owned()),
                 mailbox_id: mailbox_id.map(|s| s.to_owned()),
-                pagination: Some(pb::Pagination { page: 1, page_size: 50 }),
+                pagination: Some(pb::Pagination {
+                    page: 1,
+                    page_size: 50,
+                }),
             })
             .await?
             .into_inner();
@@ -512,7 +529,11 @@ impl MailCatClient {
             .await?
             .into_inner();
 
-        Ok(resp.suggestions.into_iter().map(suggestion_from_proto).collect())
+        Ok(resp
+            .suggestions
+            .into_iter()
+            .map(suggestion_from_proto)
+            .collect())
     }
 
     // ── Watch ─────────────────────────────────────────────────────────────────
@@ -553,7 +574,8 @@ impl MailCatClient {
             .into_inner();
 
         Ok(tokio_stream::StreamExt::map(stream, |item| {
-            item.map(sync_progress_from_proto).map_err(ClientError::Grpc)
+            item.map(sync_progress_from_proto)
+                .map_err(ClientError::Grpc)
         }))
     }
 
@@ -574,7 +596,8 @@ impl MailCatClient {
             .into_inner();
 
         Ok(tokio_stream::StreamExt::map(stream, |item| {
-            item.map(sync_progress_from_proto).map_err(ClientError::Grpc)
+            item.map(sync_progress_from_proto)
+                .map_err(ClientError::Grpc)
         }))
     }
 

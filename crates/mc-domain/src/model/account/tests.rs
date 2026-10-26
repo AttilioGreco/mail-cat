@@ -2,16 +2,16 @@ use super::*;
 
 fn test_connection_config() -> ConnectionConfig {
     ConnectionConfig {
-        imap_host: Some("imap.example.com".into()),
-        imap_port: Some(993),
-        use_tls: true,
+        incoming: IncomingServer::Imap {
+            host: "imap.example.com".into(),
+            port: 993,
+            use_tls: true,
+        },
         auth: AuthConfig::Plain {
             username: "user@example.com".into(),
             password: "secret".into(),
         },
         smtp: None,
-        smtp_host: None,
-        smtp_port: None,
     }
 }
 
@@ -158,7 +158,7 @@ fn account_serialization_roundtrip() {
     let (account, _) = Account::create(
         "Serialize Test".into(),
         EmailAddress::new("ser@example.com").unwrap(),
-        ProviderType::GmailApi,
+        ProviderType::Jmap,
         test_connection_config(),
         test_identity(),
     );
@@ -167,7 +167,7 @@ fn account_serialization_roundtrip() {
     let deserialized: Account = serde_json::from_str(&json).unwrap();
 
     assert_eq!(deserialized.name, "Serialize Test");
-    assert_eq!(deserialized.provider_type, ProviderType::GmailApi);
+    assert_eq!(deserialized.provider_type, ProviderType::Jmap);
 }
 
 #[test]

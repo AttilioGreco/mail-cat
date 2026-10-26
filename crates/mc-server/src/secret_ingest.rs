@@ -36,7 +36,11 @@ pub fn ingest_plaintext_secrets(config_path: &Path, store: &dyn SecretStore) -> 
 
     let mut changed = false;
     for table in accounts.iter_mut() {
-        let Some(email) = table.get("email").and_then(|v| v.as_str()).map(str::to_owned) else {
+        let Some(email) = table
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+        else {
             continue; // malformed account block; leave it alone
         };
 
@@ -53,7 +57,7 @@ pub fn ingest_plaintext_secrets(config_path: &Path, store: &dyn SecretStore) -> 
         // Merge into any existing bundle so OAuth/app-password secrets survive.
         let mut secrets = store.load(&email)?.unwrap_or_default();
         if imap_pw.is_some() {
-            secrets.imap_password = imap_pw;
+            secrets.password = imap_pw;
         }
         if smtp_pw.is_some() {
             secrets.smtp_password = smtp_pw;
@@ -148,11 +152,14 @@ password = "smtp-secret"
         // First pass migrates both secrets and rewrites the file.
         assert!(ingest_plaintext_secrets(&path, &store).unwrap());
         let saved = store.load("test@example.com").unwrap().unwrap();
-        assert_eq!(saved.imap_password.as_deref(), Some("hunter2"));
+        assert_eq!(saved.password.as_deref(), Some("hunter2"));
         assert_eq!(saved.smtp_password.as_deref(), Some("smtp-secret"));
 
         let rewritten = std::fs::read_to_string(&path).unwrap();
-        assert!(!rewritten.contains("hunter2"), "plaintext must be gone:\n{rewritten}");
+        assert!(
+            !rewritten.contains("hunter2"),
+            "plaintext must be gone:\n{rewritten}"
+        );
         assert!(!rewritten.contains("smtp-secret"));
         assert!(rewritten.contains("# password → OS keychain"));
         assert!(rewritten.contains("imap_host"), "non-secret keys preserved");

@@ -4,9 +4,8 @@ use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::{
     application_error_to_status, auth_status_to_proto, domain_account_summary_to_detail,
-    domain_account_summary_to_proto,
-    proto_connection_to_domain, proto_email_to_domain, proto_oauth_provider_to_domain,
-    proto_provider_type_to_domain,
+    domain_account_summary_to_proto, proto_connection_to_domain, proto_email_to_domain,
+    proto_oauth_provider_to_domain, proto_provider_type_to_domain,
 };
 use crate::grpc::proto::{
     self, AddAccountRequest, AddAccountResponse, GetAccountRequest, GetAccountResponse,
@@ -15,7 +14,7 @@ use crate::grpc::proto::{
     account_service_server::AccountService,
 };
 use mc_application::{
-    AccountProvisioner, AuthGates, ImapProvisionParams, OAuthLoginProgress, OAuthLoginTrigger,
+    AccountProvisioner, AuthGates, OAuthLoginProgress, OAuthLoginTrigger, ProvisionParams,
     SyncProgressEvent as AppSyncProgressEvent, SyncState, SyncTrigger,
     bus::{CommandBus, QueryBus},
     commands::{Command, CommandResult},
@@ -90,6 +89,9 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
 
         let provider_type =
             proto_provider_type_to_domain(req.provider_type).map_err(Status::invalid_argument)?;
+        if provider_type == mc_domain::ProviderType::Jmap {
+            return Err(Status::unimplemented("JMAP not supported yet"));
+        }
 
         let connection_config = proto_connection_to_domain(
             &req.connection_config
@@ -105,19 +107,13 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             match &connection_config.auth {
                 mc_domain::AuthConfig::Plain { username, password } => {
                     provisioner
-                        .provision_imap(ImapProvisionParams {
+                        .provision(ProvisionParams {
                             name: req.name.clone(),
                             email: email.as_str().to_string(),
-                            imap_host: connection_config
-                                .imap_host
-                                .clone()
-                                .ok_or_else(|| Status::invalid_argument("imap_host is required"))?,
-                            imap_port: connection_config.imap_port.unwrap_or(993),
-                            use_tls: connection_config.use_tls,
+                            incoming: connection_config.incoming.clone(),
                             username: username.clone(),
                             password: password.clone(),
-                            smtp_host: connection_config.smtp_host.clone(),
-                            smtp_port: connection_config.smtp_port,
+                            smtp: connection_config.smtp.clone(),
                         })
                         .await
                         .map_err(application_error_to_status)?;
@@ -126,7 +122,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
                 // token exchange; app passwords have no provisioning path yet.
                 _ => {
                     return Err(Status::invalid_argument(
-                        "AddAccount supports plain IMAP credentials only — use StartOAuthLogin for OAuth accounts",
+                        "AddAccount supports plain-password credentials only — use StartOAuthLogin for OAuth accounts",
                     ));
                 }
             }
@@ -473,7 +469,11 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
 
         tokio::spawn(async move {
             while let Some(event) = progress_rx.recv().await {
-                if tx.send(Ok(oauth_login_progress_to_proto(event))).await.is_err() {
+                if tx
+                    .send(Ok(oauth_login_progress_to_proto(event)))
+                    .await
+                    .is_err()
+                {
                     break; // client disconnected
                 }
             }

@@ -1,6 +1,6 @@
 use super::*;
 use chrono::Utc;
-use mc_domain::{AuthConfig, ConnectionConfig, Identity, ProviderType};
+use mc_domain::{AuthConfig, ConnectionConfig, Identity, IncomingServer, ProviderType};
 
 fn addr(name: Option<&str>, email: &str) -> Address {
     Address {
@@ -16,16 +16,16 @@ fn account(email: &str) -> Account {
         email.clone(),
         ProviderType::Imap,
         ConnectionConfig {
-            imap_host: Some("imap.example.com".into()),
-            imap_port: Some(993),
-            use_tls: true,
+            incoming: IncomingServer::Imap {
+                host: "imap.example.com".into(),
+                port: 993,
+                use_tls: true,
+            },
             auth: AuthConfig::Plain {
                 username: "u".into(),
                 password: String::new(),
             },
             smtp: None,
-            smtp_host: None,
-            smtp_port: None,
         },
         Identity {
             display_name: "Me".into(),

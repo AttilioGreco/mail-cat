@@ -27,17 +27,17 @@ impl KeyringSecretStore {
 impl SecretStore for KeyringSecretStore {
     fn load(&self, email: &str) -> Result<Option<AccountSecrets>, DomainError> {
         match Self::entry(email)?.get_password() {
-            Ok(json) => serde_json::from_str(&json)
-                .map(Some)
-                .map_err(|e| DomainError::SecretStore(format!("corrupt secret blob for {email}: {e}"))),
+            Ok(json) => serde_json::from_str(&json).map(Some).map_err(|e| {
+                DomainError::SecretStore(format!("corrupt secret blob for {email}: {e}"))
+            }),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(DomainError::SecretStore(e.to_string())),
         }
     }
 
     fn store(&self, email: &str, secrets: &AccountSecrets) -> Result<(), DomainError> {
-        let json = serde_json::to_string(secrets)
-            .map_err(|e| DomainError::SecretStore(e.to_string()))?;
+        let json =
+            serde_json::to_string(secrets).map_err(|e| DomainError::SecretStore(e.to_string()))?;
         Self::entry(email)?
             .set_password(&json)
             .map_err(|e| DomainError::SecretStore(e.to_string()))
@@ -64,7 +64,7 @@ mod tests {
         let store = KeyringSecretStore::new();
         let email = "verify-mailcat@example.invalid";
         let secrets = AccountSecrets {
-            imap_password: Some("s3cr3t".into()),
+            password: Some("s3cr3t".into()),
             ..Default::default()
         };
         store.delete(email).unwrap(); // clean slate

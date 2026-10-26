@@ -8,26 +8,26 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
-use mc_application::{CommandBus, QueryBus};
 use mc_application::projections::{ProjectionEventHandler, SearchProjectionHandler};
 use mc_application::{
-    AuthGate, AuthGates, AuthState, Credential, EventPublisher, OAuthLoginTrigger, RefreshFn, SyncConfig,
-    SyncService, SyncTrigger,
+    AuthGate, AuthGates, AuthState, Credential, EventPublisher, OAuthLoginTrigger, RefreshFn,
+    SyncConfig, SyncService, SyncTrigger,
 };
+use mc_application::{CommandBus, QueryBus};
+use mc_domain::model::account::{IncomingServer, SmtpConnectionConfig, SmtpSecurity};
 use mc_domain::{
-    Account, AccountEventSource, AccountId, AccountReadRepository, AccountSecrets, AccountWriteRepository,
-    AggregateType, AuthConfig, ConnectionConfig, DomainError, DomainEvent, EmailAddress, EventEnvelope,
-    EventStore, Identity, LoginGate, MailboxId, MailboxPath, ProviderNotification, ProviderRegistry,
-    ProviderUid,
+    Account, AccountEventSource, AccountId, AccountReadRepository, AccountSecrets,
+    AccountWriteRepository, AggregateType, AuthConfig, ConnectionConfig, DomainError, DomainEvent,
+    EmailAddress, EventEnvelope, EventStore, Identity, LoginGate, MailboxId, MailboxPath,
+    ProviderNotification, ProviderRegistry, ProviderUid,
 };
-use mc_domain::model::account::{SmtpConnectionConfig, SmtpSecurity};
 use mc_infrastructure::{
-    email::smtp::SmtpSender,
     DownloadMeter, ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SqliteDb,
-    SqliteEventStore, SqliteRepository, TantivySearchIndex,
+    SqliteEventStore, SqliteRepository, TantivySearchIndex, email::smtp::SmtpSender,
 };
 use mc_interfaces::grpc::services::{
-    AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl, SearchServiceImpl,
+    AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl,
+    SearchServiceImpl,
 };
 
 use crate::config::{AccountConfig, ServerConfig};
@@ -41,23 +41,22 @@ const SYNC_RETRY_FLOOR: std::time::Duration = std::time::Duration::from_secs(30)
 // Type aliases for concrete implementations
 type ProviderRegistryImpl = InMemoryProviderRegistry<ImapEmailProvider>;
 type CommandBusImpl = InProcessCommandBus<
-    SqliteRepository,               // AW
-    SqliteRepository,               // CW
-    SqliteEventStore,               // ES
-    ProviderRegistryImpl,           // PR
-    SqliteRepository,               // MR
-    InProcessEventBus,              // B
+    SqliteRepository,     // AW
+    SqliteRepository,     // CW
+    SqliteEventStore,     // ES
+    ProviderRegistryImpl, // PR
+    SqliteRepository,     // MR
+    InProcessEventBus,    // B
 >;
 type QueryBusImpl = InProcessQueryBus<
-    SqliteRepository,               // AR
-    SqliteRepository,               // MBR
-    SqliteRepository,               // MR
-    TantivySearchIndex,             // SI
-    SqliteRepository,               // CTR
-    SqliteRepository,               // CR
+    SqliteRepository,   // AR
+    SqliteRepository,   // MBR
+    SqliteRepository,   // MR
+    TantivySearchIndex, // SI
+    SqliteRepository,   // CTR
+    SqliteRepository,   // CR
 >;
-type SyncServiceImpl =
-    SyncService<ProviderRegistryImpl, SqliteEventStore, SqliteRepository>;
+type SyncServiceImpl = SyncService<ProviderRegistryImpl, SqliteEventStore, SqliteRepository>;
 
 /// Application context with all wired dependencies.
 pub struct AppContext {
@@ -132,27 +131,31 @@ impl AppContext {
 
         // Message commands ask for these when the server did more than they
         // could record; served once the sync service exists.
-        let (resync_tx, resync_rx) = tokio::sync::mpsc::unbounded_channel::<(AccountId, MailboxPath)>();
+        let (resync_tx, resync_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(AccountId, MailboxPath)>();
 
         // Create command bus
-        let command_bus = Arc::new(InProcessCommandBus::new(
-            repository_arc.clone(),    // AW
-            repository_arc.clone(),    // CW
-            event_store.clone(),       // ES
-            provider_registry.clone(), // PR
-            repository_arc.clone(),    // MR
-            event_bus.clone(),         // B
-        ).with_resync_requests(resync_tx));
+        let command_bus = Arc::new(
+            InProcessCommandBus::new(
+                repository_arc.clone(),    // AW
+                repository_arc.clone(),    // CW
+                event_store.clone(),       // ES
+                provider_registry.clone(), // PR
+                repository_arc.clone(),    // MR
+                event_bus.clone(),         // B
+            )
+            .with_resync_requests(resync_tx),
+        );
         tracing::info!("Initialized command bus");
 
         // Create query bus
         let query_bus = Arc::new(InProcessQueryBus::new(
-            repository_arc.clone(),    // AR
-            repository_arc.clone(),    // MBR
-            repository_arc.clone(),    // MR
-            search_index.clone(),      // SI
-            repository_arc.clone(),    // CTR
-            repository_arc.clone(),    // CR
+            repository_arc.clone(), // AR
+            repository_arc.clone(), // MBR
+            repository_arc.clone(), // MR
+            search_index.clone(),   // SI
+            repository_arc.clone(), // CTR
+            repository_arc.clone(), // CR
         ));
         tracing::info!("Initialized query bus");
 
@@ -226,7 +229,9 @@ impl AppContext {
         // rejected, recovered) come out of the gates in order; appended below.
         let (auth_events_tx, auth_events) = tokio::sync::mpsc::unbounded_channel();
         let refresh: RefreshFn = Arc::new(|provider, refresh_token| {
-            Box::pin(async move { mc_infrastructure::oauth::refresh(provider, &refresh_token).await })
+            Box::pin(
+                async move { mc_infrastructure::oauth::refresh(provider, &refresh_token).await },
+            )
         });
         let mut auth_gates = AuthGates::new(refresh, secret_store.clone(), auth_events_tx);
 
@@ -243,7 +248,8 @@ impl AppContext {
             let (account_id, name) = match existing {
                 Some(summary) => (summary.id, summary.name.clone()),
                 None => {
-                    let account_id = create_account(account_config, repository_arc.as_ref()).await?;
+                    let account_id =
+                        create_account(account_config, repository_arc.as_ref()).await?;
                     created_new = true;
                     (account_id, account_config.name.clone())
                 }
@@ -255,7 +261,7 @@ impl AppContext {
                 .load(&account_config.email)
                 .with_context(|| format!("reading keychain secrets for {}", account_config.email))?
                 .unwrap_or_default();
-            let imap_password = secrets.imap_password.clone().unwrap_or_default();
+            let imap_password = secrets.password.clone().unwrap_or_default();
             let credential = match account_config.oauth_provider {
                 Some(oauth_cfg) => {
                     oauth_names.insert(account_id, name.clone());
@@ -272,7 +278,10 @@ impl AppContext {
                             expires_at: Utc::now(),
                         }
                     });
-                    Credential::OAuth { provider: oauth_cfg.into(), tokens }
+                    Credential::OAuth {
+                        provider: oauth_cfg.into(),
+                        tokens,
+                    }
                 }
                 None => {
                     if imap_password.is_empty() {
@@ -289,7 +298,8 @@ impl AppContext {
                 gate.restore(summary);
             }
 
-            let smtp_sender = build_smtp_sender(account_config, &secrets, &imap_password, &gate).await;
+            let smtp_sender =
+                build_smtp_sender(account_config, &secrets, &imap_password, &gate).await;
             let login_gate = gate.clone() as Arc<dyn LoginGate>;
             let provider = Arc::new(
                 ImapEmailProvider::new(
@@ -303,7 +313,11 @@ impl AppContext {
                 .with_download_meter(DownloadMeter::new(db.clone(), &account_config.email)),
             );
             provider_registry.register_provider(account_id, provider);
-            tracing::info!("Registered provider for '{}' ({})", name, account_config.email);
+            tracing::info!(
+                "Registered provider for '{}' ({})",
+                name,
+                account_config.email
+            );
 
             // A pause persisted by an older run gets one real login now; the
             // user may have fixed it meanwhile (e.g. a password in config.toml).
@@ -317,9 +331,16 @@ impl AppContext {
                 );
                 tokio::spawn(async move {
                     gate.retry_after_restart(|secret| async move {
-                        ImapEmailProvider::new(host, port, username, Arc::new(secret), use_tls, None)
-                            .verify_login()
-                            .await
+                        ImapEmailProvider::new(
+                            host,
+                            port,
+                            username,
+                            Arc::new(secret),
+                            use_tls,
+                            None,
+                        )
+                        .verify_login()
+                        .await
                     })
                     .await;
                 });
@@ -344,8 +365,14 @@ impl AppContext {
         // An OAuth account that died before the user re-authenticated (e.g. server
         // restarted mid-outage) gets its "Ri-autentica" notification reissued
         // immediately instead of staying silently orphaned.
-        for account in existing_accounts.iter().filter(|a| a.status == mc_domain::AccountStatus::NeedsReauth) {
-            if let Some(gate) = auth_gates.get(&account.id).filter(|g| g.oauth_provider().is_some()) {
+        for account in existing_accounts
+            .iter()
+            .filter(|a| a.status == mc_domain::AccountStatus::NeedsReauth)
+        {
+            if let Some(gate) = auth_gates
+                .get(&account.id)
+                .filter(|g| g.oauth_provider().is_some())
+            {
                 spawn_reauth_notification(
                     account.id,
                     gate.email().to_owned(),
@@ -399,13 +426,17 @@ impl AppContext {
                         e = sub.recv() => match e { Some(v) => v, None => break },
                     };
                     let (account_id, addrs) = match envelope.payload {
-                        mc_domain::DomainEvent::MessageReceived { account_id, envelope: mail, .. } => {
-                            (account_id, [mail.from, mail.to, mail.cc].concat())
-                        }
+                        mc_domain::DomainEvent::MessageReceived {
+                            account_id,
+                            envelope: mail,
+                            ..
+                        } => (account_id, [mail.from, mail.to, mail.cc].concat()),
                         // The people you write to are the ones autocomplete most needs.
-                        mc_domain::DomainEvent::MessageSent { account_id, envelope: mail, .. } => {
-                            (account_id, [mail.to, mail.cc, mail.bcc].concat())
-                        }
+                        mc_domain::DomainEvent::MessageSent {
+                            account_id,
+                            envelope: mail,
+                            ..
+                        } => (account_id, [mail.to, mail.cc, mail.bcc].concat()),
                         _ => continue,
                     };
                     for addr in addrs {
@@ -450,8 +481,7 @@ impl AppContext {
         //       live OAuthRuntimeState cells (no server restart needed)
         {
             let mut sub = event_bus.subscribe();
-            let notif_cmd_bus =
-                command_bus.clone() as Arc<dyn mc_application::bus::CommandBus>;
+            let notif_cmd_bus = command_bus.clone() as Arc<dyn mc_application::bus::CommandBus>;
             let notif_q_bus = query_bus.clone() as Arc<dyn mc_application::bus::QueryBus>;
             let notif_ui_bin = config.ui_bin.clone();
             let center = crate::notifications::NotificationCenter::connect().await;
@@ -579,8 +609,12 @@ impl AppContext {
                                 notif_oauth_trigger.clone(),
                             );
                         }
-                        mc_domain::DomainEvent::AccountCredentialsRejected { account_id, .. } => {
-                            let Some(email) = notif_gates.get(&account_id).map(|g| g.email().to_owned()) else {
+                        mc_domain::DomainEvent::AccountCredentialsRejected {
+                            account_id, ..
+                        } => {
+                            let Some(email) =
+                                notif_gates.get(&account_id).map(|g| g.email().to_owned())
+                            else {
                                 continue;
                             };
                             tokio::task::spawn_blocking(move || {
@@ -612,8 +646,19 @@ impl AppContext {
             tokio::spawn(async move {
                 while let Some((account_id, event)) = auth_events.recv().await {
                     let name = event.event_name();
-                    if let Err(e) = append_account_event(account_id, event, &event_store, &repository, &publisher).await {
-                        tracing::error!("Failed recording {name} for {}: {e}", account_id.as_uuid());
+                    if let Err(e) = append_account_event(
+                        account_id,
+                        event,
+                        &event_store,
+                        &repository,
+                        &publisher,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "Failed recording {name} for {}: {e}",
+                            account_id.as_uuid()
+                        );
                     }
                 }
             });
@@ -672,7 +717,11 @@ impl AppContext {
                     }
                     let failed = match sync.start_sync(&id).await {
                         Ok(events) => {
-                            tracing::info!("Sync done for '{}': {} event(s)", account_name, events.len());
+                            tracing::info!(
+                                "Sync done for '{}': {} event(s)",
+                                account_name,
+                                events.len()
+                            );
                             // IMAP answered, even over a pooled session: not offline.
                             gate.login_succeeded();
                             false
@@ -683,7 +732,11 @@ impl AppContext {
                         }
                     };
                     if let Err(e) = search.catch_up(es.as_ref()).await {
-                        tracing::warn!("Search index catch-up after sync of '{}' failed: {}", account_name, e);
+                        tracing::warn!(
+                            "Search index catch-up after sync of '{}' failed: {}",
+                            account_name,
+                            e
+                        );
                     }
                     // A failure while the retry is already due wasn't a login the
                     // gate rescheduled: don't spin on it.
@@ -790,114 +843,124 @@ impl AppContext {
                     tracing::info!("[Watcher] Started INBOX IDLE for '{}'", account_name);
 
                     loop {
-                    let result = tokio::select! {
-                        _ = sd.cancelled() => break,
-                        item = stream.next() => match item { Some(v) => v, None => break },
-                    };
-                    {
-                        match result {
-                            Ok(notification) => match notification {
-                                // ── New message ──────────────────────────────
-                                // Targeted partial sync: fetch only from the
-                                // notified UID onward in this specific mailbox.
-                                // Emits MessageReceived + MailboxCountsUpdated
-                                // and advances the checkpoint so start_sync
-                                // won't re-fetch on the next periodic run.
-                                ProviderNotification::NewMessage {
-                                    ref mailbox,
-                                    ref uid,
-                                } => {
-                                    if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
-                                        let sync_clone = Arc::clone(&sync);
-                                        let id_clone = id;
-                                        let mailbox_clone = mailbox.clone();
-                                        let from_uid = *uid;
-                                        tokio::spawn(async move {
-                                            let _permit = permit;
-                                            if let Err(e) = sync_clone
-                                                .sync_mailbox(&id_clone, &mailbox_clone, from_uid)
-                                                .await
-                                            {
-                                                tracing::warn!(
-                                                    "[Watcher] Partial sync failed: {e}"
-                                                );
-                                            }
-                                        });
-                                    }
-                                }
-
-                                // ── Count changed (no UID) ────────────────────
-                                // Fallback: let the checkpoint decide what to fetch.
-                                // ProviderUid(0) → fetch_from = max(0, checkpoint) = checkpoint.
-                                ProviderNotification::MailboxCountChanged {
-                                    ref mailbox, ..
-                                } => {
-                                    if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
-                                        let sync_clone = Arc::clone(&sync);
-                                        let id_clone = id;
-                                        let mailbox_clone = mailbox.clone();
-                                        tokio::spawn(async move {
-                                            let _permit = permit;
-                                            if let Err(e) = sync_clone
-                                                .sync_mailbox(
-                                                    &id_clone,
-                                                    &mailbox_clone,
-                                                    ProviderUid::new(0),
-                                                )
-                                                .await
-                                            {
-                                                tracing::warn!(
-                                                    "[Watcher] Count-triggered sync failed: {e}"
-                                                );
-                                            }
-                                        });
-                                    }
-                                }
-
-                                // ── Remote flag change ───────────────────────
-                                // Map immediately to a domain command so the UI
-                                // gets a MessageFlagged event without waiting
-                                // for the next full sync.
-                                ProviderNotification::FlagsChanged {
-                                    ref mailbox,
-                                    ref uid,
-                                    ref flags,
-                                } if uid.value() > 0 => {
-                                    if let Some(mb_id) = path_to_id.get(&mailbox.full_path()) {
-                                        let cmd = mc_application::Command::ApplyRemoteFlagChange {
-                                            mailbox_id: *mb_id,
-                                            provider_uid: mc_application::commands::ProviderUid::new(
-                                                uid.value(),
-                                            ),
-                                            new_flags: flags.clone(),
-                                        };
-                                        if let Err(e) = cmd_bus.dispatch(cmd).await {
-                                            tracing::warn!(
-                                                "[Watcher] ApplyRemoteFlagChange uid={}: {e}",
-                                                uid.value()
-                                            );
+                        let result = tokio::select! {
+                            _ = sd.cancelled() => break,
+                            item = stream.next() => match item { Some(v) => v, None => break },
+                        };
+                        {
+                            match result {
+                                Ok(notification) => match notification {
+                                    // ── New message ──────────────────────────────
+                                    // Targeted partial sync: fetch only from the
+                                    // notified UID onward in this specific mailbox.
+                                    // Emits MessageReceived + MailboxCountsUpdated
+                                    // and advances the checkpoint so start_sync
+                                    // won't re-fetch on the next periodic run.
+                                    ProviderNotification::NewMessage {
+                                        ref mailbox,
+                                        ref uid,
+                                    } => {
+                                        if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
+                                            let sync_clone = Arc::clone(&sync);
+                                            let id_clone = id;
+                                            let mailbox_clone = mailbox.clone();
+                                            let from_uid = *uid;
+                                            tokio::spawn(async move {
+                                                let _permit = permit;
+                                                if let Err(e) = sync_clone
+                                                    .sync_mailbox(
+                                                        &id_clone,
+                                                        &mailbox_clone,
+                                                        from_uid,
+                                                    )
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        "[Watcher] Partial sync failed: {e}"
+                                                    );
+                                                }
+                                            });
                                         }
                                     }
-                                }
 
-                                // uid=0 FlagsChanged are spurious IMAP EXISTS echoes — ignore.
-                                ProviderNotification::FlagsChanged { .. } => {}
-                            },
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[Watcher] IDLE error for '{}': {e}",
-                                    account_name
-                                );
+                                    // ── Count changed (no UID) ────────────────────
+                                    // Fallback: let the checkpoint decide what to fetch.
+                                    // ProviderUid(0) → fetch_from = max(0, checkpoint) = checkpoint.
+                                    ProviderNotification::MailboxCountChanged {
+                                        ref mailbox,
+                                        ..
+                                    } => {
+                                        if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
+                                            let sync_clone = Arc::clone(&sync);
+                                            let id_clone = id;
+                                            let mailbox_clone = mailbox.clone();
+                                            tokio::spawn(async move {
+                                                let _permit = permit;
+                                                if let Err(e) = sync_clone
+                                                    .sync_mailbox(
+                                                        &id_clone,
+                                                        &mailbox_clone,
+                                                        ProviderUid::new(0),
+                                                    )
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        "[Watcher] Count-triggered sync failed: {e}"
+                                                    );
+                                                }
+                                            });
+                                        }
+                                    }
+
+                                    // ── Remote flag change ───────────────────────
+                                    // Map immediately to a domain command so the UI
+                                    // gets a MessageFlagged event without waiting
+                                    // for the next full sync.
+                                    ProviderNotification::FlagsChanged {
+                                        ref mailbox,
+                                        ref uid,
+                                        ref flags,
+                                    } if uid.value() > 0 => {
+                                        if let Some(mb_id) = path_to_id.get(&mailbox.full_path()) {
+                                            let cmd =
+                                                mc_application::Command::ApplyRemoteFlagChange {
+                                                    mailbox_id: *mb_id,
+                                                    provider_uid:
+                                                        mc_application::commands::ProviderUid::new(
+                                                            uid.value(),
+                                                        ),
+                                                    new_flags: flags.clone(),
+                                                };
+                                            if let Err(e) = cmd_bus.dispatch(cmd).await {
+                                                tracing::warn!(
+                                                    "[Watcher] ApplyRemoteFlagChange uid={}: {e}",
+                                                    uid.value()
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    // uid=0 FlagsChanged are spurious IMAP EXISTS echoes — ignore.
+                                    ProviderNotification::FlagsChanged { .. } => {}
+                                },
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "[Watcher] IDLE error for '{}': {e}",
+                                        account_name
+                                    );
+                                }
                             }
-                        }
-                    } // end inner block
+                        } // end inner block
                     } // end loop
 
                     tracing::info!("[Watcher] INBOX IDLE stopped for '{}'", account_name);
                 });
             }
         }
-        tracing::info!("Started server-side mailbox watchers for {} account(s)", registered.len());
+        tracing::info!(
+            "Started server-side mailbox watchers for {} account(s)",
+            registered.len()
+        );
 
         // ── Interface Layer ─────────────────────────────────────────────────
 
@@ -906,20 +969,17 @@ impl AppContext {
             .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>)
             .with_oauth_trigger(oauth_trigger.clone())
             .with_auth_gates(auth_gates.clone())
-            .with_provisioner(Arc::new(
-                crate::account_provisioner::ConfigAccountProvisioner::new(
+            .with_provisioner(
+                Arc::new(crate::account_provisioner::ConfigAccountProvisioner::new(
                     std::path::PathBuf::from(config_path),
                     secret_store.clone(),
-                ),
-            ) as Arc<dyn mc_application::AccountProvisioner>);
+                )) as Arc<dyn mc_application::AccountProvisioner>,
+            );
 
         let mailbox_service = MailboxServiceImpl::new(query_bus.clone());
 
-        let message_service = MessageServiceImpl::new(
-            command_bus.clone(),
-            query_bus.clone(),
-            event_bus.clone(),
-        );
+        let message_service =
+            MessageServiceImpl::new(command_bus.clone(), query_bus.clone(), event_bus.clone());
 
         let search_service = SearchServiceImpl::new(query_bus.clone());
 
@@ -975,12 +1035,8 @@ fn spawn_reauth_notification(
                 let mut progress = trigger.start_reauth(account_id);
                 while let Some(update) = progress.recv().await {
                     match update {
-                        mc_application::OAuthLoginProgress::AwaitingBrowser {
-                            authorize_url,
-                        } => {
-                            if let Err(e) =
-                                mc_shared::browser::open_browser(&authorize_url)
-                            {
+                        mc_application::OAuthLoginProgress::AwaitingBrowser { authorize_url } => {
+                            if let Err(e) = mc_shared::browser::open_browser(&authorize_url) {
                                 tracing::warn!(
                                     "Failed to open browser for re-auth ({e}) — \
                                      apri manualmente: {authorize_url}"
@@ -995,15 +1051,9 @@ fn spawn_reauth_notification(
                                 .show();
                         }
                         mc_application::OAuthLoginProgress::Failed { message } => {
-                            tracing::warn!(
-                                "Re-auth failed for {}: {message}",
-                                email
-                            );
+                            tracing::warn!("Re-auth failed for {}: {message}", email);
                             let _ = notify_rust::Notification::new()
-                                .summary(&format!(
-                                    "Ri-autenticazione fallita per {}",
-                                    email
-                                ))
+                                .summary(&format!("Ri-autenticazione fallita per {}", email))
                                 .body(&message)
                                 .icon("dialog-error")
                                 .show();
@@ -1032,16 +1082,16 @@ async fn create_account(
         password: None,
     });
     let connection_config = ConnectionConfig {
-        imap_host: Some(account_config.imap_host.clone()),
-        imap_port: Some(account_config.imap_port),
-        use_tls: account_config.use_tls,
+        incoming: IncomingServer::Imap {
+            host: account_config.imap_host.clone(),
+            port: account_config.imap_port,
+            use_tls: account_config.use_tls,
+        },
         auth: AuthConfig::Plain {
             username: account_config.username.clone(),
             password: String::new(), // resolved from keychain at runtime
         },
         smtp,
-        smtp_host: None,
-        smtp_port: None,
     };
     let identity = Identity {
         display_name: account_config.name.clone(),
@@ -1056,8 +1106,15 @@ async fn create_account(
         connection_config,
         identity,
     );
-    repository.save(&account, vec![event]).await.context("failed to auto-create account")?;
-    tracing::info!("Auto-created account '{}' ({})", account_config.name, account_config.email);
+    repository
+        .save(&account, vec![event])
+        .await
+        .context("failed to auto-create account")?;
+    tracing::info!(
+        "Auto-created account '{}' ({})",
+        account_config.name,
+        account_config.email
+    );
     Ok(account.id)
 }
 
@@ -1080,7 +1137,10 @@ async fn build_smtp_sender(
     gate: &Arc<AuthGate>,
 ) -> Option<SmtpSender> {
     let Some(smtp_cfg) = &account_config.smtp else {
-        tracing::warn!("⚠ SMTP {}: nessun blocco [smtp] in config — invio disabilitato", account_config.email);
+        tracing::warn!(
+            "⚠ SMTP {}: nessun blocco [smtp] in config — invio disabilitato",
+            account_config.email
+        );
         return None;
     };
     let domain_smtp = SmtpConnectionConfig {
@@ -1090,14 +1150,25 @@ async fn build_smtp_sender(
         username: smtp_cfg.username.clone(),
         password: secrets.smtp_password.clone(),
     };
-    let own_password = secrets.smtp_password.as_deref().is_some_and(|p| p != imap_password);
+    let own_password = secrets
+        .smtp_password
+        .as_deref()
+        .is_some_and(|p| p != imap_password);
     let sender = if account_config.oauth_provider.is_some() || !own_password {
         SmtpSender::build_gated(&domain_smtp, &account_config.username, gate.clone())
     } else {
-        match SmtpSender::build(&domain_smtp, &account_config.username, imap_password, gate.clone()) {
+        match SmtpSender::build(
+            &domain_smtp,
+            &account_config.username,
+            imap_password,
+            gate.clone(),
+        ) {
             Ok(sender) => sender,
             Err(e) => {
-                tracing::warn!("⚠ SMTP {}: configurazione non valida — {e}", account_config.email);
+                tracing::warn!(
+                    "⚠ SMTP {}: configurazione non valida — {e}",
+                    account_config.email
+                );
                 return None;
             }
         }
@@ -1108,9 +1179,14 @@ async fn build_smtp_sender(
     match sender.test_connection().await {
         Ok(true) => tracing::info!(
             "✓ SMTP {} ({}:{}) connessione OK",
-            account_config.email, smtp_cfg.host, smtp_cfg.port
+            account_config.email,
+            smtp_cfg.host,
+            smtp_cfg.port
         ),
-        Ok(false) => tracing::warn!("⚠ SMTP {}: server raggiungibile ma NOOP fallito", account_config.email),
+        Ok(false) => tracing::warn!(
+            "⚠ SMTP {}: server raggiungibile ma NOOP fallito",
+            account_config.email
+        ),
         Err(e) => tracing::warn!("⚠ SMTP {}: non raggiungibile — {e}", account_config.email),
     }
     Some(sender)
@@ -1130,10 +1206,15 @@ async fn append_account_event(
         .load(&account_id)
         .await?
         .ok_or_else(|| DomainError::AccountNotFound(account_id.to_string()))?;
-    let sequence_number = event_store.current_sequence(&account_id.to_string()).await? + 1;
+    let sequence_number = event_store
+        .current_sequence(&account_id.to_string())
+        .await?
+        + 1;
 
     account.apply(&event);
-    account_repository.save(&account, vec![event.clone()]).await?;
+    account_repository
+        .save(&account, vec![event.clone()])
+        .await?;
 
     event_publisher.publish(EventEnvelope::new(
         account_id.to_string(),

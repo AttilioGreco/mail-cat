@@ -110,16 +110,12 @@ impl AccountConfig {
 #[serde(rename_all = "lowercase")]
 pub enum ProviderTypeConfig {
     Imap,
-    GmailApi,
-    OutlookApi,
 }
 
 impl From<ProviderTypeConfig> for mc_domain::ProviderType {
     fn from(config: ProviderTypeConfig) -> Self {
         match config {
             ProviderTypeConfig::Imap => Self::Imap,
-            ProviderTypeConfig::GmailApi => Self::GmailApi,
-            ProviderTypeConfig::OutlookApi => Self::OutlookApi,
         }
     }
 }
@@ -255,7 +251,10 @@ security = "start_tls"
 "#;
         let config: ServerConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.accounts.len(), 1);
-        let smtp = config.accounts[0].smtp.as_ref().expect("smtp should be Some");
+        let smtp = config.accounts[0]
+            .smtp
+            .as_ref()
+            .expect("smtp should be Some");
         assert_eq!(smtp.host, "smtp.example.com");
         assert_eq!(smtp.port, 587);
         assert!(matches!(smtp.security, SmtpSecurityConfig::StartTls));
@@ -319,7 +318,10 @@ security = "start_tls"
     fn account_config_parses_oauth_provider() {
         let config: ServerConfig = toml::from_str(OAUTH_ACCOUNT_TOML).unwrap();
         assert_eq!(config.accounts.len(), 1);
-        assert_eq!(config.accounts[0].oauth_provider, Some(OAuthProviderConfig::Google));
+        assert_eq!(
+            config.accounts[0].oauth_provider,
+            Some(OAuthProviderConfig::Google)
+        );
         assert!(config.accounts[0].password.is_none());
     }
 

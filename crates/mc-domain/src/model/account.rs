@@ -46,16 +46,14 @@ impl From<Uuid> for AccountId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderType {
     Imap,
-    GmailApi,
-    OutlookApi,
+    Jmap,
 }
 
 impl std::fmt::Display for ProviderType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Imap => write!(f, "IMAP"),
-            Self::GmailApi => write!(f, "Gmail API"),
-            Self::OutlookApi => write!(f, "Outlook API"),
+            Self::Jmap => write!(f, "JMAP"),
         }
     }
 }
@@ -75,9 +73,9 @@ pub enum AccountStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SmtpSecurity {
-    Smtps,     // implicit TLS on port 465
+    Smtps, // implicit TLS on port 465
     #[default]
-    StartTls,  // plain → STARTTLS upgrade on port 587
+    StartTls, // plain → STARTTLS upgrade on port 587
 }
 
 /// SMTP-specific connection configuration stored on the account.
@@ -131,23 +129,26 @@ pub enum AuthConfig {
     },
 }
 
+/// Where an account's mail is fetched from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IncomingServer {
+    Imap {
+        host: String,
+        port: u16,
+        use_tls: bool,
+    },
+    Jmap {
+        session_url: String,
+    },
+}
+
 /// Connection configuration for an email account.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionConfig {
-    // ── IMAP ─────────────────────────────────────────────────────────────────
-    pub imap_host: Option<String>,
-    pub imap_port: Option<u16>,
-    pub use_tls: bool,
+    pub incoming: IncomingServer,
     pub auth: AuthConfig,
-    // ── SMTP ─────────────────────────────────────────────────────────────────
     /// When `None` outbound sending is disabled for this account.
-    #[serde(default)]
     pub smtp: Option<SmtpConnectionConfig>,
-    // Legacy flat fields kept for backward compatibility with stored events.
-    #[serde(default)]
-    pub smtp_host: Option<String>,
-    #[serde(default)]
-    pub smtp_port: Option<u16>,
 }
 
 /// Account aggregate root.
@@ -302,16 +303,16 @@ impl Account {
             email: email.clone(),
             provider_type: *provider_type,
             connection_config: ConnectionConfig {
-                imap_host: None,
-                imap_port: None,
-                use_tls: true,
+                incoming: IncomingServer::Imap {
+                    host: String::new(),
+                    port: 0,
+                    use_tls: true,
+                },
                 auth: AuthConfig::Plain {
                     username: String::new(),
                     password: String::new(),
                 },
                 smtp: None,
-                smtp_host: None,
-                smtp_port: None,
             },
             identity: Identity {
                 display_name: name.clone(),

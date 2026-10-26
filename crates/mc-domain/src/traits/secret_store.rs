@@ -12,8 +12,13 @@ use crate::error::DomainError;
 /// All secrets for a single account, stored as one JSON blob per keychain item.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AccountSecrets {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub imap_password: Option<String>,
+    // Persisted key predates the neutral name; keyring items must stay readable.
+    #[serde(
+        default,
+        rename = "imap_password",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp_password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,11 +59,14 @@ mod tests {
     #[test]
     fn secrets_roundtrip_json_omitting_absent_fields() {
         let s = AccountSecrets {
-            imap_password: Some("hunter2".into()),
+            password: Some("hunter2".into()),
             ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();
-        assert!(!json.contains("smtp_password"), "absent fields must be omitted: {json}");
+        assert!(
+            !json.contains("smtp_password"),
+            "absent fields must be omitted: {json}"
+        );
         assert_eq!(serde_json::from_str::<AccountSecrets>(&json).unwrap(), s);
     }
 }
