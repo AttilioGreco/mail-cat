@@ -4,14 +4,13 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use async_imap::types::Seq;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
 use mc_domain::traits::email_provider::MessageBodyResult;
 use mc_domain::traits::login_gate::{LoginGate, LoginSecret, login_with};
-use mc_domain::value_objects::uid::ProviderUid;
+use mc_domain::value_objects::remote_id::RemoteId;
 
 use crate::email::smtp::SmtpSender;
 use crate::persistence::DownloadMeter;
@@ -309,7 +308,7 @@ impl ImapEmailProvider {
         self.metered(raw.len() as u64).await;
         let (body_text, body_html) = whole_message_text(&raw);
         Ok(Some(MessageBodyResult {
-            provider_uid: ProviderUid::new(uid),
+            remote_id: RemoteId::from(uid),
             body_text,
             body_html,
             truncated: false,
@@ -454,11 +453,6 @@ impl ImapEmailProvider {
         }
 
         Ok(session)
-    }
-
-    /// Helper to convert ProviderUid to IMAP sequence.
-    pub(super) fn uid_to_seq(uid: &ProviderUid) -> Seq {
-        Seq::from(uid.value())
     }
 
     /// Batch size for UID FETCH operations to avoid IMAP command line limits.

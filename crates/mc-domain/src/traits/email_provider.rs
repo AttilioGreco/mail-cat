@@ -11,14 +11,8 @@ use crate::model::mailbox::Mailbox;
 use crate::model::message::{Envelope, Message, OutgoingMessage};
 use crate::value_objects::flag::Flag;
 use crate::value_objects::mailbox_path::MailboxPath;
-use crate::value_objects::uid::ProviderUid;
-
-/// Lightweight UID + flags entry returned by `fetch_uid_flags`.
-#[derive(Debug, Clone)]
-pub struct UidFlagEntry {
-    pub uid: ProviderUid,
-    pub flags: Vec<Flag>,
-}
+use crate::value_objects::remote_id::RemoteId;
+use crate::value_objects::sync_cursor::SyncCursor;
 
 /// Abstraction over email backends: IMAP, Gmail API, Outlook API, etc.
 ///
@@ -35,148 +29,99 @@ pub trait EmailProvider: Send + Sync {
     /// List all mailboxes (folders) for the account.
     async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError>;
 
-    /// Fetch message envelopes (headers) from a mailbox.
-    /// Returns lightweight summaries; bodies are fetched separately.
-    async fn fetch_message_envelopes(
+    /// What changed in `mailbox` since `since` (`None`: never synced). The
+    /// provider owns the strategy and the cursor format; the caller applies
+    /// the changes and stores [`MailboxChanges::cursor`] only once it has.
+    async fn mailbox_changes(
         &self,
         mailbox: &MailboxPath,
-        range: FetchRange,
+        since: Option<&SyncCursor>,
+    ) -> Result<MailboxChanges, DomainError>;
+
+    /// Envelopes (headers) of these messages, in no particular order; ids the
+    /// server no longer has are simply absent. Bodies are fetched separately.
+    async fn fetch_envelopes(
+        &self,
+        mailbox: &MailboxPath,
+        ids: &[RemoteId],
     ) -> Result<Vec<MessageEnvelopeSummary>, DomainError>;
 
     /// Fetch the full message detail including body and attachments metadata.
     async fn fetch_message_detail(
         &self,
         mailbox: &MailboxPath,
-        uid: ProviderUid,
+        id: &RemoteId,
     ) -> Result<Message, DomainError>;
 
-    /// Fetch bodies for multiple messages in bulk (single IMAP connection, batched UID FETCH).
+    /// Fetch bodies for multiple messages in bulk over one connection.
     /// Text only, each part cut at a size cap (see `MessageBodyResult::truncated`):
     /// this feeds the background backfill, which must never pull attachments.
-    /// Returns one result per UID; errors on individual messages are returned inline.
+    /// Returns one result per message; errors on individual messages are returned inline.
     async fn fetch_bodies_bulk(
         &self,
         mailbox: &MailboxPath,
-        uids: &[ProviderUid],
+        ids: &[RemoteId],
     ) -> Result<Vec<MessageBodyResult>, DomainError>;
 
-    /// UIDs of the messages with RFC Message-ID `rfc_id` (`<…>`) in
-    /// `mailbox`, ascending; several when the mailbox holds copies. How a
-    /// message whose UID is unknown is found again; a provider whose ids
-    /// survive moves answers it too.
-    async fn find_message(
+    /// Ids of the messages with RFC Message-ID `rfc_id` (`<…>`) in
+    /// `mailbox`, oldest first (callers `.rev()` for the newest); several when
+    /// the mailbox holds copies. How a message whose id is unknown is found
+    /// again.
+    async fn find_by_message_id(
         &self,
         mailbox: &MailboxPath,
         rfc_id: &str,
-    ) -> Result<Vec<ProviderUid>, DomainError>;
-
-    /// UIDs from `from` up in `mailbox`, ascending. Lets sync fetch a big
-    /// mailbox in batches, saving its progress after each.
-    async fn uids_from(&self, mailbox: &MailboxPath, from: ProviderUid) -> Result<Vec<ProviderUid>, DomainError>;
+    ) -> Result<Vec<RemoteId>, DomainError>;
 
     /// Fetch raw message bytes (RFC 2822).
     async fn fetch_raw_message(
         &self,
         mailbox: &MailboxPath,
-        uid: ProviderUid,
+        id: &RemoteId,
     ) -> Result<Vec<u8>, DomainError>;
 
-    /// Set or unset flags on a message.
-    async fn set_flags(
-        &self,
-        mailbox: &MailboxPath,
-        uid: ProviderUid,
-        flags_to_add: &[Flag],
-        flags_to_remove: &[Flag],
-    ) -> Result<(), DomainError>;
-
-    /// Set or unset flags on multiple messages in one provider round-trip
-    /// (single IMAP connection, batched UID STORE).
+    /// Set or unset flags on multiple messages in one provider round-trip.
     async fn set_flags_bulk(
         &self,
         mailbox: &MailboxPath,
-        uids: &[ProviderUid],
+        ids: &[RemoteId],
         flags_to_add: &[Flag],
         flags_to_remove: &[Flag],
     ) -> Result<(), DomainError>;
 
-    /// Move a message between mailboxes. Returns the new UID if available.
-    async fn move_message(
-        &self,
-        uid: ProviderUid,
-        from: &MailboxPath,
-        to: &MailboxPath,
-    ) -> Result<Option<ProviderUid>, DomainError>;
-
-    /// Delete a message (move to Trash or permanent delete).
-    async fn delete_message(
-        &self,
-        mailbox: &MailboxPath,
-        uid: ProviderUid,
-        permanently: bool,
-    ) -> Result<(), DomainError>;
-
-    /// Move many messages in one go. The default walks them one by one; a
-    /// provider that can express the whole set in a single request (IMAP can —
-    /// `UID COPY 1,4,7:9`) should override it. Bulk callers must use this
-    /// rather than looping `move_message` themselves: with one connection per
-    /// operation, a loop over a few hundred messages is a few hundred TLS
-    /// handshakes, which is what gets an account throttled.
+    /// Move many messages in one request: with one connection per operation,
+    /// a loop over a few hundred messages is a few hundred TLS handshakes,
+    /// which is what gets an account throttled.
     ///
-    /// Returns the UID each moved message got in `to`, for those the
-    /// provider reported.
+    /// Returns the id each moved message got in `to`; `None` for those the
+    /// provider did not report.
     async fn move_messages(
         &self,
-        uids: &[ProviderUid],
+        ids: &[RemoteId],
         from: &MailboxPath,
         to: &MailboxPath,
-    ) -> Result<HashMap<ProviderUid, ProviderUid>, DomainError> {
-        let mut moved = HashMap::new();
-        for &uid in uids {
-            if let Some(new_uid) = self.move_message(uid, from, to).await? {
-                moved.insert(uid, new_uid);
-            }
-        }
-        Ok(moved)
-    }
+    ) -> Result<HashMap<RemoteId, Option<RemoteId>>, DomainError>;
 
-    /// Delete many messages in one go. Same rationale as [`move_messages`].
+    /// Delete many messages in one request (move to Trash or permanent
+    /// delete). Same rationale as [`Self::move_messages`].
     async fn delete_messages(
         &self,
         mailbox: &MailboxPath,
-        uids: &[ProviderUid],
+        ids: &[RemoteId],
         permanently: bool,
-    ) -> Result<(), DomainError> {
-        for uid in uids {
-            self.delete_message(mailbox, *uid, permanently).await?;
-        }
-        Ok(())
-    }
+    ) -> Result<(), DomainError>;
 
     /// Send a message via the provider's send mechanism (SMTP, API, etc.).
     async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError>;
 
-    /// Store a message in a mailbox (IMAP APPEND) — the Sent copy or a draft.
-    /// Returns the UID it landed on, when the server lets us find it.
+    /// Store a message in a mailbox — the Sent copy or a draft.
+    /// Returns the id it landed on, when the provider lets us find it.
     async fn append_message(
         &self,
         mailbox: &MailboxPath,
         message: &OutgoingMessage,
         flags: &[Flag],
-    ) -> Result<Option<ProviderUid>, DomainError>;
-
-    /// Get UIDVALIDITY and UIDNEXT for a mailbox (for sync state detection).
-    async fn mailbox_status(&self, mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError>;
-
-    /// Fetch UIDs and their current flags for all messages in a mailbox.
-    ///
-    /// This is a lightweight operation (IMAP `UID FETCH 1:* FLAGS`) used by
-    /// the sync service to detect expunged messages and reconcile flag changes
-    /// without re-downloading full envelopes.
-    async fn fetch_uid_flags(
-        &self,
-        mailbox: &MailboxPath,
-    ) -> Result<Vec<UidFlagEntry>, DomainError>;
+    ) -> Result<Option<RemoteId>, DomainError>;
 
     /// Subscribe to real-time notifications (IMAP IDLE, push, etc.).
     ///
@@ -188,25 +133,57 @@ pub trait EmailProvider: Send + Sync {
     ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>>;
 }
 
-/// Range specification for fetching messages.
+/// What a provider reports for one mailbox since a cursor.
 #[derive(Debug, Clone)]
-pub enum FetchRange {
-    /// Fetch messages by IMAP UID range (inclusive).
-    UidRange { from: u32, to: u32 },
-    /// Fetch the last N messages.
-    Last(u32),
-    /// Fetch messages since a given date.
-    Since(DateTime<Utc>),
-    /// Fetch all messages.
-    All,
-    /// Fetch exactly these UIDs (ascending), wherever they fall.
-    Uids(Vec<ProviderUid>),
+pub struct MailboxChanges {
+    /// To store once the changes are fully applied, and to pass back next time.
+    pub cursor: SyncCursor,
+    /// The cursor passed in could not be used.
+    pub reset: Option<Reset>,
+    /// Arrived since the cursor (every message on a first sync or after a
+    /// reset), newest first.
+    pub added: Vec<RemoteId>,
+    /// State of the messages already known.
+    pub existing: Existing,
+    /// The server's totals for the mailbox.
+    pub counts: MailboxCounts,
+}
+
+/// Why a cursor was not usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reset {
+    /// Every id seen before in this mailbox is meaningless now (IMAP
+    /// mailbox renumbered by its server): messages must be matched again by
+    /// Message-ID.
+    IdsInvalidated,
+    /// Ids still hold, but the changes since the cursor cannot be computed
+    /// (JMAP `cannotCalculateChanges`): `existing` is a full listing.
+    Rescan,
+}
+
+/// The state of messages the caller already knows, as the server sees it.
+/// Provider-specific markers (IMAP `\Deleted`, `\Recent`) are resolved by the
+/// provider: a message that is soft-deleted counts as absent.
+#[derive(Debug, Clone)]
+pub enum Existing {
+    /// Every message the mailbox has, with its flags: one that is absent
+    /// from it is gone.
+    Snapshot(Vec<(RemoteId, Vec<Flag>)>),
+    /// Only what changed since the cursor.
+    Delta { changed: Vec<(RemoteId, Vec<Flag>)>, removed: Vec<RemoteId> },
+}
+
+/// Message counts as the server reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailboxCounts {
+    pub total: u32,
+    pub unread: u32,
 }
 
 /// Lightweight envelope summary for list views (without body).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageEnvelopeSummary {
-    pub provider_uid: ProviderUid,
+    pub remote_id: RemoteId,
     /// RFC Message-ID header (e.g. `<abc@mail.example.com>`).
     pub message_rfc_id: Option<String>,
     /// RFC In-Reply-To header.
@@ -223,20 +200,11 @@ pub struct MessageEnvelopeSummary {
 /// Result of a bulk body fetch for a single message.
 #[derive(Debug, Clone)]
 pub struct MessageBodyResult {
-    pub provider_uid: ProviderUid,
+    pub remote_id: RemoteId,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
     /// Only the start of a long text part was downloaded.
     pub truncated: bool,
-}
-
-/// Mailbox metadata for sync comparison.
-#[derive(Debug, Clone)]
-pub struct MailboxStatus {
-    pub uid_validity: u32,
-    pub uid_next: u32,
-    pub total_messages: u32,
-    pub unseen_messages: u32,
 }
 
 /// Real-time notifications from provider.
@@ -244,17 +212,17 @@ pub struct MailboxStatus {
 pub enum ProviderNotification {
     NewMessage {
         mailbox: MailboxPath,
-        uid: ProviderUid,
+        remote_id: RemoteId,
     },
     FlagsChanged {
         mailbox: MailboxPath,
-        uid: ProviderUid,
+        remote_id: RemoteId,
         flags: Vec<Flag>,
     },
     // Note: expunges are NOT delivered as a dedicated notification. Plain IMAP
     // IDLE reports EXPUNGE only by sequence number, which can't be reliably
     // resolved back to a UID after the message is gone. Instead the watcher emits
-    // MailboxCountChanged, and reconcile_mailbox (UID diff) detects the deletion.
+    // MailboxCountChanged, and the mailbox sync detects the deletion.
     MailboxCountChanged {
         mailbox: MailboxPath,
         total: u32,

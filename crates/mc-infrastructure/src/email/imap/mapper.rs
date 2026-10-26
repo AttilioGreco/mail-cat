@@ -188,9 +188,32 @@ pub fn imap_flag_to_domain(flag: &async_imap::types::Flag<'_>) -> Option<Flag> {
     }
 }
 
+/// The flags the application may see, or `None` for a message that is gone.
+///
+/// `\Deleted` marks a message for expunge (a move without UIDPLUS leaves one
+/// behind): sync treats it as absent. `\Recent` is volatile (present on first
+/// fetch, gone once the mailbox is selected), so diffing it would churn flags
+/// on every sync.
+pub fn visible_flags(mut flags: Vec<Flag>) -> Option<Vec<Flag>> {
+    if flags.contains(&Flag::Deleted) {
+        return None;
+    }
+    flags.retain(|f| *f != Flag::Recent);
+    Some(flags)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_messages_are_gone_and_recent_is_dropped() {
+        assert_eq!(visible_flags(vec![Flag::Seen, Flag::Deleted]), None);
+        assert_eq!(
+            visible_flags(vec![Flag::Recent, Flag::Flagged, Flag::Seen]),
+            Some(vec![Flag::Flagged, Flag::Seen])
+        );
+    }
 
     #[test]
     fn test_parse_mailbox_path() {

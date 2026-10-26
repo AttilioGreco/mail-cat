@@ -83,7 +83,7 @@ fn message_received_event_serialization() {
         message_id: MessageId::new(),
         account_id: AccountId::new(),
         mailbox_id: MailboxId::new(),
-        provider_uid: ProviderUid::new(1234),
+        remote_id: RemoteId::from(1234),
         message_rfc_id: None,
         in_reply_to: None,
         references: vec![],

@@ -200,7 +200,7 @@ def remote_delete(w):
 def reappear(w):
     """mail-cat moves M INBOX→Archive, then another client copies it back
     into INBOX. The copy must be ingested (RFC 3501: a COPY always gets a UID
-    >= UIDNEXT, so this exercises the checkpoint/reconcile boundary right
+    >= UIDNEXT, so this exercises the cursor/reconcile boundary right
     after mail-cat's own move, not a UID strictly below the stored one)."""
     mc("messages", "move", w.mc_id("INBOX", 11), w.boxes["Archive"]["ID"])
     wait(lambda: on_server(w, 11, "Archive") and not on_server(w, 11, "INBOX"), "tag 11 moved on server")
@@ -259,7 +259,7 @@ def backfill_text_only(w):
     before = db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0]
     w.sync()
     pending = ("SELECT COUNT(DISTINCT m.id) FROM messages m JOIN message_mailboxes mm ON mm.message_id = m.id "
-               "WHERE m.body_state = 'pending' AND mm.provider_uid IS NOT NULL")
+               "WHERE m.body_state = 'pending' AND mm.remote_id IS NOT NULL")
     # The worker naps a minute when its queue runs dry.
     wait(lambda: db(pending)[0] == 0, "every body backfilled", timeout=90)
     spent = db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0] - before

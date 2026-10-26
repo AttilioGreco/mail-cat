@@ -228,21 +228,21 @@ mod tests {
         async fn get_thread(&self, _id: &MessageId) -> Result<Vec<Message>, DomainError> {
             unimplemented!()
         }
-        async fn find_by_provider_uid(
+        async fn find_by_remote_id(
             &self,
             _m: &MailboxId,
-            _u: u32,
+            _u: &mc_domain::RemoteId,
         ) -> Result<Option<MessageSummary>, DomainError> {
             Ok(None)
         }
-        async fn held_uids(
+        async fn held_ids(
             &self,
             _mailbox_id: &MailboxId,
-            _uids: &[mc_domain::ProviderUid],
-        ) -> Result<std::collections::HashSet<mc_domain::ProviderUid>, DomainError> {
+            _uids: &[mc_domain::RemoteId],
+        ) -> Result<std::collections::HashSet<mc_domain::RemoteId>, DomainError> {
             Ok(Default::default())
         }
-        async fn uidless_messages(&self, _mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
+        async fn pending_messages(&self, _mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
             Ok(vec![])
         }
         async fn find_by_rfc_id(
@@ -350,7 +350,7 @@ mod tests {
         Message {
             id: MessageId::from_uuid(uuid::Uuid::parse_str(id).unwrap()),
             account_id: AccountId::new(),
-            memberships: vec![mc_domain::Membership { mailbox_id: MailboxId::new(), provider_uid: None }],
+            memberships: vec![mc_domain::Membership { mailbox_id: MailboxId::new(), remote_id: None }],
             message_rfc_id: None,
             in_reply_to: None,
             references: vec![],
@@ -392,7 +392,7 @@ mod tests {
                     message_id: mid,
                     account_id: AccountId::new(),
                     mailbox_id: MailboxId::new(),
-                    provider_uid: 1.into(),
+                    remote_id: 1.into(),
                     message_rfc_id: None,
                     in_reply_to: None,
                     references: vec![],

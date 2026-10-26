@@ -232,11 +232,11 @@ where
             }
             Command::ApplyRemoteFlagChange {
                 mailbox_id,
-                provider_uid,
+                remote_id,
                 new_flags,
             } => {
                 self.message_handler
-                    .handle_apply_remote_flag_change(mailbox_id, provider_uid, new_flags)
+                    .handle_apply_remote_flag_change(mailbox_id, remote_id, new_flags)
                     .await
             }
             Command::AddContact {

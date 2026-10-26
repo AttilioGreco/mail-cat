@@ -13,7 +13,7 @@ use mc_application::{
 };
 use mc_domain::{
     AccountId, AggregateType, DomainEvent, EventEnvelope, Flag, Mailbox, MailboxId, MailboxPath,
-    MailboxType, MessageId, ProviderUid,
+    MailboxType, MessageId, RemoteId,
 };
 
 // ── Minimal mock buses ────────────────────────────────────────────────────
@@ -51,8 +51,6 @@ fn fake_mailbox(account_id: AccountId, mailbox_id: MailboxId) -> Mailbox {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
-        uid_validity: None,
-        uid_next: None,
     }
 }
 
@@ -106,7 +104,7 @@ async fn fetches_on_open(body_text: Option<&str>, truncated: bool) -> u32 {
     let (message, _) = mc_domain::Message::receive(
         account_id,
         mailbox_id,
-        ProviderUid::new(1),
+        RemoteId::from(1),
         None,
         None,
         vec![],
@@ -177,7 +175,7 @@ async fn new_message_reaches_watch_stream() {
         message_id,
         account_id,
         mailbox_id,
-        provider_uid: ProviderUid::new(42),
+        remote_id: RemoteId::from(42),
         envelope: mc_domain::Envelope {
             from: vec![],
             to: vec![],
@@ -206,7 +204,7 @@ async fn new_message_reaches_watch_stream() {
     assert_eq!(event.mailbox_id, mailbox_id.as_uuid().to_string());
     assert!(matches!(
         event.event_type,
-        Some(mailbox_event::EventType::NewMessage(ref n)) if n.provider_uid == 42
+        Some(mailbox_event::EventType::NewMessage(ref n)) if n.remote_id == "42"
     ));
 }
 
@@ -232,7 +230,7 @@ async fn events_from_other_account_are_filtered() {
         message_id: MessageId::new(),
         account_id: other_account,
         mailbox_id,
-        provider_uid: ProviderUid::new(1),
+        remote_id: RemoteId::from(1),
         envelope: mc_domain::Envelope {
             from: vec![],
             to: vec![],
@@ -256,7 +254,7 @@ async fn events_from_other_account_are_filtered() {
         message_id: MessageId::new(),
         account_id,
         mailbox_id,
-        provider_uid: ProviderUid::new(2),
+        remote_id: RemoteId::from(2),
         envelope: mc_domain::Envelope {
             from: vec![],
             to: vec![],
@@ -282,7 +280,7 @@ async fn events_from_other_account_are_filtered() {
         .unwrap()
         .unwrap();
     match event.event_type {
-        Some(mailbox_event::EventType::NewMessage(n)) => assert_eq!(n.provider_uid, 2),
+        Some(mailbox_event::EventType::NewMessage(n)) => assert_eq!(n.remote_id, "2"),
         other => panic!("unexpected: {:?}", other),
     }
 }
@@ -355,7 +353,7 @@ async fn opening_a_message_without_uid_fetches_its_body() {
     let (mut message, _) = mc_domain::Message::receive(
         account_id,
         mailbox_id,
-        ProviderUid::new(1),
+        RemoteId::from(1),
         Some("<x@example.com>".into()),
         None,
         vec![],
@@ -373,7 +371,7 @@ async fn opening_a_message_without_uid_fetches_its_body() {
         false,
         chrono::Utc::now(),
     );
-    message.memberships[0].provider_uid = None;
+    message.memberships[0].remote_id = None;
     let commands = Arc::new(Recording(std::sync::Mutex::new(vec![])));
     let svc = MessageServiceImpl::new(
         Arc::clone(&commands),
@@ -417,7 +415,7 @@ fn message_in(account_id: AccountId, mailbox_id: MailboxId) -> mc_domain::Messag
     mc_domain::Message::receive(
         account_id,
         mailbox_id,
-        mc_domain::ProviderUid::new(1),
+        mc_domain::RemoteId::from(1),
         None,
         None,
         vec![],
@@ -504,7 +502,7 @@ async fn leaving_a_mailbox_reaches_its_watchers_as_an_expunge() {
         message_id: moved,
         added: vec![mc_domain::Membership {
             mailbox_id: MailboxId::new(),
-            provider_uid: None,
+            remote_id: None,
         }],
         removed: vec![mailbox_id],
     }));

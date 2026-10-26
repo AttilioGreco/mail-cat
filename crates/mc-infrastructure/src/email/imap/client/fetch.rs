@@ -6,66 +6,30 @@ use async_imap::imap_proto::types::{BodyStructure, ContentEncoding};
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
-use mc_domain::traits::email_provider::{FetchRange, MessageBodyResult, MessageEnvelopeSummary};
+use mc_domain::traits::email_provider::{MessageBodyResult, MessageEnvelopeSummary};
 use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::mailbox_path::MailboxPath;
-use mc_domain::value_objects::uid::ProviderUid;
+use mc_domain::value_objects::remote_id::RemoteId;
 
 use super::super::mapper;
-use super::commands::{exchange, fetch_checked};
-use super::{BODY_FETCH_TIMEOUT, COMMAND_TIMEOUT, ImapEmailProvider};
+use super::commands::{exchange, fetch_checked, uids_of};
+use super::{BODY_FETCH_TIMEOUT, ImapEmailProvider};
 
 impl ImapEmailProvider {
     pub(super) async fn envelopes(
         &self,
         mailbox: &MailboxPath,
-        range: FetchRange,
+        ids: &[RemoteId],
     ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
         debug!("Fetching envelopes from mailbox: {:?}", mailbox);
-        if matches!(&range, FetchRange::Uids(uids) if uids.is_empty()) {
+        let mut uids_to_fetch = uids_of(ids)?;
+        if uids_to_fetch.is_empty() {
             return Ok(Vec::new());
         }
+        uids_to_fetch.sort_unstable();
+        uids_to_fetch.dedup();
         let mailbox_name = mapper::mailbox_path_to_string(mailbox);
         let mut session = self.selected(&mailbox_name).await?;
-
-        // Use SEARCH to find actual existing UIDs (handles UID gaps from deleted messages)
-        let search_criteria = match &range {
-            FetchRange::All => "ALL".to_string(),
-            FetchRange::UidRange { from, to } => format!("UID {}:{}", from, to),
-            FetchRange::Last(_) => "ALL".to_string(),
-            FetchRange::Since(date) => format!("SINCE {}", date.format("%d-%b-%Y")),
-            FetchRange::Uids(uids) => {
-                let uids: Vec<u32> = uids.iter().map(|u| u.value()).collect();
-                format!("UID {}", Self::compress_uid_ranges(&uids))
-            }
-        };
-
-        debug!("Executing UID SEARCH with criteria: {}", search_criteria);
-        let search_results = exchange(
-            COMMAND_TIMEOUT,
-            "Search",
-            session.uid_search(&search_criteria),
-        )
-        .await?;
-
-        if search_results.is_empty() {
-            debug!("No messages found matching search criteria");
-            self.release(session);
-            return Ok(Vec::new());
-        }
-
-        // Convert HashSet to sorted Vec
-        let mut all_uids: Vec<u32> = search_results.into_iter().collect();
-        all_uids.sort_unstable();
-
-        // For Last(n), take only the last n UIDs
-        let uids_to_fetch = match range {
-            FetchRange::Last(n) => {
-                let start = all_uids.len().saturating_sub(n as usize);
-                &all_uids[start..]
-            }
-            _ => &all_uids[..],
-        };
 
         info!(
             "Fetching {} envelopes in batches of {}",
@@ -111,7 +75,7 @@ impl ImapEmailProvider {
 
             for fetch_data in &batch_results {
                 if let Some(envelope_data) = fetch_data.envelope() {
-                    let provider_uid = ProviderUid::new(fetch_data.uid.ok_or_else(|| {
+                    let remote_id = RemoteId::from(fetch_data.uid.ok_or_else(|| {
                         DomainError::Provider("Missing UID in fetch response".to_string())
                     })?);
 
@@ -151,6 +115,10 @@ impl ImapEmailProvider {
                         .flags()
                         .filter_map(|f| mapper::imap_flag_to_domain(&f))
                         .collect();
+                    // Expunged between the listing and this fetch.
+                    let Some(flags) = mapper::visible_flags(flags) else {
+                        continue;
+                    };
 
                     let internal_date = fetch_data
                         .internal_date()
@@ -164,7 +132,7 @@ impl ImapEmailProvider {
                         .unwrap_or((None, None, Vec::new()));
 
                     let summary = MessageEnvelopeSummary {
-                        provider_uid,
+                        remote_id,
                         message_rfc_id,
                         in_reply_to,
                         references,
@@ -232,7 +200,7 @@ where
     for (sections, message_uids) in layouts {
         if sections.is_empty() {
             results.extend(message_uids.into_iter().map(|uid| MessageBodyResult {
-                provider_uid: ProviderUid::new(uid),
+                remote_id: RemoteId::from(uid),
                 body_text: None,
                 body_html: None,
                 truncated: false,
@@ -266,7 +234,7 @@ where
                 continue;
             };
             let mut result = MessageBodyResult {
-                provider_uid: ProviderUid::new(uid),
+                remote_id: RemoteId::from(uid),
                 body_text: None,
                 body_html: None,
                 truncated: false,
@@ -326,7 +294,7 @@ where
     let truncated = raw.len() >= cap as usize;
     let (body_text, body_html) = whole_message_text(if truncated { whole_lines(raw) } else { raw });
     let result = MessageBodyResult {
-        provider_uid: ProviderUid::new(uid),
+        remote_id: RemoteId::from(uid),
         body_text,
         body_html,
         truncated,

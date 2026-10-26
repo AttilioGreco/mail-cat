@@ -10,7 +10,7 @@ macro_rules! read_repository_conformance {
             ContactSource, ConversationReadRepository, DomainEvent, EmailAddress, Envelope,
             EventEnvelope, EventStore, Flag, Identity, IncomingServer, MailboxId, MailboxPath,
             MailboxReadRepository, MailboxType, Membership, MessageBodyStore, MessageId,
-            MessageReadRepository, ProjectionCheckpoint, ProviderType, ProviderUid,
+            MessageReadRepository, ProjectionCheckpoint, ProviderType, RemoteId,
             ReadModelProjector, SuggestScope,
         };
         use mc_shared::pagination::Pagination;
@@ -123,7 +123,7 @@ macro_rules! read_repository_conformance {
                         message_id: id,
                         account_id,
                         mailbox_id,
-                        provider_uid: ProviderUid::new(uid),
+                        remote_id: RemoteId::from(uid),
                         envelope: test_envelope(),
                         flags: vec![],
                         size_bytes: 0,
@@ -140,11 +140,11 @@ macro_rules! read_repository_conformance {
             repo.project(&recv(1, older, 10, t0)).await.unwrap();
             repo.project(&recv(2, newer, 20, t1)).await.unwrap();
 
-            // Newest received comes first, carrying the right provider_uid.
+            // Newest received comes first, carrying the right remote_id.
             let pending = repo.list_pending_backfill(&account_id, 10).await.unwrap();
             assert_eq!(pending.len(), 2);
             assert_eq!(pending[0].message_id.to_string(), newer.to_string());
-            assert_eq!(pending[0].provider_uid, 20);
+            assert_eq!(pending[0].remote_id, RemoteId::from(20));
             assert_eq!(pending[1].message_id.to_string(), older.to_string());
 
             // Fetching a body dequeues exactly that entry.
@@ -214,7 +214,7 @@ macro_rules! read_repository_conformance {
                         message_id: id,
                         account_id,
                         mailbox_id,
-                        provider_uid: ProviderUid::new(uid),
+                        remote_id: RemoteId::from(uid),
                         envelope: test_envelope(),
                         flags: vec![],
                         size_bytes: 0,
@@ -491,7 +491,7 @@ macro_rules! read_repository_conformance {
                     message_id,
                     account_id,
                     mailbox_id,
-                    provider_uid: ProviderUid::new(42),
+                    remote_id: RemoteId::from(42),
                     envelope: test_envelope(),
                     flags: vec![Flag::Recent],
                     size_bytes: 2048,
@@ -594,7 +594,7 @@ macro_rules! read_repository_conformance {
                     message_id,
                     account_id,
                     mailbox_id,
-                    provider_uid: ProviderUid::new(42),
+                    remote_id: RemoteId::from(42),
                     envelope: test_envelope(),
                     flags: vec![Flag::Recent],
                     size_bytes: 2048,
@@ -744,7 +744,7 @@ macro_rules! read_repository_conformance {
                         message_id: mid,
                         account_id,
                         mailbox_id,
-                        provider_uid: ProviderUid::new(pos as u32),
+                        remote_id: RemoteId::from(pos as u32),
                         envelope: test_envelope(),
                         flags: vec![], // unread
                         size_bytes: 10,
@@ -880,7 +880,7 @@ macro_rules! read_repository_conformance {
                     message_id,
                     account_id,
                     mailbox_id: inbox_id,
-                    provider_uid: ProviderUid::new(1),
+                    remote_id: RemoteId::from(1),
                     envelope: test_envelope(),
                     flags: vec![],
                     size_bytes: 1024,
@@ -904,7 +904,7 @@ macro_rules! read_repository_conformance {
                     message_id,
                     added: vec![Membership {
                         mailbox_id: archive_id,
-                        provider_uid: None,
+                        remote_id: None,
                     }],
                     removed: vec![inbox_id],
                 },
@@ -920,7 +920,7 @@ macro_rules! read_repository_conformance {
                 msg.memberships,
                 [Membership {
                     mailbox_id: archive_id,
-                    provider_uid: None
+                    remote_id: None
                 }]
             );
 
@@ -950,7 +950,7 @@ macro_rules! read_repository_conformance {
             assert_eq!(archive_msgs.total_count, 1);
             // The inbox UID means nothing in archive.
             assert_eq!(
-                repo.uidless_messages(&archive_id).await.unwrap(),
+                repo.pending_messages(&archive_id).await.unwrap(),
                 [message_id]
             );
 
@@ -964,22 +964,22 @@ macro_rules! read_repository_conformance {
                     message_id,
                     added: vec![Membership {
                         mailbox_id: archive_id,
-                        provider_uid: Some(ProviderUid::new(77)),
+                        remote_id: Some(RemoteId::from(77)),
                     }],
                     removed: vec![],
                 },
             );
             repo.project(&env).await.unwrap();
-            let found = repo.find_by_provider_uid(&archive_id, 77).await.unwrap();
+            let found = repo.find_by_remote_id(&archive_id, &RemoteId::from(77u32)).await.unwrap();
             assert_eq!(found.map(|m| m.id), Some(message_id));
-            assert!(repo.uidless_messages(&archive_id).await.unwrap().is_empty());
+            assert!(repo.pending_messages(&archive_id).await.unwrap().is_empty());
             let held = repo
-                .held_uids(&archive_id, &[ProviderUid::new(5), ProviderUid::new(77)])
+                .held_ids(&archive_id, &[RemoteId::from(5), RemoteId::from(77)])
                 .await
                 .unwrap();
-            assert_eq!(held, [ProviderUid::new(77)].into());
+            assert_eq!(held, [RemoteId::from(77)].into());
             assert!(
-                repo.held_uids(&inbox_id, &[ProviderUid::new(77)])
+                repo.held_ids(&inbox_id, &[RemoteId::from(77)])
                     .await
                     .unwrap()
                     .is_empty()
@@ -1011,7 +1011,7 @@ macro_rules! read_repository_conformance {
                     message_id: root_id,
                     account_id,
                     mailbox_id: MailboxId::new(),
-                    provider_uid: ProviderUid::new(1),
+                    remote_id: RemoteId::from(1),
                     envelope: test_envelope(),
                     flags: vec![Flag::Seen],
                     size_bytes: 1024,
@@ -1101,7 +1101,7 @@ macro_rules! read_repository_conformance {
                     message_id,
                     account_id,
                     mailbox_id: MailboxId::new(),
-                    provider_uid: ProviderUid::new(1),
+                    remote_id: RemoteId::from(1),
                     message_rfc_id: None,
                     in_reply_to: None,
                     references: vec![],
@@ -1303,7 +1303,7 @@ macro_rules! read_repository_conformance {
                 message_id,
                 account_id,
                 mailbox_id,
-                provider_uid: ProviderUid::new(uid),
+                remote_id: RemoteId::from(uid),
                 message_rfc_id: rfc.map(str::to_owned),
                 in_reply_to: None,
                 references: references.iter().map(|r| r.to_string()).collect(),
@@ -1440,7 +1440,7 @@ macro_rules! read_repository_conformance {
                 message_id,
                 added: vec![Membership {
                     mailbox_id,
-                    provider_uid: uid.map(ProviderUid::new),
+                    remote_id: uid.map(RemoteId::from),
                 }],
                 removed: vec![],
             }
@@ -1484,21 +1484,21 @@ macro_rules! read_repository_conformance {
                 assert_eq!(threads.items.len(), 1);
             }
             assert_eq!(
-                repo.find_by_provider_uid(&label, 5)
+                repo.find_by_remote_id(&label, &RemoteId::from(5u32))
                     .await
                     .unwrap()
                     .map(|m| m.id),
                 Some(id)
             );
             assert_eq!(
-                repo.find_by_provider_uid(&inbox, 1)
+                repo.find_by_remote_id(&inbox, &RemoteId::from(1u32))
                     .await
                     .unwrap()
                     .map(|m| m.id),
                 Some(id)
             );
             assert!(
-                repo.find_by_provider_uid(&inbox, 5)
+                repo.find_by_remote_id(&inbox, &RemoteId::from(5u32))
                     .await
                     .unwrap()
                     .is_none(),
@@ -1541,7 +1541,7 @@ macro_rules! read_repository_conformance {
                 (1, 1)
             );
             assert_eq!(
-                repo.held_uids(&label, &[ProviderUid::new(5)])
+                repo.held_ids(&label, &[RemoteId::from(5)])
                     .await
                     .unwrap()
                     .len(),
@@ -1565,7 +1565,7 @@ macro_rules! read_repository_conformance {
             )
             .await;
             let page = first_page();
-            assert_eq!(repo.uidless_messages(&label).await.unwrap(), [id]);
+            assert_eq!(repo.pending_messages(&label).await.unwrap(), [id]);
 
             project_all(
                 &repo,
@@ -1597,7 +1597,7 @@ macro_rules! read_repository_conformance {
                 kept.memberships,
                 [Membership {
                     mailbox_id: label,
-                    provider_uid: None
+                    remote_id: None
                 }]
             );
             assert_eq!(
@@ -1666,7 +1666,7 @@ macro_rules! read_repository_conformance {
         }
 
         #[tokio::test]
-        async fn find_by_provider_uid_is_scoped_and_survives_uid_reuse() {
+        async fn find_by_remote_id_is_scoped_and_survives_uid_reuse() {
             let (_guard, _es, repo) = $make;
             let (account, inbox, archive) = (AccountId::new(), MailboxId::new(), MailboxId::new());
             let (old, e_old) = received(account, inbox, 7, None, &[], false, at(0));
@@ -1675,14 +1675,14 @@ macro_rules! read_repository_conformance {
             let (new, e_new) = received(account, inbox, 7, None, &[], false, at(2));
             project_all(&repo, [e_old, e_elsewhere, e_new]).await;
 
-            let found = repo.find_by_provider_uid(&inbox, 7).await.unwrap().unwrap();
+            let found = repo.find_by_remote_id(&inbox, &RemoteId::from(7u32)).await.unwrap().unwrap();
             assert_eq!(found.id, new);
             assert_eq!(
-                found.membership(inbox).and_then(|m| m.provider_uid),
-                Some(ProviderUid::new(7))
+                found.membership(inbox).and_then(|m| m.remote_id.clone()),
+                Some(RemoteId::from(7))
             );
             assert!(
-                repo.find_by_provider_uid(&inbox, 8)
+                repo.find_by_remote_id(&inbox, &RemoteId::from(8u32))
                     .await
                     .unwrap()
                     .is_none()
@@ -1916,7 +1916,7 @@ macro_rules! read_repository_conformance {
                 message_id: MessageId::new(),
                 account_id: account,
                 mailbox_id,
-                provider_uid: ProviderUid::new(1),
+                remote_id: RemoteId::from(1),
                 message_rfc_id: None,
                 in_reply_to: None,
                 references: vec![],
@@ -2266,7 +2266,7 @@ macro_rules! read_repository_conformance {
                         message_id: reply,
                         added: vec![Membership {
                             mailbox_id: archive,
-                            provider_uid: None,
+                            remote_id: None,
                         }],
                         removed: vec![inbox],
                     },
@@ -2430,7 +2430,7 @@ macro_rules! read_repository_conformance {
                         message_id: roamer,
                         added: vec![Membership {
                             mailbox_id: trash,
-                            provider_uid: None,
+                            remote_id: None,
                         }],
                         removed: vec![inbox],
                     },
@@ -2438,7 +2438,7 @@ macro_rules! read_repository_conformance {
                         message_id: roamer,
                         added: vec![Membership {
                             mailbox_id: archive,
-                            provider_uid: None,
+                            remote_id: None,
                         }],
                         removed: vec![trash],
                     },
@@ -2525,7 +2525,7 @@ macro_rules! read_repository_conformance {
                         message_id: waiting,
                         added: vec![Membership {
                             mailbox_id: archive,
-                            provider_uid: None,
+                            remote_id: None,
                         }],
                         removed: vec![archive],
                     },
@@ -2535,8 +2535,8 @@ macro_rules! read_repository_conformance {
 
             let pending = repo.list_pending_backfill(&account, 10).await.unwrap();
             assert_eq!(
-                pending.iter().map(|e| e.provider_uid).collect::<Vec<_>>(),
-                [5]
+                pending.iter().map(|e| e.remote_id.clone()).collect::<Vec<_>>(),
+                [RemoteId::from(5)]
             );
             assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 1);
         }
@@ -2580,8 +2580,8 @@ macro_rules! read_repository_conformance {
 
             let pending = repo.list_pending_backfill(&account, 10).await.unwrap();
             assert_eq!(
-                pending.iter().map(|e| e.provider_uid).collect::<Vec<_>>(),
-                [8, 7, 6, 5, 1, 2]
+                pending.iter().map(|e| e.remote_id.clone()).collect::<Vec<_>>(),
+                [8, 7, 6, 5, 1, 2].map(RemoteId::from)
             );
             assert_eq!(repo.count_pending_backfill(&account).await.unwrap(), 6);
             assert_eq!(
@@ -2749,7 +2749,7 @@ macro_rules! read_repository_conformance {
                         message_id: waiting,
                         added: vec![Membership {
                             mailbox_id: archive,
-                            provider_uid: None,
+                            remote_id: None,
                         }],
                         removed: vec![archive],
                     },

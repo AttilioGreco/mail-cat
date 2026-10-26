@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AccountStatus, ContactEmail, ContactId, DomainError, DomainEvent,
-    Envelope, EventEnvelope, Flag, MailboxId, MailboxType, Membership, MessageId, ProviderUid, ReadModelProjector,
+    Envelope, EventEnvelope, Flag, MailboxId, MailboxType, Membership, MessageId, RemoteId, ReadModelProjector,
 };
 
 use super::repo_err;
@@ -82,6 +82,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
         }
         DomainEvent::AccountRemoved { account_id } => {
             exec(tx, "DELETE FROM accounts WHERE id = ?1", [account_id.as_uuid()])?;
+            exec(tx, "DELETE FROM sync_cursors WHERE account_id = ?1", [account_id.as_uuid()])?;
         }
         DomainEvent::AccountAuthExpired { account_id, error } => {
             set_account_status(tx, account_id, AccountStatus::NeedsReauth, Some(error), event.occurred_at)?;
@@ -158,13 +159,14 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             exec(tx, "DELETE FROM message_mailboxes WHERE mailbox_id = ?1", [mailbox_id.as_uuid()])?;
             refresh_threads(tx, &threads)?;
             exec(tx, "DELETE FROM mailboxes WHERE id = ?1", [mailbox_id.as_uuid()])?;
+            exec(tx, "DELETE FROM sync_cursors WHERE collection = ?1", [mailbox_id.to_string()])?;
         }
 
         DomainEvent::MessageReceived {
             message_id,
             account_id,
             mailbox_id,
-            provider_uid,
+            remote_id,
             message_rfc_id,
             in_reply_to,
             references,
@@ -195,7 +197,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 },
             )?;
             if inserted {
-                upsert_membership(tx, message_id, mailbox_id, Some(*provider_uid))?;
+                upsert_membership(tx, message_id, mailbox_id, Some(remote_id))?;
                 // Symmetric with MessageDeleted's decrement, so replaying a
                 // received+deleted pair nets zero.
                 if !flags.contains(&Flag::Seen) {
@@ -411,19 +413,19 @@ fn insert_message(tx: &Connection, m: &NewMessage) -> Result<bool, DomainError> 
 
 /// `received_at` is copied from the message (it never changes) so a mailbox
 /// lists by date from `message_mailboxes_date` alone. An existing membership
-/// only takes the new UID.
+/// only takes the new remote id.
 fn upsert_membership(
     tx: &Connection,
     id: &MessageId,
     mailbox_id: &MailboxId,
-    provider_uid: Option<ProviderUid>,
+    remote_id: Option<&RemoteId>,
 ) -> Result<(), DomainError> {
     exec(
         tx,
-        "INSERT INTO message_mailboxes (message_id, mailbox_id, provider_uid, received_at) \
+        "INSERT INTO message_mailboxes (message_id, mailbox_id, remote_id, received_at) \
          SELECT id, ?2, ?3, received_at FROM messages WHERE id = ?1 \
-         ON CONFLICT(message_id, mailbox_id) DO UPDATE SET provider_uid = excluded.provider_uid",
-        params![id.as_uuid(), mailbox_id.as_uuid(), provider_uid.map(|u| u.value())],
+         ON CONFLICT(message_id, mailbox_id) DO UPDATE SET remote_id = excluded.remote_id",
+        params![id.as_uuid(), mailbox_id.as_uuid(), remote_id.map(RemoteId::as_str)],
     )
     .map(drop)
 }
@@ -477,7 +479,7 @@ fn server_copy_exists(
         tx,
         "SELECT 1 FROM messages m JOIN message_mailboxes mm ON mm.message_id = m.id \
          WHERE m.account_id = ?1 AND m.rfc_message_id = ?2 \
-             AND mm.mailbox_id = ?3 AND mm.provider_uid IS NOT NULL LIMIT 1",
+             AND mm.mailbox_id = ?3 AND mm.remote_id IS NOT NULL LIMIT 1",
         params![account_id.as_uuid(), rfc_message_id, mailbox_id.as_uuid()],
         |_| Ok(()),
     )?
@@ -504,7 +506,7 @@ fn drop_sent_placeholders(
     let placeholders = query_all(
         tx,
         "SELECT m.id FROM messages m JOIN message_mailboxes mm ON mm.message_id = m.id \
-         WHERE m.account_id = ?1 AND m.rfc_message_id = ?2 AND mm.mailbox_id = ?3 AND mm.provider_uid IS NULL",
+         WHERE m.account_id = ?1 AND m.rfc_message_id = ?2 AND mm.mailbox_id = ?3 AND mm.remote_id IS NULL",
         params![account_id.as_uuid(), rfc_message_id, sent.as_uuid()],
         |r| r.get::<_, Uuid>(0),
     )?;
@@ -621,7 +623,7 @@ fn change_mailboxes(
             adjust_unread(tx, mailbox_id.as_uuid(), -1)?;
         }
     }
-    for Membership { mailbox_id, provider_uid } in added {
+    for Membership { mailbox_id, remote_id } in added {
         let existed = query_one(
             tx,
             "SELECT 1 FROM message_mailboxes WHERE message_id = ?1 AND mailbox_id = ?2",
@@ -629,7 +631,7 @@ fn change_mailboxes(
             |_| Ok(()),
         )?
         .is_some();
-        upsert_membership(tx, id, mailbox_id, *provider_uid)?;
+        upsert_membership(tx, id, mailbox_id, remote_id.as_ref())?;
         if !existed && !seen {
             adjust_unread(tx, mailbox_id.as_uuid(), 1)?;
         }

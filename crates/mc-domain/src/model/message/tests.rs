@@ -23,7 +23,7 @@ fn receive_message_produces_event() {
     let (msg, event) = Message::receive(
         AccountId::new(),
         MailboxId::new(),
-        ProviderUid::new(42),
+        RemoteId::from(42),
         None,
         None,
         vec![],
@@ -35,7 +35,7 @@ fn receive_message_produces_event() {
     );
 
     assert_eq!(msg.envelope.subject, "Test subject");
-    assert_eq!(msg.memberships[0].provider_uid, Some(ProviderUid::new(42)));
+    assert_eq!(msg.memberships[0].remote_id, Some(RemoteId::from(42)));
     assert!(!msg.is_read());
     assert_eq!(event.event_name(), "MessageReceived");
 }
@@ -45,7 +45,7 @@ fn set_body_produces_event() {
     let (mut msg, _) = Message::receive(
         AccountId::new(),
         MailboxId::new(),
-        ProviderUid::new(1),
+        RemoteId::from(1),
         None,
         None,
         vec![],
@@ -77,7 +77,7 @@ fn mark_as_read_and_unread() {
     let (mut msg, _) = Message::receive(
         AccountId::new(),
         MailboxId::new(),
-        ProviderUid::new(1),
+        RemoteId::from(1),
         None,
         None,
         vec![],
@@ -104,7 +104,7 @@ fn toggle_flagged() {
     let (mut msg, _) = Message::receive(
         AccountId::new(),
         MailboxId::new(),
-        ProviderUid::new(1),
+        RemoteId::from(1),
         None,
         None,
         vec![],
@@ -126,7 +126,7 @@ fn received_in(mailbox_id: MailboxId, uid: u32) -> Message {
     Message::receive(
         AccountId::new(),
         mailbox_id,
-        ProviderUid::new(uid),
+        RemoteId::from(uid),
         None,
         None,
         vec![],
@@ -139,8 +139,8 @@ fn received_in(mailbox_id: MailboxId, uid: u32) -> Message {
     .0
 }
 
-fn uid_in(msg: &Message, mailbox_id: MailboxId) -> Option<ProviderUid> {
-    msg.membership(mailbox_id).and_then(|m| m.provider_uid)
+fn uid_in(msg: &Message, mailbox_id: MailboxId) -> Option<RemoteId> {
+    msg.membership(mailbox_id).and_then(|m| m.remote_id.clone())
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn move_message() {
         msg.memberships,
         [Membership {
             mailbox_id: target_mailbox,
-            provider_uid: None
+            remote_id: None
         }]
     );
     assert!(
@@ -166,15 +166,15 @@ fn move_message() {
     );
 
     assert!(
-        msg.attach_uid(original_mailbox, ProviderUid::new(7))
+        msg.attach_remote_id(original_mailbox, RemoteId::from(7))
             .is_none(),
         "left that mailbox"
     );
     let attached = msg
-        .attach_uid(target_mailbox, ProviderUid::new(42))
+        .attach_remote_id(target_mailbox, RemoteId::from(42))
         .unwrap();
     assert!(
-        msg.attach_uid(target_mailbox, ProviderUid::new(43))
+        msg.attach_remote_id(target_mailbox, RemoteId::from(43))
             .is_none(),
         "already attached"
     );
@@ -183,7 +183,7 @@ fn move_message() {
             message_id: msg.id,
             account_id: msg.account_id,
             mailbox_id: original_mailbox,
-            provider_uid: ProviderUid::new(1),
+            remote_id: RemoteId::from(1),
             message_rfc_id: None,
             in_reply_to: None,
             references: vec![],
@@ -202,18 +202,18 @@ fn move_message() {
         rehydrated.memberships,
         [Membership {
             mailbox_id: target_mailbox,
-            provider_uid: Some(ProviderUid::new(42))
+            remote_id: Some(RemoteId::from(42))
         }]
     );
 
     assert!(
-        msg.forget_uid(original_mailbox).is_none(),
+        msg.forget_remote_id(original_mailbox).is_none(),
         "not in that mailbox"
     );
-    assert!(msg.forget_uid(target_mailbox).is_some());
+    assert!(msg.forget_remote_id(target_mailbox).is_some());
     assert_eq!(uid_in(&msg, target_mailbox), None);
     assert!(
-        msg.forget_uid(target_mailbox).is_none(),
+        msg.forget_remote_id(target_mailbox).is_none(),
         "nothing left to forget"
     );
 }
@@ -223,14 +223,14 @@ fn a_message_is_in_many_mailboxes_and_deleted_with_the_last() {
     let (inbox, label) = (MailboxId::new(), MailboxId::new());
     let mut msg = received_in(inbox, 1);
 
-    let added = msg.add_to(label, Some(ProviderUid::new(9))).unwrap();
+    let added = msg.add_to(label, Some(RemoteId::from(9))).unwrap();
     assert!(msg.add_to(label, None).is_none(), "already there");
     assert_eq!(msg.memberships.len(), 2);
 
     let removed = msg.remove_from(inbox).unwrap();
     assert_eq!(removed.event_name(), "MessageMailboxesChanged");
     assert!(msg.remove_from(inbox).is_none(), "not there any more");
-    assert_eq!(uid_in(&msg, label), Some(ProviderUid::new(9)));
+    assert_eq!(uid_in(&msg, label), Some(RemoteId::from(9)));
     assert!(!msg.is_deleted());
 
     let gone = msg.remove_from(label).unwrap();
@@ -254,12 +254,12 @@ fn an_added_membership_for_a_mailbox_already_held_only_replaces_its_uid() {
         message_id: msg.id,
         added: vec![Membership {
             mailbox_id: inbox,
-            provider_uid: Some(ProviderUid::new(5)),
+            remote_id: Some(RemoteId::from(5)),
         }],
         removed: vec![],
     });
     assert_eq!(msg.memberships.len(), 1);
-    assert_eq!(uid_in(&msg, inbox), Some(ProviderUid::new(5)));
+    assert_eq!(uid_in(&msg, inbox), Some(RemoteId::from(5)));
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn message_serialization_roundtrip() {
     let (msg, _) = Message::receive(
         AccountId::new(),
         MailboxId::new(),
-        ProviderUid::new(99),
+        RemoteId::from(99),
         None,
         None,
         vec![],
@@ -314,7 +314,7 @@ fn rehydrate_message_from_events() {
             message_id: msg_id,
             account_id,
             mailbox_id,
-            provider_uid: ProviderUid::new(100),
+            remote_id: RemoteId::from(100),
             message_rfc_id: None,
             in_reply_to: None,
             references: vec![],
@@ -338,7 +338,7 @@ fn rehydrate_message_from_events() {
             message_id: msg_id,
             added: vec![Membership {
                 mailbox_id: target_mailbox,
-                provider_uid: None,
+                remote_id: None,
             }],
             removed: vec![mailbox_id],
         },
@@ -353,7 +353,7 @@ fn rehydrate_message_from_events() {
         message.memberships,
         [Membership {
             mailbox_id: target_mailbox,
-            provider_uid: None
+            remote_id: None
         }]
     );
 }
@@ -369,7 +369,7 @@ fn change_flags_no_duplicates() {
     let (mut msg, _) = Message::receive(
         AccountId::new(),
         MailboxId::new(),
-        ProviderUid::new(1),
+        RemoteId::from(1),
         None,
         None,
         vec![],

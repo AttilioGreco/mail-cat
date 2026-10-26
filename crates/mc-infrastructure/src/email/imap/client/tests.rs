@@ -376,7 +376,7 @@ async fn one_unreadable_structure_costs_only_its_own_message() {
 
     let mut texts: Vec<_> = found
         .iter()
-        .map(|r| (r.provider_uid.value(), r.body_text.clone().unwrap()))
+        .map(|r| (r.remote_id.as_str().parse::<u32>().unwrap(), r.body_text.clone().unwrap()))
         .collect();
     texts.sort();
     assert_eq!(texts[2], (3, "hello\r\n".to_owned()));
@@ -511,7 +511,7 @@ async fn a_server_that_never_answers_times_out_instead_of_hanging() {
     );
 
     let err = provider
-        .mailbox_status(&MailboxPath::inbox())
+        .mailbox_changes(&MailboxPath::inbox(), None)
         .await
         .unwrap_err();
 

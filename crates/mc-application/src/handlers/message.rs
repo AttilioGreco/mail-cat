@@ -14,7 +14,7 @@ use mc_domain::{
     Account, AccountId, AggregateType, Attachment, AttachmentId, DomainError, DomainEvent, EmailProvider,
     Envelope, EventEnvelope, EventStore, Flag, Mailbox, MailboxId, MailboxPath, MailboxReadRepository,
     MailboxType, Message, MessageId, MessageBodyStore, MessageReadRepository, OutgoingMessage,
-    ProviderRegistry, ReadModelProjector, value_objects::uid::ProviderUid,
+    ProviderRegistry, ReadModelProjector, value_objects::remote_id::RemoteId,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
@@ -36,7 +36,7 @@ pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, MR: Messa
     event_bus: Arc<B>,
     /// One server-side change (move, delete, flag store) at a time per
     /// account, each acting on the message as it is when its turn comes:
-    /// two quick actions on one message must not both send its old UID.
+    /// two quick actions on one message must not both send its old remote id.
     /// Separate from the sync lock, which a full sync holds for minutes.
     account_queues: Arc<std::sync::Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>>,
     /// Mailboxes to sync after the server changed them in a way the local
@@ -116,12 +116,12 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 (message, seq) = self.load_message(&message_id).await?;
             }
         }
-        let provider_uid = self.remote_uid(&mut message, &mut seq, &mailbox_path).await?;
+        let remote_id = self.remote_id(&mut message, &mut seq, &mailbox_path).await?;
 
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
         let detail = provider
-            .fetch_message_detail(&mailbox_path, provider_uid)
+            .fetch_message_detail(&mailbox_path, &remote_id)
             .await?;
 
         // Reload after the round trip: opening a message marks it read at the
@@ -154,7 +154,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         flags_to_remove: Vec<Flag>,
     ) -> Result<CommandResult, ApplicationError> {
         let (mut message, mut seq) = self.load_message(&message_id).await?;
-        self.remote_uid(&mut message, &mut seq, &mailbox_path).await?;
+        self.remote_id(&mut message, &mut seq, &mailbox_path).await?;
 
         // Optimistic update: persist locally first for instant UI feedback,
         // then sync to IMAP in background. Next sync reconciles if IMAP fails.
@@ -199,20 +199,20 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         Ok(CommandResult::MailboxMarkedRead { count })
     }
 
-    /// Record `\Seen` on one message, finding its UID on the server first
+    /// Record `\Seen` on one message, finding its remote id on the server first
     /// when it has none so the flag can reach the server too.
     async fn mark_seen(&self, message_id: &MessageId, mailbox_path: &MailboxPath) -> Result<(), ApplicationError> {
         let (mut message, mut seq) = self.load_message(message_id).await?;
-        if let Err(e) = self.remote_uid(&mut message, &mut seq, mailbox_path).await {
+        if let Err(e) = self.remote_id(&mut message, &mut seq, mailbox_path).await {
             warn!(%message_id, %e, "marked read locally only");
         }
         self.record(message_id, |m| Some(m.change_flags(vec![Flag::Seen], vec![]))).await.map(drop)
     }
 
     /// Store a flag change on the server in the background, in the account's
-    /// turn: each message's mailbox and UID are read when the store is sent,
+    /// turn: each message's mailbox and remote id are read when the store is sent,
     /// so a move queued ahead of it (open, mark read, archive) is followed
-    /// rather than racing it with a UID that no longer exists.
+    /// rather than racing it with an id that no longer exists.
     fn push_flags(&self, account_id: AccountId, message_ids: Vec<MessageId>, add: Vec<Flag>, remove: Vec<Flag>) {
         if message_ids.is_empty() {
             return;
@@ -220,19 +220,19 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let this = self.clone();
         tokio::spawn(async move {
             let _turn = this.turn(account_id).await;
-            let mut by_mailbox: HashMap<MailboxId, Vec<ProviderUid>> = HashMap::new();
+            let mut by_mailbox: HashMap<MailboxId, Vec<RemoteId>> = HashMap::new();
             for id in &message_ids {
                 match this.load_message(id).await {
                     Ok((message, _)) => {
                         let mut stored = false;
                         for m in &message.memberships {
-                            if let Some(uid) = m.provider_uid {
-                                by_mailbox.entry(m.mailbox_id).or_default().push(uid);
+                            if let Some(remote_id) = &m.remote_id {
+                                by_mailbox.entry(m.mailbox_id).or_default().push(remote_id.clone());
                                 stored = true;
                             }
                         }
                         if !stored {
-                            warn!(message_id = %id, "no UID to store flags on, next sync will reconcile");
+                            warn!(message_id = %id, "no remote id to store flags on, next sync will reconcile");
                         }
                     }
                     Err(e) => warn!(message_id = %id, %e, "flags not stored on the server"),
@@ -241,18 +241,18 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             let Ok(provider) = this.provider_registry.get_provider(&account_id) else {
                 return;
             };
-            for (mailbox_id, uids) in by_mailbox {
+            for (mailbox_id, ids) in by_mailbox {
                 let Ok(Some(mailbox)) = this.message_read_repo.get_mailbox(&mailbox_id).await else {
                     continue;
                 };
-                if let Err(e) = provider.set_flags_bulk(&mailbox.path, &uids, &add, &remove).await {
-                    warn!(%e, "Background IMAP flag store failed — next sync will reconcile");
+                if let Err(e) = provider.set_flags_bulk(&mailbox.path, &ids, &add, &remove).await {
+                    warn!(%e, "Background flag store failed — next sync will reconcile");
                 }
             }
         });
     }
 
-    /// Apply a flag change that arrived from a remote IMAP IDLE notification.
+    /// Apply a flag change that arrived from a provider push notification.
     ///
     /// Unlike `handle_set_flags`, this does NOT call the provider (flags are
     /// already changed on the server). It only updates the local projection
@@ -260,26 +260,26 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     pub async fn handle_apply_remote_flag_change(
         &self,
         mailbox_id: MailboxId,
-        provider_uid: ProviderUid,
+        remote_id: RemoteId,
         new_flags: Vec<Flag>,
     ) -> Result<CommandResult, ApplicationError> {
-        info!(mailbox_id = %mailbox_id, uid = provider_uid.value(), ?new_flags,
+        info!(mailbox_id = %mailbox_id, %remote_id, ?new_flags,
             "handle_apply_remote_flag_change: looking up message");
 
-        // Look up the local message by provider UID
+        // Look up the local message by remote id
         let summary = self
             .message_read_repo
-            .find_by_provider_uid(&mailbox_id, provider_uid.value())
+            .find_by_remote_id(&mailbox_id, &remote_id)
             .await?
             .ok_or_else(|| {
                 ApplicationError::NotFound(
                     "Message",
-                    format!("provider_uid={} mailbox_id={}", provider_uid.value(), mailbox_id),
+                    format!("remote_id={remote_id} mailbox_id={mailbox_id}"),
                 )
             })?;
 
         let message_id = summary.id;
-        info!(%message_id, uid = provider_uid.value(), "message found, loading aggregate");
+        info!(%message_id, %remote_id, "message found, loading aggregate");
 
         let (mut message, seq) = self.load_message(&message_id).await?;
 
@@ -307,7 +307,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         self.append_and_publish(&message_id, AggregateType::Message, seq, event)
             .await?;
 
-        info!(%message_id, uid = provider_uid.value(), "remote flag change applied");
+        info!(%message_id, %remote_id, "remote flag change applied");
         Ok(CommandResult::RemoteFlagApplied)
     }
 
@@ -371,9 +371,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let Some(dest) = destination(requested_in, source, &mailboxes) else {
             return Ok(());
         };
-        let uid = self.remote_uid(&mut message, &mut seq, &source.path).await?;
+        let remote_id = self.remote_id(&mut message, &mut seq, &source.path).await?;
         let dest = dest.as_ref().map(|(id, path)| (*id, path));
-        match self.apply_on_server(account_id, source, dest, vec![(message_id, uid)]).await {
+        match self.apply_on_server(account_id, source, dest, vec![(message_id, remote_id)]).await {
             (_, Some(refused)) => Err(refused),
             _ => Ok(()),
         }
@@ -384,7 +384,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     /// (per [`SERVER_CHUNK`]). The per-message path would open a connection
     /// each, and deleting a search result set of 800 would mean 800 of them.
     ///
-    /// A message that can't be loaded, has no provider UID, or whose mailbox has
+    /// A message that can't be loaded, has no remote id, or whose mailbox has
     /// vanished is counted in `failed` and skipped — a stale search index must not
     /// abort the rest of the batch halfway through. So is every message of a
     /// chunk the provider refused, and of the chunks after it.
@@ -431,7 +431,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         for (account_id, ids) in by_account {
             let _turn = self.turn(account_id).await;
             let mailboxes = self.message_read_repo.list_mailboxes(&account_id).await?;
-            let mut groups: HashMap<Group, Vec<(MessageId, ProviderUid)>> = HashMap::new();
+            let mut groups: HashMap<Group, Vec<(MessageId, RemoteId)>> = HashMap::new();
             for (message_id, requested_in) in ids {
                 // Gone while it waited for its turn: an earlier action took it.
                 let Ok((mut message, mut seq)) = self.load_message(&message_id).await else {
@@ -444,11 +444,11 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 let Some(dest) = destination(requested_in, source, &mailboxes) else {
                     continue;
                 };
-                let Ok(provider_uid) = self.remote_uid(&mut message, &mut seq, &source.path).await else {
+                let Ok(remote_id) = self.remote_id(&mut message, &mut seq, &source.path).await else {
                     failed += 1;
                     continue;
                 };
-                groups.entry((source.id, dest)).or_default().push((message_id, provider_uid));
+                groups.entry((source.id, dest)).or_default().push((message_id, remote_id));
             }
 
             for ((from, dest), members) in groups {
@@ -662,7 +662,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 ApplicationError::PreconditionFailed("Cartella Bozze non trovata: sincronizza l'account".into())
             })?;
 
-        let uid = self
+        let remote_id = self
             .provider_registry
             .get_provider(&account.id)?
             .append_message(&drafts.path, &outgoing, &[Flag::Draft, Flag::Seen])
@@ -671,12 +671,12 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
         let message_id = match self
             .message_read_repo
-            .find_by_provider_uid(&drafts.id, uid.value())
+            .find_by_remote_id(&drafts.id, &remote_id)
             .await?
         {
             // A Drafts sync stored it first.
             Some(existing) => existing.id,
-            None => self.store_draft_locally(account.id, drafts.id, uid, &outgoing).await?,
+            None => self.store_draft_locally(account.id, drafts.id, remote_id, &outgoing).await?,
         };
 
         if let Some(old) = input.draft_id.filter(|old| *old != message_id)
@@ -840,8 +840,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             .get_mailbox(&home.mailbox_id)
             .await?
             .ok_or_else(|| ApplicationError::NotFound("Mailbox", home.mailbox_id.to_string()))?;
-        let uid = match self.load_message(&message.id).await {
-            Ok((mut aggregate, mut seq)) => self.remote_uid(&mut aggregate, &mut seq, &mailbox.path).await?,
+        let remote_id = match self.load_message(&message.id).await {
+            Ok((mut aggregate, mut seq)) => self.remote_id(&mut aggregate, &mut seq, &mailbox.path).await?,
             // Only received mail rehydrates; one sent from here has no server
             // copy until Sent syncs.
             Err(ApplicationError::NotFound(..)) => {
@@ -852,7 +852,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         Ok(self
             .provider_registry
             .get_provider(&message.account_id)?
-            .fetch_raw_message(&mailbox.path, uid)
+            .fetch_raw_message(&mailbox.path, &remote_id)
             .await?)
     }
 
@@ -860,7 +860,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         &self,
         account_id: AccountId,
         drafts_id: MailboxId,
-        uid: ProviderUid,
+        remote_id: RemoteId,
         outgoing: &OutgoingMessage,
     ) -> Result<MessageId, ApplicationError> {
         let attachments: Vec<Attachment> = outgoing
@@ -878,7 +878,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let (mut message, received) = Message::receive(
             account_id,
             drafts_id,
-            uid,
+            remote_id,
             outgoing.message_rfc_id.clone(),
             outgoing.in_reply_to.clone(),
             outgoing.references.clone(),
@@ -909,20 +909,20 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             None => None,
         };
         // No server copy to find is no reason to keep the local one.
-        let uid = match &mailbox {
-            Some(mailbox) => self.remote_uid(&mut message, &mut seq, &mailbox.path).await.ok(),
+        let remote_id = match &mailbox {
+            Some(mailbox) => self.remote_id(&mut message, &mut seq, &mailbox.path).await.ok(),
             None => None,
         };
         self.append_and_publish(&id, AggregateType::Message, seq, message.delete())
             .await?;
 
-        if let (Some(uid), Some(mailbox)) = (uid, mailbox) {
+        if let (Some(remote_id), Some(mailbox)) = (remote_id, mailbox) {
             let provider = self.provider_registry.get_provider(&message.account_id)?;
             let this = self.clone();
             tokio::spawn(async move {
                 let _turn = this.turn(message.account_id).await;
-                if let Err(e) = provider.delete_message(&mailbox.path, uid, true).await {
-                    tracing::warn!(%e, "Background IMAP draft delete failed — next sync will reconcile");
+                if let Err(e) = provider.delete_messages(&mailbox.path, &[remote_id], true).await {
+                    tracing::warn!(%e, "Background draft delete failed — next sync will reconcile");
                 }
             });
         }
@@ -937,7 +937,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         queue.lock_owned().await
     }
 
-    /// Move `members` (message, UID) from `from` to `dest`, or expunge them
+    /// Move `members` (message, remote id) from `from` to `dest`, or expunge them
     /// when `dest` is `None`, on the server first, a chunk at a time, each
     /// chunk recorded here as soon as the server confirms it. Returns how
     /// many the server applied and, if it refused a chunk, why: that chunk
@@ -947,7 +947,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         account_id: AccountId,
         from: &Mailbox,
         dest: Option<(MailboxId, &MailboxPath)>,
-        members: Vec<(MessageId, ProviderUid)>,
+        members: Vec<(MessageId, RemoteId)>,
     ) -> (u32, Option<ApplicationError>) {
         let provider = match self.provider_registry.get_provider(&account_id) {
             Ok(provider) => provider,
@@ -956,13 +956,13 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let mut done = 0;
         let mut out_of_step = false;
         for chunk in members.chunks(SERVER_CHUNK) {
-            let uids: Vec<ProviderUid> = chunk.iter().map(|&(_, uid)| uid).collect();
+            let ids: Vec<RemoteId> = chunk.iter().map(|(_, id)| id.clone()).collect();
             let applied = match dest {
-                Some((_, to)) => provider.move_messages(&uids, &from.path, to).await,
-                None => provider.delete_messages(&from.path, &uids, true).await.map(|()| HashMap::new()),
+                Some((_, to)) => provider.move_messages(&ids, &from.path, to).await,
+                None => provider.delete_messages(&from.path, &ids, true).await.map(|()| HashMap::new()),
             };
-            let new_uids = match applied {
-                Ok(new_uids) => new_uids,
+            let new_ids = match applied {
+                Ok(new_ids) => new_ids,
                 Err(e) => {
                     // A timeout or a dropped connection may come after the
                     // server applied it: let a sync tell.
@@ -970,8 +970,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                     return (done, Some(e.into()));
                 }
             };
-            for &(message_id, uid) in chunk {
-                if let Err(e) = self.record_applied(&provider, message_id, from.id, dest, new_uids.get(&uid).copied()).await {
+            for (message_id, id) in chunk {
+                let message_id = *message_id;
+                if let Err(e) = self.record_applied(&provider, message_id, from.id, dest, new_ids.get(id).cloned().flatten()).await {
                     warn!(%message_id, %e, "done on the server but not recorded here, resyncing");
                     out_of_step = true;
                 }
@@ -985,9 +986,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     }
 
     /// Record a move or expunge the server confirmed. A moved message is
-    /// recorded in `dest` only with evidence of its UID there — reported by
+    /// recorded in `dest` only with evidence of its remote id there — reported by
     /// the server, else found by Message-ID. With neither, the server had
-    /// nothing under that UID any more (another client moved it) or the
+    /// nothing under that id any more (another client moved it) or the
     /// destination copy already belongs to another row: either way the real
     /// copy is, or will be, synced as a row of its own, so this one goes.
     /// `Err` means local state is out of step and needs a resync.
@@ -997,32 +998,32 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         message_id: MessageId,
         from: MailboxId,
         dest: Option<(MailboxId, &MailboxPath)>,
-        reported_uid: Option<ProviderUid>,
+        reported_id: Option<RemoteId>,
     ) -> Result<(), ApplicationError> {
         let Some((to_id, to_path)) = dest else {
             return self.record(&message_id, |m| m.remove_from(from)).await.map(drop);
         };
-        let new_uid = match reported_uid {
-            Some(uid) => Some(uid),
+        let new_id = match reported_id {
+            Some(id) => Some(id),
             None => {
                 let (message, _) = self.load_message(&message_id).await?;
                 self.locate(provider, &message, &to_id, to_path).await.unwrap_or_else(|e| {
-                    warn!(%message_id, %e, "moved, but its new UID could not be looked up");
+                    warn!(%message_id, %e, "moved, but its new remote id could not be looked up");
                     None
                 })
             }
         };
-        let Some(uid) = new_uid else {
+        let Some(new_id) = new_id else {
             self.record(&message_id, |m| m.remove_from(from)).await?;
-            return Err(ApplicationError::Internal(format!("server confirmed the move to {to_path} without the new UID")));
+            return Err(ApplicationError::Internal(format!("server confirmed the move to {to_path} without the new id")));
         };
         // The destination already had that copy as a row of its own: a
         // Gmail label the message already carried, All Mail as the archive.
         // Recording the move too would make two rows of one server message.
-        if self.message_read_repo.held_uids(&to_id, &[uid]).await?.contains(&uid) {
+        if self.message_read_repo.held_ids(&to_id, std::slice::from_ref(&new_id)).await?.contains(&new_id) {
             return self.record(&message_id, |m| m.remove_from(from)).await.map(drop);
         }
-        self.record(&message_id, |m| m.move_to(from, to_id, Some(uid))).await.map(drop)
+        self.record(&message_id, |m| m.move_to(from, to_id, Some(new_id.clone()))).await.map(drop)
     }
 
     fn request_resync(&self, account_id: AccountId, from: &MailboxPath, to: Option<&MailboxPath>) {
@@ -1058,7 +1059,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         }
     }
 
-    /// The UID `message` has in `mailbox` (at `path`), found by Message-ID:
+    /// The remote id `message` has in `mailbox` (at `path`), found by Message-ID:
     /// the newest copy no other local message already holds.
     async fn locate(
         &self,
@@ -1066,26 +1067,26 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         message: &Message,
         mailbox_id: &MailboxId,
         path: &MailboxPath,
-    ) -> Result<Option<ProviderUid>, ApplicationError> {
+    ) -> Result<Option<RemoteId>, ApplicationError> {
         let Some(rfc_id) = message.message_rfc_id.as_deref() else {
             return Ok(None);
         };
-        let found = provider.find_message(path, rfc_id).await?;
-        let held = self.message_read_repo.held_uids(mailbox_id, &found).await?;
-        Ok(found.into_iter().rev().find(|uid| !held.contains(uid)))
+        let found = provider.find_by_message_id(path, rfc_id).await?;
+        let held = self.message_read_repo.held_ids(mailbox_id, &found).await?;
+        Ok(found.into_iter().rev().find(|id| !held.contains(id)))
     }
 
-    /// The message's UID in its mailbox, at `mailbox_path`. One without (a
-    /// renumbered mailbox, a move the server confirmed without its new UID)
+    /// The message's remote id in its mailbox, at `mailbox_path`. One without (a
+    /// mailbox whose ids were invalidated, a move the server confirmed without its new id)
     /// is looked up on the server by Message-ID and recorded, so every
     /// action on it can go ahead. `seq` follows the recording event.
-    async fn remote_uid(
+    async fn remote_id(
         &self,
         message: &mut Message,
         seq: &mut u64,
         mailbox_path: &MailboxPath,
-    ) -> Result<ProviderUid, ApplicationError> {
-        // A UID is valid only in its own mailbox: sending it to another, or
+    ) -> Result<RemoteId, ApplicationError> {
+        // A remote id is valid only in its own mailbox: sending it to another, or
         // searching another, would act on some other message.
         let mut elsewhere = None;
         let mut here = None;
@@ -1096,7 +1097,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 .await?
                 .ok_or_else(|| ApplicationError::NotFound("Mailbox", membership.mailbox_id.to_string()))?;
             if mailbox.path.full_path() == mailbox_path.full_path() {
-                here = Some((*membership, mailbox));
+                here = Some((membership.clone(), mailbox));
                 break;
             }
             elsewhere.get_or_insert(mailbox.path);
@@ -1107,21 +1108,21 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 None => format!("message is in no mailbox, not {mailbox_path}"),
             }));
         };
-        if let Some(uid) = membership.provider_uid {
-            return Ok(uid);
+        if let Some(remote_id) = membership.remote_id {
+            return Ok(remote_id);
         }
         let provider = self.provider_registry.get_provider(&message.account_id)?;
-        let uid = self.locate(&provider, message, &mailbox.id, &mailbox.path).await?.ok_or_else(|| {
+        let remote_id = self.locate(&provider, message, &mailbox.id, &mailbox.path).await?.ok_or_else(|| {
             ApplicationError::NotFound(
                 "Message on the server",
                 format!("{} in {mailbox_path}", message.message_rfc_id.as_deref().unwrap_or("(no Message-ID)")),
             )
         })?;
-        if let Some(event) = message.attach_uid(mailbox.id, uid) {
+        if let Some(event) = message.attach_remote_id(mailbox.id, remote_id.clone()) {
             self.append_and_publish(&message.id, AggregateType::Message, *seq, event).await?;
             *seq += 1;
         }
-        Ok(uid)
+        Ok(remote_id)
     }
 
     /// Load a message aggregate from the event store.

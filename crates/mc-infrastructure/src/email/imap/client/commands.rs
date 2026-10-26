@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_imap::imap_proto::types::{AttributeValue, Response, SectionPath};
 
 use mc_domain::error::DomainError;
-use mc_domain::value_objects::uid::ProviderUid;
+use mc_domain::value_objects::remote_id::RemoteId;
 
 use super::fetch::{TextPart, text_parts};
 use super::{BODY_FETCH_TIMEOUT, COMMAND_TIMEOUT, ImapEmailProvider, UPLOAD_FLOOR_BYTES_PER_SEC};
@@ -253,7 +253,8 @@ where
     use futures::TryStreamExt;
 
     let all = exchange(COMMAND_TIMEOUT, "UID SEARCH ALL", session.uid_search("ALL")).await?;
-    let all: Vec<u32> = sorted_uids(all).into_iter().map(|u| u.value()).collect();
+    let mut all: Vec<u32> = all.into_iter().collect();
+    all.sort_unstable();
     let mut fetches = Vec::with_capacity(all.len());
     for chunk in all.chunks(ImapEmailProvider::FLAGS_BATCH_SIZE) {
         let set = ImapEmailProvider::compress_uid_ranges(chunk);
@@ -293,10 +294,21 @@ pub(super) fn message_id_search(rfc_id: &str) -> Result<Option<String>, DomainEr
     )))
 }
 
-pub(super) fn sorted_uids(found: std::collections::HashSet<u32>) -> Vec<ProviderUid> {
+/// Ascending, so the newest copy is last.
+pub(super) fn sorted_uids(found: std::collections::HashSet<u32>) -> Vec<RemoteId> {
     let mut uids: Vec<u32> = found.into_iter().collect();
     uids.sort_unstable();
-    uids.into_iter().map(ProviderUid::new).collect()
+    uids.into_iter().map(RemoteId::from).collect()
+}
+
+pub(super) fn uid_of(id: &RemoteId) -> Result<u32, DomainError> {
+    id.as_str()
+        .parse()
+        .map_err(|_| DomainError::Provider(format!("Not an IMAP UID: {id:?}")))
+}
+
+pub(super) fn uids_of(ids: &[RemoteId]) -> Result<Vec<u32>, DomainError> {
+    ids.iter().map(uid_of).collect()
 }
 
 /// Move `uids` (ascending) out of the selected mailbox into `to`, returning

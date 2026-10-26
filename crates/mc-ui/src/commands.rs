@@ -219,7 +219,7 @@ pub struct MailboxEventPayload {
     pub kind: String, // "counts_changed" | "new_message" | "message_expunged" | "flags_changed"
     pub total: Option<u32>,
     pub unseen: Option<u32>,
-    pub provider_uid: Option<u32>,
+    pub remote_id: Option<String>,
 }
 
 // ── Conversions ──────────────────────────────────────────────────────────────
@@ -844,25 +844,25 @@ pub async fn start_watching(
                                         kind: "counts_changed".into(),
                                         total: Some(total),
                                         unseen: Some(unseen),
-                                        provider_uid: None,
+                                        remote_id: None,
                                     }
                                 }
-                                MailboxNotificationKind::NewMessage { provider_uid } => {
+                                MailboxNotificationKind::NewMessage { remote_id } => {
                                     MailboxEventPayload {
                                         mailbox_id: mid.clone(),
                                         kind: "new_message".into(),
                                         total: None,
                                         unseen: None,
-                                        provider_uid: Some(provider_uid),
+                                        remote_id: Some(remote_id),
                                     }
                                 }
-                                MailboxNotificationKind::MessageExpunged { provider_uid } => {
+                                MailboxNotificationKind::MessageExpunged { .. } => {
                                     MailboxEventPayload {
                                         mailbox_id: mid.clone(),
                                         kind: "message_expunged".into(),
                                         total: None,
                                         unseen: None,
-                                        provider_uid: Some(provider_uid),
+                                        remote_id: None,
                                     }
                                 }
                                 MailboxNotificationKind::FlagsChanged => {
@@ -871,7 +871,7 @@ pub async fn start_watching(
                                         kind: "flags_changed".into(),
                                         total: None,
                                         unseen: None,
-                                        provider_uid: None,
+                                        remote_id: None,
                                     }
                                 }
                             };

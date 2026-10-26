@@ -19,13 +19,14 @@ pub use value_objects::email_address::EmailAddress;
 pub use value_objects::flag::Flag;
 pub use value_objects::mailbox_path::MailboxPath;
 pub use value_objects::message_id::MessageId;
-pub use value_objects::uid::ProviderUid;
+pub use value_objects::remote_id::RemoteId;
+pub use value_objects::sync_cursor::SyncCursor;
 
 // Trait re-exports
 pub use traits::account_event_source::AccountEventSource;
 pub use traits::email_provider::{
-    EmailProvider, FetchRange, MailboxStatus, MessageBodyResult, MessageEnvelopeSummary,
-    ProviderNotification, UidFlagEntry,
+    EmailProvider, Existing, MailboxChanges, MailboxCounts, MessageBodyResult, MessageEnvelopeSummary,
+    ProviderNotification, Reset,
 };
 pub use traits::event_store::EventStore;
 pub use traits::login_gate::{login_with, LoginGate, LoginSecret};
@@ -37,7 +38,7 @@ pub use traits::repository::{
     BodyBackfillQueue,
     ContactReadRepository, ContactSummary, ContactWriteRepository, ConversationReadRepository,
     ConversationSummary, MailboxReadRepository, MessageReadRepository, MessageSummary,
-    MessageBodyStore, ProjectionCheckpoint,
+    MessageBodyStore, ProjectionCheckpoint, SyncCursorStore,
 };
 pub use model::conversation::Conversation;
 pub use value_objects::thread_id::ThreadId;

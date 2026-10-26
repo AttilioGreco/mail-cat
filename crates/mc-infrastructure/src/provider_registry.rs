@@ -50,9 +50,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use mc_domain::{
-        DomainError, FetchRange, Flag, Mailbox, MailboxPath, MailboxStatus, Message,
-        MessageEnvelopeSummary, OutgoingMessage, ProviderNotification, ProviderUid,
+        DomainError, Existing, Flag, Mailbox, MailboxChanges, MailboxCounts, MailboxPath, Message,
+        MessageEnvelopeSummary, OutgoingMessage, ProviderNotification, RemoteId, SyncCursor,
     };
+    use std::collections::HashMap;
     use std::pin::Pin;
 
     #[derive(Debug)]
@@ -63,67 +64,68 @@ mod tests {
         async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
             Ok(vec![])
         }
-        async fn fetch_message_envelopes(
+        async fn mailbox_changes(
             &self,
             _mailbox: &MailboxPath,
-            _range: FetchRange,
+            _since: Option<&SyncCursor>,
+        ) -> Result<MailboxChanges, DomainError> {
+            Ok(MailboxChanges {
+                cursor: SyncCursor::new("stub"),
+                reset: None,
+                added: vec![],
+                existing: Existing::Snapshot(vec![]),
+                counts: MailboxCounts { total: 0, unread: 0 },
+            })
+        }
+        async fn fetch_envelopes(
+            &self,
+            _mailbox: &MailboxPath,
+            _ids: &[RemoteId],
         ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
             Ok(vec![])
         }
         async fn fetch_message_detail(
             &self,
             _mailbox: &MailboxPath,
-            _uid: ProviderUid,
+            _id: &RemoteId,
         ) -> Result<Message, DomainError> {
             Err(DomainError::Provider("stub".into()))
         }
-        async fn find_message(
+        async fn find_by_message_id(
             &self,
             _mailbox: &MailboxPath,
             _rfc_id: &str,
-        ) -> Result<Vec<ProviderUid>, DomainError> {
-            Ok(vec![])
-        }
-        async fn uids_from(&self, _mailbox: &MailboxPath, _from: ProviderUid) -> Result<Vec<ProviderUid>, DomainError> {
+        ) -> Result<Vec<RemoteId>, DomainError> {
             Ok(vec![])
         }
         async fn fetch_raw_message(
             &self,
             _mailbox: &MailboxPath,
-            _uid: ProviderUid,
+            _id: &RemoteId,
         ) -> Result<Vec<u8>, DomainError> {
             Ok(vec![])
-        }
-        async fn set_flags(
-            &self,
-            _mailbox: &MailboxPath,
-            _uid: ProviderUid,
-            _add: &[Flag],
-            _remove: &[Flag],
-        ) -> Result<(), DomainError> {
-            Ok(())
         }
         async fn set_flags_bulk(
             &self,
             _mailbox: &MailboxPath,
-            _uids: &[ProviderUid],
+            _ids: &[RemoteId],
             _add: &[Flag],
             _remove: &[Flag],
         ) -> Result<(), DomainError> {
             Ok(())
         }
-        async fn move_message(
+        async fn move_messages(
             &self,
-            _uid: ProviderUid,
+            _ids: &[RemoteId],
             _from: &MailboxPath,
             _to: &MailboxPath,
-        ) -> Result<Option<ProviderUid>, DomainError> {
-            Ok(None)
+        ) -> Result<HashMap<RemoteId, Option<RemoteId>>, DomainError> {
+            Ok(HashMap::new())
         }
-        async fn delete_message(
+        async fn delete_messages(
             &self,
             _mailbox: &MailboxPath,
-            _uid: ProviderUid,
+            _ids: &[RemoteId],
             _permanently: bool,
         ) -> Result<(), DomainError> {
             Ok(())
@@ -136,25 +138,8 @@ mod tests {
             _mailbox: &MailboxPath,
             _message: &OutgoingMessage,
             _flags: &[Flag],
-        ) -> Result<Option<ProviderUid>, DomainError> {
+        ) -> Result<Option<RemoteId>, DomainError> {
             Ok(None)
-        }
-        async fn mailbox_status(
-            &self,
-            _mailbox: &MailboxPath,
-        ) -> Result<MailboxStatus, DomainError> {
-            Ok(MailboxStatus {
-                uid_validity: 1,
-                uid_next: 1,
-                total_messages: 0,
-                unseen_messages: 0,
-            })
-        }
-        async fn fetch_uid_flags(
-            &self,
-            _mailbox: &MailboxPath,
-        ) -> Result<Vec<mc_domain::traits::email_provider::UidFlagEntry>, DomainError> {
-            Ok(vec![])
         }
         fn watch_mailbox(
             &self,
@@ -167,7 +152,7 @@ mod tests {
         async fn fetch_bodies_bulk(
             &self,
             _mailbox: &MailboxPath,
-            _uids: &[ProviderUid],
+            _ids: &[RemoteId],
         ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError> {
             Ok(vec![])
         }

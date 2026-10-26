@@ -28,11 +28,11 @@ pub async fn run(mailbox_id: String, client: MailCatClient) -> Result<()> {
                     unseen
                 )
             }
-            MailboxNotificationKind::NewMessage { provider_uid } => {
-                format!("{} — uid={}", "NEW MESSAGE".green().bold(), provider_uid)
+            MailboxNotificationKind::NewMessage { remote_id } => {
+                format!("{} — id={}", "NEW MESSAGE".green().bold(), remote_id)
             }
-            MailboxNotificationKind::MessageExpunged { provider_uid } => {
-                format!("{} — uid={}", "EXPUNGED".red().bold(), provider_uid)
+            MailboxNotificationKind::MessageExpunged { message_id } => {
+                format!("{} — message={}", "EXPUNGED".red().bold(), message_id)
             }
         };
 

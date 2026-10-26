@@ -19,7 +19,7 @@ use mc_domain::{
     Account, AccountEventSource, AccountId, AccountReadRepository, AccountSecrets,
     AccountWriteRepository, AggregateType, AuthConfig, ConnectionConfig, DomainError, DomainEvent,
     EmailAddress, EventEnvelope, EventStore, Identity, LoginGate, MailboxId, MailboxPath,
-    ProviderNotification, ProviderRegistry, ProviderUid,
+    ProviderNotification, ProviderRegistry,
 };
 use mc_infrastructure::{
     DownloadMeter, ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SqliteDb,
@@ -850,62 +850,25 @@ impl AppContext {
                         {
                             match result {
                                 Ok(notification) => match notification {
-                                    // ── New message ──────────────────────────────
-                                    // Targeted partial sync: fetch only from the
-                                    // notified UID onward in this specific mailbox.
+                                    // ── New message / count changed ──────────────
+                                    // Targeted sync of this mailbox from its cursor.
                                     // Emits MessageReceived + MailboxCountsUpdated
-                                    // and advances the checkpoint so start_sync
+                                    // and advances the cursor so start_sync
                                     // won't re-fetch on the next periodic run.
-                                    ProviderNotification::NewMessage {
-                                        ref mailbox,
-                                        ref uid,
-                                    } => {
+                                    ProviderNotification::NewMessage { ref mailbox, .. }
+                                    | ProviderNotification::MailboxCountChanged { ref mailbox, .. } => {
                                         if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
                                             let sync_clone = Arc::clone(&sync);
                                             let id_clone = id;
                                             let mailbox_clone = mailbox.clone();
-                                            let from_uid = *uid;
                                             tokio::spawn(async move {
                                                 let _permit = permit;
                                                 if let Err(e) = sync_clone
-                                                    .sync_mailbox(
-                                                        &id_clone,
-                                                        &mailbox_clone,
-                                                        from_uid,
-                                                    )
+                                                    .sync_mailbox(&id_clone, &mailbox_clone)
                                                     .await
                                                 {
                                                     tracing::warn!(
                                                         "[Watcher] Partial sync failed: {e}"
-                                                    );
-                                                }
-                                            });
-                                        }
-                                    }
-
-                                    // ── Count changed (no UID) ────────────────────
-                                    // Fallback: let the checkpoint decide what to fetch.
-                                    // ProviderUid(0) → fetch_from = max(0, checkpoint) = checkpoint.
-                                    ProviderNotification::MailboxCountChanged {
-                                        ref mailbox,
-                                        ..
-                                    } => {
-                                        if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
-                                            let sync_clone = Arc::clone(&sync);
-                                            let id_clone = id;
-                                            let mailbox_clone = mailbox.clone();
-                                            tokio::spawn(async move {
-                                                let _permit = permit;
-                                                if let Err(e) = sync_clone
-                                                    .sync_mailbox(
-                                                        &id_clone,
-                                                        &mailbox_clone,
-                                                        ProviderUid::new(0),
-                                                    )
-                                                    .await
-                                                {
-                                                    tracing::warn!(
-                                                        "[Watcher] Count-triggered sync failed: {e}"
                                                     );
                                                 }
                                             });
@@ -918,30 +881,24 @@ impl AppContext {
                                     // for the next full sync.
                                     ProviderNotification::FlagsChanged {
                                         ref mailbox,
-                                        ref uid,
+                                        ref remote_id,
                                         ref flags,
-                                    } if uid.value() > 0 => {
+                                    } => {
                                         if let Some(mb_id) = path_to_id.get(&mailbox.full_path()) {
                                             let cmd =
                                                 mc_application::Command::ApplyRemoteFlagChange {
                                                     mailbox_id: *mb_id,
-                                                    provider_uid:
-                                                        mc_application::commands::ProviderUid::new(
-                                                            uid.value(),
-                                                        ),
+                                                    remote_id: remote_id.clone(),
                                                     new_flags: flags.clone(),
                                                 };
                                             if let Err(e) = cmd_bus.dispatch(cmd).await {
                                                 tracing::warn!(
-                                                    "[Watcher] ApplyRemoteFlagChange uid={}: {e}",
-                                                    uid.value()
+                                                    "[Watcher] ApplyRemoteFlagChange id={}: {e}",
+                                                    remote_id
                                                 );
                                             }
                                         }
                                     }
-
-                                    // uid=0 FlagsChanged are spurious IMAP EXISTS echoes — ignore.
-                                    ProviderNotification::FlagsChanged { .. } => {}
                                 },
                                 Err(e) => {
                                     tracing::warn!(

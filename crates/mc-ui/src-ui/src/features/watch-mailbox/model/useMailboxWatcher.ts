@@ -8,7 +8,7 @@ export interface MailboxEventPayload {
   kind: 'counts_changed' | 'new_message' | 'message_expunged' | 'flags_changed'
   total?: number
   unseen?: number
-  provider_uid?: number
+  remote_id?: string
 }
 
 /**

@@ -14,7 +14,8 @@ use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
 use crate::value_objects::message_id::MessageId;
 use crate::value_objects::thread_id::ThreadId;
-use crate::value_objects::uid::ProviderUid;
+use crate::value_objects::remote_id::RemoteId;
+use crate::value_objects::sync_cursor::SyncCursor;
 
 // ── Write-side Repositories ─────────────────────────────────────────────
 //
@@ -130,22 +131,22 @@ pub trait MessageReadRepository: Send + Sync {
 
     async fn get_thread(&self, message_id: &MessageId) -> Result<Vec<Message>, DomainError>;
 
-    /// Find a message summary by its provider UID within a specific mailbox.
-    async fn find_by_provider_uid(
+    /// Find a message summary by its remote id within a specific mailbox.
+    async fn find_by_remote_id(
         &self,
         mailbox_id: &MailboxId,
-        provider_uid: u32,
+        remote_id: &RemoteId,
     ) -> Result<Option<MessageSummary>, DomainError>;
 
-    /// Which of `uids` a message in `mailbox_id` already holds.
-    async fn held_uids(
+    /// Which of `ids` a message in `mailbox_id` already holds.
+    async fn held_ids(
         &self,
         mailbox_id: &MailboxId,
-        uids: &[ProviderUid],
-    ) -> Result<std::collections::HashSet<ProviderUid>, DomainError>;
+        ids: &[RemoteId],
+    ) -> Result<std::collections::HashSet<RemoteId>, DomainError>;
 
-    /// Messages in `mailbox_id` whose UID there is unknown.
-    async fn uidless_messages(&self, mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError>;
+    /// Messages in `mailbox_id` whose remote id there is unknown.
+    async fn pending_messages(&self, mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError>;
 
     /// Every copy of an RFC Message-ID (`<…>`) stored for an account.
     async fn find_by_rfc_id(
@@ -193,13 +194,23 @@ pub trait ProjectionCheckpoint: Send + Sync {
     ) -> Result<(), DomainError>;
 }
 
+/// Where a collection's sync stands, as its provider reported it (see
+/// [`SyncCursor`]). `collection` names what is synced: a mailbox today, an
+/// address book or calendar later.
+#[async_trait]
+pub trait SyncCursorStore: Send + Sync {
+    async fn get_cursor(&self, account_id: &AccountId, collection: &str) -> Result<Option<SyncCursor>, DomainError>;
+    async fn put_cursor(&self, account_id: &AccountId, collection: &str, cursor: &SyncCursor) -> Result<(), DomainError>;
+    async fn delete_cursor(&self, account_id: &AccountId, collection: &str) -> Result<(), DomainError>;
+}
+
 /// A message whose body still needs downloading, drained by the background
 /// backfill worker, with the membership to fetch it through.
 #[derive(Debug, Clone)]
 pub struct BackfillEntry {
     pub message_id: MessageId,
     pub mailbox_id: MailboxId,
-    pub provider_uid: u32,
+    pub remote_id: RemoteId,
     /// Copies sharing it, with the size and sender, share one download
     /// (Gmail: a label folder and All Mail). A Message-ID alone proves nothing.
     pub rfc_message_id: Option<String>,

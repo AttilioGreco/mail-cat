@@ -29,7 +29,7 @@ fn received(account_id: AccountId, mailbox_id: MailboxId, rfc: &str) -> (Message
         message_id,
         account_id,
         mailbox_id,
-        provider_uid: ProviderUid::new(1),
+        remote_id: RemoteId::from(1),
         message_rfc_id: Some(rfc.into()),
         in_reply_to: None,
         references: vec![],
@@ -263,7 +263,7 @@ async fn uid_lookup_breaks_received_at_ties_by_newest_id() {
         ids.push(id);
     }
 
-    let found = repo.find_by_provider_uid(&inbox, 1).await.unwrap().unwrap();
+    let found = repo.find_by_remote_id(&inbox, &RemoteId::from(1)).await.unwrap().unwrap();
     assert_eq!(found.id, ids[1]);
 }
 

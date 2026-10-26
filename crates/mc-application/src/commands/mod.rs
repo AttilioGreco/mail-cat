@@ -9,7 +9,7 @@ use mc_domain::{
 };
 
 use crate::compose::{ComposeInput, ComposeMode, ComposeView};
-pub use mc_domain::value_objects::uid::ProviderUid;
+pub use mc_domain::value_objects::remote_id::RemoteId;
 
 /// All write-side commands in the application.
 #[derive(Debug, Clone)]
@@ -113,7 +113,7 @@ pub enum Command {
     /// Only updates the local projection.
     ApplyRemoteFlagChange {
         mailbox_id: MailboxId,
-        provider_uid: ProviderUid,
+        remote_id: RemoteId,
         new_flags: Vec<Flag>,
     },
 

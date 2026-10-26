@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chrono::DateTime;
 use mc_domain::{
     AccountId, ConversationReadRepository, DomainEvent, Envelope, EventEnvelope, Flag, MailboxId,
-    MailboxPath, MailboxType, Membership, MessageId, ProviderUid, ReadModelProjector,
+    MailboxPath, MailboxType, Membership, MessageId, RemoteId, ReadModelProjector,
 };
 use mc_shared::pagination::Pagination;
 use uuid::Uuid;
@@ -105,7 +105,7 @@ impl Mail {
             message_id,
             account_id: self.account,
             mailbox_id,
-            provider_uid: ProviderUid::new(self.uid),
+            remote_id: RemoteId::from(self.uid),
             message_rfc_id: rfc.map(str::to_owned),
             in_reply_to: in_reply_to.map(str::to_owned),
             references: refs.iter().map(|r| r.to_string()).collect(),
@@ -133,7 +133,7 @@ impl Mail {
             message_id: id,
             added: vec![Membership {
                 mailbox_id: to,
-                provider_uid: Some(ProviderUid::new(900)),
+                remote_id: Some(RemoteId::from(900)),
             }],
             removed: vec![from],
         })
@@ -309,7 +309,7 @@ async fn a_message_in_three_mailboxes_counts_once() {
     let id = mail.receive(Some("<a@x>"), None, &[]).await;
     let extra = |mailbox_id| Membership {
         mailbox_id,
-        provider_uid: Some(ProviderUid::new(77)),
+        remote_id: Some(RemoteId::from(77)),
     };
     mail.project(DomainEvent::MessageMailboxesChanged {
         message_id: id,

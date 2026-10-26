@@ -1,7 +1,7 @@
 use super::*;
 use mc_domain::{
     AccountId, AccountStatus, AccountSummary, ContactSummary, DomainError, EmailAddress, Mailbox,
-    MailboxId, Message, MessageId, MessageSummary, ProviderType,
+    MailboxId, Message, MessageId, MessageSummary, ProviderType, RemoteId,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -90,22 +90,22 @@ impl MessageReadRepository for MockMessageReadRepo {
         Ok(vec![])
     }
 
-    async fn find_by_provider_uid(
+    async fn find_by_remote_id(
         &self,
         _mailbox_id: &MailboxId,
-        _provider_uid: u32,
+        _remote_id: &RemoteId,
     ) -> Result<Option<MessageSummary>, DomainError> {
         Ok(None)
     }
 
-    async fn held_uids(
+    async fn held_ids(
         &self,
         _mailbox_id: &MailboxId,
-        _uids: &[mc_domain::ProviderUid],
-    ) -> Result<std::collections::HashSet<mc_domain::ProviderUid>, DomainError> {
+        _uids: &[mc_domain::RemoteId],
+    ) -> Result<std::collections::HashSet<mc_domain::RemoteId>, DomainError> {
         Ok(Default::default())
     }
-    async fn uidless_messages(
+    async fn pending_messages(
         &self,
         _mailbox_id: &MailboxId,
     ) -> Result<Vec<MessageId>, DomainError> {
@@ -328,7 +328,7 @@ async fn search_hydrates_hits_from_the_read_model_and_skips_stale_ones() {
         account_id: AccountId::new(),
         memberships: vec![mc_domain::Membership {
             mailbox_id: MailboxId::new(),
-            provider_uid: None,
+            remote_id: None,
         }],
         message_rfc_id: None,
         in_reply_to: None,

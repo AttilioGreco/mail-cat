@@ -70,8 +70,6 @@ pub struct Mailbox {
     pub flags: Vec<Flag>,
     pub total_messages: u32,
     pub unread_messages: u32,
-    pub uid_validity: Option<u32>,
-    pub uid_next: Option<u32>,
 }
 
 impl Mailbox {
@@ -100,8 +98,6 @@ impl Mailbox {
             flags: Vec::new(),
             total_messages: 0,
             unread_messages: 0,
-            uid_validity: None,
-            uid_next: None,
         };
 
         (mailbox, event)
@@ -206,8 +202,6 @@ impl Mailbox {
             flags: Vec::new(),
             total_messages: 0,
             unread_messages: 0,
-            uid_validity: None,
-            uid_next: None,
         };
 
         for event in &events[1..] {

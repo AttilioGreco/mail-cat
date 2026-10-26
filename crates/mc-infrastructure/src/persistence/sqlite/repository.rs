@@ -20,8 +20,7 @@ use mc_domain::{
     ConversationReadRepository, ConversationSummary, DomainError, DomainEvent, EmailAddress,
     Envelope, EventEnvelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, MailboxType, Membership, Message,
     MessageBodyStore, MessageId, MessageReadRepository, MessageSummary, ProjectionCheckpoint,
-    ReadModelProjector,
-    ProviderUid, SuggestScope, Suggestion, ThreadId,
+    ReadModelProjector, RemoteId, SuggestScope, Suggestion, SyncCursor, SyncCursorStore, ThreadId,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -274,12 +273,12 @@ pub(super) fn save_checkpoint_in(
 // ── Row mapping ─────────────────────────────────────────────────────────
 
 /// The last column carries the message's memberships as JSON
-/// `[[hex mailbox id, uid or null], ...]`: blobs can't travel in JSON, so ids
+/// `[[hex mailbox id, remote id or null], ...]`: blobs can't travel in JSON, so ids
 /// are hex.
 const MESSAGE_COLUMNS: &str = "m.id, m.account_id, \
      m.rfc_message_id, m.in_reply_to, m.refs, m.subject, m.addresses, m.flags, m.size_bytes, \
      m.has_attachments, m.attachments, m.sent_at, m.received_at, m.internal_date, \
-     (SELECT json_group_array(json_array(hex(x.mailbox_id), x.provider_uid)) \
+     (SELECT json_group_array(json_array(hex(x.mailbox_id), x.remote_id)) \
       FROM message_mailboxes x WHERE x.message_id = m.id)";
 
 fn select_messages(rest: &str) -> String {
@@ -333,12 +332,12 @@ fn message_from_row(row: &Row) -> rusqlite::Result<Message> {
 /// Sorted by mailbox so the same state always reads the same, whatever order
 /// the memberships were added in.
 fn memberships_col(row: &Row, idx: usize) -> rusqlite::Result<Vec<Membership>> {
-    let rows: Vec<(String, Option<u32>)> = json_col(row, idx)?;
+    let rows: Vec<(String, Option<String>)> = json_col(row, idx)?;
     let mut memberships = rows
         .into_iter()
-        .map(|(mailbox, uid)| {
+        .map(|(mailbox, remote_id)| {
             let mailbox = Uuid::parse_str(&mailbox).map_err(|e| conversion_err(idx, Type::Text, e))?;
-            Ok(Membership { mailbox_id: MailboxId::from_uuid(mailbox), provider_uid: uid.map(ProviderUid::new) })
+            Ok(Membership { mailbox_id: MailboxId::from_uuid(mailbox), remote_id: remote_id.map(RemoteId::from) })
         })
         .collect::<rusqlite::Result<Vec<_>>>()?;
     memberships.sort_by_key(|m| *m.mailbox_id.as_uuid());
@@ -393,7 +392,7 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
 }
 
 const SELECT_MAILBOX: &str = "SELECT id, account_id, path, delimiter, display_name, \
-     mailbox_type, flags, total_messages, unread_messages, uid_validity, uid_next FROM mailboxes";
+     mailbox_type, flags, total_messages, unread_messages FROM mailboxes";
 
 fn mailbox_from_row(row: &Row) -> rusqlite::Result<Mailbox> {
     let path: String = row.get(2)?;
@@ -407,8 +406,6 @@ fn mailbox_from_row(row: &Row) -> rusqlite::Result<Mailbox> {
         flags: json_col(row, 6)?,
         total_messages: row.get(7)?,
         unread_messages: row.get(8)?,
-        uid_validity: row.get(9)?,
-        uid_next: row.get(10)?,
     })
 }
 
@@ -611,6 +608,53 @@ impl ProjectionCheckpoint for SqliteRepository {
 }
 
 #[async_trait]
+impl SyncCursorStore for SqliteRepository {
+    async fn get_cursor(&self, account_id: &AccountId, collection: &str) -> Result<Option<SyncCursor>, DomainError> {
+        let (account, collection) = (*account_id.as_uuid(), collection.to_owned());
+        self.db
+            .read(move |conn| {
+                query_one(
+                    conn,
+                    "SELECT cursor FROM sync_cursors WHERE account_id = ?1 AND collection = ?2",
+                    params![account, collection],
+                    |r| r.get::<_, String>(0),
+                )
+            })
+            .await
+            .map(|cursor| cursor.map(SyncCursor::new))
+    }
+
+    async fn put_cursor(&self, account_id: &AccountId, collection: &str, cursor: &SyncCursor) -> Result<(), DomainError> {
+        let (account, collection, cursor) = (*account_id.as_uuid(), collection.to_owned(), cursor.to_string());
+        self.db
+            .write(move |conn| {
+                exec(
+                    conn,
+                    "INSERT INTO sync_cursors (account_id, collection, cursor) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(account_id, collection) DO UPDATE SET cursor = excluded.cursor",
+                    params![account, collection, cursor],
+                )
+                .map(drop)
+            })
+            .await
+    }
+
+    async fn delete_cursor(&self, account_id: &AccountId, collection: &str) -> Result<(), DomainError> {
+        let (account, collection) = (*account_id.as_uuid(), collection.to_owned());
+        self.db
+            .write(move |conn| {
+                exec(
+                    conn,
+                    "DELETE FROM sync_cursors WHERE account_id = ?1 AND collection = ?2",
+                    params![account, collection],
+                )
+                .map(drop)
+            })
+            .await
+    }
+}
+
+#[async_trait]
 impl MessageBodyStore for SqliteRepository {
     async fn put_body(
         &self,
@@ -654,10 +698,10 @@ impl MessageBodyStore for SqliteRepository {
 }
 
 /// Messages the backfill downloads: Trash and Spam only when opened, and
-/// none without a UID to fetch it by (a renumbered mailbox mid-sync).
+/// none without a remote id to fetch it by (a mailbox whose ids were invalidated mid-sync).
 const BACKFILLABLE: &str = "FROM message_mailboxes mm JOIN messages m ON m.id = mm.message_id \
      LEFT JOIN mailboxes b ON b.id = mm.mailbox_id \
-     WHERE m.account_id = ?1 AND m.body_state = 'pending' AND mm.provider_uid IS NOT NULL \
+     WHERE m.account_id = ?1 AND m.body_state = 'pending' AND mm.remote_id IS NOT NULL \
      AND IFNULL(b.mailbox_type, '') NOT IN ('\"Trash\"', '\"Spam\"')";
 
 #[async_trait]
@@ -676,7 +720,7 @@ impl BodyBackfillQueue for SqliteRepository {
                 let mut entries = query_all(
                     conn,
                     &format!(
-                        "SELECT m.id, mm.mailbox_id, mm.provider_uid, m.rfc_message_id, \
+                        "SELECT m.id, mm.mailbox_id, mm.remote_id, m.rfc_message_id, \
                          m.size_bytes, m.from_email {BACKFILLABLE} \
                          ORDER BY CASE b.mailbox_type WHEN '\"Inbox\"' THEN 0 \
                              WHEN '\"All\"' THEN 2 WHEN '\"Important\"' THEN 2 ELSE 1 END, \
@@ -687,7 +731,7 @@ impl BodyBackfillQueue for SqliteRepository {
                         Ok(BackfillEntry {
                             message_id: MessageId::from_uuid(r.get(0)?),
                             mailbox_id: MailboxId::from_uuid(r.get(1)?),
-                            provider_uid: r.get(2)?,
+                            remote_id: RemoteId::from(r.get::<_, String>(2)?),
                             rfc_message_id: r.get(3)?,
                             size_bytes: r.get::<_, i64>(4)? as u64,
                             from_email: r.get(5)?,
@@ -916,60 +960,59 @@ impl MessageReadRepository for SqliteRepository {
             .await
     }
 
-    async fn find_by_provider_uid(
+    async fn find_by_remote_id(
         &self,
         mailbox_id: &MailboxId,
-        provider_uid: u32,
+        remote_id: &RemoteId,
     ) -> Result<Option<MessageSummary>, DomainError> {
-        let mailbox = *mailbox_id.as_uuid();
+        let (mailbox, remote_id) = (*mailbox_id.as_uuid(), remote_id.to_string());
         self.db
             .read(move |conn| {
                 query_one(
                     conn,
                     &select_mailbox_messages(
-                        "WHERE mm.mailbox_id = ?1 AND mm.provider_uid = ?2 \
+                        "WHERE mm.mailbox_id = ?1 AND mm.remote_id = ?2 \
                          ORDER BY mm.received_at DESC, mm.message_id DESC LIMIT 1",
                     ),
-                    params![mailbox, provider_uid],
+                    params![mailbox, remote_id],
                     summary_from_row,
                 )
             })
             .await
     }
 
-    async fn held_uids(
+    async fn held_ids(
         &self,
         mailbox_id: &MailboxId,
-        uids: &[ProviderUid],
-    ) -> Result<HashSet<ProviderUid>, DomainError> {
+        ids: &[RemoteId],
+    ) -> Result<HashSet<RemoteId>, DomainError> {
         let mailbox = *mailbox_id.as_uuid();
         // One JSON array parameter: a sync batch can be tens of thousands of
-        // UIDs, past SQLite's bound-parameter limit.
-        let uids = serde_json::to_string(&uids.iter().map(|u| u.value()).collect::<Vec<_>>())
-            .map_err(repo_err)?;
+        // ids, past SQLite's bound-parameter limit.
+        let ids = serde_json::to_string(ids).map_err(repo_err)?;
         let held = self
             .db
             .read(move |conn| {
                 query_all(
                     conn,
-                    "SELECT DISTINCT provider_uid FROM message_mailboxes \
-                     WHERE mailbox_id = ?1 AND provider_uid IN (SELECT value FROM json_each(?2))",
-                    params![mailbox, uids],
-                    |r| r.get::<_, u32>(0),
+                    "SELECT DISTINCT remote_id FROM message_mailboxes \
+                     WHERE mailbox_id = ?1 AND remote_id IN (SELECT value FROM json_each(?2))",
+                    params![mailbox, ids],
+                    |r| r.get::<_, String>(0),
                 )
             })
             .await?;
-        Ok(held.into_iter().map(ProviderUid::new).collect())
+        Ok(held.into_iter().map(RemoteId::from).collect())
     }
 
-    async fn uidless_messages(&self, mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
+    async fn pending_messages(&self, mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
         let mailbox = *mailbox_id.as_uuid();
         let ids = self
             .db
             .read(move |conn| {
                 query_all(
                     conn,
-                    "SELECT message_id FROM message_mailboxes WHERE mailbox_id = ?1 AND provider_uid IS NULL",
+                    "SELECT message_id FROM message_mailboxes WHERE mailbox_id = ?1 AND remote_id IS NULL",
                     [mailbox],
                     |r| r.get::<_, Uuid>(0),
                 )

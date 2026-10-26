@@ -12,20 +12,20 @@ use mc_domain::error::DomainError;
 use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::{Message, OutgoingMessage};
 use mc_domain::traits::email_provider::{
-    EmailProvider, FetchRange, MailboxStatus, MessageBodyResult, MessageEnvelopeSummary,
-    ProviderNotification, UidFlagEntry,
+    EmailProvider, MailboxChanges, MessageBodyResult, MessageEnvelopeSummary, ProviderNotification,
 };
 use mc_domain::traits::login_gate::LoginGate;
 use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::mailbox_path::MailboxPath;
-use mc_domain::value_objects::uid::ProviderUid;
+use mc_domain::value_objects::remote_id::RemoteId;
+use mc_domain::value_objects::sync_cursor::SyncCursor;
 
 use crate::email::smtp::SmtpSender;
 use crate::persistence::DownloadMeter;
 
 use self::commands::{
     ServerCaps, append_timeout, delete_uids, exchange, known_caps, message_id_search, move_uids,
-    sorted_uids, timed,
+    sorted_uids, timed, uid_of, uids_of,
 };
 use self::fetch::isolating;
 #[cfg(test)]
@@ -94,18 +94,26 @@ impl EmailProvider for ImapEmailProvider {
         self.list_all_mailboxes().await
     }
 
-    async fn fetch_message_envelopes(
+    async fn mailbox_changes(
         &self,
         mailbox: &MailboxPath,
-        range: FetchRange,
+        since: Option<&SyncCursor>,
+    ) -> Result<MailboxChanges, DomainError> {
+        self.changes(mailbox, since).await
+    }
+
+    async fn fetch_envelopes(
+        &self,
+        mailbox: &MailboxPath,
+        ids: &[RemoteId],
     ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
-        self.envelopes(mailbox, range).await
+        self.envelopes(mailbox, ids).await
     }
 
     async fn fetch_message_detail(
         &self,
         mailbox: &MailboxPath,
-        uid: ProviderUid,
+        id: &RemoteId,
     ) -> Result<Message, DomainError> {
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
         let MessageBodyResult {
@@ -113,7 +121,7 @@ impl EmailProvider for ImapEmailProvider {
             body_html,
             ..
         } = self
-            .fetch_one_body(&mailbox_name, uid.value())
+            .fetch_one_body(&mailbox_name, uid_of(id)?)
             .await?
             .ok_or_else(|| DomainError::Provider("Message not found".into()))?;
 
@@ -132,7 +140,7 @@ impl EmailProvider for ImapEmailProvider {
         let (msg, _event) = Message::receive(
             mc_domain::AccountId::new(),
             mc_domain::MailboxId::new(),
-            uid,
+            id.clone(),
             None,
             None,
             vec![],
@@ -152,16 +160,16 @@ impl EmailProvider for ImapEmailProvider {
     async fn fetch_bodies_bulk(
         &self,
         mailbox: &MailboxPath,
-        uids: &[ProviderUid],
+        ids: &[RemoteId],
     ) -> Result<Vec<MessageBodyResult>, DomainError> {
-        if uids.is_empty() {
+        if ids.is_empty() {
             return Ok(vec![]);
         }
 
         let mailbox_name = super::mapper::mailbox_path_to_string(mailbox);
-        let uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
+        let uids = uids_of(ids)?;
         let mut results = Vec::with_capacity(uids.len());
-        for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
+        for chunk in uids.chunks(Self::FETCH_BATCH_SIZE) {
             debug!("Bulk body fetch: {} UIDs", chunk.len());
             results.extend(
                 isolating(
@@ -175,11 +183,11 @@ impl EmailProvider for ImapEmailProvider {
         Ok(results)
     }
 
-    async fn find_message(
+    async fn find_by_message_id(
         &self,
         mailbox: &MailboxPath,
         rfc_id: &str,
-    ) -> Result<Vec<ProviderUid>, DomainError> {
+    ) -> Result<Vec<RemoteId>, DomainError> {
         let Some(query) = message_id_search(rfc_id)? else {
             return Ok(Vec::new());
         };
@@ -189,35 +197,15 @@ impl EmailProvider for ImapEmailProvider {
         Ok(sorted_uids(found))
     }
 
-    async fn uids_from(
-        &self,
-        mailbox: &MailboxPath,
-        from: ProviderUid,
-    ) -> Result<Vec<ProviderUid>, DomainError> {
-        let mut session = self.selected(&mailbox_path_to_string(mailbox)).await?;
-        let found = exchange(
-            COMMAND_TIMEOUT,
-            "Search",
-            session.uid_search(format!("UID {}:*", from.value())),
-        )
-        .await?;
-        self.release(session);
-        // `n:*` always matches the last message, even when its UID is below n.
-        Ok(sorted_uids(found)
-            .into_iter()
-            .filter(|uid| *uid >= from)
-            .collect())
-    }
-
     async fn fetch_raw_message(
         &self,
         mailbox: &MailboxPath,
-        uid: ProviderUid,
+        id: &RemoteId,
     ) -> Result<Vec<u8>, DomainError> {
         let mut session = self
             .selected(&super::mapper::mailbox_path_to_string(mailbox))
             .await?;
-        let raw = Self::fetch_whole(&mut session, uid.value())
+        let raw = Self::fetch_whole(&mut session, uid_of(id)?)
             .await?
             .ok_or_else(|| DomainError::Provider("Message not found".into()))?;
         self.release(session);
@@ -225,103 +213,33 @@ impl EmailProvider for ImapEmailProvider {
         Ok(raw)
     }
 
-    async fn set_flags(
-        &self,
-        mailbox: &MailboxPath,
-        uid: ProviderUid,
-        flags_to_add: &[Flag],
-        flags_to_remove: &[Flag],
-    ) -> Result<(), DomainError> {
-        self.change_flags(mailbox, uid, flags_to_add, flags_to_remove)
-            .await
-    }
-
     async fn set_flags_bulk(
         &self,
         mailbox: &MailboxPath,
-        uids: &[ProviderUid],
+        ids: &[RemoteId],
         flags_to_add: &[Flag],
         flags_to_remove: &[Flag],
     ) -> Result<(), DomainError> {
-        self.change_flags_bulk(mailbox, uids, flags_to_add, flags_to_remove)
+        self.change_flags_bulk(mailbox, ids, flags_to_add, flags_to_remove)
             .await
     }
 
-    async fn move_message(
-        &self,
-        uid: ProviderUid,
-        from: &MailboxPath,
-        to: &MailboxPath,
-    ) -> Result<Option<ProviderUid>, DomainError> {
-        let (from_name, to_name) = (mailbox_path_to_string(from), mailbox_path_to_string(to));
-        info!(
-            "Moving message {} from {} to {}",
-            uid.value(),
-            from_name,
-            to_name
-        );
-
-        let mut session = self.selected(&from_name).await?;
-        let caps = known_caps(&self.caps, &mut session).await?;
-        let new_uid = timed(
-            COMMAND_TIMEOUT,
-            "Move",
-            move_uids(&mut session, caps, &[uid.value()], &to_name),
-        )
-        .await?
-        .first()
-        .map(|&(_, new)| ProviderUid::new(new));
-        self.release(session);
-
-        info!(new_uid = ?new_uid, "Message moved successfully");
-        Ok(new_uid)
-    }
-
-    async fn delete_message(
-        &self,
-        mailbox: &MailboxPath,
-        uid: ProviderUid,
-        permanently: bool,
-    ) -> Result<(), DomainError> {
-        let mailbox_name = mailbox_path_to_string(mailbox);
-        info!(
-            "Deleting message {} from {} (permanent: {})",
-            uid.value(),
-            mailbox_name,
-            permanently
-        );
-
-        let mut session = self.selected(&mailbox_name).await?;
-        let caps = known_caps(&self.caps, &mut session).await?;
-        timed(
-            COMMAND_TIMEOUT,
-            "Delete",
-            delete_uids(&mut session, caps, &[uid.value()], permanently),
-        )
-        .await?;
-        self.release(session);
-
-        info!("Message deleted successfully");
-        Ok(())
-    }
-
-    /// One session, one `UID STORE` over the whole set — the whole point of
-    /// this override. Mirrors `set_flags_bulk`: same range compression, same
-    /// chunking to stay under the server's command-line limit.
+    /// One session, one `UID STORE` over the whole set per chunk, with the
+    /// same range compression and chunking as `set_flags_bulk`.
     async fn delete_messages(
         &self,
         mailbox: &MailboxPath,
-        uids: &[ProviderUid],
+        ids: &[RemoteId],
         permanently: bool,
     ) -> Result<(), DomainError> {
-        if uids.is_empty() {
+        if ids.is_empty() {
             return Ok(());
         }
 
         let mailbox_name = mailbox_path_to_string(mailbox);
         info!(
             "Deleting {} messages from {} (permanent: {})",
-            uids.len(),
+            ids.len(),
             mailbox_name,
             permanently
         );
@@ -330,9 +248,9 @@ impl EmailProvider for ImapEmailProvider {
         let caps = known_caps(&self.caps, &mut session).await?;
         // compress_uid_ranges assumes sorted input — the caller's order is
         // whatever the selection was, so sort here rather than trusting it.
-        let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
-        uid_nums.sort_unstable();
-        for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
+        let mut uids = uids_of(ids)?;
+        uids.sort_unstable();
+        for chunk in uids.chunks(Self::FETCH_BATCH_SIZE) {
             timed(
                 COMMAND_TIMEOUT,
                 "Delete",
@@ -342,7 +260,7 @@ impl EmailProvider for ImapEmailProvider {
         }
         self.release(session);
 
-        info!("Bulk delete of {} messages completed", uid_nums.len());
+        info!("Bulk delete of {} messages completed", uids.len());
         Ok(())
     }
 
@@ -350,43 +268,42 @@ impl EmailProvider for ImapEmailProvider {
     /// instead of a session per message.
     async fn move_messages(
         &self,
-        uids: &[ProviderUid],
+        ids: &[RemoteId],
         from: &MailboxPath,
         to: &MailboxPath,
-    ) -> Result<HashMap<ProviderUid, ProviderUid>, DomainError> {
-        if uids.is_empty() {
+    ) -> Result<HashMap<RemoteId, Option<RemoteId>>, DomainError> {
+        if ids.is_empty() {
             return Ok(HashMap::new());
         }
 
         let (from_name, to_name) = (mailbox_path_to_string(from), mailbox_path_to_string(to));
         info!(
             "Moving {} messages from {} to {}",
-            uids.len(),
+            ids.len(),
             from_name,
             to_name
         );
 
         let mut session = self.selected(&from_name).await?;
         let caps = known_caps(&self.caps, &mut session).await?;
-        let mut uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
-        uid_nums.sort_unstable();
-        let mut moved = HashMap::new();
-        for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
+        let mut uids = uids_of(ids)?;
+        uids.sort_unstable();
+        let mut moved: HashMap<RemoteId, Option<RemoteId>> =
+            uids.iter().map(|&uid| (RemoteId::from(uid), None)).collect();
+        for chunk in uids.chunks(Self::FETCH_BATCH_SIZE) {
             let pairs = timed(
                 COMMAND_TIMEOUT,
                 "Move",
                 move_uids(&mut session, caps, chunk, &to_name),
             )
             .await?;
-            moved.extend(
-                pairs
-                    .into_iter()
-                    .map(|(old, new)| (ProviderUid::new(old), ProviderUid::new(new))),
-            );
+            for (old, new) in pairs {
+                moved.insert(RemoteId::from(old), Some(RemoteId::from(new)));
+            }
         }
         self.release(session);
 
-        info!("Bulk move of {} messages completed", uid_nums.len());
+        info!("Bulk move of {} messages completed", uids.len());
         Ok(moved)
     }
 
@@ -405,7 +322,7 @@ impl EmailProvider for ImapEmailProvider {
         mailbox: &MailboxPath,
         message: &OutgoingMessage,
         flags: &[Flag],
-    ) -> Result<Option<ProviderUid>, DomainError> {
+    ) -> Result<Option<RemoteId>, DomainError> {
         let raw = crate::email::smtp::format_for_storage(message)?;
         let flags = format!(
             "({})",
@@ -439,23 +356,12 @@ impl EmailProvider for ImapEmailProvider {
                     .await?
                     .into_iter()
                     .max()
-                    .map(ProviderUid::new)
+                    .map(RemoteId::from)
             }
             None => None,
         };
         self.release(session);
         Ok(uid)
-    }
-
-    async fn mailbox_status(&self, mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError> {
-        self.status_of(mailbox).await
-    }
-
-    async fn fetch_uid_flags(
-        &self,
-        mailbox: &MailboxPath,
-    ) -> Result<Vec<UidFlagEntry>, DomainError> {
-        self.uid_flags_of(mailbox).await
     }
 
     fn watch_mailbox(
@@ -468,6 +374,7 @@ impl EmailProvider for ImapEmailProvider {
 
 pub use self::session::asks_the_user_to_act;
 
+mod changes;
 mod commands;
 mod fetch;
 mod mailbox;

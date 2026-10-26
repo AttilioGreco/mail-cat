@@ -11,8 +11,8 @@ pub struct MailboxNotification {
 #[derive(Debug, Clone)]
 pub enum MailboxNotificationKind {
     CountsChanged { total: u32, unseen: u32 },
-    NewMessage { provider_uid: u32 },
-    MessageExpunged { provider_uid: u32 },
+    NewMessage { remote_id: String },
+    MessageExpunged { message_id: String },
     FlagsChanged,
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 use mc_domain::{
-    AggregateType, DomainError, EventEnvelope, FetchRange, Mailbox, MailboxStatus, Membership,
-    MessageEnvelopeSummary, ProviderNotification, ProviderUid,
+    AggregateType, DomainError, EventEnvelope, Existing, Mailbox, MailboxChanges, MailboxCounts,
+    Membership, MessageEnvelopeSummary, ProviderNotification, RemoteId, SyncCursor,
 };
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -12,8 +12,8 @@ fn mailbox_of(message: &Message) -> MailboxId {
     message.memberships[0].mailbox_id
 }
 
-fn uid_of(message: &Message) -> Option<ProviderUid> {
-    message.memberships[0].provider_uid
+fn uid_of(message: &Message) -> Option<RemoteId> {
+    message.memberships[0].remote_id.clone()
 }
 
 // ── Mock EventStore ────────────────────────────────────────────────
@@ -44,7 +44,7 @@ impl MockEventStore {
             message_id: message.id,
             account_id: message.account_id,
             mailbox_id: mailbox_of(message),
-            provider_uid: uid_of(message).unwrap(),
+            remote_id: uid_of(message).unwrap(),
             message_rfc_id: message.message_rfc_id.clone(),
             in_reply_to: message.in_reply_to.clone(),
             references: message.references.clone(),
@@ -147,20 +147,20 @@ struct MockEmailProvider {
     /// Runs while the body fetch is "on the wire".
     during_fetch: RwLock<Option<Box<dyn Fn() + Send + Sync>>>,
     /// UID reported for the moved message in its destination.
-    moved_uid: RwLock<Option<ProviderUid>>,
-    /// What `find_message` finds on the server.
-    found: RwLock<Vec<ProviderUid>>,
+    moved_uid: RwLock<Option<RemoteId>>,
+    /// What `find_by_message_id` finds on the server.
+    found: RwLock<Vec<RemoteId>>,
     /// UIDs `set_flags_bulk` was asked to flag.
-    flagged_bulk: RwLock<Vec<ProviderUid>>,
+    flagged_bulk: RwLock<Vec<RemoteId>>,
     /// UIDs `fetch_message_detail` was asked for.
-    fetched: RwLock<Vec<ProviderUid>>,
-    /// UIDs `move_message` was asked to move.
-    moved: RwLock<Vec<ProviderUid>>,
-    /// Makes `move_message` fail, as a server refusing it.
+    fetched: RwLock<Vec<RemoteId>>,
+    /// UIDs `move_messages` was asked to move.
+    moved: RwLock<Vec<RemoteId>>,
+    /// Makes `move_messages` fail, as a server refusing it.
     refuse: RwLock<bool>,
-    /// `move_message` moves, then times out before the server's answer.
+    /// `move_messages` moves, then times out before the server's answer.
     time_out: RwLock<bool>,
-    /// Makes `move_message` fail once this many messages moved.
+    /// Makes `move_messages` fail once this many messages moved.
     refuse_after: RwLock<Option<usize>>,
     /// Mailbox of each `set_flags_bulk` call.
     flagged_in: RwLock<Vec<MailboxPath>>,
@@ -174,7 +174,7 @@ impl MockEmailProvider {
     /// One whose moves report `uid` as the destination UID.
     fn moving_to(uid: u32) -> Self {
         Self {
-            moved_uid: RwLock::new(Some(ProviderUid::new(uid))),
+            moved_uid: RwLock::new(Some(RemoteId::from(uid))),
             ..Self::default()
         }
     }
@@ -185,19 +185,32 @@ impl EmailProvider for MockEmailProvider {
     async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
         Ok(vec![])
     }
-    async fn fetch_message_envelopes(
+    async fn mailbox_changes(
         &self,
         _mailbox: &MailboxPath,
-        _range: FetchRange,
+        _since: Option<&SyncCursor>,
+    ) -> Result<MailboxChanges, DomainError> {
+        Ok(MailboxChanges {
+            cursor: SyncCursor::new("mock"),
+            reset: None,
+            added: vec![],
+            existing: Existing::Snapshot(vec![]),
+            counts: MailboxCounts { total: 0, unread: 0 },
+        })
+    }
+    async fn fetch_envelopes(
+        &self,
+        _mailbox: &MailboxPath,
+        _ids: &[RemoteId],
     ) -> Result<Vec<MessageEnvelopeSummary>, DomainError> {
         Ok(vec![])
     }
     async fn fetch_message_detail(
         &self,
         _mailbox: &MailboxPath,
-        uid: ProviderUid,
+        id: &RemoteId,
     ) -> Result<Message, DomainError> {
-        self.fetched.write().unwrap().push(uid);
+        self.fetched.write().unwrap().push(id.clone());
         if let Some(during) = self.during_fetch.read().unwrap().as_ref() {
             during();
         }
@@ -207,40 +220,24 @@ impl EmailProvider for MockEmailProvider {
             .clone()
             .ok_or_else(|| DomainError::Provider("no detail configured".into()))
     }
-    async fn find_message(
+    async fn find_by_message_id(
         &self,
         _mailbox: &MailboxPath,
         _rfc_id: &str,
-    ) -> Result<Vec<ProviderUid>, DomainError> {
+    ) -> Result<Vec<RemoteId>, DomainError> {
         Ok(self.found.read().unwrap().clone())
-    }
-    async fn uids_from(
-        &self,
-        _mailbox: &MailboxPath,
-        _from: ProviderUid,
-    ) -> Result<Vec<ProviderUid>, DomainError> {
-        Ok(vec![])
     }
     async fn fetch_raw_message(
         &self,
         _mailbox: &MailboxPath,
-        _uid: ProviderUid,
+        _id: &RemoteId,
     ) -> Result<Vec<u8>, DomainError> {
         Ok(self.raw.read().unwrap().clone())
-    }
-    async fn set_flags(
-        &self,
-        _mailbox: &MailboxPath,
-        _uid: ProviderUid,
-        _add: &[Flag],
-        _remove: &[Flag],
-    ) -> Result<(), DomainError> {
-        Ok(())
     }
     async fn set_flags_bulk(
         &self,
         mailbox: &MailboxPath,
-        uids: &[ProviderUid],
+        uids: &[RemoteId],
         _add: &[Flag],
         _remove: &[Flag],
     ) -> Result<(), DomainError> {
@@ -248,32 +245,32 @@ impl EmailProvider for MockEmailProvider {
         self.flagged_bulk.write().unwrap().extend_from_slice(uids);
         Ok(())
     }
-    async fn move_message(
+    async fn move_messages(
         &self,
-        uid: ProviderUid,
+        ids: &[RemoteId],
         _from: &MailboxPath,
         _to: &MailboxPath,
-    ) -> Result<Option<ProviderUid>, DomainError> {
-        let moved = self.moved.read().unwrap().len();
-        if *self.refuse.read().unwrap()
-            || self
-                .refuse_after
-                .read()
-                .unwrap()
-                .is_some_and(|n| moved >= n)
-        {
-            return Err(DomainError::Provider("refused".into()));
+    ) -> Result<HashMap<RemoteId, Option<RemoteId>>, DomainError> {
+        let mut moved = HashMap::new();
+        for id in ids {
+            let done = self.moved.read().unwrap().len();
+            if *self.refuse.read().unwrap()
+                || self.refuse_after.read().unwrap().is_some_and(|n| done >= n)
+            {
+                return Err(DomainError::Provider("refused".into()));
+            }
+            self.moved.write().unwrap().push(id.clone());
+            if *self.time_out.read().unwrap() {
+                return Err(DomainError::ConnectionTimeout("move".into()));
+            }
+            moved.insert(id.clone(), self.moved_uid.read().unwrap().clone());
         }
-        self.moved.write().unwrap().push(uid);
-        if *self.time_out.read().unwrap() {
-            return Err(DomainError::ConnectionTimeout("move".into()));
-        }
-        Ok(*self.moved_uid.read().unwrap())
+        Ok(moved)
     }
-    async fn delete_message(
+    async fn delete_messages(
         &self,
         _mailbox: &MailboxPath,
-        _uid: ProviderUid,
+        _ids: &[RemoteId],
         _permanently: bool,
     ) -> Result<(), DomainError> {
         Ok(())
@@ -287,26 +284,12 @@ impl EmailProvider for MockEmailProvider {
         mailbox: &MailboxPath,
         message: &OutgoingMessage,
         flags: &[Flag],
-    ) -> Result<Option<ProviderUid>, DomainError> {
+    ) -> Result<Option<RemoteId>, DomainError> {
         self.appended
             .write()
             .unwrap()
             .push((mailbox.clone(), message.clone(), flags.to_vec()));
-        Ok(Some(ProviderUid::new(7)))
-    }
-    async fn mailbox_status(&self, _mailbox: &MailboxPath) -> Result<MailboxStatus, DomainError> {
-        Ok(MailboxStatus {
-            uid_validity: 1,
-            uid_next: 1,
-            total_messages: 0,
-            unseen_messages: 0,
-        })
-    }
-    async fn fetch_uid_flags(
-        &self,
-        _mailbox: &MailboxPath,
-    ) -> Result<Vec<mc_domain::traits::email_provider::UidFlagEntry>, DomainError> {
-        Ok(vec![])
+        Ok(Some(RemoteId::from(7)))
     }
     fn watch_mailbox(
         &self,
@@ -318,7 +301,7 @@ impl EmailProvider for MockEmailProvider {
     async fn fetch_bodies_bulk(
         &self,
         _mailbox: &MailboxPath,
-        _uids: &[ProviderUid],
+        _uids: &[RemoteId],
     ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError> {
         Ok(vec![])
     }
@@ -360,7 +343,7 @@ struct MockMessageReadRepo {
     stored_bodies: std::sync::Mutex<Vec<StoredBody>>,
     unread: Vec<mc_domain::MessageSummary>,
     /// UIDs other local rows already hold.
-    held: Vec<ProviderUid>,
+    held: Vec<RemoteId>,
     /// What `share_bodies` hands out: copies given another's body.
     shared: Vec<(MessageId, bool)>,
 }
@@ -441,27 +424,27 @@ impl MessageReadRepository for MockMessageReadRepo {
     async fn get_thread(&self, _id: &MessageId) -> Result<Vec<Message>, DomainError> {
         Ok(vec![])
     }
-    async fn find_by_provider_uid(
+    async fn find_by_remote_id(
         &self,
         _mailbox_id: &MailboxId,
-        _provider_uid: u32,
+        _remote_id: &RemoteId,
     ) -> Result<Option<mc_domain::MessageSummary>, DomainError> {
         Ok(None)
     }
 
-    async fn held_uids(
+    async fn held_ids(
         &self,
         _mailbox_id: &MailboxId,
-        uids: &[ProviderUid],
-    ) -> Result<std::collections::HashSet<ProviderUid>, DomainError> {
+        uids: &[RemoteId],
+    ) -> Result<std::collections::HashSet<RemoteId>, DomainError> {
         Ok(self
             .held
             .iter()
-            .copied()
             .filter(|uid| uids.contains(uid))
+            .cloned()
             .collect())
     }
-    async fn uidless_messages(
+    async fn pending_messages(
         &self,
         _mailbox_id: &MailboxId,
     ) -> Result<Vec<MessageId>, DomainError> {
@@ -560,7 +543,7 @@ fn make_test_message() -> Message {
     let (msg, _) = Message::receive(
         AccountId::new(),
         MailboxId::new(),
-        ProviderUid::new(42),
+        RemoteId::from(42),
         None,
         None,
         vec![],
@@ -696,8 +679,6 @@ async fn handle_delete_moves_to_trash_when_trash_exists() {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
-        uid_validity: None,
-        uid_next: None,
     };
 
     let es = Arc::new(MockEventStore::with_message(&msg));
@@ -737,8 +718,6 @@ async fn handle_delete_many_counts_partial_success() {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
-        uid_validity: None,
-        uid_next: None,
     };
     let trash = mc_domain::Mailbox {
         id: MailboxId::new(),
@@ -749,8 +728,6 @@ async fn handle_delete_many_counts_partial_success() {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
-        uid_validity: None,
-        uid_next: None,
     };
 
     let es = Arc::new(MockEventStore::with_message(&msg));
@@ -796,8 +773,6 @@ async fn handle_delete_permanent_expunges_even_with_trash() {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
-        uid_validity: None,
-        uid_next: None,
     };
 
     let es = Arc::new(MockEventStore::with_message(&msg));
@@ -882,8 +857,6 @@ fn test_mailbox(account_id: AccountId, name: &str, kind: MailboxType) -> mc_doma
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
-        uid_validity: None,
-        uid_next: None,
     }
 }
 
@@ -1052,7 +1025,7 @@ fn source_message(account_id: AccountId, mailbox_id: MailboxId) -> Message {
     let (mut msg, _) = Message::receive(
         account_id,
         mailbox_id,
-        ProviderUid::new(42),
+        RemoteId::from(42),
         Some("<orig@example.com>".into()),
         Some("<parent@example.com>".into()),
         vec!["<root@example.com>".into(), "<parent@example.com>".into()],
@@ -1407,7 +1380,7 @@ async fn handle_fetch_body_still_downloads_when_the_copy_is_truncated() {
         .await
         .unwrap();
 
-    assert_eq!(*provider.fetched.read().unwrap(), [ProviderUid::new(42)]);
+    assert_eq!(*provider.fetched.read().unwrap(), [RemoteId::from(42)]);
     assert_eq!(
         read_repo.stored_bodies.lock().unwrap()[0].1.as_deref(),
         Some("whole")
@@ -1468,7 +1441,7 @@ fn uidless_in_archive() -> (Message, mc_domain::Mailbox, Arc<MockEventStore>) {
     let (msg, _) = Message::receive(
         AccountId::new(),
         MailboxId::new(),
-        ProviderUid::new(42),
+        RemoteId::from(42),
         Some("<moved@example.com>".into()),
         None,
         vec![],
@@ -1487,8 +1460,6 @@ fn uidless_in_archive() -> (Message, mc_domain::Mailbox, Arc<MockEventStore>) {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
-        uid_validity: None,
-        uid_next: None,
     };
     let es = Arc::new(MockEventStore::with_message(&msg));
     es.events
@@ -1504,7 +1475,7 @@ fn uidless_in_archive() -> (Message, mc_domain::Mailbox, Arc<MockEventStore>) {
                 message_id: msg.id,
                 added: vec![Membership {
                     mailbox_id: archive.id,
-                    provider_uid: None,
+                    remote_id: None,
                 }],
                 removed: vec![mailbox_of(&msg)],
             },
@@ -1516,7 +1487,7 @@ fn uidless_in_archive() -> (Message, mc_domain::Mailbox, Arc<MockEventStore>) {
 async fn a_message_without_uid_is_found_on_the_server_before_acting() {
     let (msg, archive, es) = uidless_in_archive();
     let provider = Arc::new(MockEmailProvider::new());
-    *provider.found.write().unwrap() = vec![ProviderUid::new(55)];
+    *provider.found.write().unwrap() = vec![RemoteId::from(55)];
     *provider.detail_response.write().unwrap() = Some(Message {
         body_text: Some("text".into()),
         ..msg.clone()
@@ -1531,11 +1502,11 @@ async fn a_message_without_uid_is_found_on_the_server_before_acting() {
         .await
         .unwrap();
 
-    assert_eq!(*provider.fetched.read().unwrap(), [ProviderUid::new(55)]);
+    assert_eq!(*provider.fetched.read().unwrap(), [RemoteId::from(55)]);
     let (stored, _) = handler.load_message(&msg.id).await.unwrap();
     assert_eq!(
         uid_of(&stored),
-        Some(ProviderUid::new(55)),
+        Some(RemoteId::from(55)),
         "found UID is recorded"
     );
 }
@@ -1561,13 +1532,13 @@ async fn a_message_gone_from_the_server_is_a_clear_error() {
 async fn marking_a_mailbox_read_reaches_messages_without_uid() {
     let (msg, archive, es) = uidless_in_archive();
     let provider = Arc::new(MockEmailProvider::new());
-    *provider.found.write().unwrap() = vec![ProviderUid::new(55)];
+    *provider.found.write().unwrap() = vec![RemoteId::from(55)];
     let unread = mc_domain::MessageSummary {
         id: msg.id,
         account_id: msg.account_id,
         memberships: vec![Membership {
             mailbox_id: archive.id,
-            provider_uid: None,
+            remote_id: None,
         }],
         from_name: None,
         from_email: "sender@example.com".into(),
@@ -1597,7 +1568,7 @@ async fn marking_a_mailbox_read_reaches_messages_without_uid() {
 
     assert_eq!(
         *provider.flagged_bulk.read().unwrap(),
-        [ProviderUid::new(55)]
+        [RemoteId::from(55)]
     );
 }
 
@@ -1607,10 +1578,10 @@ async fn marking_a_mailbox_read_reaches_messages_without_uid() {
 async fn the_uid_found_skips_copies_other_rows_hold() {
     let (msg, archive, es) = uidless_in_archive();
     let provider = Arc::new(MockEmailProvider::new());
-    *provider.found.write().unwrap() = vec![ProviderUid::new(55), ProviderUid::new(60)];
+    *provider.found.write().unwrap() = vec![RemoteId::from(55), RemoteId::from(60)];
     *provider.detail_response.write().unwrap() = Some(msg.clone());
     let read_repo = Arc::new(MockMessageReadRepo {
-        held: vec![ProviderUid::new(60)],
+        held: vec![RemoteId::from(60)],
         ..MockMessageReadRepo::with_mailboxes(vec![archive.clone()])
     });
     let handler = MessageCommandHandler::new(
@@ -1625,14 +1596,14 @@ async fn the_uid_found_skips_copies_other_rows_hold() {
         .await
         .unwrap();
 
-    assert_eq!(*provider.fetched.read().unwrap(), [ProviderUid::new(55)]);
+    assert_eq!(*provider.fetched.read().unwrap(), [RemoteId::from(55)]);
 }
 
 #[tokio::test]
 async fn a_uid_is_never_looked_up_in_another_mailbox() {
     let (msg, archive, es) = uidless_in_archive();
     let provider = Arc::new(MockEmailProvider::new());
-    *provider.found.write().unwrap() = vec![ProviderUid::new(55)];
+    *provider.found.write().unwrap() = vec![RemoteId::from(55)];
     let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![archive]));
     let handler = MessageCommandHandler::new(
         es,
@@ -1655,7 +1626,7 @@ async fn a_uid_is_never_looked_up_in_another_mailbox() {
 async fn bulk_move_finds_messages_without_uid() {
     let (msg, archive, es) = uidless_in_archive();
     let provider = Arc::new(MockEmailProvider::new());
-    *provider.found.write().unwrap() = vec![ProviderUid::new(55)];
+    *provider.found.write().unwrap() = vec![RemoteId::from(55)];
     let registry = Arc::new(MockProviderRegistry::new(provider.clone()));
     let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![archive]));
     let handler =
@@ -1680,7 +1651,7 @@ async fn bulk_move_finds_messages_without_uid() {
     for _ in 0..20 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(*provider.moved.read().unwrap(), [ProviderUid::new(55)]);
+    assert_eq!(*provider.moved.read().unwrap(), [RemoteId::from(55)]);
 }
 
 #[tokio::test]
@@ -1689,7 +1660,7 @@ async fn handle_move_records_the_uid_the_provider_reports() {
     let msg_id = msg.id;
     let archive = MailboxId::new();
     let provider = MockEmailProvider::new();
-    *provider.moved_uid.write().unwrap() = Some(ProviderUid::new(900));
+    *provider.moved_uid.write().unwrap() = Some(RemoteId::from(900));
 
     let es = Arc::new(MockEventStore::with_message(&msg));
     let registry = Arc::new(MockProviderRegistry::new(Arc::new(provider)));
@@ -1715,7 +1686,7 @@ async fn handle_move_records_the_uid_the_provider_reports() {
     // would address some other message in Archive.
     let (moved, _) = handler.load_message(&msg_id).await.unwrap();
     assert_eq!(mailbox_of(&moved), archive);
-    assert_eq!(uid_of(&moved), Some(ProviderUid::new(900)));
+    assert_eq!(uid_of(&moved), Some(RemoteId::from(900)));
 }
 
 /// A move the server refuses changes nothing locally.
@@ -1769,7 +1740,7 @@ impl Moving {
         std::iter::from_fn(|| self.resync.try_recv().ok().map(|(_, path)| path)).collect()
     }
 
-    async fn location(&self, id: MessageId) -> (MailboxId, Option<ProviderUid>) {
+    async fn location(&self, id: MessageId) -> (MailboxId, Option<RemoteId>) {
         let (stored, _) = self.handler.load_message(&id).await.unwrap();
         (mailbox_of(&stored), uid_of(&stored))
     }
@@ -1836,11 +1807,11 @@ async fn a_delete_queued_behind_a_move_follows_it_to_trash() {
     assert!(matches!(result, CommandResult::MessageDeleted));
     assert_eq!(
         *m.provider.moved.read().unwrap(),
-        [ProviderUid::new(42), ProviderUid::new(900)]
+        [RemoteId::from(42), RemoteId::from(900)]
     );
     assert_eq!(
         m.location(msg.id).await,
-        (m.trash.id, Some(ProviderUid::new(900)))
+        (m.trash.id, Some(RemoteId::from(900)))
     );
 
     // Moving it where it already is changes nothing.
@@ -1861,7 +1832,7 @@ fn with_rfc_id(rfc_id: &str) -> Message {
     Message::receive(
         AccountId::new(),
         MailboxId::new(),
-        ProviderUid::new(42),
+        RemoteId::from(42),
         Some(rfc_id.into()),
         None,
         vec![],
@@ -1910,12 +1881,12 @@ async fn a_move_confirmed_without_evidence_records_no_destination() {
 async fn archiving_a_message_another_client_already_moved_leaves_one_row() {
     let msg = with_rfc_id("<phone@example.com>");
     let provider = MockEmailProvider::new();
-    *provider.found.write().unwrap() = vec![ProviderUid::new(900)];
+    *provider.found.write().unwrap() = vec![RemoteId::from(900)];
     let mut m = moving_with(
         &msg,
         provider,
         MockMessageReadRepo {
-            held: vec![ProviderUid::new(900)],
+            held: vec![RemoteId::from(900)],
             ..Default::default()
         },
     );
@@ -1954,7 +1925,7 @@ async fn a_move_onto_a_uid_another_row_holds_leaves_that_row_alone() {
         &msg,
         MockEmailProvider::moving_to(900),
         MockMessageReadRepo {
-            held: vec![ProviderUid::new(900)],
+            held: vec![RemoteId::from(900)],
             ..Default::default()
         },
     );
@@ -2030,7 +2001,7 @@ async fn a_double_delete_leaves_the_message_in_trash() {
     }
     assert_eq!(
         m.location(msg.id).await,
-        (m.trash.id, Some(ProviderUid::new(900)))
+        (m.trash.id, Some(RemoteId::from(900)))
     );
 
     m.handler
@@ -2062,7 +2033,7 @@ async fn a_double_bulk_delete_leaves_the_message_in_trash() {
     }
     assert_eq!(
         m.location(msg.id).await,
-        (m.trash.id, Some(ProviderUid::new(900)))
+        (m.trash.id, Some(RemoteId::from(900)))
     );
 }
 
@@ -2090,7 +2061,7 @@ async fn a_timeout_after_a_move_resyncs_both_mailboxes() {
     assert!(result.is_err());
     assert_eq!(
         m.location(msg.id).await,
-        (mailbox_of(&msg), Some(ProviderUid::new(42)))
+        (mailbox_of(&msg), Some(RemoteId::from(42)))
     );
     assert_eq!(m.resync_requests(), [MailboxPath::inbox(), archive.path]);
 }
@@ -2119,7 +2090,7 @@ async fn recording_a_done_move_retries_past_a_concurrent_append() {
     let (stored, _) = m.handler.load_message(&msg.id).await.unwrap();
     assert_eq!(
         (mailbox_of(&stored), uid_of(&stored)),
-        (archive.id, Some(ProviderUid::new(900)))
+        (archive.id, Some(RemoteId::from(900)))
     );
     assert!(
         stored.flags.contains(&Flag::Flagged),
@@ -2202,7 +2173,7 @@ async fn marking_a_mailbox_read_continues_past_a_failing_message() {
         account_id: msg.account_id,
         memberships: vec![Membership {
             mailbox_id: mailbox_of(&msg),
-            provider_uid: None,
+            remote_id: None,
         }],
         from_name: None,
         from_email: "sender@example.com".into(),
@@ -2239,7 +2210,7 @@ async fn marking_a_mailbox_read_continues_past_a_failing_message() {
     assert!(handler.load_message(&msg.id).await.unwrap().0.is_read());
     assert_eq!(
         *provider.flagged_bulk.read().unwrap(),
-        [ProviderUid::new(42)]
+        [RemoteId::from(42)]
     );
 }
 
@@ -2281,7 +2252,7 @@ async fn a_flag_store_follows_a_move_queued_ahead_of_it() {
 
     assert_eq!(
         *provider.flagged_bulk.read().unwrap(),
-        [ProviderUid::new(900)]
+        [RemoteId::from(900)]
     );
     assert_eq!(*provider.flagged_in.read().unwrap(), [archive.path]);
 }

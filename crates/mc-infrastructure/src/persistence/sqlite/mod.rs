@@ -48,9 +48,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         mailbox_type    TEXT NOT NULL,
         flags           TEXT NOT NULL,
         total_messages  INTEGER NOT NULL DEFAULT 0,
-        unread_messages INTEGER NOT NULL DEFAULT 0,
-        uid_validity    INTEGER,
-        uid_next        INTEGER
+        unread_messages INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX mailboxes_account ON mailboxes(account_id);
     CREATE TABLE messages (
@@ -77,12 +75,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE TABLE message_mailboxes (
         message_id   BLOB NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
         mailbox_id   BLOB NOT NULL,
-        provider_uid INTEGER,
+        remote_id    TEXT,
         received_at  INTEGER NOT NULL,
         PRIMARY KEY (message_id, mailbox_id)
     ) WITHOUT ROWID;
     CREATE INDEX message_mailboxes_date ON message_mailboxes(mailbox_id, received_at DESC, message_id);
-    CREATE INDEX message_mailboxes_uid ON message_mailboxes(mailbox_id, provider_uid);
+    CREATE INDEX message_mailboxes_remote ON message_mailboxes(mailbox_id, remote_id);
     CREATE INDEX messages_thread ON messages(account_id, thread_id, received_at);
     CREATE INDEX messages_rfc ON messages(account_id, rfc_message_id);
     CREATE INDEX messages_backfill ON messages(account_id, received_at DESC) WHERE body_state = 'pending';
@@ -130,6 +128,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE TABLE projection_checkpoints (
         name     TEXT PRIMARY KEY,
         position INTEGER NOT NULL
+    );
+    CREATE TABLE sync_cursors (
+        account_id BLOB NOT NULL,
+        collection TEXT NOT NULL,
+        cursor     TEXT NOT NULL,
+        PRIMARY KEY (account_id, collection)
     );",
     // 3: per-address correspondence, ranking recipient autocomplete. Keyed by
     // address, not contact: it outlives contact edits and merges.

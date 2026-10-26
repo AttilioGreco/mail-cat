@@ -1,4 +1,4 @@
-//! Mailbox listing, status, flag changes and IDLE watching.
+//! Mailbox listing, flag changes and IDLE watching.
 
 use std::pin::Pin;
 use std::time::Duration;
@@ -8,13 +8,13 @@ use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
 use mc_domain::model::mailbox::Mailbox;
-use mc_domain::traits::email_provider::{MailboxStatus, ProviderNotification, UidFlagEntry};
+use mc_domain::traits::email_provider::ProviderNotification;
 use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::mailbox_path::MailboxPath;
-use mc_domain::value_objects::uid::ProviderUid;
+use mc_domain::value_objects::remote_id::RemoteId;
 
 use super::super::mapper::{self, flag_to_imap, mailbox_path_to_string};
-use super::commands::{exchange, store, uid_flags};
+use super::commands::{exchange, store, uids_of};
 use super::{COMMAND_TIMEOUT, IDLE_REISSUE, ImapEmailProvider};
 
 impl ImapEmailProvider {
@@ -132,27 +132,23 @@ impl ImapEmailProvider {
                         match fetches {
                             Ok(items) => {
                                 for fetch_data in &items {
-                                    let uid = fetch_data.uid.unwrap_or(0);
                                     let flags: Vec<Flag> = fetch_data
                                         .flags()
                                         .filter_map(|f| mapper::imap_flag_to_domain(&f))
                                         .collect();
+                                    // No UID is a spurious EXISTS echo, not a flag change.
+                                    let Some(uid) = fetch_data.uid else { continue };
                                     info!("[watch] FlagsChanged in '{}': uid={} flags={:?}",
                                         mailbox_name, uid, flags);
                                     yield Ok(ProviderNotification::FlagsChanged {
                                         mailbox: mb_path.clone(),
-                                        uid: ProviderUid::new(uid),
+                                        remote_id: RemoteId::from(uid),
                                         flags,
                                     });
                                 }
                             }
                             Err(e) => {
                                 warn!("[watch] FETCH (UID FLAGS) failed for seq {}: {}", seq, e);
-                                yield Ok(ProviderNotification::FlagsChanged {
-                                    mailbox: mb_path.clone(),
-                                    uid: ProviderUid::new(0),
-                                    flags: vec![],
-                                });
                                 // A timed-out reply may still arrive: never reuse that session.
                                 if matches!(e, DomainError::ConnectionTimeout(_)) {
                                     continue;
@@ -161,11 +157,6 @@ impl ImapEmailProvider {
                         }
                     } else {
                         warn!("[watch] Could not parse seq num from IDLE response");
-                        yield Ok(ProviderNotification::FlagsChanged {
-                            mailbox: mb_path.clone(),
-                            uid: ProviderUid::new(0),
-                            flags: vec![],
-                        });
                     }
                 } else {
                     // EXISTS (new messages) and/or EXPUNGE.
@@ -189,7 +180,7 @@ impl ImapEmailProvider {
                                             info!("[watch] NewMessage in '{}': uid={}", mailbox_name, uid);
                                             yield Ok(ProviderNotification::NewMessage {
                                                 mailbox: mb_path.clone(),
-                                                uid: ProviderUid::new(uid),
+                                                remote_id: RemoteId::from(uid),
                                             });
                                         }
                                     }
@@ -274,9 +265,7 @@ impl ImapEmailProvider {
                 flags: Vec::new(),
                 total_messages: 0,
                 unread_messages: 0,
-                uid_validity: None,
-                uid_next: None,
-            };
+                            };
 
             mailboxes.push(mailbox);
         }
@@ -285,79 +274,27 @@ impl ImapEmailProvider {
         Ok(mailboxes)
     }
 
-    pub(super) async fn change_flags(
-        &self,
-        mailbox: &MailboxPath,
-        uid: ProviderUid,
-        flags_to_add: &[Flag],
-        flags_to_remove: &[Flag],
-    ) -> Result<(), DomainError> {
-        info!(
-            "Setting flags for message {} in mailbox {}",
-            uid.value(),
-            mailbox_path_to_string(mailbox)
-        );
-
-        let mut session = self.selected(&mailbox_path_to_string(mailbox)).await?;
-        let seq = Self::uid_to_seq(&uid);
-
-        // Add flags
-        if !flags_to_add.is_empty() {
-            let flags_str: Vec<String> = flags_to_add.iter().map(flag_to_imap).collect();
-            let flags_query = flags_str.join(" ");
-
-            store(
-                &mut session,
-                &seq.to_string(),
-                &format!("+FLAGS ({flags_query})"),
-                "Add flags",
-            )
-            .await?;
-
-            debug!("Added flags: {}", flags_query);
-        }
-
-        // Remove flags
-        if !flags_to_remove.is_empty() {
-            let flags_str: Vec<String> = flags_to_remove.iter().map(flag_to_imap).collect();
-            let flags_query = flags_str.join(" ");
-
-            store(
-                &mut session,
-                &seq.to_string(),
-                &format!("-FLAGS ({flags_query})"),
-                "Remove flags",
-            )
-            .await?;
-
-            debug!("Removed flags: {}", flags_query);
-        }
-        self.release(session);
-
-        info!("Flags updated successfully");
-        Ok(())
-    }
-
     pub(super) async fn change_flags_bulk(
         &self,
         mailbox: &MailboxPath,
-        uids: &[ProviderUid],
+        ids: &[RemoteId],
         flags_to_add: &[Flag],
         flags_to_remove: &[Flag],
     ) -> Result<(), DomainError> {
-        if uids.is_empty() {
+        if ids.is_empty() {
             return Ok(());
         }
 
         info!(
             "Setting flags for {} messages in mailbox {}",
-            uids.len(),
+            ids.len(),
             mailbox_path_to_string(mailbox)
         );
 
         let mut session = self.selected(&mailbox_path_to_string(mailbox)).await?;
 
-        let uid_nums: Vec<u32> = uids.iter().map(|u| u.value()).collect();
+        let mut uid_nums = uids_of(ids)?;
+        uid_nums.sort_unstable();
 
         for chunk in uid_nums.chunks(Self::FETCH_BATCH_SIZE) {
             let query = Self::compress_uid_ranges(chunk);
@@ -397,75 +334,5 @@ impl ImapEmailProvider {
 
         info!("Bulk flags updated successfully");
         Ok(())
-    }
-
-    pub(super) async fn status_of(
-        &self,
-        mailbox: &MailboxPath,
-    ) -> Result<MailboxStatus, DomainError> {
-        debug!("Getting mailbox status for: {:?}", mailbox);
-        let mut session = self.session().await?;
-
-        let mailbox_name = mapper::mailbox_path_to_string(mailbox);
-
-        // Use STATUS command to get accurate counts.
-        // SELECT's "unseen" field is the sequence number of the first unseen message (RFC 3501),
-        // NOT the count — STATUS (MESSAGES UNSEEN UIDNEXT UIDVALIDITY) returns the actual count.
-        let mailbox_data = exchange(
-            COMMAND_TIMEOUT,
-            "Mailbox STATUS",
-            session.status(&mailbox_name, "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"),
-        )
-        .await?;
-
-        self.release(session);
-
-        let status = MailboxStatus {
-            uid_validity: mailbox_data.uid_validity.unwrap_or(0),
-            uid_next: mailbox_data.uid_next.unwrap_or(0),
-            total_messages: mailbox_data.exists,
-            unseen_messages: mailbox_data.unseen.unwrap_or(0),
-        };
-
-        info!(
-            "Mailbox status: total={}, unseen={}, uid_validity={}, uid_next={}",
-            status.total_messages, status.unseen_messages, status.uid_validity, status.uid_next
-        );
-        Ok(status)
-    }
-
-    pub(super) async fn uid_flags_of(
-        &self,
-        mailbox: &MailboxPath,
-    ) -> Result<Vec<UidFlagEntry>, DomainError> {
-        let mailbox_name = mailbox_path_to_string(mailbox);
-        let mut session = self.selected(&mailbox_name).await?;
-        let fetches = uid_flags(&mut session).await?;
-
-        // ponytail: `* n FETCH (UID u FLAGS (...))` is about 40 bytes a message.
-        self.metered(fetches.len() as u64 * 40).await;
-        let entries: Vec<UidFlagEntry> = fetches
-            .iter()
-            .filter_map(|f| {
-                let uid = f.uid?;
-                let flags: Vec<Flag> = f
-                    .flags()
-                    .filter_map(|flag| mapper::imap_flag_to_domain(&flag))
-                    .collect();
-                Some(UidFlagEntry {
-                    uid: ProviderUid::new(uid),
-                    flags,
-                })
-            })
-            .collect();
-
-        info!(
-            mailbox = %mailbox_name,
-            count = entries.len(),
-            "Fetched UID+flags for reconciliation"
-        );
-
-        self.release(session);
-        Ok(entries)
     }
 }

@@ -4,4 +4,5 @@ pub mod flag;
 pub mod mailbox_path;
 pub mod message_id;
 pub mod thread_id;
-pub mod uid;
+pub mod remote_id;
+pub mod sync_cursor;

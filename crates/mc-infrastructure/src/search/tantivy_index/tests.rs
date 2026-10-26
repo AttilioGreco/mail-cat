@@ -11,7 +11,7 @@ fn create_test_message(id: &str, subject: &str, from: &str, body: &str) -> Messa
         account_id: AccountId::new(),
         memberships: vec![Membership {
             mailbox_id: MailboxId::new(),
-            provider_uid: None,
+            remote_id: None,
         }],
         message_rfc_id: None,
         in_reply_to: None,
@@ -259,7 +259,7 @@ async fn a_message_is_found_in_every_mailbox_it_is_in() {
     let (first, second) = (msg.memberships[0].mailbox_id, MailboxId::new());
     msg.memberships.push(Membership {
         mailbox_id: second,
-        provider_uid: None,
+        remote_id: None,
     });
     index.index_message(&msg).await.unwrap();
 

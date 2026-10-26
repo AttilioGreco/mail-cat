@@ -732,13 +732,13 @@ fn domain_event_to_mailbox_event(
             message_id,
             account_id: evt_account,
             mailbox_id: evt_mailbox,
-            provider_uid,
+            remote_id,
             ..
         } if evt_account == account_id && evt_mailbox == mailbox_id => Some(MailboxEvent {
             mailbox_id: mailbox_id_str.to_owned(),
             event_type: Some(mailbox_event::EventType::NewMessage(NewMessageEvent {
                 message_id: message_id.to_string(),
-                provider_uid: provider_uid.value(),
+                remote_id: remote_id.to_string(),
             })),
         }),
 

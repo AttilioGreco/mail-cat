@@ -70,14 +70,14 @@ async fn main() -> anyhow::Result<()> {
                     Ok(n) => {
                         let ts = chrono::Utc::now().format("%H:%M:%S");
                         let desc = match n.event {
-                            MailboxNotificationKind::NewMessage { provider_uid } => {
-                                format!("NewMessage uid={}", provider_uid)
+                            MailboxNotificationKind::NewMessage { remote_id } => {
+                                format!("NewMessage id={}", remote_id)
                             }
                             MailboxNotificationKind::FlagsChanged => {
                                 "FlagsChanged".to_string()
                             }
-                            MailboxNotificationKind::MessageExpunged { provider_uid } => {
-                                format!("MessageExpunged uid={}", provider_uid)
+                            MailboxNotificationKind::MessageExpunged { message_id } => {
+                                format!("MessageExpunged message={}", message_id)
                             }
                             MailboxNotificationKind::CountsChanged { total, unseen } => {
                                 format!("CountsChanged total={} unseen={}", total, unseen)

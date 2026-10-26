@@ -154,11 +154,10 @@ pub fn mailbox_notification_from_proto(e: pb::MailboxEvent) -> MailboxNotificati
             MailboxNotificationKind::CountsChanged { total: c.total, unseen: c.unseen }
         }
         Some(EventType::NewMessage(m)) => {
-            MailboxNotificationKind::NewMessage { provider_uid: m.provider_uid }
+            MailboxNotificationKind::NewMessage { remote_id: m.remote_id }
         }
         Some(EventType::MessageExpunged(m)) => {
-            let uid = m.message_id.parse::<u32>().unwrap_or(0);
-            MailboxNotificationKind::MessageExpunged { provider_uid: uid }
+            MailboxNotificationKind::MessageExpunged { message_id: m.message_id }
         }
         Some(EventType::FlagsChanged(_)) | None => MailboxNotificationKind::FlagsChanged,
     };

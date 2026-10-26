@@ -212,7 +212,7 @@ message MoveMessagesRequest {
 }
 
 // Shared result of a bulk operation. `failed` counts messages skipped because
-// they could not be loaded, had no provider UID, or their mailbox was gone —
+// they could not be loaded, had no remote id, or their mailbox was gone —
 // the batch continues past them rather than aborting.
 message BulkChangeResponse {
   uint32 succeeded = 1;
@@ -321,7 +321,7 @@ message MailboxEvent {
 
 message NewMessageEvent {
   string message_id = 1;
-  uint32 provider_uid = 2;
+  string remote_id = 2;
 }
 
 message FlagsChangedEvent {

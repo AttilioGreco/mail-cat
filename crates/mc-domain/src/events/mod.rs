@@ -12,7 +12,7 @@ use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
 use crate::value_objects::mailbox_path::MailboxPath;
 use crate::value_objects::message_id::MessageId;
-use crate::value_objects::uid::ProviderUid;
+use crate::value_objects::remote_id::RemoteId;
 
 /// Metadata wrapper for all domain events.
 ///
@@ -175,7 +175,7 @@ pub enum DomainEvent {
         message_id: MessageId,
         account_id: AccountId,
         mailbox_id: MailboxId,
-        provider_uid: ProviderUid,
+        remote_id: RemoteId,
         /// RFC Message-ID header (e.g. `<abc@mail.example.com>`).
         message_rfc_id: Option<String>,
         /// RFC In-Reply-To header (Message-ID of the direct parent).
@@ -210,7 +210,7 @@ pub enum DomainEvent {
 
     /// The mailboxes a message is in changed: a move is one `removed` plus one
     /// `added`. An `added` entry for a mailbox the message is already in only
-    /// replaces its provider UID (learned late, or forgotten when the server
+    /// replaces its remote id (learned late, or forgotten when the server
     /// renumbered the mailbox). Never removes the last mailbox: that is
     /// `MessageDeleted`.
     MessageMailboxesChanged {
