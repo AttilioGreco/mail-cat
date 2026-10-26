@@ -470,7 +470,7 @@ impl AppContext {
         //     Actions are routed by the shared NotificationCenter listener, not
         //     by notify-rust's per-notification wait, so they keep working after
         //     the banner has moved into the shell's notification panel.
-        //   • MessageFlagged(Seen) / MessageMoved / MessageDeleted – dismiss any
+        //   • MessageFlagged(Seen) / MessageMailboxesChanged / MessageDeleted – dismiss any
         //     notification still up for that message. Covers reading the mail in
         //     another client (remote flag change → MessageFlagged) as well as
         //     acting on it from the notification itself.
@@ -578,7 +578,7 @@ impl AppContext {
                         } if flags_added.contains(&mc_domain::Flag::Seen) => {
                             center.close_for_message(&message_id).await;
                         }
-                        mc_domain::DomainEvent::MessageMoved { message_id, .. }
+                        mc_domain::DomainEvent::MessageMailboxesChanged { message_id, .. }
                         | mc_domain::DomainEvent::MessageDeleted { message_id, .. } => {
                             center.close_for_message(&message_id).await;
                         }

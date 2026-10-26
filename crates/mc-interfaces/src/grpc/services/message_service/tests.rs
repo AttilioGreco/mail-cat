@@ -373,7 +373,7 @@ async fn opening_a_message_without_uid_fetches_its_body() {
         false,
         chrono::Utc::now(),
     );
-    message.provider_uid = None;
+    message.memberships[0].provider_uid = None;
     let commands = Arc::new(Recording(std::sync::Mutex::new(vec![])));
     let svc = MessageServiceImpl::new(
         Arc::clone(&commands),
@@ -396,13 +396,100 @@ async fn opening_a_message_without_uid_fetches_its_body() {
     ));
 }
 
-/// MessageFlagged reaches the stream as FlagsChanged.
+/// Query bus whose one message is in `mailbox` only.
+struct MessageInMailbox(mc_domain::Message, Mailbox);
+
+#[async_trait::async_trait]
+impl QueryBus for MessageInMailbox {
+    async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError> {
+        match query {
+            Query::GetMessage { message_id } if message_id == self.0.id => {
+                Ok(QueryResult::Message(Box::new(Some(self.0.clone()))))
+            }
+            Query::GetMessage { .. } => Ok(QueryResult::Message(Box::new(None))),
+            Query::GetMailbox { .. } => Ok(QueryResult::Mailbox(Some(self.1.clone()))),
+            _ => Err(ApplicationError::Internal("unexpected".into())),
+        }
+    }
+}
+
+fn message_in(account_id: AccountId, mailbox_id: MailboxId) -> mc_domain::Message {
+    mc_domain::Message::receive(
+        account_id,
+        mailbox_id,
+        mc_domain::ProviderUid::new(1),
+        None,
+        None,
+        vec![],
+        mc_domain::Envelope {
+            from: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: "".into(),
+            date: chrono::Utc::now(),
+        },
+        vec![],
+        0,
+        false,
+        chrono::Utc::now(),
+    )
+    .0
+}
+
+/// Flags belong to the message: a watcher hears of the ones in its mailbox.
 #[tokio::test]
-async fn flags_changed_reaches_watch_stream() {
+async fn flags_changed_reaches_only_the_watchers_of_the_messages_mailbox() {
+    let bus = Arc::new(InProcessEventBus::new(16));
+    let account_id = AccountId::new();
+    let (watched, elsewhere) = (MailboxId::new(), MailboxId::new());
+    let (inside, outside) = (
+        message_in(account_id, watched),
+        message_in(account_id, elsewhere),
+    );
+
+    let svc = MessageServiceImpl::new(
+        Arc::new(NopCommandBus),
+        Arc::new(MessageInMailbox(
+            inside.clone(),
+            fake_mailbox(account_id, watched),
+        )),
+        Arc::clone(&bus),
+    );
+    let mut stream = svc
+        .watch_mailbox(Request::new(WatchMailboxRequest {
+            mailbox_id: watched.as_uuid().to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    for message_id in [outside.id, inside.id] {
+        bus.publish(envelope(DomainEvent::MessageFlagged {
+            message_id,
+            flags_added: vec![Flag::Seen],
+            flags_removed: vec![],
+        }));
+    }
+
+    let event = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event.event_type,
+        Some(mailbox_event::EventType::FlagsChanged(ref f)) if f.message_id == inside.id.to_string()
+    ));
+}
+
+/// Leaving a mailbox, by move or by deletion, reaches its watchers as an expunge.
+#[tokio::test]
+async fn leaving_a_mailbox_reaches_its_watchers_as_an_expunge() {
     let bus = Arc::new(InProcessEventBus::new(16));
     let account_id = AccountId::new();
     let mailbox_id = MailboxId::new();
-
     let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id, mailbox_id));
     let mut stream = svc
         .watch_mailbox(Request::new(WatchMailboxRequest {
@@ -412,20 +499,29 @@ async fn flags_changed_reaches_watch_stream() {
         .unwrap()
         .into_inner();
 
-    bus.publish(envelope(DomainEvent::MessageFlagged {
-        message_id: MessageId::new(),
-        mailbox_id,
-        flags_added: vec![Flag::Seen],
-        flags_removed: vec![],
+    let (moved, deleted) = (MessageId::new(), MessageId::new());
+    bus.publish(envelope(DomainEvent::MessageMailboxesChanged {
+        message_id: moved,
+        added: vec![mc_domain::Membership {
+            mailbox_id: MailboxId::new(),
+            provider_uid: None,
+        }],
+        removed: vec![mailbox_id],
+    }));
+    bus.publish(envelope(DomainEvent::MessageDeleted {
+        message_id: deleted,
+        mailbox_ids: vec![mailbox_id],
     }));
 
-    let event = timeout(Duration::from_secs(1), stream.next())
-        .await
-        .expect("timeout")
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        event.event_type,
-        Some(mailbox_event::EventType::FlagsChanged(_))
-    ));
+    for expected in [moved, deleted] {
+        let event = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("timeout")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event.event_type,
+            Some(mailbox_event::EventType::MessageExpunged(ref e)) if e.message_id == expected.to_string()
+        ));
+    }
 }

@@ -98,7 +98,7 @@ pub fn message_summary_from_proto(m: pb::MessageSummary) -> MessageSummary {
 
     MessageSummary {
         id: m.id,
-        mailbox_id: m.mailbox_id,
+        mailbox_ids: m.mailbox_ids,
         subject: envelope.subject,
         from_name: from.as_ref().and_then(|f| f.name.clone()),
         from_email: from.map(|f| f.email).unwrap_or_default(),

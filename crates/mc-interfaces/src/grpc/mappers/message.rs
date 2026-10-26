@@ -70,7 +70,11 @@ pub fn domain_message_to_summary(message: &Message) -> MessageSummary {
     MessageSummary {
         id: message.id.to_string(),
         account_id: message.account_id.to_string(),
-        mailbox_id: message.mailbox_id.to_string(),
+        mailbox_ids: message
+            .memberships
+            .iter()
+            .map(|m| m.mailbox_id.to_string())
+            .collect(),
         envelope: Some(domain_envelope_to_proto(&message.envelope)),
         flags: message.flags.iter().map(domain_flag_to_proto).collect(),
         size_bytes: message.size_bytes,
@@ -84,7 +88,11 @@ pub fn domain_message_to_detail(message: &Message) -> MessageDetail {
     MessageDetail {
         id: message.id.to_string(),
         account_id: message.account_id.to_string(),
-        mailbox_id: message.mailbox_id.to_string(),
+        mailbox_ids: message
+            .memberships
+            .iter()
+            .map(|m| m.mailbox_id.to_string())
+            .collect(),
         message_rfc_id: message.message_rfc_id.clone(),
         in_reply_to: message.in_reply_to.clone(),
         references: message.references.clone(),

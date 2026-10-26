@@ -167,7 +167,8 @@ impl MailboxKind {
 #[derive(Debug, Clone)]
 pub struct MessageSummary {
     pub id: String,
-    pub mailbox_id: String,
+    /// Every mailbox the message is in.
+    pub mailbox_ids: Vec<String>,
     pub subject: String,
     pub from_name: Option<String>,
     pub from_email: String,

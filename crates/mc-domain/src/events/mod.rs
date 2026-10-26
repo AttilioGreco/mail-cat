@@ -6,7 +6,7 @@ use crate::model::account::{AccountId, ConnectionConfig, ProviderType};
 use crate::model::attachment::Attachment;
 use crate::model::contact::{ContactEmail, ContactSource};
 use crate::model::mailbox::{MailboxId, MailboxType};
-use crate::model::message::Envelope;
+use crate::model::message::{Envelope, Membership};
 use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
@@ -189,7 +189,6 @@ pub enum DomainEvent {
         received_at: DateTime<Utc>,
         /// Brought back by a sync repairing local state (a row dropped while
         /// the server kept the message), not newly arrived: nothing to notify.
-        #[serde(default)]
         restored: bool,
     },
 
@@ -201,33 +200,31 @@ pub enum DomainEvent {
         attachments: Vec<Attachment>,
     },
 
-    /// Flags on a message were changed.
+    /// Flags on a message were changed. Flags belong to the message, whatever
+    /// mailboxes it is in.
     MessageFlagged {
         message_id: MessageId,
-        mailbox_id: MailboxId,
         flags_added: Vec<Flag>,
         flags_removed: Vec<Flag>,
     },
 
-    /// A message was moved between mailboxes.
-    ///
-    /// Provider UIDs are per-mailbox (IMAP), so the old one is meaningless in
-    /// `to_mailbox_id`: `provider_uid` is the message's id there, `None` while
-    /// unknown. A move with `from == to` only records a UID learned later.
-    /// `#[serde(default)]`: events stored before the field read as "unknown".
-    MessageMoved {
+    /// The mailboxes a message is in changed: a move is one `removed` plus one
+    /// `added`. An `added` entry for a mailbox the message is already in only
+    /// replaces its provider UID (learned late, or forgotten when the server
+    /// renumbered the mailbox). Never removes the last mailbox: that is
+    /// `MessageDeleted`.
+    MessageMailboxesChanged {
         message_id: MessageId,
-        from_mailbox_id: MailboxId,
-        to_mailbox_id: MailboxId,
-        #[serde(default)]
-        provider_uid: Option<ProviderUid>,
+        added: Vec<Membership>,
+        removed: Vec<MailboxId>,
     },
 
-    /// A message was deleted.
+    /// A message is gone: its last mailbox was removed, or it was expunged.
+    /// `mailbox_ids` are the mailboxes it was in, for subscribers following
+    /// one mailbox.
     MessageDeleted {
         message_id: MessageId,
-        mailbox_id: MailboxId,
-        permanently: bool,
+        mailbox_ids: Vec<MailboxId>,
     },
 
     /// A message was sent via SMTP or provider API.
@@ -235,23 +232,14 @@ pub enum DomainEvent {
         message_id: MessageId,
         account_id: AccountId,
         /// The account's Sent mailbox, resolved at send time.
-        /// `#[serde(default)]` so events persisted before this field existed
-        /// still deserialize (falling back to a fresh placeholder id, same
-        /// as the old behavior).
-        #[serde(default)]
         mailbox_id: MailboxId,
         envelope: Envelope,
         /// The Message-ID we sent with, so the server copy that later syncs
         /// into Sent replaces this one instead of showing up beside it.
-        #[serde(default)]
         message_rfc_id: Option<String>,
-        #[serde(default)]
         in_reply_to: Option<String>,
-        #[serde(default)]
         references: Vec<String>,
-        #[serde(default)]
         body_text: Option<String>,
-        #[serde(default)]
         body_html: Option<String>,
         sent_at: DateTime<Utc>,
     },
@@ -328,7 +316,7 @@ impl DomainEvent {
             Self::MessageReceived { .. }
             | Self::MessageBodyFetched { .. }
             | Self::MessageFlagged { .. }
-            | Self::MessageMoved { .. }
+            | Self::MessageMailboxesChanged { .. }
             | Self::MessageDeleted { .. }
             | Self::MessageSent { .. }
             | Self::DraftSaved { .. }
@@ -361,7 +349,7 @@ impl DomainEvent {
             Self::MessageReceived { .. } => "MessageReceived",
             Self::MessageBodyFetched { .. } => "MessageBodyFetched",
             Self::MessageFlagged { .. } => "MessageFlagged",
-            Self::MessageMoved { .. } => "MessageMoved",
+            Self::MessageMailboxesChanged { .. } => "MessageMailboxesChanged",
             Self::MessageDeleted { .. } => "MessageDeleted",
             Self::MessageSent { .. } => "MessageSent",
             Self::DraftSaved { .. } => "DraftSaved",

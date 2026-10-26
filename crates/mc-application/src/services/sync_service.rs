@@ -141,6 +141,20 @@ pub struct SyncService<
 /// What makes one progress event distinguishable from the previous one.
 type ProgressKey = (u8, u32, String);
 
+/// The event for a message the server no longer has in `mailbox_id`: the
+/// mailbox leaves its memberships, and the message goes with its last one.
+/// Built from the read model's view: the stream is appended as-is.
+fn left_mailbox(summary: &MessageSummary, mailbox_id: MailboxId) -> DomainEvent {
+    if summary.memberships.len() > 1 {
+        return DomainEvent::MessageMailboxesChanged {
+            message_id: summary.id,
+            added: vec![],
+            removed: vec![mailbox_id],
+        };
+    }
+    DomainEvent::MessageDeleted { message_id: summary.id, mailbox_ids: vec![mailbox_id] }
+}
+
 fn phase_rank(state: &SyncState) -> u8 {
     match state {
         SyncState::Idle => 0,
@@ -991,7 +1005,7 @@ impl<
                 continue;
             }
             let placeholder = match self.local_copy(local, env).await {
-                Some(stored) if stored.provider_uid.is_some() => continue,
+                Some(stored) if stored.membership(local.id).is_some_and(|m| m.provider_uid.is_some()) => continue,
                 other => other,
             };
 
@@ -1051,8 +1065,11 @@ impl<
         }
         let rfc_id = env.message_rfc_id.as_deref()?;
         let copies = self.projector.find_by_rfc_id(&mailbox.account_id, rfc_id).await.ok()?;
-        for copy in copies.into_iter().filter(|m| m.mailbox_id == mailbox.id) {
-            let ours = match copy.provider_uid {
+        for copy in copies {
+            let Some(here) = copy.membership(mailbox.id) else {
+                continue;
+            };
+            let ours = match here.provider_uid {
                 Some(uid) => uid == env.provider_uid,
                 None => mailbox.mailbox_type == MailboxType::Sent && self.is_sent_placeholder(&copy.id).await,
             };
@@ -1122,36 +1139,40 @@ impl<
             .find_by_rfc_id(&mailbox.account_id, rfc_id)
             .await
             .map_err(|e| ApplicationError::SyncFailed(format!("find_by_rfc_id failed: {e}")))?;
-        let (here, elsewhere): (Vec<_>, Vec<_>) =
-            copies.into_iter().filter(|m| m.provider_uid.is_none()).partition(|m| m.mailbox_id == mailbox.id);
-        for waiting in here {
-            if self.update_message(&waiting.id, |m| m.attach_uid(mailbox.id, env.provider_uid)).await? {
+        // (message, mailbox it waits for a UID in)
+        let (here, elsewhere): (Vec<_>, Vec<_>) = copies
+            .iter()
+            .flat_map(|c| c.memberships.iter().filter(|m| m.provider_uid.is_none()).map(|m| (c.id, m.mailbox_id)))
+            .partition(|&(_, in_mailbox)| in_mailbox == mailbox.id);
+        for (waiting, _) in here {
+            if self.update_message(&waiting, |m| m.attach_uid(mailbox.id, env.provider_uid)).await? {
                 return Ok(true);
             }
         }
-        for orphan in elsewhere {
-            if self.is_sent_placeholder(&orphan.id).await || !self.gone_from_server(provider, &orphan, rfc_id).await {
+        for (orphan, from) in elsewhere {
+            if self.is_sent_placeholder(&orphan).await || !self.gone_from_server(provider, from, rfc_id).await {
                 continue;
             }
-            let from = orphan.mailbox_id;
             let moved = self
-                .update_message(&orphan.id, |m| {
-                    (m.mailbox_id == from && m.provider_uid.is_none()).then(|| m.move_to(mailbox.id, Some(env.provider_uid)))
+                .update_message(&orphan, |m| {
+                    m.membership(from).filter(|x| x.provider_uid.is_none())?;
+                    m.move_to(from, mailbox.id, Some(env.provider_uid))
                 })
                 .await?;
             if moved {
-                info!(message_id = %orphan.id, "Found again in another mailbox, moved there");
+                info!(message_id = %orphan, "Found again in another mailbox, moved there");
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    /// Whether the server has no copy of `message` (waiting for a UID) left in
-    /// its mailbox that another local row doesn't already hold. Unsure counts
-    /// as present: a wrong "gone" would steal the message from its mailbox.
-    async fn gone_from_server(&self, provider: &Arc<PR::Provider>, message: &MessageSummary, rfc_id: &str) -> bool {
-        let Ok(Some(own)) = self.projector.get_mailbox(&message.mailbox_id).await else {
+    /// Whether the server has no copy of a message waiting for a UID in
+    /// `mailbox_id` left there that another local row doesn't already hold.
+    /// Unsure counts as present: a wrong "gone" would steal the message from
+    /// its mailbox.
+    async fn gone_from_server(&self, provider: &Arc<PR::Provider>, mailbox_id: MailboxId, rfc_id: &str) -> bool {
+        let Ok(Some(own)) = self.projector.get_mailbox(&mailbox_id).await else {
             return false;
         };
         let Ok(found) = provider.find_message(&own.path, rfc_id).await else {
@@ -1225,11 +1246,10 @@ impl<
                 .await
                 .map_err(|e| ApplicationError::SyncFailed(format!("Failed to load events: {e}")))?;
             let events: Vec<DomainEvent> = events.into_iter().map(|e| e.payload).collect();
-            let gone = events.iter().any(|e| matches!(e, DomainEvent::MessageDeleted { .. }));
-            let Some(message) = Message::rehydrate(&events).filter(|_| !gone) else {
+            let Some(message) = Message::rehydrate(&events).filter(|m| !m.is_deleted()) else {
                 continue;
             };
-            if message.mailbox_id != mailbox.id || message.provider_uid.is_some() {
+            if message.membership(mailbox.id).is_none_or(|m| m.provider_uid.is_some()) {
                 continue;
             }
             let found = match message.message_rfc_id.as_deref() {
@@ -1250,12 +1270,12 @@ impl<
             let free = found.into_iter().rev().find(|uid| !held.contains(uid));
             let changed = self
                 .update_message(&message_id, |m| {
-                    if m.mailbox_id != mailbox.id || m.provider_uid.is_some() {
+                    if m.membership(mailbox.id).is_none_or(|x| x.provider_uid.is_some()) {
                         return None;
                     }
                     match free {
                         Some(uid) => m.attach_uid(mailbox.id, uid),
-                        None => Some(m.delete(false)),
+                        None => m.remove_from(mailbox.id),
                     }
                 })
                 .await?;
@@ -1279,7 +1299,8 @@ impl<
         for message_id in waiting {
             let dropped = self
                 .update_message(&message_id, |m| {
-                    (m.mailbox_id == mailbox.id && m.provider_uid.is_none()).then(|| m.delete(false))
+                    m.membership(mailbox.id).filter(|x| x.provider_uid.is_none())?;
+                    m.remove_from(mailbox.id)
                 })
                 .await?;
             if dropped {
@@ -1328,8 +1349,7 @@ impl<
         };
         let event = DomainEvent::MessageDeleted {
             message_id: sent.id,
-            mailbox_id: sent.mailbox_id,
-            permanently: true,
+            mailbox_ids: sent.memberships.iter().map(|m| m.mailbox_id).collect(),
         };
         self.append_and_project(&sent.id.to_string(), AggregateType::Message, event)
             .await
@@ -1512,9 +1532,9 @@ impl<
         let mut flags_changed = 0u32;
 
         for summary in &local_messages.items {
-            let local_uid = match summary.provider_uid {
-                Some(uid) => uid.value(),
-                None => continue,
+            let Some(local_uid) = summary.membership(local.id).and_then(|m| m.provider_uid).map(|uid| uid.value())
+            else {
+                continue;
             };
 
             if remote_by_uid
@@ -1529,12 +1549,7 @@ impl<
                     uid = local_uid,
                     "Message marked \\Deleted remotely, deleting locally"
                 );
-                let event = DomainEvent::MessageDeleted {
-                    message_id: summary.id,
-                    mailbox_id: local.id,
-                    permanently: false,
-                };
-                self.append_and_project(&summary.id.to_string(), AggregateType::Message, event)
+                self.append_and_project(&summary.id.to_string(), AggregateType::Message, left_mailbox(summary, local.id))
                     .await?;
                 // De-indexing owned by the search-index projection (MessageDeleted).
                 expunged += 1;
@@ -1565,7 +1580,6 @@ impl<
                     );
                     let event = DomainEvent::MessageFlagged {
                         message_id: summary.id,
-                        mailbox_id: local.id,
                         flags_added: flags_to_add,
                         flags_removed: flags_to_remove,
                     };
@@ -1584,17 +1598,8 @@ impl<
                     uid = local_uid,
                     "Message expunged remotely, deleting locally"
                 );
-                let event = DomainEvent::MessageDeleted {
-                    message_id: summary.id,
-                    mailbox_id: local.id,
-                    permanently: false,
-                };
-                self.append_and_project(
-                    &summary.id.to_string(),
-                    AggregateType::Message,
-                    event,
-                )
-                .await?;
+                self.append_and_project(&summary.id.to_string(), AggregateType::Message, left_mailbox(summary, local.id))
+                    .await?;
                 // De-indexing owned by the search-index projection (MessageDeleted).
                 expunged += 1;
             }
@@ -1610,7 +1615,7 @@ impl<
         // server copy is harmless there, a revived draft is not.
         let restorable = local.mailbox_type != MailboxType::Drafts;
         let held: HashSet<u32> =
-            local_messages.items.iter().filter_map(|m| m.provider_uid.map(|uid| uid.value())).collect();
+            local_messages.items.iter().filter_map(|m| m.membership(local.id)?.provider_uid.map(|uid| uid.value())).collect();
         let mut unheld: Vec<u32> = remote_entries
             .iter()
             .filter(|e| restorable && e.uid.value() < uid_next)

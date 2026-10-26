@@ -1,6 +1,6 @@
 use super::*;
 use chrono::Utc;
-use mc_domain::model::message::{Address, Envelope};
+use mc_domain::model::message::{Address, Envelope, Membership};
 use mc_domain::value_objects::email_address::EmailAddress;
 use tempfile::TempDir;
 
@@ -9,8 +9,10 @@ fn create_test_message(id: &str, subject: &str, from: &str, body: &str) -> Messa
     Message {
         id: MessageId::from_uuid(uuid),
         account_id: AccountId::new(),
-        mailbox_id: MailboxId::new(),
-        provider_uid: None,
+        memberships: vec![Membership {
+            mailbox_id: MailboxId::new(),
+            provider_uid: None,
+        }],
         message_rfc_id: None,
         in_reply_to: None,
         references: vec![],
@@ -231,7 +233,7 @@ async fn scope_filters_restrict_hits() {
         [a.id]
     );
     let by_mailbox = index
-        .search("invoice", None, Some(&b.mailbox_id), &page)
+        .search("invoice", None, Some(&b.memberships[0].mailbox_id), &page)
         .await
         .unwrap();
     assert_eq!(
@@ -241,6 +243,57 @@ async fn scope_filters_restrict_hits() {
             .map(|h| h.message_id)
             .collect::<Vec<_>>(),
         [b.id]
+    );
+}
+
+#[tokio::test]
+async fn a_message_is_found_in_every_mailbox_it_is_in() {
+    let dir = TempDir::new().unwrap();
+    let index = TantivySearchIndex::new(dir.path()).unwrap();
+    let mut msg = create_test_message(
+        "00000000-0000-0000-0000-0000000000a1",
+        "Invoice",
+        "a@example.com",
+        "x",
+    );
+    let (first, second) = (msg.memberships[0].mailbox_id, MailboxId::new());
+    msg.memberships.push(Membership {
+        mailbox_id: second,
+        provider_uid: None,
+    });
+    index.index_message(&msg).await.unwrap();
+
+    let page = Pagination::default();
+    for mailbox in [first, second] {
+        let hits = index
+            .search("invoice", None, Some(&mailbox), &page)
+            .await
+            .unwrap()
+            .hits;
+        assert_eq!(
+            hits.iter().map(|h| h.message_id).collect::<Vec<_>>(),
+            [msg.id]
+        );
+    }
+
+    msg.memberships.remove(0);
+    index.index_message(&msg).await.unwrap();
+    assert!(
+        index
+            .search("invoice", None, Some(&first), &page)
+            .await
+            .unwrap()
+            .hits
+            .is_empty()
+    );
+    assert_eq!(
+        index
+            .search("invoice", None, Some(&second), &page)
+            .await
+            .unwrap()
+            .hits
+            .len(),
+        1
     );
 }
 

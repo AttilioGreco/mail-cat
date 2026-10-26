@@ -5,7 +5,7 @@ import type { MessageEnvelope, MessageBody } from './types';
 // Raw DTO shape returned by the Rust command
 interface MessageSummaryDto {
   id: string;
-  mailbox_id: string;
+  mailbox_ids: string[];
   subject: string;
   from_name: string | null;
   from_email: string;

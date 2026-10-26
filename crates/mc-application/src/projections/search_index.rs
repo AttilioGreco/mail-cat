@@ -65,7 +65,7 @@ where
             }
             DomainEvent::MessageReceived { message_id, .. }
             | DomainEvent::MessageBodyFetched { message_id, .. }
-            | DomainEvent::MessageMoved { message_id, .. }
+            | DomainEvent::MessageMailboxesChanged { message_id, .. }
             | DomainEvent::MessageFlagged { message_id, .. } => message_id,
             _ => return Ok(()),
         };
@@ -350,8 +350,7 @@ mod tests {
         Message {
             id: MessageId::from_uuid(uuid::Uuid::parse_str(id).unwrap()),
             account_id: AccountId::new(),
-            mailbox_id: MailboxId::new(),
-            provider_uid: None,
+            memberships: vec![mc_domain::Membership { mailbox_id: MailboxId::new(), provider_uid: None }],
             message_rfc_id: None,
             in_reply_to: None,
             references: vec![],
@@ -416,8 +415,7 @@ mod tests {
                 2,
                 DomainEvent::MessageDeleted {
                     message_id: mid,
-                    mailbox_id: MailboxId::new(),
-                    permanently: false,
+                    mailbox_ids: vec![MailboxId::new()],
                 },
             )],
         };
@@ -438,11 +436,10 @@ mod tests {
         let store = FakeStore {
             events: vec![env(
                 7,
-                DomainEvent::MessageMoved {
+                DomainEvent::MessageMailboxesChanged {
                     message_id: mid,
-                    from_mailbox_id: MailboxId::new(),
-                    to_mailbox_id: MailboxId::new(),
-                    provider_uid: None,
+                    added: vec![],
+                    removed: vec![MailboxId::new()],
                 },
             )],
         };

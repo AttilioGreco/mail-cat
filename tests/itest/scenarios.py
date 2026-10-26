@@ -258,7 +258,8 @@ def backfill_text_only(w):
     m.logout()
     before = db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0]
     w.sync()
-    pending = "SELECT COUNT(*) FROM messages WHERE body_state = 'pending' AND provider_uid IS NOT NULL"
+    pending = ("SELECT COUNT(DISTINCT m.id) FROM messages m JOIN message_mailboxes mm ON mm.message_id = m.id "
+               "WHERE m.body_state = 'pending' AND mm.provider_uid IS NOT NULL")
     # The worker naps a minute when its queue runs dry.
     wait(lambda: db(pending)[0] == 0, "every body backfilled", timeout=90)
     spent = db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0] - before

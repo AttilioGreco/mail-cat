@@ -14,7 +14,7 @@ pub use model::account::{
 pub use model::attachment::{Attachment, AttachmentId};
 pub use model::identity::Identity;
 pub use model::mailbox::{Mailbox, MailboxId, MailboxType};
-pub use model::message::{Address, Envelope, Message, OutgoingAttachment, OutgoingMessage};
+pub use model::message::{Address, Envelope, Membership, Message, OutgoingAttachment, OutgoingMessage};
 pub use value_objects::email_address::EmailAddress;
 pub use value_objects::flag::Flag;
 pub use value_objects::mailbox_path::MailboxPath;

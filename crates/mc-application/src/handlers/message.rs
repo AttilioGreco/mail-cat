@@ -223,8 +223,18 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             let mut by_mailbox: HashMap<MailboxId, Vec<ProviderUid>> = HashMap::new();
             for id in &message_ids {
                 match this.load_message(id).await {
-                    Ok((Message { mailbox_id, provider_uid: Some(uid), .. }, _)) => by_mailbox.entry(mailbox_id).or_default().push(uid),
-                    Ok(_) => warn!(message_id = %id, "no UID to store flags on, next sync will reconcile"),
+                    Ok((message, _)) => {
+                        let mut stored = false;
+                        for m in &message.memberships {
+                            if let Some(uid) = m.provider_uid {
+                                by_mailbox.entry(m.mailbox_id).or_default().push(uid);
+                                stored = true;
+                            }
+                        }
+                        if !stored {
+                            warn!(message_id = %id, "no UID to store flags on, next sync will reconcile");
+                        }
+                    }
                     Err(e) => warn!(message_id = %id, %e, "flags not stored on the server"),
                 }
             }
@@ -307,12 +317,12 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     pub async fn handle_move(
         &self,
         message_id: MessageId,
-        _from_mailbox_id: MailboxId,
+        from_mailbox_id: MailboxId,
         to_mailbox_id: MailboxId,
         _from_mailbox_path: MailboxPath,
         to_mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
-        self.apply_one(message_id, to_mailbox(to_mailbox_id, to_mailbox_path)).await?;
+        self.apply_one(message_id, from_mailbox_id, to_mailbox(to_mailbox_id, to_mailbox_path)).await?;
         info!(%message_id, "message moved");
         Ok(CommandResult::MessageMoved)
     }
@@ -326,21 +336,26 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     pub async fn handle_delete(
         &self,
         message_id: MessageId,
-        _mailbox_id: MailboxId,
+        mailbox_id: MailboxId,
         _mailbox_path: MailboxPath,
         permanently: bool,
     ) -> Result<CommandResult, ApplicationError> {
-        self.apply_one(message_id, to_trash_or_expunged(permanently)).await?;
+        self.apply_one(message_id, mailbox_id, to_trash_or_expunged(permanently)).await?;
         info!(%message_id, "message deleted");
         Ok(CommandResult::MessageDeleted)
     }
 
-    /// One message's move/delete; `destination` as in [`Self::apply_many`].
-    /// A message (or its mailbox) gone by its turn is nothing left to do,
-    /// as when the same delete is sent twice.
-    async fn apply_one(&self, message_id: MessageId, destination: impl Fn(MailboxId, &Mailbox, &[Mailbox]) -> Destination) -> Result<(), ApplicationError> {
-        let (account_id, requested_in) = match self.load_message(&message_id).await {
-            Ok((message, _)) => (message.account_id, message.mailbox_id),
+    /// One message's move/delete from `requested_in`; `destination` as in
+    /// [`Self::apply_many`]. A message (or its mailbox) gone by its turn is
+    /// nothing left to do, as when the same delete is sent twice.
+    async fn apply_one(
+        &self,
+        message_id: MessageId,
+        requested_in: MailboxId,
+        destination: impl Fn(MailboxId, &Mailbox, &[Mailbox]) -> Destination,
+    ) -> Result<(), ApplicationError> {
+        let account_id = match self.load_message(&message_id).await {
+            Ok((message, _)) => message.account_id,
             Err(ApplicationError::NotFound(..)) => return Ok(()),
             Err(e) => return Err(e),
         };
@@ -350,7 +365,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             loaded => loaded?,
         };
         let mailboxes = self.message_read_repo.list_mailboxes(&account_id).await?;
-        let Some(source) = mailboxes.iter().find(|m| m.id == message.mailbox_id) else {
+        let Some(source) = source_mailbox(&message, requested_in, &mailboxes) else {
             return Ok(());
         };
         let Some(dest) = destination(requested_in, source, &mailboxes) else {
@@ -358,7 +373,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         };
         let uid = self.remote_uid(&mut message, &mut seq, &source.path).await?;
         let dest = dest.as_ref().map(|(id, path)| (*id, path));
-        match self.apply_on_server(account_id, &source.path, dest, vec![(message_id, uid)]).await {
+        match self.apply_on_server(account_id, source, dest, vec![(message_id, uid)]).await {
             (_, Some(refused)) => Err(refused),
             _ => Ok(()),
         }
@@ -404,12 +419,15 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let mut by_account: HashMap<AccountId, Vec<(MessageId, MailboxId)>> = HashMap::new();
         for message_id in message_ids {
             match self.load_message(&message_id).await {
-                Ok((message, _)) => by_account.entry(message.account_id).or_default().push((message_id, message.mailbox_id)),
+                Ok((message, _)) => match message.memberships.first() {
+                    Some(home) => by_account.entry(message.account_id).or_default().push((message_id, home.mailbox_id)),
+                    None => failed += 1,
+                },
                 Err(_) => failed += 1,
             }
         }
 
-        type Group = (MailboxPath, Option<(MailboxId, MailboxPath)>);
+        type Group = (MailboxId, Option<(MailboxId, MailboxPath)>);
         for (account_id, ids) in by_account {
             let _turn = self.turn(account_id).await;
             let mailboxes = self.message_read_repo.list_mailboxes(&account_id).await?;
@@ -419,7 +437,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 let Ok((mut message, mut seq)) = self.load_message(&message_id).await else {
                     continue;
                 };
-                let Some(source) = mailboxes.iter().find(|m| m.id == message.mailbox_id) else {
+                let Some(source) = source_mailbox(&message, requested_in, &mailboxes) else {
                     failed += 1;
                     continue;
                 };
@@ -430,15 +448,18 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                     failed += 1;
                     continue;
                 };
-                groups.entry((source.path.clone(), dest)).or_default().push((message_id, provider_uid));
+                groups.entry((source.id, dest)).or_default().push((message_id, provider_uid));
             }
 
             for ((from, dest), members) in groups {
+                let Some(from) = mailboxes.iter().find(|m| m.id == from) else {
+                    continue;
+                };
                 let count = members.len() as u32;
                 let (done, refused) =
-                    self.apply_on_server(account_id, &from, dest.as_ref().map(|(id, path)| (*id, path)), members).await;
+                    self.apply_on_server(account_id, from, dest.as_ref().map(|(id, path)| (*id, path)), members).await;
                 if let Some(e) = refused {
-                    warn!(%e, %from, applied = done, "bulk change refused by the server part-way");
+                    warn!(%e, from = %from.path, applied = done, "bulk change refused by the server part-way");
                 }
                 succeeded += done;
                 failed += count - done;
@@ -603,7 +624,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
         if input.mode.is_reply()
             && let Some(source) = &source
-            && let Some(mailbox) = mailboxes.iter().find(|m| m.id == source.mailbox_id)
+            && let Some(home) = source.memberships.first()
+            && let Some(mailbox) = mailboxes.iter().find(|m| m.id == home.mailbox_id)
             && let Err(e) = self
                 .handle_set_flags(source.id, mailbox.path.clone(), vec![Flag::Answered], vec![])
                 .await
@@ -809,11 +831,15 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     }
 
     async fn fetch_raw(&self, message: &Message) -> Result<Vec<u8>, ApplicationError> {
+        let home = message
+            .memberships
+            .first()
+            .ok_or_else(|| ApplicationError::PreconditionFailed("il messaggio non è più su nessuna cartella".into()))?;
         let mailbox = self
             .message_read_repo
-            .get_mailbox(&message.mailbox_id)
+            .get_mailbox(&home.mailbox_id)
             .await?
-            .ok_or_else(|| ApplicationError::NotFound("Mailbox", message.mailbox_id.to_string()))?;
+            .ok_or_else(|| ApplicationError::NotFound("Mailbox", home.mailbox_id.to_string()))?;
         let uid = match self.load_message(&message.id).await {
             Ok((mut aggregate, mut seq)) => self.remote_uid(&mut aggregate, &mut seq, &mailbox.path).await?,
             // Only received mail rehydrates; one sent from here has no server
@@ -877,13 +903,17 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     /// Delete a draft locally now and on the server in the background.
     async fn remove_draft(&self, id: MessageId) -> Result<(), ApplicationError> {
         let (mut message, mut seq) = self.load_message(&id).await?;
-        let mailbox = self.message_read_repo.get_mailbox(&message.mailbox_id).await?;
+        let home = message.memberships.first().map(|m| m.mailbox_id);
+        let mailbox = match home {
+            Some(home) => self.message_read_repo.get_mailbox(&home).await?,
+            None => None,
+        };
         // No server copy to find is no reason to keep the local one.
         let uid = match &mailbox {
             Some(mailbox) => self.remote_uid(&mut message, &mut seq, &mailbox.path).await.ok(),
             None => None,
         };
-        self.append_and_publish(&id, AggregateType::Message, seq, message.delete(true))
+        self.append_and_publish(&id, AggregateType::Message, seq, message.delete())
             .await?;
 
         if let (Some(uid), Some(mailbox)) = (uid, mailbox) {
@@ -915,7 +945,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     async fn apply_on_server(
         &self,
         account_id: AccountId,
-        from: &MailboxPath,
+        from: &Mailbox,
         dest: Option<(MailboxId, &MailboxPath)>,
         members: Vec<(MessageId, ProviderUid)>,
     ) -> (u32, Option<ApplicationError>) {
@@ -928,20 +958,20 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         for chunk in members.chunks(SERVER_CHUNK) {
             let uids: Vec<ProviderUid> = chunk.iter().map(|&(_, uid)| uid).collect();
             let applied = match dest {
-                Some((_, to)) => provider.move_messages(&uids, from, to).await,
-                None => provider.delete_messages(from, &uids, true).await.map(|()| HashMap::new()),
+                Some((_, to)) => provider.move_messages(&uids, &from.path, to).await,
+                None => provider.delete_messages(&from.path, &uids, true).await.map(|()| HashMap::new()),
             };
             let new_uids = match applied {
                 Ok(new_uids) => new_uids,
                 Err(e) => {
                     // A timeout or a dropped connection may come after the
                     // server applied it: let a sync tell.
-                    self.request_resync(account_id, from, dest.map(|(_, to)| to));
+                    self.request_resync(account_id, &from.path, dest.map(|(_, to)| to));
                     return (done, Some(e.into()));
                 }
             };
             for &(message_id, uid) in chunk {
-                if let Err(e) = self.record_applied(&provider, message_id, dest, new_uids.get(&uid).copied()).await {
+                if let Err(e) = self.record_applied(&provider, message_id, from.id, dest, new_uids.get(&uid).copied()).await {
                     warn!(%message_id, %e, "done on the server but not recorded here, resyncing");
                     out_of_step = true;
                 }
@@ -949,7 +979,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             done += chunk.len() as u32;
         }
         if out_of_step {
-            self.request_resync(account_id, from, dest.map(|(_, to)| to));
+            self.request_resync(account_id, &from.path, dest.map(|(_, to)| to));
         }
         (done, None)
     }
@@ -965,11 +995,12 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         &self,
         provider: &PR::Provider,
         message_id: MessageId,
+        from: MailboxId,
         dest: Option<(MailboxId, &MailboxPath)>,
         reported_uid: Option<ProviderUid>,
     ) -> Result<(), ApplicationError> {
         let Some((to_id, to_path)) = dest else {
-            return self.record(&message_id, |m| Some(m.delete(true))).await.map(drop);
+            return self.record(&message_id, |m| m.remove_from(from)).await.map(drop);
         };
         let new_uid = match reported_uid {
             Some(uid) => Some(uid),
@@ -982,16 +1013,16 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             }
         };
         let Some(uid) = new_uid else {
-            self.record(&message_id, |m| Some(m.delete(false))).await?;
+            self.record(&message_id, |m| m.remove_from(from)).await?;
             return Err(ApplicationError::Internal(format!("server confirmed the move to {to_path} without the new UID")));
         };
         // The destination already had that copy as a row of its own: a
         // Gmail label the message already carried, All Mail as the archive.
         // Recording the move too would make two rows of one server message.
         if self.message_read_repo.held_uids(&to_id, &[uid]).await?.contains(&uid) {
-            return self.record(&message_id, |m| Some(m.delete(false))).await.map(drop);
+            return self.record(&message_id, |m| m.remove_from(from)).await.map(drop);
         }
-        self.record(&message_id, |m| Some(m.move_to(to_id, Some(uid)))).await.map(drop)
+        self.record(&message_id, |m| m.move_to(from, to_id, Some(uid))).await.map(drop)
     }
 
     fn request_resync(&self, account_id: AccountId, from: &MailboxPath, to: Option<&MailboxPath>) {
@@ -1054,20 +1085,29 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         seq: &mut u64,
         mailbox_path: &MailboxPath,
     ) -> Result<ProviderUid, ApplicationError> {
-        let mailbox = self
-            .message_read_repo
-            .get_mailbox(&message.mailbox_id)
-            .await?
-            .ok_or_else(|| ApplicationError::NotFound("Mailbox", message.mailbox_id.to_string()))?;
         // A UID is valid only in its own mailbox: sending it to another, or
         // searching another, would act on some other message.
-        if mailbox.path.full_path() != mailbox_path.full_path() {
-            return Err(ApplicationError::PreconditionFailed(format!(
-                "message is in {}, not {mailbox_path}",
-                mailbox.path
-            )));
+        let mut elsewhere = None;
+        let mut here = None;
+        for membership in &message.memberships {
+            let mailbox = self
+                .message_read_repo
+                .get_mailbox(&membership.mailbox_id)
+                .await?
+                .ok_or_else(|| ApplicationError::NotFound("Mailbox", membership.mailbox_id.to_string()))?;
+            if mailbox.path.full_path() == mailbox_path.full_path() {
+                here = Some((*membership, mailbox));
+                break;
+            }
+            elsewhere.get_or_insert(mailbox.path);
         }
-        if let Some(uid) = message.provider_uid {
+        let Some((membership, mailbox)) = here else {
+            return Err(ApplicationError::PreconditionFailed(match elsewhere {
+                Some(path) => format!("message is in {path}, not {mailbox_path}"),
+                None => format!("message is in no mailbox, not {mailbox_path}"),
+            }));
+        };
+        if let Some(uid) = membership.provider_uid {
             return Ok(uid);
         }
         let provider = self.provider_registry.get_provider(&message.account_id)?;
@@ -1077,7 +1117,7 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 format!("{} in {mailbox_path}", message.message_rfc_id.as_deref().unwrap_or("(no Message-ID)")),
             )
         })?;
-        if let Some(event) = message.attach_uid(message.mailbox_id, uid) {
+        if let Some(event) = message.attach_uid(mailbox.id, uid) {
             self.append_and_publish(&message.id, AggregateType::Message, *seq, event).await?;
             *seq += 1;
         }
@@ -1092,9 +1132,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
         let domain_events: Vec<DomainEvent> = events.into_iter().map(|e| e.payload).collect();
 
-        // A deleted message still rehydrates, in its last mailbox.
         let message = Message::rehydrate(&domain_events)
-            .filter(|_| !domain_events.iter().any(|e| matches!(e, DomainEvent::MessageDeleted { .. })))
+            .filter(|m| !m.is_deleted())
             .ok_or_else(|| ApplicationError::NotFound("Message", id.to_string()))?;
 
         Ok((message, event_count))
@@ -1136,6 +1175,14 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 /// account's mailboxes): `Some(Some(_))` a mailbox, `Some(None)` expunged,
 /// `None` nowhere — it stays put.
 type Destination = Option<Option<(MailboxId, MailboxPath)>>;
+
+/// The mailbox a move/delete acts from: the one it was asked for if the
+/// message is still there, else (an earlier action moved it) the one it is
+/// in now.
+fn source_mailbox<'a>(message: &Message, requested_in: MailboxId, mailboxes: &'a [Mailbox]) -> Option<&'a Mailbox> {
+    let home = message.membership(requested_in).or_else(|| message.memberships.first())?;
+    mailboxes.iter().find(|m| m.id == home.mailbox_id)
+}
 
 /// Moving a message to the folder it already sits in is a no-op, not a copy.
 fn to_mailbox(id: MailboxId, path: MailboxPath) -> impl Fn(MailboxId, &Mailbox, &[Mailbox]) -> Destination {

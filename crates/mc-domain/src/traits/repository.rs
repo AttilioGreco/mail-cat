@@ -7,7 +7,7 @@ use crate::events::DomainEvent;
 use crate::model::account::{AccountId, AccountStatus, ProviderType};
 use crate::model::contact::{Contact, ContactEmail, ContactSource};
 use crate::model::mailbox::{Mailbox, MailboxId};
-use crate::model::message::Message;
+use crate::model::message::{Membership, Message};
 use crate::traits::search_index::{SuggestScope, Suggestion};
 use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::email_address::EmailAddress;
@@ -89,8 +89,7 @@ pub trait AccountReadRepository: Send + Sync {
 pub struct MessageSummary {
     pub id: MessageId,
     pub account_id: AccountId,
-    pub mailbox_id: MailboxId,
-    pub provider_uid: Option<ProviderUid>,
+    pub memberships: Vec<Membership>,
     pub from_name: Option<String>,
     pub from_email: String,
     #[serde(default)]
@@ -102,6 +101,13 @@ pub struct MessageSummary {
     pub size_bytes: u64,
     pub has_attachments: bool,
     pub received_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl MessageSummary {
+    /// The membership in `mailbox_id`, if the message is there.
+    pub fn membership(&self, mailbox_id: MailboxId) -> Option<&Membership> {
+        self.memberships.iter().find(|m| m.mailbox_id == mailbox_id)
+    }
 }
 
 /// Read-side repository for mailboxes.
@@ -188,7 +194,7 @@ pub trait ProjectionCheckpoint: Send + Sync {
 }
 
 /// A message whose body still needs downloading, drained by the background
-/// backfill worker.
+/// backfill worker, with the membership to fetch it through.
 #[derive(Debug, Clone)]
 pub struct BackfillEntry {
     pub message_id: MessageId,

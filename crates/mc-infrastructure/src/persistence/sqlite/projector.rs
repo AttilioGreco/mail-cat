@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AccountStatus, ContactEmail, ContactId, Conversation, DomainError, DomainEvent,
-    Envelope, EventEnvelope, Flag, MailboxId, MailboxType, MessageId, ProviderUid, ReadModelProjector,
+    Envelope, EventEnvelope, Flag, MailboxId, MailboxType, Membership, MessageId, ProviderUid, ReadModelProjector,
 };
 
 use super::repo_err;
@@ -141,6 +141,18 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             )?;
         }
         DomainEvent::MailboxDeleted { mailbox_id, .. } => {
+            // Messages that were only here go with it.
+            let only_here = query_all(
+                tx,
+                "SELECT message_id FROM message_mailboxes mm WHERE mailbox_id = ?1 AND NOT EXISTS \
+                     (SELECT 1 FROM message_mailboxes o WHERE o.message_id = mm.message_id AND o.mailbox_id != ?1)",
+                [mailbox_id.as_uuid()],
+                |r| r.get::<_, Uuid>(0),
+            )?;
+            for id in only_here {
+                delete_message(tx, &MessageId::from_uuid(id))?;
+            }
+            exec(tx, "DELETE FROM message_mailboxes WHERE mailbox_id = ?1", [mailbox_id.as_uuid()])?;
             exec(tx, "DELETE FROM mailboxes WHERE id = ?1", [mailbox_id.as_uuid()])?;
         }
 
@@ -170,8 +182,6 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 &NewMessage {
                     id: message_id,
                     account_id,
-                    mailbox_id: Some(mailbox_id),
-                    provider_uid: Some(provider_uid.value()),
                     rfc_message_id: message_rfc_id.as_deref(),
                     in_reply_to: in_reply_to.as_deref(),
                     references,
@@ -185,6 +195,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 },
             )?;
             if inserted {
+                upsert_membership(tx, message_id, mailbox_id, Some(*provider_uid))?;
                 // Symmetric with MessageDeleted's decrement, so replaying a
                 // received+deleted pair nets zero.
                 if !flags.contains(&Flag::Seen) {
@@ -211,8 +222,8 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
         DomainEvent::MessageFlagged { message_id, flags_added, flags_removed, .. } => {
             flag_message(tx, message_id, flags_added, flags_removed)?;
         }
-        DomainEvent::MessageMoved { message_id, to_mailbox_id, provider_uid, .. } => {
-            move_message(tx, message_id, to_mailbox_id, *provider_uid)?;
+        DomainEvent::MessageMailboxesChanged { message_id, added, removed } => {
+            change_mailboxes(tx, message_id, added, removed)?;
         }
         DomainEvent::MessageDeleted { message_id, .. } => delete_message(tx, message_id)?,
         DomainEvent::MessageSent {
@@ -242,8 +253,6 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 &NewMessage {
                     id: message_id,
                     account_id,
-                    mailbox_id: Some(mailbox_id),
-                    provider_uid: None,
                     rfc_message_id: message_rfc_id.as_deref(),
                     in_reply_to: in_reply_to.as_deref(),
                     references,
@@ -257,6 +266,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 },
             )?;
             if inserted {
+                upsert_membership(tx, message_id, mailbox_id, None)?;
                 store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), false, *sent_at)?;
                 refresh_conversation(tx, account_id.as_uuid(), thread_id.value())?;
             }
@@ -270,8 +280,6 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 &NewMessage {
                     id: message_id,
                     account_id,
-                    mailbox_id: None,
-                    provider_uid: None,
                     rfc_message_id: None,
                     in_reply_to: None,
                     references: &[],
@@ -357,8 +365,6 @@ fn set_account_status(
 struct NewMessage<'a> {
     id: &'a MessageId,
     account_id: &'a AccountId,
-    mailbox_id: Option<&'a MailboxId>,
-    provider_uid: Option<u32>,
     rfc_message_id: Option<&'a str>,
     in_reply_to: Option<&'a str>,
     references: &'a [String],
@@ -378,17 +384,15 @@ fn insert_message(tx: &Connection, m: &NewMessage) -> Result<bool, DomainError> 
     let sender = m.envelope.from.first();
     let inserted = exec(
         tx,
-        "INSERT INTO messages (id, account_id, mailbox_id, provider_uid, rfc_message_id, \
+        "INSERT INTO messages (id, account_id, rfc_message_id, \
              in_reply_to, refs, thread_id, subject, from_name, from_email, addresses, flags, seen, \
              size_bytes, has_attachments, attachments, sent_at, received_at, internal_date, body_state) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, '[]', \
-             ?17, ?18, ?18, ?19) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, '[]', \
+             ?15, ?16, ?16, ?17) \
          ON CONFLICT(id) DO NOTHING",
         params![
             m.id.as_uuid(),
             m.account_id.as_uuid(),
-            m.mailbox_id.map(MailboxId::as_uuid),
-            m.provider_uid,
             m.rfc_message_id,
             m.in_reply_to,
             json(m.references)?,
@@ -407,6 +411,25 @@ fn insert_message(tx: &Connection, m: &NewMessage) -> Result<bool, DomainError> 
         ],
     )?;
     Ok(inserted == 1)
+}
+
+/// `received_at` is copied from the message (it never changes) so a mailbox
+/// lists by date from `message_mailboxes_date` alone. An existing membership
+/// only takes the new UID.
+fn upsert_membership(
+    tx: &Connection,
+    id: &MessageId,
+    mailbox_id: &MailboxId,
+    provider_uid: Option<ProviderUid>,
+) -> Result<(), DomainError> {
+    exec(
+        tx,
+        "INSERT INTO message_mailboxes (message_id, mailbox_id, provider_uid, received_at) \
+         SELECT id, ?2, ?3, received_at FROM messages WHERE id = ?1 \
+         ON CONFLICT(message_id, mailbox_id) DO UPDATE SET provider_uid = excluded.provider_uid",
+        params![id.as_uuid(), mailbox_id.as_uuid(), provider_uid.map(|u| u.value())],
+    )
+    .map(drop)
 }
 
 /// Received-side usage is a MAX, so replays are harmless; sent-side counting
@@ -456,8 +479,9 @@ fn server_copy_exists(
     };
     Ok(query_one(
         tx,
-        "SELECT 1 FROM messages WHERE account_id = ?1 AND rfc_message_id = ?2 \
-             AND mailbox_id = ?3 AND provider_uid IS NOT NULL LIMIT 1",
+        "SELECT 1 FROM messages m JOIN message_mailboxes mm ON mm.message_id = m.id \
+         WHERE m.account_id = ?1 AND m.rfc_message_id = ?2 \
+             AND mm.mailbox_id = ?3 AND mm.provider_uid IS NOT NULL LIMIT 1",
         params![account_id.as_uuid(), rfc_message_id, mailbox_id.as_uuid()],
         |_| Ok(()),
     )?
@@ -483,8 +507,8 @@ fn drop_sent_placeholders(
     };
     let placeholders = query_all(
         tx,
-        "SELECT id FROM messages \
-         WHERE account_id = ?1 AND rfc_message_id = ?2 AND mailbox_id = ?3 AND provider_uid IS NULL",
+        "SELECT m.id FROM messages m JOIN message_mailboxes mm ON mm.message_id = m.id \
+         WHERE m.account_id = ?1 AND m.rfc_message_id = ?2 AND mm.mailbox_id = ?3 AND mm.provider_uid IS NULL",
         params![account_id.as_uuid(), rfc_message_id, sent.as_uuid()],
         |r| r.get::<_, Uuid>(0),
     )?;
@@ -538,18 +562,11 @@ fn flag_message(
     added: &[Flag],
     removed: &[Flag],
 ) -> Result<(), DomainError> {
-    let Some((flags, mailbox_id, account_id, thread_id)) = query_one(
+    let Some((flags, account_id, thread_id)) = query_one(
         tx,
-        "SELECT flags, mailbox_id, account_id, thread_id FROM messages WHERE id = ?1",
+        "SELECT flags, account_id, thread_id FROM messages WHERE id = ?1",
         [id.as_uuid()],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<Uuid>>(1)?,
-                r.get::<_, Uuid>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        },
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Uuid>(1)?, r.get::<_, Option<String>>(2)?)),
     )?
     else {
         return Ok(());
@@ -571,9 +588,12 @@ fn flag_message(
     // The delta comes from the row's before/after state, so re-applying a
     // flag change is a no-op.
     if seen != was_seen {
-        if let Some(mailbox_id) = mailbox_id {
-            adjust_unread(tx, &mailbox_id, if seen { -1 } else { 1 })?;
-        }
+        exec(
+            tx,
+            "UPDATE mailboxes SET unread_messages = MAX(unread_messages + ?2, 0) \
+             WHERE id IN (SELECT mailbox_id FROM message_mailboxes WHERE message_id = ?1)",
+            params![id.as_uuid(), if seen { -1 } else { 1 }],
+        )?;
         if let Some(thread_id) = thread_id {
             refresh_conversation(tx, &account_id, &thread_id)?;
         }
@@ -581,60 +601,78 @@ fn flag_message(
     Ok(())
 }
 
-fn move_message(
+/// Replay-safe: each membership is counted only when this call is what adds
+/// or removes its row.
+fn change_mailboxes(
     tx: &Connection,
     id: &MessageId,
-    to: &MailboxId,
-    provider_uid: Option<ProviderUid>,
+    added: &[Membership],
+    removed: &[MailboxId],
 ) -> Result<(), DomainError> {
-    let Some((from, seen)) = query_one(
-        tx,
-        "SELECT mailbox_id, seen FROM messages WHERE id = ?1",
-        [id.as_uuid()],
-        |r| Ok((r.get::<_, Option<Uuid>>(0)?, r.get::<_, bool>(1)?)),
-    )?
+    let Some(seen) = query_one(tx, "SELECT seen FROM messages WHERE id = ?1", [id.as_uuid()], |r| {
+        r.get::<_, bool>(0)
+    })?
     else {
         return Ok(());
     };
-    let to = *to.as_uuid();
-    exec(
-        tx,
-        "UPDATE messages SET mailbox_id = ?2, provider_uid = ?3 WHERE id = ?1",
-        params![id.as_uuid(), to, provider_uid.map(|u| u.value())],
-    )?;
-    // A replay, or a UID attached after the move, finds the row already in
-    // `to`: nothing to count.
-    if !seen && from != Some(to) {
-        if let Some(from) = from {
-            adjust_unread(tx, &from, -1)?;
+    for mailbox_id in removed {
+        let gone = exec(
+            tx,
+            "DELETE FROM message_mailboxes WHERE message_id = ?1 AND mailbox_id = ?2",
+            params![id.as_uuid(), mailbox_id.as_uuid()],
+        )?;
+        if gone == 1 && !seen {
+            adjust_unread(tx, mailbox_id.as_uuid(), -1)?;
         }
-        adjust_unread(tx, &to, 1)?;
+    }
+    for Membership { mailbox_id, provider_uid } in added {
+        let existed = query_one(
+            tx,
+            "SELECT 1 FROM message_mailboxes WHERE message_id = ?1 AND mailbox_id = ?2",
+            params![id.as_uuid(), mailbox_id.as_uuid()],
+            |_| Ok(()),
+        )?
+        .is_some();
+        upsert_membership(tx, id, mailbox_id, *provider_uid)?;
+        if !existed && !seen {
+            adjust_unread(tx, mailbox_id.as_uuid(), 1)?;
+        }
+    }
+    // The domain never removes the last membership here, but a sync acting on a
+    // stale summary can: a message in no mailbox is gone, not an orphan row.
+    let orphan = query_one(
+        tx,
+        "SELECT 1 FROM message_mailboxes WHERE message_id = ?1 LIMIT 1",
+        [id.as_uuid()],
+        |_| Ok(()),
+    )?
+    .is_none();
+    if orphan {
+        delete_message(tx, id)?;
     }
     Ok(())
 }
 
 fn delete_message(tx: &Connection, id: &MessageId) -> Result<(), DomainError> {
-    let Some((mailbox_id, account_id, thread_id, seen)) = query_one(
+    let Some((account_id, thread_id, seen)) = query_one(
         tx,
-        "SELECT mailbox_id, account_id, thread_id, seen FROM messages WHERE id = ?1",
+        "SELECT account_id, thread_id, seen FROM messages WHERE id = ?1",
         [id.as_uuid()],
-        |r| {
-            Ok((
-                r.get::<_, Option<Uuid>>(0)?,
-                r.get::<_, Uuid>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, bool>(3)?,
-            ))
-        },
+        |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, bool>(2)?)),
     )?
     else {
         return Ok(());
     };
-    // The body row goes with it (ON DELETE CASCADE).
-    exec(tx, "DELETE FROM messages WHERE id = ?1", [id.as_uuid()])?;
-    if !seen && let Some(mailbox_id) = mailbox_id {
-        adjust_unread(tx, &mailbox_id, -1)?;
+    if !seen {
+        exec(
+            tx,
+            "UPDATE mailboxes SET unread_messages = MAX(unread_messages - 1, 0) \
+             WHERE id IN (SELECT mailbox_id FROM message_mailboxes WHERE message_id = ?1)",
+            [id.as_uuid()],
+        )?;
     }
+    // Memberships and the body row go with it (ON DELETE CASCADE).
+    exec(tx, "DELETE FROM messages WHERE id = ?1", [id.as_uuid()])?;
     if let Some(thread_id) = thread_id {
         refresh_conversation(tx, &account_id, &thread_id)?;
     }

@@ -29,13 +29,22 @@ pub struct Envelope {
     pub date: DateTime<Utc>,
 }
 
-/// Message aggregate root.
+/// One mailbox a message is in. Provider ids are per mailbox (IMAP UIDs), so
+/// the id lives here; `None` while unknown (a move the server confirmed
+/// without saying where the message went, a renumbered mailbox).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Membership {
+    pub mailbox_id: MailboxId,
+    pub provider_uid: Option<ProviderUid>,
+}
+
+/// Message aggregate root. A live message is in at least one mailbox, never
+/// twice in the same one; leaving the last deletes it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: MessageId,
     pub account_id: AccountId,
-    pub mailbox_id: MailboxId,
-    pub provider_uid: Option<ProviderUid>,
+    pub memberships: Vec<Membership>,
     pub message_rfc_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
@@ -91,8 +100,7 @@ impl Message {
         let message = Self {
             id,
             account_id,
-            mailbox_id,
-            provider_uid: Some(provider_uid),
+            memberships: vec![Membership { mailbox_id, provider_uid: Some(provider_uid) }],
             message_rfc_id,
             in_reply_to,
             references,
@@ -146,7 +154,6 @@ impl Message {
 
         DomainEvent::MessageFlagged {
             message_id: self.id,
-            mailbox_id: self.mailbox_id,
             flags_added: flags_to_add,
             flags_removed: flags_to_remove,
         }
@@ -171,54 +178,89 @@ impl Message {
         }
     }
 
-    /// Move the message to another mailbox and produce the event.
-    /// `provider_uid` is its UID there (`None` only when the provider could
-    /// not tell): UIDs are per-mailbox, so the old one must not follow.
-    pub fn move_to(&mut self, to_mailbox_id: MailboxId, provider_uid: Option<ProviderUid>) -> DomainEvent {
-        let from = self.mailbox_id;
-        self.mailbox_id = to_mailbox_id;
-        self.provider_uid = provider_uid;
+    /// The membership in `mailbox_id`, if the message is there.
+    pub fn membership(&self, mailbox_id: MailboxId) -> Option<&Membership> {
+        self.memberships.iter().find(|m| m.mailbox_id == mailbox_id)
+    }
 
-        DomainEvent::MessageMoved {
-            message_id: self.id,
-            from_mailbox_id: from,
-            to_mailbox_id,
-            provider_uid,
+    /// Whether the message is gone (its last membership was removed).
+    pub fn is_deleted(&self) -> bool {
+        self.memberships.is_empty()
+    }
+
+    /// Move the message from one mailbox to another in a single event.
+    /// `provider_uid` is its UID in `to` (`None` only when the provider could
+    /// not tell): UIDs are per-mailbox, so the old one must not follow.
+    /// `None` when the message is not in `from`: the move no longer applies.
+    pub fn move_to(
+        &mut self,
+        from: MailboxId,
+        to: MailboxId,
+        provider_uid: Option<ProviderUid>,
+    ) -> Option<DomainEvent> {
+        self.membership(from)?;
+        Some(self.change_mailboxes(vec![Membership { mailbox_id: to, provider_uid }], vec![from]))
+    }
+
+    /// Put the message in one more mailbox. `None` when it is already there.
+    pub fn add_to(&mut self, mailbox_id: MailboxId, provider_uid: Option<ProviderUid>) -> Option<DomainEvent> {
+        self.membership(mailbox_id).is_none().then(|| {
+            self.change_mailboxes(vec![Membership { mailbox_id, provider_uid }], vec![])
+        })
+    }
+
+    /// Take the message out of `mailbox_id`; leaving the last one deletes it.
+    /// `None` when it is not there.
+    pub fn remove_from(&mut self, mailbox_id: MailboxId) -> Option<DomainEvent> {
+        self.membership(mailbox_id)?;
+        if self.memberships.len() == 1 {
+            return Some(self.delete());
         }
+        Some(self.change_mailboxes(vec![], vec![mailbox_id]))
     }
 
     /// Record the UID the message has in `mailbox_id`, learned after the move
     /// that cleared it. `None` when the message has since left that mailbox or
     /// already has a UID: the information arrived late and no longer applies.
     pub fn attach_uid(&mut self, mailbox_id: MailboxId, provider_uid: ProviderUid) -> Option<DomainEvent> {
-        (self.mailbox_id == mailbox_id && self.provider_uid.is_none())
-            .then(|| self.set_uid(Some(provider_uid)))
+        self.membership(mailbox_id)
+            .is_some_and(|m| m.provider_uid.is_none())
+            .then(|| self.set_uid(mailbox_id, Some(provider_uid)))
     }
 
     /// Drop the UID the message had in `mailbox_id`, after the server
     /// renumbered that mailbox (UIDVALIDITY change). `None` when the message
     /// is no longer there or has no UID.
     pub fn forget_uid(&mut self, mailbox_id: MailboxId) -> Option<DomainEvent> {
-        (self.mailbox_id == mailbox_id && self.provider_uid.is_some()).then(|| self.set_uid(None))
+        self.membership(mailbox_id)
+            .is_some_and(|m| m.provider_uid.is_some())
+            .then(|| self.set_uid(mailbox_id, None))
     }
 
-    fn set_uid(&mut self, provider_uid: Option<ProviderUid>) -> DomainEvent {
-        self.provider_uid = provider_uid;
-
-        DomainEvent::MessageMoved {
-            message_id: self.id,
-            from_mailbox_id: self.mailbox_id,
-            to_mailbox_id: self.mailbox_id,
-            provider_uid,
-        }
+    fn set_uid(&mut self, mailbox_id: MailboxId, provider_uid: Option<ProviderUid>) -> DomainEvent {
+        self.change_mailboxes(vec![Membership { mailbox_id, provider_uid }], vec![])
     }
 
-    /// Produce a deletion event.
-    pub fn delete(&self, permanently: bool) -> DomainEvent {
-        DomainEvent::MessageDeleted {
-            message_id: self.id,
-            mailbox_id: self.mailbox_id,
-            permanently,
+    fn change_mailboxes(&mut self, added: Vec<Membership>, removed: Vec<MailboxId>) -> DomainEvent {
+        self.apply_mailbox_change(&added, &removed);
+        DomainEvent::MessageMailboxesChanged { message_id: self.id, added, removed }
+    }
+
+    /// Remove the message everywhere.
+    pub fn delete(&mut self) -> DomainEvent {
+        let mailbox_ids = self.memberships.drain(..).map(|m| m.mailbox_id).collect();
+        DomainEvent::MessageDeleted { message_id: self.id, mailbox_ids }
+    }
+
+    /// `added` upserts: an entry for a mailbox the message is already in
+    /// replaces its UID.
+    fn apply_mailbox_change(&mut self, added: &[Membership], removed: &[MailboxId]) {
+        self.memberships.retain(|m| !removed.contains(&m.mailbox_id));
+        for new in added {
+            match self.memberships.iter_mut().find(|m| m.mailbox_id == new.mailbox_id) {
+                Some(existing) => *existing = *new,
+                None => self.memberships.push(*new),
+            }
         }
     }
 
@@ -260,12 +302,11 @@ impl Message {
                     }
                 }
             }
-            DomainEvent::MessageMoved { to_mailbox_id, provider_uid, .. } => {
-                self.mailbox_id = *to_mailbox_id;
-                self.provider_uid = *provider_uid;
+            DomainEvent::MessageMailboxesChanged { added, removed, .. } => {
+                self.apply_mailbox_change(added, removed);
             }
-            DomainEvent::MessageDeleted { .. }
-            | DomainEvent::MessageSent { .. }
+            DomainEvent::MessageDeleted { .. } => self.memberships.clear(),
+            DomainEvent::MessageSent { .. }
             | DomainEvent::DraftSaved { .. }
             | DomainEvent::DraftDiscarded { .. } => {
                 // These don't further mutate in-memory message state.
@@ -302,8 +343,7 @@ impl Message {
         let mut message = Self {
             id: *message_id,
             account_id: *account_id,
-            mailbox_id: *mailbox_id,
-            provider_uid: Some(*provider_uid),
+            memberships: vec![Membership { mailbox_id: *mailbox_id, provider_uid: Some(*provider_uid) }],
             message_rfc_id: message_rfc_id.clone(),
             in_reply_to: in_reply_to.clone(),
             references: references.clone(),

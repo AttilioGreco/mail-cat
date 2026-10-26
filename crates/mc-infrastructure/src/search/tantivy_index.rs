@@ -166,7 +166,9 @@ impl TantivySearchIndex {
         let mut doc = TantivyDocument::new();
         doc.add_text(f.message_id, message.id.to_string());
         doc.add_text(f.account_id, message.account_id.to_string());
-        doc.add_text(f.mailbox_id, message.mailbox_id.to_string());
+        for membership in &message.memberships {
+            doc.add_text(f.mailbox_id, membership.mailbox_id.to_string());
+        }
         doc.add_i64(f.date, e.date.timestamp());
         doc.add_u64(f.flags, flag_bits(&message.flags));
         doc.add_bool(f.has_attachment, message.has_attachments);

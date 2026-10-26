@@ -94,10 +94,15 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageServiceImpl<C, Q> {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("message not found"))?;
 
+        // Requests carry no source mailbox yet; a message is in one over IMAP.
+        let home = message
+            .memberships
+            .first()
+            .ok_or_else(|| Status::not_found("message is in no mailbox"))?;
         let mailbox = self
             .query_bus
             .dispatch(Query::GetMailbox {
-                mailbox_id: message.mailbox_id,
+                mailbox_id: home.mailbox_id,
             })
             .await
             .map_err(application_error_to_status)?
@@ -175,7 +180,7 @@ where
                 crate::grpc::proto::MessageSummary {
                     id: summary.id.to_string(),
                     account_id: summary.account_id.to_string(),
-                    mailbox_id: summary.mailbox_id.to_string(),
+                    mailbox_ids: summary.memberships.iter().map(|m| m.mailbox_id.to_string()).collect(),
                     envelope: Some(envelope),
                     flags: summary
                         .flags
@@ -664,10 +669,17 @@ where
         // Subscribe to the domain event bus. Filter events that belong to the
         // requested mailbox and map them to proto MailboxEvents.
         let mut subscriber = self.event_bus.subscribe();
+        let query_bus = Arc::clone(&self.query_bus);
         let (tx, rx) = mpsc::channel(32);
 
         tokio::spawn(async move {
             while let Some(envelope) = subscriber.recv().await {
+                // Flags belong to the message, not a mailbox: ask where it is.
+                if let DomainEvent::MessageFlagged { message_id, .. } = &envelope.payload
+                    && !is_in_mailbox(query_bus.as_ref(), *message_id, mailbox_id).await
+                {
+                    continue;
+                }
                 let event_opt = domain_event_to_mailbox_event(
                     &envelope.payload,
                     &account_id,
@@ -683,6 +695,28 @@ where
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+}
+
+fn expunged(message_id: &MessageId, mailbox_id_str: &str) -> MailboxEvent {
+    MailboxEvent {
+        mailbox_id: mailbox_id_str.to_owned(),
+        event_type: Some(mailbox_event::EventType::MessageExpunged(MessageExpungedEvent {
+            message_id: message_id.to_string(),
+        })),
+    }
+}
+
+/// A failed lookup counts as "not there": a missed refresh beats one per
+/// watcher for every flag change.
+async fn is_in_mailbox<Q: QueryBus>(query_bus: &Q, message_id: MessageId, mailbox_id: MailboxId) -> bool {
+    let Ok(result) = query_bus.dispatch(Query::GetMessage { message_id }).await else {
+        return false;
+    };
+    result
+        .into_message()
+        .ok()
+        .flatten()
+        .is_some_and(|m| m.membership(mailbox_id).is_some())
 }
 
 /// Maps a domain event to a gRPC [`MailboxEvent`] if it belongs to the given mailbox.
@@ -720,25 +754,22 @@ fn domain_event_to_mailbox_event(
             })),
         }),
 
-        DomainEvent::MessageDeleted {
-            message_id,
-            mailbox_id: evt_mailbox,
-            ..
-        } if evt_mailbox == mailbox_id => Some(MailboxEvent {
-            mailbox_id: mailbox_id_str.to_owned(),
-            event_type: Some(mailbox_event::EventType::MessageExpunged(
-                MessageExpungedEvent {
-                    message_id: message_id.to_string(),
-                },
-            )),
-        }),
+        DomainEvent::MessageDeleted { message_id, mailbox_ids }
+            if mailbox_ids.contains(mailbox_id) =>
+        {
+            Some(expunged(message_id, mailbox_id_str))
+        }
+
+        // Gaining a mailbox is not announced, as before.
+        DomainEvent::MessageMailboxesChanged { message_id, removed, .. } if removed.contains(mailbox_id) => {
+            Some(expunged(message_id, mailbox_id_str))
+        }
 
         DomainEvent::MessageFlagged {
             message_id,
-            mailbox_id: evt_mailbox,
             flags_added,
             flags_removed,
-        } if evt_mailbox == mailbox_id => {
+        } => {
             let mut flags: Vec<i32> = flags_added
                 .iter()
                 .map(crate::grpc::mappers::domain_flag_to_proto)

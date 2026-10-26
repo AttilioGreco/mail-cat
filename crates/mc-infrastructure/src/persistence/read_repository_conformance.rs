@@ -9,9 +9,9 @@ macro_rules! read_repository_conformance {
             ConnectionConfig, ContactEmail, ContactEmailLabel, ContactId, ContactReadRepository,
             ContactSource, ConversationReadRepository, DomainEvent, EmailAddress, Envelope,
             EventEnvelope, EventStore, Flag, Identity, IncomingServer, MailboxId, MailboxPath,
-            MailboxReadRepository, MailboxType, MessageBodyStore, MessageId, MessageReadRepository,
-            ProjectionCheckpoint, ProviderType, ProviderUid, ReadModelProjector, SuggestScope,
-            ThreadId,
+            MailboxReadRepository, MailboxType, Membership, MessageBodyStore, MessageId,
+            MessageReadRepository, ProjectionCheckpoint, ProviderType, ProviderUid,
+            ReadModelProjector, SuggestScope, ThreadId,
         };
         use mc_shared::pagination::Pagination;
 
@@ -534,7 +534,6 @@ macro_rules! read_repository_conformance {
 
             let mark_seen = || DomainEvent::MessageFlagged {
                 message_id,
-                mailbox_id,
                 flags_added: vec![Flag::Seen],
                 flags_removed: vec![],
             };
@@ -569,7 +568,6 @@ macro_rules! read_repository_conformance {
                 6,
                 DomainEvent::MessageFlagged {
                     message_id,
-                    mailbox_id,
                     flags_added: vec![],
                     flags_removed: vec![Flag::Seen],
                 },
@@ -670,7 +668,6 @@ macro_rules! read_repository_conformance {
                 3,
                 DomainEvent::MessageFlagged {
                     message_id,
-                    mailbox_id: MailboxId::new(),
                     flags_added: vec![Flag::Seen],
                     flags_removed: vec![Flag::Recent],
                 },
@@ -705,8 +702,7 @@ macro_rules! read_repository_conformance {
                 4,
                 DomainEvent::MessageDeleted {
                     message_id,
-                    mailbox_id,
-                    permanently: false,
+                    mailbox_ids: vec![mailbox_id],
                 },
             );
             repo.project(&env).await.unwrap();
@@ -804,8 +800,7 @@ macro_rules! read_repository_conformance {
                 2,
                 DomainEvent::MessageDeleted {
                     message_id: reply_id,
-                    mailbox_id,
-                    permanently: false,
+                    mailbox_ids: vec![mailbox_id],
                 },
             ))
             .await
@@ -841,8 +836,7 @@ macro_rules! read_repository_conformance {
                 2,
                 DomainEvent::MessageDeleted {
                     message_id: root_id,
-                    mailbox_id,
-                    permanently: false,
+                    mailbox_ids: vec![mailbox_id],
                 },
             ))
             .await
@@ -906,11 +900,13 @@ macro_rules! read_repository_conformance {
                 &message_id.to_string(),
                 AggregateType::Message,
                 2,
-                DomainEvent::MessageMoved {
+                DomainEvent::MessageMailboxesChanged {
                     message_id,
-                    from_mailbox_id: inbox_id,
-                    to_mailbox_id: archive_id,
-                    provider_uid: None,
+                    added: vec![Membership {
+                        mailbox_id: archive_id,
+                        provider_uid: None,
+                    }],
+                    removed: vec![inbox_id],
                 },
             );
             repo.project(&env).await.unwrap();
@@ -920,7 +916,13 @@ macro_rules! read_repository_conformance {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(msg.mailbox_id, archive_id);
+            assert_eq!(
+                msg.memberships,
+                [Membership {
+                    mailbox_id: archive_id,
+                    provider_uid: None
+                }]
+            );
 
             // Summary should be under archive, not inbox.
             let inbox_msgs = MessageReadRepository::list_messages(
@@ -947,7 +949,6 @@ macro_rules! read_repository_conformance {
             .unwrap();
             assert_eq!(archive_msgs.total_count, 1);
             // The inbox UID means nothing in archive.
-            assert_eq!(msg.provider_uid, None);
             assert_eq!(
                 repo.uidless_messages(&archive_id).await.unwrap(),
                 [message_id]
@@ -959,11 +960,13 @@ macro_rules! read_repository_conformance {
                 &message_id.to_string(),
                 AggregateType::Message,
                 3,
-                DomainEvent::MessageMoved {
+                DomainEvent::MessageMailboxesChanged {
                     message_id,
-                    from_mailbox_id: archive_id,
-                    to_mailbox_id: archive_id,
-                    provider_uid: Some(ProviderUid::new(77)),
+                    added: vec![Membership {
+                        mailbox_id: archive_id,
+                        provider_uid: Some(ProviderUid::new(77)),
+                    }],
+                    removed: vec![],
                 },
             );
             repo.project(&env).await.unwrap();
@@ -1052,7 +1055,8 @@ macro_rules! read_repository_conformance {
                 .unwrap();
             assert_eq!(sent_msg.body_text.as_deref(), Some("Hello plain reply"));
             assert_eq!(sent_msg.body_html.as_deref(), Some("<p>Hello reply</p>"));
-            assert_eq!(sent_msg.mailbox_id, sent_mailbox_id);
+            assert_eq!(sent_msg.memberships.len(), 1);
+            assert_eq!(sent_msg.memberships[0].mailbox_id, sent_mailbox_id);
 
             // (2) Must appear in the Sent mailbox's list immediately, with
             // sender and recipient populated (not blank).
@@ -1322,15 +1326,9 @@ macro_rules! read_repository_conformance {
             }
         }
 
-        fn flagged(
-            message_id: MessageId,
-            mailbox_id: MailboxId,
-            add: Vec<Flag>,
-            remove: Vec<Flag>,
-        ) -> DomainEvent {
+        fn flagged(message_id: MessageId, add: Vec<Flag>, remove: Vec<Flag>) -> DomainEvent {
             DomainEvent::MessageFlagged {
                 message_id,
-                mailbox_id,
                 flags_added: add,
                 flags_removed: remove,
             }
@@ -1429,6 +1427,212 @@ macro_rules! read_repository_conformance {
             assert_eq!(ids(&last.items, |m| m.id), [msgs[0]]);
         }
 
+        async fn unread_in(repo: &impl MailboxReadRepository, mailbox: &MailboxId) -> u32 {
+            repo.get_mailbox(mailbox)
+                .await
+                .unwrap()
+                .unwrap()
+                .unread_messages
+        }
+
+        fn gained(message_id: MessageId, mailbox_id: MailboxId, uid: Option<u32>) -> DomainEvent {
+            DomainEvent::MessageMailboxesChanged {
+                message_id,
+                added: vec![Membership {
+                    mailbox_id,
+                    provider_uid: uid.map(ProviderUid::new),
+                }],
+                removed: vec![],
+            }
+        }
+
+        #[tokio::test]
+        async fn a_message_in_two_mailboxes_is_listed_and_counted_in_both() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox, label) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let (id, e_received) = received(account, inbox, 1, Some("<m@x>"), &[], false, at(0));
+            project_all(
+                &repo,
+                [
+                    discovered(account, inbox, "INBOX"),
+                    discovered(account, label, "Label"),
+                    e_received,
+                    gained(id, label, Some(5)),
+                ],
+            )
+            .await;
+            let page = first_page();
+
+            for mailbox in [inbox, label] {
+                let listed = repo.list_messages(&mailbox, &page).await.unwrap();
+                assert_eq!(ids(&listed.items, |m| m.id), [id]);
+                assert_eq!(listed.total_count, 1);
+                assert_eq!(
+                    listed.items[0].memberships.len(),
+                    2,
+                    "the summary lists every mailbox"
+                );
+                assert_eq!(unread_in(&repo, &mailbox).await, 1);
+                assert_eq!(
+                    repo.find_unread_by_mailbox(&mailbox).await.unwrap().len(),
+                    1
+                );
+                let threads = repo
+                    .list_conversations(&account, Some(&mailbox), &page)
+                    .await
+                    .unwrap();
+                assert_eq!(threads.items.len(), 1);
+            }
+            assert_eq!(
+                repo.find_by_provider_uid(&label, 5)
+                    .await
+                    .unwrap()
+                    .map(|m| m.id),
+                Some(id)
+            );
+            assert_eq!(
+                repo.find_by_provider_uid(&inbox, 1)
+                    .await
+                    .unwrap()
+                    .map(|m| m.id),
+                Some(id)
+            );
+            assert!(
+                repo.find_by_provider_uid(&inbox, 5)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "UIDs are per mailbox"
+            );
+            let whole = repo
+                .list_conversations(&account, None, &page)
+                .await
+                .unwrap();
+            assert_eq!(
+                whole.items[0].message_count, 1,
+                "one message, however many mailboxes"
+            );
+
+            // Flags belong to the message: every mailbox it is in follows.
+            project_all(&repo, [flagged(id, vec![Flag::Seen], vec![])]).await;
+            assert_eq!(
+                (
+                    unread_in(&repo, &inbox).await,
+                    unread_in(&repo, &label).await
+                ),
+                (0, 0)
+            );
+            project_all(&repo, [flagged(id, vec![], vec![Flag::Seen])]).await;
+            assert_eq!(
+                (
+                    unread_in(&repo, &inbox).await,
+                    unread_in(&repo, &label).await
+                ),
+                (1, 1)
+            );
+
+            // Replaying the membership change counts nothing twice.
+            project_all(&repo, [gained(id, label, Some(5))]).await;
+            assert_eq!(
+                (
+                    unread_in(&repo, &inbox).await,
+                    unread_in(&repo, &label).await
+                ),
+                (1, 1)
+            );
+            assert_eq!(
+                repo.held_uids(&label, &[ProviderUid::new(5)])
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+
+        #[tokio::test]
+        async fn removing_one_membership_keeps_the_message_and_removing_the_last_deletes_it() {
+            let (_guard, _es, repo) = $make;
+            let (account, inbox, label) = (AccountId::new(), MailboxId::new(), MailboxId::new());
+            let (id, e_received) = received(account, inbox, 1, Some("<m@x>"), &[], false, at(0));
+            project_all(
+                &repo,
+                [
+                    discovered(account, inbox, "INBOX"),
+                    discovered(account, label, "Label"),
+                    e_received,
+                    gained(id, label, None),
+                ],
+            )
+            .await;
+            let page = first_page();
+            assert_eq!(repo.uidless_messages(&label).await.unwrap(), [id]);
+
+            project_all(
+                &repo,
+                [DomainEvent::MessageMailboxesChanged {
+                    message_id: id,
+                    added: vec![],
+                    removed: vec![inbox],
+                }],
+            )
+            .await;
+
+            assert_eq!(
+                repo.list_messages(&inbox, &page).await.unwrap().total_count,
+                0
+            );
+            assert_eq!(
+                repo.list_messages(&label, &page).await.unwrap().total_count,
+                1
+            );
+            assert_eq!(
+                (
+                    unread_in(&repo, &inbox).await,
+                    unread_in(&repo, &label).await
+                ),
+                (0, 1)
+            );
+            let kept = repo.get_message(&id).await.unwrap().unwrap();
+            assert_eq!(
+                kept.memberships,
+                [Membership {
+                    mailbox_id: label,
+                    provider_uid: None
+                }]
+            );
+            assert_eq!(
+                repo.list_conversations(&account, None, &page)
+                    .await
+                    .unwrap()
+                    .items
+                    .len(),
+                1
+            );
+
+            project_all(
+                &repo,
+                [DomainEvent::MessageDeleted {
+                    message_id: id,
+                    mailbox_ids: vec![label],
+                }],
+            )
+            .await;
+
+            assert!(repo.get_message(&id).await.unwrap().is_none());
+            assert_eq!(
+                repo.list_messages(&label, &page).await.unwrap().total_count,
+                0
+            );
+            assert_eq!(unread_in(&repo, &label).await, 0);
+            assert!(
+                repo.list_conversations(&account, None, &page)
+                    .await
+                    .unwrap()
+                    .items
+                    .is_empty()
+            );
+        }
+
         #[tokio::test]
         async fn get_thread_returns_the_whole_thread_oldest_first() {
             let (_guard, _es, repo) = $make;
@@ -1473,7 +1677,10 @@ macro_rules! read_repository_conformance {
 
             let found = repo.find_by_provider_uid(&inbox, 7).await.unwrap().unwrap();
             assert_eq!(found.id, new);
-            assert_eq!(found.provider_uid, Some(ProviderUid::new(7)));
+            assert_eq!(
+                found.membership(inbox).and_then(|m| m.provider_uid),
+                Some(ProviderUid::new(7))
+            );
             assert!(
                 repo.find_by_provider_uid(&inbox, 8)
                     .await
@@ -1495,7 +1702,7 @@ macro_rules! read_repository_conformance {
             let found = repo.find_unread_by_mailbox(&inbox).await.unwrap();
             assert_eq!(ids(&found, |m| m.id), [unread]);
 
-            project_all(&repo, [flagged(unread, inbox, vec![Flag::Seen], vec![])]).await;
+            project_all(&repo, [flagged(unread, vec![Flag::Seen], vec![])]).await;
             assert!(
                 repo.find_unread_by_mailbox(&inbox)
                     .await
@@ -1616,11 +1823,7 @@ macro_rules! read_repository_conformance {
             );
             let log = append_all(
                 store.as_ref(),
-                vec![
-                    e_root,
-                    e_reply,
-                    flagged(reply, inbox, vec![Flag::Seen], vec![]),
-                ],
+                vec![e_root, e_reply, flagged(reply, vec![Flag::Seen], vec![])],
             )
             .await;
             for event in &log {
@@ -2060,17 +2263,18 @@ macro_rules! read_repository_conformance {
                         message_id: root,
                         attachments: vec![],
                     },
-                    flagged(root, inbox, vec![Flag::Seen], vec![]),
-                    DomainEvent::MessageMoved {
+                    flagged(root, vec![Flag::Seen], vec![]),
+                    DomainEvent::MessageMailboxesChanged {
                         message_id: reply,
-                        from_mailbox_id: inbox,
-                        to_mailbox_id: archive,
-                        provider_uid: None,
+                        added: vec![Membership {
+                            mailbox_id: archive,
+                            provider_uid: None,
+                        }],
+                        removed: vec![inbox],
                     },
                     DomainEvent::MessageDeleted {
                         message_id: gone,
-                        mailbox_id: inbox,
-                        permanently: false,
+                        mailbox_ids: vec![inbox],
                     },
                     DomainEvent::MessageSent {
                         message_id: sent,
@@ -2084,7 +2288,7 @@ macro_rules! read_repository_conformance {
                         body_html: None,
                         sent_at: at(30),
                     },
-                    flagged(sent, archive, vec![], vec![Flag::Seen]),
+                    flagged(sent, vec![], vec![Flag::Seen]),
                     DomainEvent::ContactAdded {
                         contact_id: contact,
                         display_name: "Ada".into(),
@@ -2213,30 +2417,32 @@ macro_rules! read_repository_conformance {
                         message_id: root,
                         attachments: vec![],
                     },
-                    flagged(mid, inbox, vec![Flag::Seen], vec![]),
-                    flagged(mid, inbox, vec![], vec![Flag::Seen]),
-                    flagged(mid, inbox, vec![Flag::Seen], vec![]),
+                    flagged(mid, vec![Flag::Seen], vec![]),
+                    flagged(mid, vec![], vec![Flag::Seen]),
+                    flagged(mid, vec![Flag::Seen], vec![]),
                     DomainEvent::MessageDeleted {
                         message_id: newest,
-                        mailbox_id: inbox,
-                        permanently: false,
+                        mailbox_ids: vec![inbox],
                     },
                     DomainEvent::MessageDeleted {
                         message_id: copy_a,
-                        mailbox_id: inbox,
-                        permanently: false,
+                        mailbox_ids: vec![inbox],
                     },
-                    DomainEvent::MessageMoved {
+                    DomainEvent::MessageMailboxesChanged {
                         message_id: roamer,
-                        from_mailbox_id: inbox,
-                        to_mailbox_id: trash,
-                        provider_uid: None,
+                        added: vec![Membership {
+                            mailbox_id: trash,
+                            provider_uid: None,
+                        }],
+                        removed: vec![inbox],
                     },
-                    DomainEvent::MessageMoved {
+                    DomainEvent::MessageMailboxesChanged {
                         message_id: roamer,
-                        from_mailbox_id: trash,
-                        to_mailbox_id: archive,
-                        provider_uid: None,
+                        added: vec![Membership {
+                            mailbox_id: archive,
+                            provider_uid: None,
+                        }],
+                        removed: vec![trash],
                     },
                     DomainEvent::MessageSent {
                         message_id: sent,
@@ -2250,7 +2456,7 @@ macro_rules! read_repository_conformance {
                         body_html: None,
                         sent_at: at(50),
                     },
-                    flagged(sent, archive, vec![], vec![Flag::Seen]),
+                    flagged(sent, vec![], vec![Flag::Seen]),
                     contact(kept, "ada@example.com"),
                     contact(merged, "ada@work.example.com"),
                     DomainEvent::ContactMerged {
@@ -2317,11 +2523,13 @@ macro_rules! read_repository_conformance {
                     discovered(account, archive, "Archive"),
                     e_waiting,
                     e_ready,
-                    DomainEvent::MessageMoved {
+                    DomainEvent::MessageMailboxesChanged {
                         message_id: waiting,
-                        from_mailbox_id: archive,
-                        to_mailbox_id: archive,
-                        provider_uid: None,
+                        added: vec![Membership {
+                            mailbox_id: archive,
+                            provider_uid: None,
+                        }],
+                        removed: vec![archive],
                     },
                 ],
             )
@@ -2539,11 +2747,13 @@ macro_rules! read_repository_conformance {
                     },
                     discovered(account, archive, "Archive"),
                     e_waiting,
-                    DomainEvent::MessageMoved {
+                    DomainEvent::MessageMailboxesChanged {
                         message_id: waiting,
-                        from_mailbox_id: archive,
-                        to_mailbox_id: archive,
-                        provider_uid: None,
+                        added: vec![Membership {
+                            mailbox_id: archive,
+                            provider_uid: None,
+                        }],
+                        removed: vec![archive],
                     },
                     e_server_copy,
                 ],

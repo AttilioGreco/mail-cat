@@ -326,8 +326,10 @@ async fn search_hydrates_hits_from_the_read_model_and_skips_stale_ones() {
     let message = Message {
         id: MessageId::new(),
         account_id: AccountId::new(),
-        mailbox_id: MailboxId::new(),
-        provider_uid: None,
+        memberships: vec![mc_domain::Membership {
+            mailbox_id: MailboxId::new(),
+            provider_uid: None,
+        }],
         message_rfc_id: None,
         in_reply_to: None,
         references: vec![],

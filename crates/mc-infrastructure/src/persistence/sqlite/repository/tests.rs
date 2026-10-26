@@ -151,8 +151,7 @@ async fn deleting_a_message_takes_its_body_along() {
 
     let deleted = DomainEvent::MessageDeleted {
         message_id: id,
-        mailbox_id: MailboxId::new(),
-        permanently: true,
+        mailbox_ids: vec![MailboxId::new()],
     };
     repo.project(&at_position(2, deleted)).await.unwrap();
 
@@ -235,8 +234,7 @@ async fn deleting_one_rfc_copy_keeps_the_conversation() {
 
     let deleted = DomainEvent::MessageDeleted {
         message_id: inbox_copy,
-        mailbox_id: MailboxId::new(),
-        permanently: false,
+        mailbox_ids: vec![MailboxId::new()],
     };
     repo.project(&at_position(3, deleted)).await.unwrap();
 
@@ -298,78 +296,6 @@ async fn saved_contact_events_reach_the_read_model_without_the_bus() {
 }
 
 #[tokio::test]
-async fn address_usage_migration_seeds_from_stored_messages() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mail-cat.db");
-    let db = SqliteDb::open(&path).unwrap();
-    let repo = SqliteRepository::new(db.clone(), Arc::new(SqliteEventStore::new(db)));
-    let (account, inbox, sent) = (AccountId::new(), MailboxId::new(), MailboxId::new());
-    let addr = |raw: &str| {
-        vec![Address {
-            name: None,
-            email: EmailAddress::new(raw).unwrap(),
-        }]
-    };
-    let mut events = vec![];
-    for (mailbox_id, mailbox_type) in [(inbox, MailboxType::Inbox), (sent, MailboxType::Sent)] {
-        events.push(DomainEvent::MailboxDiscovered {
-            mailbox_id,
-            account_id: account,
-            path: MailboxPath::parse(&format!("{mailbox_type:?}"), '/').unwrap(),
-            mailbox_type,
-        });
-    }
-    for (mailbox, from, to) in [
-        (sent, "me@example.com", "ada@example.com"),
-        (sent, "me@example.com", "ada@example.com"),
-        (inbox, "bob@example.com", "me@example.com"),
-    ] {
-        let (_, mut event) = received(account, mailbox, "<x@y>");
-        if let DomainEvent::MessageReceived { envelope, .. } = &mut event {
-            envelope.from = addr(from);
-            envelope.to = addr(to);
-            envelope.cc = addr(to);
-        }
-        events.push(event);
-    }
-    for (pos, event) in (1..).zip(events) {
-        repo.project(&at_position(pos, event)).await.unwrap();
-    }
-    // Back to a pre-usage database holding the same messages.
-    repo.db
-        .write(|c| c.execute_batch(
-            "DROP TABLE address_usage; DROP TABLE sent_counted; DROP TABLE downloads; \
-             ALTER TABLE accounts DROP COLUMN status_error; ALTER TABLE accounts DROP COLUMN status_since; \
-             ALTER TABLE message_bodies DROP COLUMN truncated; \
-             PRAGMA user_version = 2;",
-        ).map_err(repo_err))
-        .await
-        .unwrap();
-    drop(repo);
-
-    let usage: Vec<(String, i64, bool, bool)> = SqliteDb::open(&path)
-        .unwrap()
-        .read(|c| {
-            query_all(
-                c,
-                "SELECT email, sent_count, last_sent_at IS NOT NULL, last_received_at IS NOT NULL \
-                 FROM address_usage ORDER BY email",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        usage,
-        [
-            ("ada@example.com".into(), 2, true, false),
-            ("bob@example.com".into(), 0, false, true)
-        ]
-    );
-}
-
-#[tokio::test]
 async fn sent_message_syncing_back_is_one_message_counted_once() {
     let (_dir, repo) = open();
     let (account, sent) = (AccountId::new(), MailboxId::new());
@@ -414,8 +340,7 @@ async fn sent_message_syncing_back_is_one_message_counted_once() {
         synced,
         DomainEvent::MessageDeleted {
             message_id: placeholder,
-            mailbox_id: sent,
-            permanently: true,
+            mailbox_ids: vec![sent],
         },
     ];
     let events: Vec<_> = (1..)

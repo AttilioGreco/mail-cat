@@ -81,7 +81,8 @@ message AttachmentInfo {
 message MessageSummary {
   string id = 1;
   string account_id = 2;
-  string mailbox_id = 3;
+  // Every mailbox the message is in.
+  repeated string mailbox_ids = 3;
   MessageEnvelope envelope = 4;
   repeated Flag flags = 5;
   uint64 size_bytes = 6;
@@ -93,7 +94,7 @@ message MessageSummary {
 message MessageDetail {
   string id = 1;
   string account_id = 2;
-  string mailbox_id = 3;
+  repeated string mailbox_ids = 3;
   optional string message_rfc_id = 4;
   optional string in_reply_to = 5;
   repeated string references = 6;

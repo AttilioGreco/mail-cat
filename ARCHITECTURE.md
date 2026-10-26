@@ -192,8 +192,7 @@ pub struct Mailbox {
 pub struct Message {
     pub id: MessageId,
     pub account_id: AccountId,
-    pub mailbox_id: MailboxId,
-    pub provider_uid: Option<ProviderUid>,
+    pub memberships: Vec<Membership>, // { mailbox_id, provider_uid }: one per mailbox the message is in
     pub message_rfc_id: Option<String>,  // RFC 2822 Message-ID header
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
@@ -259,8 +258,8 @@ pub struct EventEnvelope {
 - `MessageReceived { message_id, account_id, mailbox_id, provider_uid, envelope, flags, size_bytes, has_attachments, received_at }`
 - `MessageBodyFetched { message_id, body_text?, body_html?, attachments }`
 - `MessageFlagged { message_id, flags_added, flags_removed }`
-- `MessageMoved { message_id, from_mailbox_id, to_mailbox_id }`
-- `MessageDeleted { message_id, mailbox_id, permanently }`
+- `MessageMailboxesChanged { message_id, added: [Membership], removed: [mailbox_id] }` (a move is one of each; an `added` entry for a mailbox already held replaces its UID)
+- `MessageDeleted { message_id, mailbox_ids }` (the message is gone: its last mailbox was removed)
 - `MessageSent { message_id, account_id, envelope, sent_at }`
 - `DraftSaved { message_id, account_id, envelope, body_text?, body_html? }`
 - `DraftDiscarded { message_id }`

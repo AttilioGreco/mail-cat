@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use futures::Stream;
 use mc_domain::{
     Address, AggregateType, DomainError, EmailAddress, Envelope, EventEnvelope, Flag, LoginSecret,
-    MailboxStatus, MailboxType, MessageEnvelopeSummary, OutgoingMessage, ProviderNotification,
+    MailboxStatus, MailboxType, Membership, MessageEnvelopeSummary, OutgoingMessage,
+    ProviderNotification,
 };
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -480,8 +481,10 @@ impl ReadModelProjector for MockProjector {
                 stored.push(MessageSummary {
                     id: *message_id,
                     account_id: *account_id,
-                    mailbox_id: *mailbox_id,
-                    provider_uid: Some(*provider_uid),
+                    memberships: vec![Membership {
+                        mailbox_id: *mailbox_id,
+                        provider_uid: Some(*provider_uid),
+                    }],
                     from_name: None,
                     from_email: "sender@example.com".into(),
                     to: vec![],
@@ -499,15 +502,23 @@ impl ReadModelProjector for MockProjector {
                         .insert(*message_id, rfc_id.clone());
                 }
             }
-            DomainEvent::MessageMoved {
+            DomainEvent::MessageMailboxesChanged {
                 message_id,
-                to_mailbox_id,
-                provider_uid,
-                ..
+                added,
+                removed,
             } => {
                 if let Some(row) = stored.iter_mut().find(|m| m.id == *message_id) {
-                    row.mailbox_id = *to_mailbox_id;
-                    row.provider_uid = *provider_uid;
+                    row.memberships.retain(|m| !removed.contains(&m.mailbox_id));
+                    for new in added {
+                        match row
+                            .memberships
+                            .iter_mut()
+                            .find(|m| m.mailbox_id == new.mailbox_id)
+                        {
+                            Some(existing) => *existing = *new,
+                            None => row.memberships.push(*new),
+                        }
+                    }
                 }
             }
             DomainEvent::MessageDeleted { message_id, .. } => {
@@ -559,7 +570,7 @@ impl MessageReadRepository for MockProjector {
             .lock()
             .unwrap()
             .iter()
-            .filter(|m| m.mailbox_id == *mailbox_id)
+            .filter(|m| m.membership(*mailbox_id).is_some())
             .cloned()
             .collect();
         Ok(mc_shared::pagination::PagedResult {
@@ -606,8 +617,7 @@ impl MessageReadRepository for MockProjector {
             .lock()
             .unwrap()
             .iter()
-            .filter(|m| m.mailbox_id == *mailbox_id)
-            .filter_map(|m| m.provider_uid)
+            .filter_map(|m| m.membership(*mailbox_id)?.provider_uid)
             .filter(|uid| uids.contains(uid))
             .collect())
     }
@@ -621,7 +631,10 @@ impl MessageReadRepository for MockProjector {
             .lock()
             .unwrap()
             .iter()
-            .filter(|m| m.mailbox_id == *mailbox_id && m.provider_uid.is_none())
+            .filter(|m| {
+                m.membership(*mailbox_id)
+                    .is_some_and(|x| x.provider_uid.is_none())
+            })
             .map(|m| m.id)
             .collect())
     }
@@ -726,10 +739,11 @@ impl MockProjector {
             .iter()
             .filter(|m| !bodies.contains_key(&m.id))
             .filter_map(|m| {
+                let home = m.memberships.first()?;
                 Some(mc_domain::BackfillEntry {
                     message_id: m.id,
-                    mailbox_id: m.mailbox_id,
-                    provider_uid: m.provider_uid?.value(),
+                    mailbox_id: home.mailbox_id,
+                    provider_uid: home.provider_uid?.value(),
                     rfc_message_id: rfc_ids.get(&m.id).cloned(),
                     size_bytes: m.size_bytes,
                     from_email: m.from_email.clone(),
@@ -1294,8 +1308,10 @@ async fn sent_copy_syncing_back_replaces_the_one_shown_at_send_time() {
     let placeholder = MessageSummary {
         id: MessageId::new(),
         account_id,
-        mailbox_id: sent.id,
-        provider_uid: None,
+        memberships: vec![Membership {
+            mailbox_id: sent.id,
+            provider_uid: None,
+        }],
         from_name: None,
         from_email: "sender@example.com".into(),
         to: vec![],
@@ -1362,8 +1378,10 @@ fn archived(
     MessageSummary {
         id: MessageId::new(),
         account_id,
-        mailbox_id,
-        provider_uid,
+        memberships: vec![Membership {
+            mailbox_id,
+            provider_uid,
+        }],
         from_name: None,
         from_email: "sender@example.com".into(),
         to: vec![],
@@ -1417,11 +1435,13 @@ fn seed(
     );
     let mut events = vec![received];
     if uid.is_none() {
-        events.push(DomainEvent::MessageMoved {
+        events.push(DomainEvent::MessageMailboxesChanged {
             message_id: msg.id,
-            from_mailbox_id: MailboxId::new(),
-            to_mailbox_id: mailbox.id,
-            provider_uid: None,
+            added: vec![Membership {
+                mailbox_id: mailbox.id,
+                provider_uid: None,
+            }],
+            removed: vec![MailboxId::new()],
         });
     }
     event_store
@@ -1453,7 +1473,7 @@ fn row_uid(projector: &MockProjector, id: MessageId) -> Option<Option<u32>> {
         .unwrap()
         .iter()
         .find(|m| m.id == id)
-        .map(|m| m.provider_uid.map(|u| u.value()))
+        .map(|m| m.memberships[0].provider_uid.map(|u| u.value()))
 }
 
 #[tokio::test]
@@ -1491,7 +1511,7 @@ async fn moved_message_gets_its_uid_back_instead_of_a_duplicate() {
 
 /// The read model can lag the log: a message it still lists here, waiting
 /// for a UID, may have been moved on. Re-attaching from that stale view
-/// appended `MessageMoved { from: Archive, to: Archive }` and pulled the
+/// appended a `MessageMailboxesChanged` re-adding Archive and pulled the
 /// message back.
 #[tokio::test]
 async fn reattach_does_not_pull_back_a_message_moved_on() {
@@ -1511,11 +1531,13 @@ async fn reattach_does_not_pull_back_a_message_moved_on() {
     let trash = MailboxId::new();
     event_store.events.lock().unwrap().push((
         moved.to_string(),
-        DomainEvent::MessageMoved {
+        DomainEvent::MessageMailboxesChanged {
             message_id: moved,
-            from_mailbox_id: archive.id,
-            to_mailbox_id: trash,
-            provider_uid: None,
+            added: vec![Membership {
+                mailbox_id: trash,
+                provider_uid: None,
+            }],
+            removed: vec![archive.id],
         },
     ));
     projector.mailboxes.lock().unwrap().push(archive.clone());
@@ -1529,7 +1551,7 @@ async fn reattach_does_not_pull_back_a_message_moved_on() {
         .unwrap();
 
     let pulled_back = event_store.appended_events().into_iter().any(|(id, e)| {
-        id == moved.to_string() && matches!(e, DomainEvent::MessageMoved { from_mailbox_id, to_mailbox_id, .. } if from_mailbox_id == archive.id && to_mailbox_id == archive.id)
+        id == moved.to_string() && matches!(e, DomainEvent::MessageMailboxesChanged { added, removed, .. } if removed.is_empty() && added.iter().any(|m| m.mailbox_id == archive.id))
     });
     assert!(!pulled_back);
 }
@@ -1602,7 +1624,7 @@ async fn an_interrupted_renumbering_resumes_instead_of_starting_over() {
         .await
         .unwrap();
     projector.save_checkpoint(&checkpoint_key, 2).await.unwrap();
-    projector.stored.lock().unwrap()[0].provider_uid = Some(ProviderUid::new(1));
+    projector.stored.lock().unwrap()[0].memberships[0].provider_uid = Some(ProviderUid::new(1));
 
     let mut provider = MockEmailProvider::new()
         .with_mailboxes(vec![archive])
@@ -1616,10 +1638,8 @@ async fn an_interrupted_renumbering_resumes_instead_of_starting_over() {
     let forgotten = event_store.appended_events().iter().any(|(_, e)| {
         matches!(
             e,
-            DomainEvent::MessageMoved {
-                provider_uid: None,
-                ..
-            }
+            DomainEvent::MessageMailboxesChanged { added, .. }
+                if added.iter().any(|m| m.provider_uid.is_none())
         )
     });
     assert!(!forgotten, "UIDs are not cleared all over again");
@@ -1831,7 +1851,7 @@ fn stored_uids(projector: &MockProjector) -> Vec<u32> {
         .lock()
         .unwrap()
         .iter()
-        .filter_map(|m| m.provider_uid.map(|u| u.value()))
+        .filter_map(|m| m.memberships[0].provider_uid.map(|u| u.value()))
         .collect();
     uids.sort_unstable();
     uids
@@ -2017,7 +2037,10 @@ async fn an_orphan_is_found_again_in_another_mailbox_under_its_own_id() {
         .cloned()
         .unwrap();
     assert_eq!(
-        (row.mailbox_id, row.provider_uid),
+        (
+            row.memberships[0].mailbox_id,
+            row.memberships[0].provider_uid
+        ),
         (archive.id, Some(ProviderUid::new(9)))
     );
 }

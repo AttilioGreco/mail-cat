@@ -11,7 +11,8 @@ mod projector;
 pub mod repository;
 
 /// Schema migrations, applied in order; `PRAGMA user_version` counts how many
-/// have run. Append only — a shipped migration is never edited.
+/// have run. Append only once the first release ships; until then the schema
+/// is edited in place and the data folder wiped.
 pub(crate) const MIGRATIONS: &[&str] = &[
     // 1: event log. The rowid is the global position.
     "CREATE TABLE events (
@@ -25,9 +26,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         payload         BLOB    NOT NULL,
         UNIQUE (aggregate_id, sequence)
     );",
-    // 2: read model (spec §4). No FK from mailboxes to accounts and no UNIQUE
-    // (mailbox, uid): catch-up replays events over rows in any later state,
-    // and either constraint would turn a harmless replay into a boot failure.
+    // 2: read model (spec §4). No FK from mailboxes to accounts or from
+    // memberships to mailboxes, and no UNIQUE (mailbox, uid): catch-up replays
+    // events over rows in any later state, and any of them would turn a
+    // harmless replay into a boot failure.
     "CREATE TABLE accounts (
         id            BLOB PRIMARY KEY,
         name          TEXT NOT NULL,
@@ -53,8 +55,6 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE TABLE messages (
         id              BLOB PRIMARY KEY,
         account_id      BLOB NOT NULL,
-        mailbox_id      BLOB,
-        provider_uid    INTEGER,
         rfc_message_id  TEXT,
         in_reply_to     TEXT,
         refs            TEXT NOT NULL,
@@ -73,12 +73,18 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         internal_date   INTEGER NOT NULL,
         body_state      TEXT NOT NULL DEFAULT 'pending'
     );
-    CREATE INDEX messages_mailbox_date ON messages(mailbox_id, received_at DESC);
-    CREATE INDEX messages_mailbox_uid ON messages(mailbox_id, provider_uid);
+    CREATE TABLE message_mailboxes (
+        message_id   BLOB NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        mailbox_id   BLOB NOT NULL,
+        provider_uid INTEGER,
+        received_at  INTEGER NOT NULL,
+        PRIMARY KEY (message_id, mailbox_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX message_mailboxes_date ON message_mailboxes(mailbox_id, received_at DESC, message_id);
+    CREATE INDEX message_mailboxes_uid ON message_mailboxes(mailbox_id, provider_uid);
     CREATE INDEX messages_thread ON messages(account_id, thread_id, received_at);
     CREATE INDEX messages_rfc ON messages(account_id, rfc_message_id);
     CREATE INDEX messages_backfill ON messages(account_id, received_at DESC) WHERE body_state = 'pending';
-    CREATE INDEX messages_unread ON messages(mailbox_id) WHERE seen = 0;
     CREATE TABLE message_bodies (
         message_id BLOB PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
         text_zstd  BLOB,
@@ -116,28 +122,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         position INTEGER NOT NULL
     );",
     // 3: per-address correspondence, ranking recipient autocomplete. Keyed by
-    // address, not contact: it outlives contact edits and merges. Seeded from
-    // the messages already stored so existing databases rank immediately.
+    // address, not contact: it outlives contact edits and merges.
     r#"CREATE TABLE address_usage (
         email            TEXT PRIMARY KEY,
         sent_count       INTEGER NOT NULL DEFAULT 0,
         last_sent_at     INTEGER,
         last_received_at INTEGER
-    ) WITHOUT ROWID;
-    INSERT INTO address_usage (email, sent_count, last_sent_at)
-        SELECT json_extract(a.value, '$.email'), COUNT(DISTINCT m.id), MAX(m.received_at)
-        FROM messages m
-        JOIN mailboxes b ON b.id = m.mailbox_id AND b.mailbox_type = '"Sent"',
-             json_each(m.addresses) k, json_each(k.value) a
-        WHERE k.key IN ('to', 'cc', 'bcc')
-        GROUP BY 1;
-    INSERT INTO address_usage (email, last_received_at)
-        SELECT m.from_email, MAX(m.received_at)
-        FROM messages m
-        JOIN mailboxes b ON b.id = m.mailbox_id AND b.mailbox_type NOT IN ('"Sent"', '"Drafts"')
-        WHERE m.from_email != ''
-        GROUP BY 1
-        ON CONFLICT(email) DO UPDATE SET last_received_at = excluded.last_received_at;"#,
+    ) WITHOUT ROWID;"#,
     // 4: the sent messages address_usage has counted, keyed by Message-ID
     // (row id when there is none). Outlives the rows: replaying a superseded
     // Sent placeholder's MessageSent re-inserts a deleted row, and the server
@@ -146,11 +137,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         account_id  BLOB NOT NULL,
         message_key TEXT NOT NULL,
         PRIMARY KEY (account_id, message_key)
-    ) WITHOUT ROWID;
-    INSERT OR IGNORE INTO sent_counted (account_id, message_key)
-        SELECT m.account_id, COALESCE(m.rfc_message_id, hex(m.id))
-        FROM messages m
-        JOIN mailboxes b ON b.id = m.mailbox_id AND b.mailbox_type = '"Sent"';"#,
+    ) WITHOUT ROWID;"#,
     // 5: bytes pulled from each account's server, for its daily download cap
     // (Gmail: 2.5 GB/day). Keyed by address: the provider meters before the
     // account id exists. Operational data, not event-sourced; rows older

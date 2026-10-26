@@ -190,7 +190,7 @@ pub struct MailboxDto {
 #[derive(Serialize)]
 pub struct MessageSummaryDto {
     pub id: String,
-    pub mailbox_id: String,
+    pub mailbox_ids: Vec<String>,
     pub subject: String,
     pub from_name: Option<String>,
     pub from_email: String,
@@ -291,7 +291,7 @@ fn mailbox_to_dto(m: Mailbox) -> MailboxDto {
 fn message_to_dto(m: MessageSummary) -> MessageSummaryDto {
     MessageSummaryDto {
         id: m.id,
-        mailbox_id: m.mailbox_id,
+        mailbox_ids: m.mailbox_ids,
         subject: m.subject,
         from_name: m.from_name,
         from_email: m.from_email,

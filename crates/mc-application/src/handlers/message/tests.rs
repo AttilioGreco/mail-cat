@@ -1,11 +1,20 @@
 use super::*;
 use mc_domain::{
-    AggregateType, DomainError, EventEnvelope, FetchRange, Mailbox, MailboxStatus,
+    AggregateType, DomainError, EventEnvelope, FetchRange, Mailbox, MailboxStatus, Membership,
     MessageEnvelopeSummary, ProviderNotification, ProviderUid,
 };
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::RwLock;
+
+/// The only mailbox a freshly received message is in.
+fn mailbox_of(message: &Message) -> MailboxId {
+    message.memberships[0].mailbox_id
+}
+
+fn uid_of(message: &Message) -> Option<ProviderUid> {
+    message.memberships[0].provider_uid
+}
 
 // ── Mock EventStore ────────────────────────────────────────────────
 
@@ -34,8 +43,8 @@ impl MockEventStore {
         let event = DomainEvent::MessageReceived {
             message_id: message.id,
             account_id: message.account_id,
-            mailbox_id: message.mailbox_id,
-            provider_uid: message.provider_uid.unwrap(),
+            mailbox_id: mailbox_of(message),
+            provider_uid: uid_of(message).unwrap(),
             message_rfc_id: message.message_rfc_id.clone(),
             in_reply_to: message.in_reply_to.clone(),
             references: message.references.clone(),
@@ -76,7 +85,6 @@ impl EventStore for MockEventStore {
                 DomainEvent::MessageFlagged {
                     // Only the flags matter to the aggregate.
                     message_id: MessageId::new(),
-                    mailbox_id: MailboxId::new(),
                     flags_added: vec![Flag::Flagged],
                     flags_removed: vec![],
                 },
@@ -568,7 +576,7 @@ fn make_test_message() -> Message {
 /// The INBOX `msg` sits in.
 fn inbox_of(msg: &Message) -> mc_domain::Mailbox {
     mc_domain::Mailbox {
-        id: msg.mailbox_id,
+        id: mailbox_of(msg),
         ..test_mailbox(msg.account_id, "INBOX", MailboxType::Inbox)
     }
 }
@@ -645,14 +653,14 @@ async fn handle_move_produces_event() {
         .unwrap();
 
     assert!(matches!(result, CommandResult::MessageMoved));
-    assert_eq!(bus.last_event_name().unwrap(), "MessageMoved");
+    assert_eq!(bus.last_event_name().unwrap(), "MessageMailboxesChanged");
 }
 
 #[tokio::test]
 async fn handle_delete_produces_event() {
     let msg = make_test_message();
     let msg_id = msg.id;
-    let mbx_id = msg.mailbox_id;
+    let mbx_id = mailbox_of(&msg);
 
     let es = Arc::new(MockEventStore::with_message(&msg));
     let registry = Arc::new(MockProviderRegistry::new(Arc::new(
@@ -675,10 +683,10 @@ async fn handle_delete_produces_event() {
 async fn handle_delete_moves_to_trash_when_trash_exists() {
     let msg = make_test_message();
     let msg_id = msg.id;
-    let mbx_id = msg.mailbox_id;
+    let mbx_id = mailbox_of(&msg);
 
     // A Trash folder exists for this account and the message is not in it,
-    // so a plain delete must move-to-Trash (MessageMoved), not expunge.
+    // so a plain delete must move-to-Trash (MessageMailboxesChanged), not expunge.
     let trash = mc_domain::Mailbox {
         id: MailboxId::new(),
         account_id: msg.account_id,
@@ -709,7 +717,7 @@ async fn handle_delete_moves_to_trash_when_trash_exists() {
         .unwrap();
 
     assert!(matches!(result, CommandResult::MessageDeleted));
-    assert_eq!(bus.last_event_name().unwrap(), "MessageMoved");
+    assert_eq!(bus.last_event_name().unwrap(), "MessageMailboxesChanged");
 }
 
 /// The bulk path must survive ids it cannot resolve: a search index that is
@@ -721,7 +729,7 @@ async fn handle_delete_many_counts_partial_success() {
     let msg_id = msg.id;
 
     let source = mc_domain::Mailbox {
-        id: msg.mailbox_id,
+        id: mailbox_of(&msg),
         account_id: msg.account_id,
         path: MailboxPath::inbox(),
         display_name: "INBOX".into(),
@@ -770,14 +778,14 @@ async fn handle_delete_many_counts_partial_success() {
         "expected 1 ok / 1 skipped, got {result:?}"
     );
     // Trash exists and the message wasn't in it, so a plain bulk delete moves.
-    assert_eq!(bus.last_event_name().unwrap(), "MessageMoved");
+    assert_eq!(bus.last_event_name().unwrap(), "MessageMailboxesChanged");
 }
 
 #[tokio::test]
 async fn handle_delete_permanent_expunges_even_with_trash() {
     let msg = make_test_message();
     let msg_id = msg.id;
-    let mbx_id = msg.mailbox_id;
+    let mbx_id = mailbox_of(&msg);
 
     let trash = mc_domain::Mailbox {
         id: MailboxId::new(),
@@ -1431,7 +1439,6 @@ async fn handle_fetch_body_survives_a_flag_change_during_the_download() {
             seq,
             DomainEvent::MessageFlagged {
                 message_id: msg_id,
-                mailbox_id: MailboxId::new(),
                 flags_added: vec![Flag::Seen],
                 flags_removed: vec![],
             },
@@ -1493,11 +1500,13 @@ fn uidless_in_archive() -> (Message, mc_domain::Mailbox, Arc<MockEventStore>) {
             msg.id.to_string(),
             AggregateType::Message,
             2,
-            DomainEvent::MessageMoved {
+            DomainEvent::MessageMailboxesChanged {
                 message_id: msg.id,
-                from_mailbox_id: msg.mailbox_id,
-                to_mailbox_id: archive.id,
-                provider_uid: None,
+                added: vec![Membership {
+                    mailbox_id: archive.id,
+                    provider_uid: None,
+                }],
+                removed: vec![mailbox_of(&msg)],
             },
         ));
     (msg, archive, es)
@@ -1525,7 +1534,7 @@ async fn a_message_without_uid_is_found_on_the_server_before_acting() {
     assert_eq!(*provider.fetched.read().unwrap(), [ProviderUid::new(55)]);
     let (stored, _) = handler.load_message(&msg.id).await.unwrap();
     assert_eq!(
-        stored.provider_uid,
+        uid_of(&stored),
         Some(ProviderUid::new(55)),
         "found UID is recorded"
     );
@@ -1556,8 +1565,10 @@ async fn marking_a_mailbox_read_reaches_messages_without_uid() {
     let unread = mc_domain::MessageSummary {
         id: msg.id,
         account_id: msg.account_id,
-        mailbox_id: archive.id,
-        provider_uid: None,
+        memberships: vec![Membership {
+            mailbox_id: archive.id,
+            provider_uid: None,
+        }],
         from_name: None,
         from_email: "sender@example.com".into(),
         to: vec![],
@@ -1692,7 +1703,7 @@ async fn handle_move_records_the_uid_the_provider_reports() {
     handler
         .handle_move(
             msg_id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             archive,
             MailboxPath::inbox(),
             MailboxPath::parse("Archive", '/').unwrap(),
@@ -1703,8 +1714,8 @@ async fn handle_move_records_the_uid_the_provider_reports() {
     // The server moved it before anything changed here; the inbox UID
     // would address some other message in Archive.
     let (moved, _) = handler.load_message(&msg_id).await.unwrap();
-    assert_eq!(moved.mailbox_id, archive);
-    assert_eq!(moved.provider_uid, Some(ProviderUid::new(900)));
+    assert_eq!(mailbox_of(&moved), archive);
+    assert_eq!(uid_of(&moved), Some(ProviderUid::new(900)));
 }
 
 /// A move the server refuses changes nothing locally.
@@ -1724,7 +1735,7 @@ async fn a_refused_move_changes_nothing() {
     let result = handler
         .handle_move(
             msg.id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             MailboxId::new(),
             MailboxPath::inbox(),
             MailboxPath::parse("Archive", '/').unwrap(),
@@ -1734,8 +1745,8 @@ async fn a_refused_move_changes_nothing() {
     assert!(result.is_err());
     let (stored, _) = handler.load_message(&msg.id).await.unwrap();
     assert_eq!(
-        (stored.mailbox_id, stored.provider_uid),
-        (msg.mailbox_id, msg.provider_uid)
+        (mailbox_of(&stored), uid_of(&stored)),
+        (mailbox_of(&msg), uid_of(&msg))
     );
 }
 
@@ -1760,7 +1771,7 @@ impl Moving {
 
     async fn location(&self, id: MessageId) -> (MailboxId, Option<ProviderUid>) {
         let (stored, _) = self.handler.load_message(&id).await.unwrap();
-        (stored.mailbox_id, stored.provider_uid)
+        (mailbox_of(&stored), uid_of(&stored))
     }
 }
 
@@ -1809,7 +1820,7 @@ async fn a_delete_queued_behind_a_move_follows_it_to_trash() {
     m.handler
         .handle_move(
             msg.id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             archive.id,
             MailboxPath::inbox(),
             archive.path.clone(),
@@ -1818,7 +1829,7 @@ async fn a_delete_queued_behind_a_move_follows_it_to_trash() {
         .unwrap();
     let result = m
         .handler
-        .handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), false)
+        .handle_delete(msg.id, mailbox_of(&msg), MailboxPath::inbox(), false)
         .await
         .unwrap();
 
@@ -1836,7 +1847,7 @@ async fn a_delete_queued_behind_a_move_follows_it_to_trash() {
     m.handler
         .handle_move(
             msg.id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             m.trash.id,
             MailboxPath::inbox(),
             m.trash.path.clone(),
@@ -1875,7 +1886,7 @@ async fn a_move_confirmed_without_evidence_records_no_destination() {
     m.handler
         .handle_move(
             msg.id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             archive.id,
             MailboxPath::inbox(),
             archive.path.clone(),
@@ -1913,7 +1924,7 @@ async fn archiving_a_message_another_client_already_moved_leaves_one_row() {
     m.handler
         .handle_move(
             msg.id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             archive.id,
             MailboxPath::inbox(),
             archive.path.clone(),
@@ -1952,7 +1963,7 @@ async fn a_move_onto_a_uid_another_row_holds_leaves_that_row_alone() {
     m.handler
         .handle_move(
             msg.id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             archive.id,
             MailboxPath::inbox(),
             archive.path.clone(),
@@ -1976,12 +1987,12 @@ async fn the_same_delete_sent_twice_is_done_once() {
     let m = moving(&msg, MockEmailProvider::new());
 
     m.handler
-        .handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), true)
+        .handle_delete(msg.id, mailbox_of(&msg), MailboxPath::inbox(), true)
         .await
         .unwrap();
     let again = m
         .handler
-        .handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), true)
+        .handle_delete(msg.id, mailbox_of(&msg), MailboxPath::inbox(), true)
         .await;
 
     assert!(
@@ -1998,12 +2009,13 @@ async fn a_double_delete_leaves_the_message_in_trash() {
     let msg = make_test_message();
     let m = moving(&msg, MockEmailProvider::moving_to(900));
     let turn = m.handler.turn(msg.account_id).await;
+    let (msg_id, inbox) = (msg.id, mailbox_of(&msg));
     let deletes: Vec<_> = (0..2)
         .map(|_| {
             let handler = m.handler.clone();
             tokio::spawn(async move {
                 handler
-                    .handle_delete(msg.id, msg.mailbox_id, MailboxPath::inbox(), false)
+                    .handle_delete(msg_id, inbox, MailboxPath::inbox(), false)
                     .await
             })
         })
@@ -2068,7 +2080,7 @@ async fn a_timeout_after_a_move_resyncs_both_mailboxes() {
         .handler
         .handle_move(
             msg.id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             archive.id,
             MailboxPath::inbox(),
             archive.path.clone(),
@@ -2078,7 +2090,7 @@ async fn a_timeout_after_a_move_resyncs_both_mailboxes() {
     assert!(result.is_err());
     assert_eq!(
         m.location(msg.id).await,
-        (msg.mailbox_id, Some(ProviderUid::new(42)))
+        (mailbox_of(&msg), Some(ProviderUid::new(42)))
     );
     assert_eq!(m.resync_requests(), [MailboxPath::inbox(), archive.path]);
 }
@@ -2096,7 +2108,7 @@ async fn recording_a_done_move_retries_past_a_concurrent_append() {
     m.handler
         .handle_move(
             msg.id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             archive.id,
             MailboxPath::inbox(),
             archive.path.clone(),
@@ -2106,7 +2118,7 @@ async fn recording_a_done_move_retries_past_a_concurrent_append() {
 
     let (stored, _) = m.handler.load_message(&msg.id).await.unwrap();
     assert_eq!(
-        (stored.mailbox_id, stored.provider_uid),
+        (mailbox_of(&stored), uid_of(&stored)),
         (archive.id, Some(ProviderUid::new(900)))
     );
     assert!(
@@ -2123,7 +2135,7 @@ async fn recording_a_done_move_retries_past_a_concurrent_append() {
     m.handler
         .handle_move(
             msg.id,
-            msg.mailbox_id,
+            mailbox_of(&msg),
             archive.id,
             MailboxPath::inbox(),
             archive.path.clone(),
@@ -2173,7 +2185,7 @@ async fn a_refused_chunk_keeps_the_chunks_before_it() {
     );
     let mut in_archive = 0;
     for id in &ids {
-        if handler.load_message(id).await.unwrap().0.mailbox_id == archive.id {
+        if mailbox_of(&handler.load_message(id).await.unwrap().0) == archive.id {
             in_archive += 1;
         }
     }
@@ -2188,8 +2200,10 @@ async fn marking_a_mailbox_read_continues_past_a_failing_message() {
     let summary = |id| mc_domain::MessageSummary {
         id,
         account_id: msg.account_id,
-        mailbox_id: msg.mailbox_id,
-        provider_uid: None,
+        memberships: vec![Membership {
+            mailbox_id: mailbox_of(&msg),
+            provider_uid: None,
+        }],
         from_name: None,
         from_email: "sender@example.com".into(),
         to: vec![],
@@ -2213,7 +2227,7 @@ async fn marking_a_mailbox_read_continues_past_a_failing_message() {
     );
 
     let result = handler
-        .handle_mark_mailbox_read(msg.mailbox_id, MailboxPath::inbox())
+        .handle_mark_mailbox_read(mailbox_of(&msg), MailboxPath::inbox())
         .await
         .unwrap();
     drain_spawned().await;
@@ -2244,11 +2258,12 @@ async fn a_flag_store_follows_a_move_queued_ahead_of_it() {
 
     let mover = handler.clone();
     let archive_path = archive.path.clone();
+    let (msg_id, inbox) = (msg.id, mailbox_of(&msg));
     let moved = tokio::spawn(async move {
         mover
             .handle_move(
-                msg.id,
-                msg.mailbox_id,
+                msg_id,
+                inbox,
                 archive.id,
                 MailboxPath::inbox(),
                 archive_path,

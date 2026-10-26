@@ -38,7 +38,6 @@ fn event_aggregate_type_classification() {
 fn event_name() {
     let event = DomainEvent::MessageFlagged {
         message_id: MessageId::new(),
-        mailbox_id: MailboxId::new(),
         flags_added: vec![Flag::Seen],
         flags_removed: vec![],
     };

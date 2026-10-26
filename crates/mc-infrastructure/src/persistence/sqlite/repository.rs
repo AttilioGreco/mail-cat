@@ -18,7 +18,7 @@ use mc_domain::{
     AccountWriteRepository, Address, AggregateType, BackfillEntry, BodyBackfillQueue, Contact,
     ContactId, ContactReadRepository, ContactSummary, ContactWriteRepository, Conversation,
     ConversationReadRepository, ConversationSummary, DomainError, DomainEvent, EmailAddress,
-    Envelope, EventEnvelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Message,
+    Envelope, EventEnvelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, Membership, Message,
     MessageBodyStore, MessageId, MessageReadRepository, MessageSummary, ProjectionCheckpoint,
     ReadModelProjector,
     ProviderUid, SuggestScope, Suggestion, ThreadId,
@@ -273,12 +273,24 @@ pub(super) fn save_checkpoint_in(
 
 // ── Row mapping ─────────────────────────────────────────────────────────
 
-const MESSAGE_COLUMNS: &str = "m.id, m.account_id, m.mailbox_id, m.provider_uid, \
+/// The last column carries the message's memberships as JSON
+/// `[[hex mailbox id, uid or null], ...]`: blobs can't travel in JSON, so ids
+/// are hex.
+const MESSAGE_COLUMNS: &str = "m.id, m.account_id, \
      m.rfc_message_id, m.in_reply_to, m.refs, m.subject, m.addresses, m.flags, m.size_bytes, \
-     m.has_attachments, m.attachments, m.sent_at, m.received_at, m.internal_date";
+     m.has_attachments, m.attachments, m.sent_at, m.received_at, m.internal_date, \
+     (SELECT json_group_array(json_array(hex(x.mailbox_id), x.provider_uid)) \
+      FROM message_mailboxes x WHERE x.message_id = m.id)";
 
 fn select_messages(rest: &str) -> String {
     format!("SELECT {MESSAGE_COLUMNS} FROM messages m {rest}")
+}
+
+/// The messages in a mailbox: `?1` is the mailbox, ordered by `message_mailboxes_date`.
+fn select_mailbox_messages(rest: &str) -> String {
+    format!(
+        "SELECT {MESSAGE_COLUMNS} FROM message_mailboxes mm JOIN messages m ON m.id = mm.message_id {rest}"
+    )
 }
 
 fn select_messages_with_body(rest: &str) -> String {
@@ -289,43 +301,55 @@ fn select_messages_with_body(rest: &str) -> String {
 }
 
 fn message_from_row(row: &Row) -> rusqlite::Result<Message> {
-    let addresses: Addresses = json_col(row, 8)?;
-    let mailbox_id: Option<Uuid> = row.get(2)?;
+    let addresses: Addresses = json_col(row, 6)?;
     Ok(Message {
         id: MessageId::from_uuid(row.get(0)?),
         account_id: AccountId::from_uuid(row.get(1)?),
-        // Drafts have no mailbox (NULL); the domain type still needs one.
-        mailbox_id: MailboxId::from_uuid(mailbox_id.unwrap_or_default()),
-        provider_uid: row.get::<_, Option<u32>>(3)?.map(ProviderUid::new),
-        message_rfc_id: row.get(4)?,
-        in_reply_to: row.get(5)?,
-        references: json_col(row, 6)?,
+        memberships: memberships_col(row, 14)?,
+        message_rfc_id: row.get(2)?,
+        in_reply_to: row.get(3)?,
+        references: json_col(row, 4)?,
         envelope: Envelope {
             from: addresses.from,
             to: addresses.to,
             cc: addresses.cc,
             bcc: addresses.bcc,
             reply_to: addresses.reply_to,
-            subject: row.get(7)?,
-            date: time_col(row, 13)?,
+            subject: row.get(5)?,
+            date: time_col(row, 11)?,
         },
-        flags: json_col(row, 9)?,
-        size_bytes: row.get::<_, i64>(10)? as u64,
-        has_attachments: row.get(11)?,
-        attachments: json_col(row, 12)?,
+        flags: json_col(row, 7)?,
+        size_bytes: row.get::<_, i64>(8)? as u64,
+        has_attachments: row.get(9)?,
+        attachments: json_col(row, 10)?,
         body_text: None,
         body_html: None,
         body_truncated: false,
-        received_at: time_col(row, 14)?,
-        internal_date: time_col(row, 15)?,
+        received_at: time_col(row, 12)?,
+        internal_date: time_col(row, 13)?,
     })
+}
+
+/// Sorted by mailbox so the same state always reads the same, whatever order
+/// the memberships were added in.
+fn memberships_col(row: &Row, idx: usize) -> rusqlite::Result<Vec<Membership>> {
+    let rows: Vec<(String, Option<u32>)> = json_col(row, idx)?;
+    let mut memberships = rows
+        .into_iter()
+        .map(|(mailbox, uid)| {
+            let mailbox = Uuid::parse_str(&mailbox).map_err(|e| conversion_err(idx, Type::Text, e))?;
+            Ok(Membership { mailbox_id: MailboxId::from_uuid(mailbox), provider_uid: uid.map(ProviderUid::new) })
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    memberships.sort_by_key(|m| *m.mailbox_id.as_uuid());
+    Ok(memberships)
 }
 
 fn message_with_body(row: &Row) -> rusqlite::Result<Message> {
     let mut message = message_from_row(row)?;
-    message.body_text = body_col(row, 16)?;
-    message.body_html = body_col(row, 17)?;
-    message.body_truncated = row.get::<_, Option<bool>>(18)?.unwrap_or_default();
+    message.body_text = body_col(row, 15)?;
+    message.body_html = body_col(row, 16)?;
+    message.body_truncated = row.get::<_, Option<bool>>(17)?.unwrap_or_default();
     Ok(message)
 }
 
@@ -335,8 +359,7 @@ fn summary_of(m: Message) -> MessageSummary {
     MessageSummary {
         id: m.id,
         account_id: m.account_id,
-        mailbox_id: m.mailbox_id,
-        provider_uid: m.provider_uid,
+        memberships: m.memberships,
         from_email: sender.as_ref().map(|a| a.email.to_string()).unwrap_or_default(),
         from_name: sender.and_then(|a| a.name),
         to: to.into_iter().map(|a| a.email.to_string()).collect(),
@@ -406,12 +429,13 @@ fn conversation_from_row(row: &Row) -> rusqlite::Result<ConversationSummary> {
 }
 
 /// Per-mailbox threads are computed, not stored (spec §4): stats count only
-/// this mailbox's copies. SQLite fills the bare columns from the row that
+/// this mailbox's messages. SQLite fills the bare columns from the row that
 /// holds MAX(received_at).
-const MAILBOX_CONVERSATIONS: &str = "SELECT thread_id, account_id, subject, COUNT(*), \
-         SUM(seen = 0), MAX(received_at), from_name, from_email, id \
-     FROM messages WHERE account_id = ?1 AND mailbox_id = ?2 AND thread_id IS NOT NULL \
-     GROUP BY thread_id ORDER BY MAX(received_at) DESC, thread_id LIMIT ?3 OFFSET ?4";
+const MAILBOX_CONVERSATIONS: &str = "SELECT m.thread_id, m.account_id, m.subject, COUNT(*), \
+         SUM(m.seen = 0), MAX(m.received_at), m.from_name, m.from_email, m.id \
+     FROM message_mailboxes mm JOIN messages m ON m.id = mm.message_id \
+     WHERE m.account_id = ?1 AND mm.mailbox_id = ?2 AND m.thread_id IS NOT NULL \
+     GROUP BY m.thread_id ORDER BY MAX(m.received_at) DESC, m.thread_id LIMIT ?3 OFFSET ?4";
 
 fn mailbox_conversation_from_row(row: &Row) -> rusqlite::Result<ConversationSummary> {
     let subject: String = row.get(2)?;
@@ -631,8 +655,9 @@ impl MessageBodyStore for SqliteRepository {
 
 /// Messages the backfill downloads: Trash and Spam only when opened, and
 /// none without a UID to fetch it by (a renumbered mailbox mid-sync).
-const BACKFILLABLE: &str = "FROM messages m LEFT JOIN mailboxes b ON b.id = m.mailbox_id \
-     WHERE m.account_id = ?1 AND m.body_state = 'pending' AND m.provider_uid IS NOT NULL \
+const BACKFILLABLE: &str = "FROM message_mailboxes mm JOIN messages m ON m.id = mm.message_id \
+     LEFT JOIN mailboxes b ON b.id = mm.mailbox_id \
+     WHERE m.account_id = ?1 AND m.body_state = 'pending' AND mm.provider_uid IS NOT NULL \
      AND IFNULL(b.mailbox_type, '') NOT IN ('\"Trash\"', '\"Spam\"')";
 
 #[async_trait]
@@ -648,10 +673,10 @@ impl BodyBackfillQueue for SqliteRepository {
                 // ponytail: sorts every pending row per call (~100k on a big
                 // Gmail account, well under a batch's fetch); a class column
                 // in the backfill index if it ever shows.
-                query_all(
+                let mut entries = query_all(
                     conn,
                     &format!(
-                        "SELECT m.id, m.mailbox_id, m.provider_uid, m.rfc_message_id, \
+                        "SELECT m.id, mm.mailbox_id, mm.provider_uid, m.rfc_message_id, \
                          m.size_bytes, m.from_email {BACKFILLABLE} \
                          ORDER BY CASE b.mailbox_type WHEN '\"Inbox\"' THEN 0 \
                              WHEN '\"All\"' THEN 2 WHEN '\"Important\"' THEN 2 ELSE 1 END, \
@@ -668,7 +693,12 @@ impl BodyBackfillQueue for SqliteRepository {
                             from_email: r.get(5)?,
                         })
                     },
-                )
+                )?;
+                // One download serves a message in several mailboxes: keep
+                // its best-ranked membership.
+                let mut seen = HashSet::new();
+                entries.retain(|e| seen.insert(e.message_id));
+                Ok(entries)
             })
             .await
     }
@@ -677,7 +707,7 @@ impl BodyBackfillQueue for SqliteRepository {
         let account = *account_id.as_uuid();
         self.db
             .read(move |conn| {
-                count_rows(conn, &format!("SELECT COUNT(*) {BACKFILLABLE}"), [account])
+                count_rows(conn, &format!("SELECT COUNT(DISTINCT m.id) {BACKFILLABLE}"), [account])
                 .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
             })
             .await
@@ -774,9 +804,9 @@ impl AccountReadRepository for SqliteRepository {
                     .query_row(
                         &format!("SELECT \
                            (SELECT COALESCE(SUM(total_messages), 0) FROM mailboxes WHERE account_id = ?1), \
-                           (SELECT COUNT(*) FROM messages WHERE mailbox_id IN \
+                           (SELECT COUNT(*) FROM message_mailboxes WHERE mailbox_id IN \
                                (SELECT id FROM mailboxes WHERE account_id = ?1)), \
-                           (SELECT COUNT(*) {BACKFILLABLE})"),
+                           (SELECT COUNT(DISTINCT m.id) {BACKFILLABLE})"),
                         [id],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )
@@ -838,12 +868,15 @@ impl MessageReadRepository for SqliteRepository {
         let (limit, offset) = page_bounds(&pagination);
         self.db
             .read(move |conn| {
-                let total =
-                    count_rows(conn, "SELECT COUNT(*) FROM messages WHERE mailbox_id = ?1", [mailbox])?;
+                let total = count_rows(
+                    conn,
+                    "SELECT COUNT(*) FROM message_mailboxes WHERE mailbox_id = ?1",
+                    [mailbox],
+                )?;
                 let items = query_all(
                     conn,
-                    &select_messages(
-                        "WHERE m.mailbox_id = ?1 ORDER BY m.received_at DESC, m.id LIMIT ?2 OFFSET ?3",
+                    &select_mailbox_messages(
+                        "WHERE mm.mailbox_id = ?1 ORDER BY mm.received_at DESC, mm.message_id LIMIT ?2 OFFSET ?3",
                     ),
                     params![mailbox, limit, offset],
                     summary_from_row,
@@ -891,8 +924,9 @@ impl MessageReadRepository for SqliteRepository {
             .read(move |conn| {
                 query_one(
                     conn,
-                    &select_messages(
-                        "WHERE m.mailbox_id = ?1 AND m.provider_uid = ?2 ORDER BY m.received_at DESC, m.id DESC LIMIT 1",
+                    &select_mailbox_messages(
+                        "WHERE mm.mailbox_id = ?1 AND mm.provider_uid = ?2 \
+                         ORDER BY mm.received_at DESC, mm.message_id DESC LIMIT 1",
                     ),
                     params![mailbox, provider_uid],
                     summary_from_row,
@@ -916,7 +950,7 @@ impl MessageReadRepository for SqliteRepository {
             .read(move |conn| {
                 query_all(
                     conn,
-                    "SELECT DISTINCT provider_uid FROM messages \
+                    "SELECT DISTINCT provider_uid FROM message_mailboxes \
                      WHERE mailbox_id = ?1 AND provider_uid IN (SELECT value FROM json_each(?2))",
                     params![mailbox, uids],
                     |r| r.get::<_, u32>(0),
@@ -933,7 +967,7 @@ impl MessageReadRepository for SqliteRepository {
             .read(move |conn| {
                 query_all(
                     conn,
-                    "SELECT id FROM messages WHERE mailbox_id = ?1 AND provider_uid IS NULL",
+                    "SELECT message_id FROM message_mailboxes WHERE mailbox_id = ?1 AND provider_uid IS NULL",
                     [mailbox],
                     |r| r.get::<_, Uuid>(0),
                 )
@@ -969,7 +1003,9 @@ impl MessageReadRepository for SqliteRepository {
             .read(move |conn| {
                 query_all(
                     conn,
-                    &select_messages("WHERE m.mailbox_id = ?1 AND m.seen = 0 ORDER BY m.received_at DESC, m.id"),
+                    &select_mailbox_messages(
+                        "WHERE mm.mailbox_id = ?1 AND m.seen = 0 ORDER BY mm.received_at DESC, mm.message_id",
+                    ),
                     [mailbox],
                     summary_from_row,
                 )
@@ -1076,8 +1112,9 @@ impl ConversationReadRepository for SqliteRepository {
                     Some(mailbox) => (
                         count_rows(
                             conn,
-                            "SELECT COUNT(DISTINCT thread_id) FROM messages \
-                             WHERE account_id = ?1 AND mailbox_id = ?2",
+                            "SELECT COUNT(DISTINCT m.thread_id) FROM message_mailboxes mm \
+                             JOIN messages m ON m.id = mm.message_id \
+                             WHERE m.account_id = ?1 AND mm.mailbox_id = ?2",
                             params![account, mailbox],
                         )?,
                         query_all(

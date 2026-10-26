@@ -297,9 +297,9 @@ async fn move_msg(
     let updated = client.move_message(&message_id, &to_mailbox_id).await?;
 
     println!(
-        "  {} Message moved (new mailbox_id={})",
+        "  {} Message moved (mailbox_ids={})",
         "✓".green(),
-        updated.mailbox_id
+        updated.mailbox_ids.join(",")
     );
     Ok(())
 }

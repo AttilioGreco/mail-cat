@@ -35,7 +35,7 @@ fn receive_message_produces_event() {
     );
 
     assert_eq!(msg.envelope.subject, "Test subject");
-    assert_eq!(msg.provider_uid, Some(ProviderUid::new(42)));
+    assert_eq!(msg.memberships[0].provider_uid, Some(ProviderUid::new(42)));
     assert!(!msg.is_read());
     assert_eq!(event.event_name(), "MessageReceived");
 }
@@ -122,15 +122,11 @@ fn toggle_flagged() {
     assert!(!msg.is_flagged());
 }
 
-#[test]
-fn move_message() {
-    let original_mailbox = MailboxId::new();
-    let target_mailbox = MailboxId::new();
-
-    let (mut msg, _) = Message::receive(
+fn received_in(mailbox_id: MailboxId, uid: u32) -> Message {
+    Message::receive(
         AccountId::new(),
-        original_mailbox,
-        ProviderUid::new(1),
+        mailbox_id,
+        ProviderUid::new(uid),
         None,
         None,
         vec![],
@@ -139,14 +135,35 @@ fn move_message() {
         512,
         false,
         Utc::now(),
+    )
+    .0
+}
+
+fn uid_in(msg: &Message, mailbox_id: MailboxId) -> Option<ProviderUid> {
+    msg.membership(mailbox_id).and_then(|m| m.provider_uid)
+}
+
+#[test]
+fn move_message() {
+    let original_mailbox = MailboxId::new();
+    let target_mailbox = MailboxId::new();
+    let mut msg = received_in(original_mailbox, 1);
+
+    let event = msg.move_to(original_mailbox, target_mailbox, None).unwrap();
+
+    assert_eq!(event.event_name(), "MessageMailboxesChanged");
+    assert_eq!(
+        msg.memberships,
+        [Membership {
+            mailbox_id: target_mailbox,
+            provider_uid: None
+        }]
     );
-
-    let event = msg.move_to(target_mailbox, None);
-
-    assert_eq!(msg.mailbox_id, target_mailbox);
-    assert_eq!(event.event_name(), "MessageMoved");
-    // UIDs are per-mailbox: the source UID must not follow the message.
-    assert_eq!(msg.provider_uid, None);
+    assert!(
+        msg.move_to(original_mailbox, target_mailbox, None)
+            .is_none(),
+        "no longer in the source"
+    );
 
     assert!(
         msg.attach_uid(original_mailbox, ProviderUid::new(7))
@@ -181,15 +198,20 @@ fn move_message() {
         attached,
     ])
     .unwrap();
-    assert_eq!(rehydrated.mailbox_id, target_mailbox);
-    assert_eq!(rehydrated.provider_uid, Some(ProviderUid::new(42)));
+    assert_eq!(
+        rehydrated.memberships,
+        [Membership {
+            mailbox_id: target_mailbox,
+            provider_uid: Some(ProviderUid::new(42))
+        }]
+    );
 
     assert!(
         msg.forget_uid(original_mailbox).is_none(),
         "not in that mailbox"
     );
     assert!(msg.forget_uid(target_mailbox).is_some());
-    assert_eq!(msg.provider_uid, None);
+    assert_eq!(uid_in(&msg, target_mailbox), None);
     assert!(
         msg.forget_uid(target_mailbox).is_none(),
         "nothing left to forget"
@@ -197,45 +219,61 @@ fn move_message() {
 }
 
 #[test]
-fn move_event_stored_before_the_uid_field_still_reads() {
-    let event: DomainEvent = serde_json::from_value(serde_json::json!({
-        "MessageMoved": {
-            "message_id": MessageId::new(),
-            "from_mailbox_id": MailboxId::new(),
-            "to_mailbox_id": MailboxId::new(),
-        }
-    }))
-    .unwrap();
-    assert!(matches!(
-        event,
-        DomainEvent::MessageMoved {
-            provider_uid: None,
-            ..
-        }
-    ));
+fn a_message_is_in_many_mailboxes_and_deleted_with_the_last() {
+    let (inbox, label) = (MailboxId::new(), MailboxId::new());
+    let mut msg = received_in(inbox, 1);
+
+    let added = msg.add_to(label, Some(ProviderUid::new(9))).unwrap();
+    assert!(msg.add_to(label, None).is_none(), "already there");
+    assert_eq!(msg.memberships.len(), 2);
+
+    let removed = msg.remove_from(inbox).unwrap();
+    assert_eq!(removed.event_name(), "MessageMailboxesChanged");
+    assert!(msg.remove_from(inbox).is_none(), "not there any more");
+    assert_eq!(uid_in(&msg, label), Some(ProviderUid::new(9)));
+    assert!(!msg.is_deleted());
+
+    let gone = msg.remove_from(label).unwrap();
+    assert!(
+        matches!(&gone, DomainEvent::MessageDeleted { mailbox_ids, .. } if mailbox_ids == &[label])
+    );
+    assert!(msg.is_deleted());
+
+    let mut replayed = received_in(inbox, 1);
+    for event in [added, removed, gone] {
+        replayed.apply(&event);
+    }
+    assert!(replayed.is_deleted());
+}
+
+#[test]
+fn an_added_membership_for_a_mailbox_already_held_only_replaces_its_uid() {
+    let inbox = MailboxId::new();
+    let mut msg = received_in(inbox, 1);
+    msg.apply(&DomainEvent::MessageMailboxesChanged {
+        message_id: msg.id,
+        added: vec![Membership {
+            mailbox_id: inbox,
+            provider_uid: Some(ProviderUid::new(5)),
+        }],
+        removed: vec![],
+    });
+    assert_eq!(msg.memberships.len(), 1);
+    assert_eq!(uid_in(&msg, inbox), Some(ProviderUid::new(5)));
 }
 
 #[test]
 fn delete_message() {
-    let (msg, _) = Message::receive(
-        AccountId::new(),
-        MailboxId::new(),
-        ProviderUid::new(1),
-        None,
-        None,
-        vec![],
-        test_envelope(),
-        vec![],
-        512,
-        false,
-        Utc::now(),
+    let (a, b) = (MailboxId::new(), MailboxId::new());
+    let mut msg = received_in(a, 1);
+    msg.add_to(b, None);
+
+    let event = msg.delete();
+
+    assert!(
+        matches!(&event, DomainEvent::MessageDeleted { mailbox_ids, .. } if mailbox_ids == &[a, b])
     );
-
-    let soft_delete = msg.delete(false);
-    assert_eq!(soft_delete.event_name(), "MessageDeleted");
-
-    let hard_delete = msg.delete(true);
-    assert_eq!(hard_delete.event_name(), "MessageDeleted");
+    assert!(msg.is_deleted());
 }
 
 #[test]
@@ -293,15 +331,16 @@ fn rehydrate_message_from_events() {
         },
         DomainEvent::MessageFlagged {
             message_id: msg_id,
-            mailbox_id,
             flags_added: vec![Flag::Seen, Flag::Flagged],
             flags_removed: vec![],
         },
-        DomainEvent::MessageMoved {
+        DomainEvent::MessageMailboxesChanged {
             message_id: msg_id,
-            from_mailbox_id: mailbox_id,
-            to_mailbox_id: target_mailbox,
-            provider_uid: None,
+            added: vec![Membership {
+                mailbox_id: target_mailbox,
+                provider_uid: None,
+            }],
+            removed: vec![mailbox_id],
         },
     ];
 
@@ -310,7 +349,13 @@ fn rehydrate_message_from_events() {
     assert!(message.body_text.is_none());
     assert!(message.is_read());
     assert!(message.is_flagged());
-    assert_eq!(message.mailbox_id, target_mailbox);
+    assert_eq!(
+        message.memberships,
+        [Membership {
+            mailbox_id: target_mailbox,
+            provider_uid: None
+        }]
+    );
 }
 
 #[test]
