@@ -8,10 +8,10 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use mc_client::{
-    Account, AuthStatus, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit, ConversationSummary,
-    ImapAccountParams, MailCatClient, Mailbox, MailboxNotificationKind, MessageBody, MessageFlag,
-    MessageSummary, OAuthLoginEvent, OAuthProvider, SearchHit, Suggestion, SyncPhase,
-    SyncProgress, ThreadMessage,
+    Account, AuthStatus, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit,
+    ConversationSummary, ImapAccountParams, MailCatClient, Mailbox, MailboxNotificationKind,
+    MessageBody, MessageFlag, MessageSummary, OAuthLoginEvent, OAuthProvider, SearchHit,
+    Suggestion, SyncPhase, SyncProgress, ThreadMessage,
 };
 
 /// Tauri managed state — single shared client instance.
@@ -1224,7 +1224,10 @@ pub async fn prepare_compose(
 
 /// Returns the id of the sent message.
 #[tauri::command]
-pub async fn send_compose(input: ComposeInputDto, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn send_compose(
+    input: ComposeInputDto,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let input = input.into_client()?;
     let client = get_or_connect(&state).await?;
     client.send_compose(input).await.map_err(compose_error)
@@ -1232,7 +1235,10 @@ pub async fn send_compose(input: ComposeInputDto, state: State<'_, AppState>) ->
 
 /// Returns the id of the stored draft (pass it back as `draftId` next time).
 #[tauri::command]
-pub async fn save_draft(input: ComposeInputDto, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn save_draft(
+    input: ComposeInputDto,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let input = input.into_client()?;
     let client = get_or_connect(&state).await?;
     client.save_draft(input).await.map_err(compose_error)
