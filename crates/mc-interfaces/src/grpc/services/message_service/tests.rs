@@ -1,0 +1,431 @@
+use super::*;
+
+use std::sync::Arc;
+use tokio::time::{Duration, timeout};
+use tokio_stream::StreamExt as _;
+use tonic::Request;
+
+use mc_application::{
+    ApplicationError, EventPublisher, InProcessEventBus,
+    bus::{CommandBus, QueryBus},
+    commands::{Command, CommandResult},
+    queries::{Query, QueryResult},
+};
+use mc_domain::{
+    AccountId, AggregateType, DomainEvent, EventEnvelope, Flag, Mailbox, MailboxId, MailboxPath,
+    MailboxType, MessageId, ProviderUid,
+};
+
+// ── Minimal mock buses ────────────────────────────────────────────────────
+
+struct NopCommandBus;
+
+#[async_trait::async_trait]
+impl CommandBus for NopCommandBus {
+    async fn dispatch(&self, _: Command) -> Result<CommandResult, ApplicationError> {
+        unreachable!()
+    }
+}
+
+struct SingleMailboxQueryBus(Mailbox);
+
+#[async_trait::async_trait]
+impl QueryBus for SingleMailboxQueryBus {
+    async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError> {
+        match query {
+            Query::GetMailbox { .. } => Ok(QueryResult::Mailbox(Some(self.0.clone()))),
+            _ => Err(ApplicationError::Internal("unexpected".into())),
+        }
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+fn fake_mailbox(account_id: AccountId, mailbox_id: MailboxId) -> Mailbox {
+    Mailbox {
+        id: mailbox_id,
+        account_id,
+        path: MailboxPath::inbox(),
+        display_name: "INBOX".to_string(),
+        mailbox_type: MailboxType::Inbox,
+        flags: vec![],
+        total_messages: 0,
+        unread_messages: 0,
+        uid_validity: None,
+        uid_next: None,
+    }
+}
+
+fn make_svc(
+    bus: Arc<InProcessEventBus>,
+    mailbox: Mailbox,
+) -> MessageServiceImpl<NopCommandBus, SingleMailboxQueryBus> {
+    MessageServiceImpl::new(
+        Arc::new(NopCommandBus),
+        Arc::new(SingleMailboxQueryBus(mailbox)),
+        bus,
+    )
+}
+
+fn envelope(event: DomainEvent) -> EventEnvelope {
+    EventEnvelope::new("test".into(), AggregateType::Message, 1, event)
+}
+
+/// Answers with one message and its mailbox; counts body fetches.
+struct OneMessage {
+    message: mc_domain::Message,
+    mailbox: Mailbox,
+    fetches: std::sync::Mutex<u32>,
+}
+
+#[async_trait::async_trait]
+impl QueryBus for OneMessage {
+    async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError> {
+        match query {
+            Query::GetMessage { .. } => {
+                Ok(QueryResult::Message(Box::new(Some(self.message.clone()))))
+            }
+            Query::GetMailbox { .. } => Ok(QueryResult::Mailbox(Some(self.mailbox.clone()))),
+            _ => Err(ApplicationError::Internal("unexpected".into())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandBus for OneMessage {
+    async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {
+        assert!(matches!(command, Command::FetchMessageBody { .. }));
+        *self.fetches.lock().unwrap() += 1;
+        Ok(CommandResult::MessageBodyFetched)
+    }
+}
+
+/// Body fetches opening a message with `body_text` and `truncated` dispatches.
+async fn fetches_on_open(body_text: Option<&str>, truncated: bool) -> u32 {
+    let (account_id, mailbox_id) = (AccountId::new(), MailboxId::new());
+    let (message, _) = mc_domain::Message::receive(
+        account_id,
+        mailbox_id,
+        ProviderUid::new(1),
+        None,
+        None,
+        vec![],
+        mc_domain::Envelope {
+            from: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: "s".into(),
+            date: chrono::Utc::now(),
+        },
+        vec![],
+        1,
+        false,
+        chrono::Utc::now(),
+    );
+    let message = mc_domain::Message {
+        body_text: body_text.map(Into::into),
+        body_truncated: truncated,
+        ..message
+    };
+    let buses = Arc::new(OneMessage {
+        message: message.clone(),
+        mailbox: fake_mailbox(account_id, mailbox_id),
+        fetches: Default::default(),
+    });
+    let svc = MessageServiceImpl::new(
+        Arc::clone(&buses),
+        Arc::clone(&buses),
+        Arc::new(InProcessEventBus::new(16)),
+    );
+    svc.get_message(Request::new(GetMessageRequest {
+        message_id: message.id.to_string(),
+    }))
+    .await
+    .unwrap();
+    *buses.fetches.lock().unwrap()
+}
+
+#[tokio::test]
+async fn opening_a_truncated_body_fetches_the_rest() {
+    assert_eq!(fetches_on_open(Some("start"), true).await, 1);
+    assert_eq!(fetches_on_open(None, false).await, 1);
+    assert_eq!(fetches_on_open(Some("whole"), false).await, 0);
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
+/// MessageReceived domain event reaches the gRPC stream as NewMessage.
+#[tokio::test]
+async fn new_message_reaches_watch_stream() {
+    let bus = Arc::new(InProcessEventBus::new(16));
+    let account_id = AccountId::new();
+    let mailbox_id = MailboxId::new();
+    let message_id = MessageId::new();
+
+    let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id, mailbox_id));
+    let mut stream = svc
+        .watch_mailbox(Request::new(WatchMailboxRequest {
+            mailbox_id: mailbox_id.as_uuid().to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    bus.publish(envelope(DomainEvent::MessageReceived {
+        message_id,
+        account_id,
+        mailbox_id,
+        provider_uid: ProviderUid::new(42),
+        envelope: mc_domain::Envelope {
+            from: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: "Hi".into(),
+            date: chrono::Utc::now(),
+        },
+        flags: vec![],
+        size_bytes: 0,
+        has_attachments: false,
+        message_rfc_id: None,
+        in_reply_to: None,
+        references: vec![],
+        received_at: chrono::Utc::now(),
+        restored: false,
+    }));
+
+    let event = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("timeout")
+        .expect("ended")
+        .expect("error");
+
+    assert_eq!(event.mailbox_id, mailbox_id.as_uuid().to_string());
+    assert!(matches!(
+        event.event_type,
+        Some(mailbox_event::EventType::NewMessage(ref n)) if n.provider_uid == 42
+    ));
+}
+
+/// Events from a different account are filtered out.
+#[tokio::test]
+async fn events_from_other_account_are_filtered() {
+    let bus = Arc::new(InProcessEventBus::new(16));
+    let account_id = AccountId::new();
+    let other_account = AccountId::new();
+    let mailbox_id = MailboxId::new();
+
+    let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id, mailbox_id));
+    let mut stream = svc
+        .watch_mailbox(Request::new(WatchMailboxRequest {
+            mailbox_id: mailbox_id.as_uuid().to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Wrong account → filtered
+    bus.publish(envelope(DomainEvent::MessageReceived {
+        message_id: MessageId::new(),
+        account_id: other_account,
+        mailbox_id,
+        provider_uid: ProviderUid::new(1),
+        envelope: mc_domain::Envelope {
+            from: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: "".into(),
+            date: chrono::Utc::now(),
+        },
+        flags: vec![],
+        size_bytes: 0,
+        has_attachments: false,
+        message_rfc_id: None,
+        in_reply_to: None,
+        references: vec![],
+        received_at: chrono::Utc::now(),
+        restored: false,
+    }));
+    // Correct account → arrives
+    bus.publish(envelope(DomainEvent::MessageReceived {
+        message_id: MessageId::new(),
+        account_id,
+        mailbox_id,
+        provider_uid: ProviderUid::new(2),
+        envelope: mc_domain::Envelope {
+            from: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: "".into(),
+            date: chrono::Utc::now(),
+        },
+        flags: vec![],
+        size_bytes: 0,
+        has_attachments: false,
+        message_rfc_id: None,
+        in_reply_to: None,
+        references: vec![],
+        received_at: chrono::Utc::now(),
+        restored: false,
+    }));
+
+    let event = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .unwrap();
+    match event.event_type {
+        Some(mailbox_event::EventType::NewMessage(n)) => assert_eq!(n.provider_uid, 2),
+        other => panic!("unexpected: {:?}", other),
+    }
+}
+
+/// MailboxCountsUpdated reaches the stream as CountsChanged.
+#[tokio::test]
+async fn counts_updated_reaches_watch_stream() {
+    let bus = Arc::new(InProcessEventBus::new(16));
+    let account_id = AccountId::new();
+    let mailbox_id = MailboxId::new();
+
+    let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id, mailbox_id));
+    let mut stream = svc
+        .watch_mailbox(Request::new(WatchMailboxRequest {
+            mailbox_id: mailbox_id.as_uuid().to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    bus.publish(EventEnvelope::new(
+        "mbx".into(),
+        AggregateType::Mailbox,
+        1,
+        DomainEvent::MailboxCountsUpdated {
+            mailbox_id,
+            total_messages: 100,
+            unread_messages: 5,
+        },
+    ));
+
+    let event = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event.event_type,
+        Some(mailbox_event::EventType::CountsChanged(ref c)) if c.total == 100 && c.unseen == 5
+    ));
+}
+
+/// A body-less message whose UID is unknown is still fetched on open:
+/// the handler finds it by Message-ID.
+#[tokio::test]
+async fn opening_a_message_without_uid_fetches_its_body() {
+    struct Recording(std::sync::Mutex<Vec<Command>>);
+    #[async_trait::async_trait]
+    impl CommandBus for Recording {
+        async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {
+            self.0.lock().unwrap().push(command);
+            Ok(CommandResult::MessageBodyFetched)
+        }
+    }
+    struct MessageAndMailbox(mc_domain::Message, Mailbox);
+    #[async_trait::async_trait]
+    impl QueryBus for MessageAndMailbox {
+        async fn dispatch(&self, query: Query) -> Result<QueryResult, ApplicationError> {
+            match query {
+                Query::GetMessage { .. } => {
+                    Ok(QueryResult::Message(Box::new(Some(self.0.clone()))))
+                }
+                Query::GetMailbox { .. } => Ok(QueryResult::Mailbox(Some(self.1.clone()))),
+                _ => Err(ApplicationError::Internal("unexpected".into())),
+            }
+        }
+    }
+
+    let (account_id, mailbox_id) = (AccountId::new(), MailboxId::new());
+    let (mut message, _) = mc_domain::Message::receive(
+        account_id,
+        mailbox_id,
+        ProviderUid::new(1),
+        Some("<x@example.com>".into()),
+        None,
+        vec![],
+        mc_domain::Envelope {
+            from: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: "".into(),
+            date: chrono::Utc::now(),
+        },
+        vec![],
+        0,
+        false,
+        chrono::Utc::now(),
+    );
+    message.provider_uid = None;
+    let commands = Arc::new(Recording(std::sync::Mutex::new(vec![])));
+    let svc = MessageServiceImpl::new(
+        Arc::clone(&commands),
+        Arc::new(MessageAndMailbox(
+            message.clone(),
+            fake_mailbox(account_id, mailbox_id),
+        )),
+        Arc::new(InProcessEventBus::new(16)),
+    );
+
+    svc.get_message(Request::new(GetMessageRequest {
+        message_id: message.id.to_string(),
+    }))
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        commands.0.lock().unwrap().as_slice(),
+        [Command::FetchMessageBody { .. }]
+    ));
+}
+
+/// MessageFlagged reaches the stream as FlagsChanged.
+#[tokio::test]
+async fn flags_changed_reaches_watch_stream() {
+    let bus = Arc::new(InProcessEventBus::new(16));
+    let account_id = AccountId::new();
+    let mailbox_id = MailboxId::new();
+
+    let svc = make_svc(Arc::clone(&bus), fake_mailbox(account_id, mailbox_id));
+    let mut stream = svc
+        .watch_mailbox(Request::new(WatchMailboxRequest {
+            mailbox_id: mailbox_id.as_uuid().to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    bus.publish(envelope(DomainEvent::MessageFlagged {
+        message_id: MessageId::new(),
+        mailbox_id,
+        flags_added: vec![Flag::Seen],
+        flags_removed: vec![],
+    }));
+
+    let event = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event.event_type,
+        Some(mailbox_event::EventType::FlagsChanged(_))
+    ));
+}
