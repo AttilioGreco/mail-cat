@@ -16,6 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 mod mocks;
 use mocks::*;
+mod mocks_store;
+use mocks_store::*;
 
 // ── Test helpers ──────────────────────────────────────────────────
 

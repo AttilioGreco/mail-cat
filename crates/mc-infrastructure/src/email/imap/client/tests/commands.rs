@@ -1,0 +1,216 @@
+use super::*;
+
+#[tokio::test]
+async fn move_uses_uid_move_and_reports_the_new_uid() {
+    let (mut session, commands) = scripted(server_reply).await;
+    let caps = ServerCaps {
+        move_cmd: true,
+        uidplus: true,
+    };
+
+    let moved = move_uids(&mut session, caps, &[5], "Archive")
+        .await
+        .unwrap();
+
+    assert_eq!(moved, [(5, 77)], "COPYUID arrives untagged with MOVE");
+    assert_eq!(uid_commands(&commands), ["UID MOVE 5 \"Archive\""]);
+}
+
+#[tokio::test]
+async fn move_without_move_expunges_only_its_own_uids() {
+    let (mut session, commands) = scripted(server_reply).await;
+    let caps = ServerCaps {
+        move_cmd: false,
+        uidplus: true,
+    };
+
+    let moved = move_uids(&mut session, caps, &[5], "Archive")
+        .await
+        .unwrap();
+
+    assert_eq!(moved, [(5, 78)]);
+    assert_eq!(
+        uid_commands(&commands),
+        [
+            "UID COPY 5 \"Archive\"",
+            "UID STORE 5 +FLAGS.SILENT (\\Deleted)",
+            "UID EXPUNGE 5"
+        ]
+    );
+}
+
+/// A plain EXPUNGE would purge mail another client merely marked.
+#[tokio::test]
+async fn without_uidplus_nothing_is_ever_expunged() {
+    let caps = ServerCaps::default();
+
+    let (mut session, commands) = scripted(server_reply).await;
+    delete_uids(&mut session, caps, &[6], true).await.unwrap();
+    assert_eq!(
+        uid_commands(&commands),
+        ["UID STORE 6 +FLAGS.SILENT (\\Deleted)"]
+    );
+
+    let (mut session, commands) = scripted(server_reply).await;
+    move_uids(&mut session, caps, &[5], "Archive")
+        .await
+        .unwrap();
+    assert_eq!(
+        uid_commands(&commands),
+        [
+            "UID COPY 5 \"Archive\"",
+            "UID STORE 5 +FLAGS.SILENT (\\Deleted)"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn unknown_capabilities_are_asked_again_and_refuse_when_still_unknown() {
+    let (mut session, _) = scripted(|command| {
+        if command == "CAPABILITY" {
+            "* CAPABILITY IMAP4rev1 MOVE UIDPLUS\r\n$T OK Done\r\n"
+        } else {
+            "$T OK Done\r\n"
+        }
+    })
+    .await;
+    let cell = OnceLock::new();
+    let caps = known_caps(&cell, &mut session).await.unwrap();
+    assert!(caps.move_cmd && caps.uidplus);
+    assert!(cell.get().is_some(), "learned once");
+
+    let (mut session, commands) = scripted(|_| "$T BAD no\r\n").await;
+    let err = known_caps(&OnceLock::new(), &mut session)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::Provider(_)), "{err:?}");
+    assert_eq!(
+        uid_commands(&commands),
+        ["CAPABILITY"],
+        "nothing moved or deleted on a guess"
+    );
+}
+
+#[tokio::test]
+async fn uid_flags_are_fetched_in_bounded_batches() {
+    let (mut session, commands) = scripted(|command| {
+        if command == "UID SEARCH ALL" {
+            // Two batches' worth: 1..=5000 and 5001..=5002.
+            Box::leak(
+                format!(
+                    "* SEARCH {}\r\n$T OK Done\r\n",
+                    (1..=5002)
+                        .map(|u| u.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+                .into_boxed_str(),
+            )
+        } else {
+            "$T OK Done\r\n"
+        }
+    })
+    .await;
+
+    uid_flags(&mut session).await.unwrap();
+
+    assert_eq!(
+        uid_commands(&commands),
+        [
+            "UID SEARCH ALL",
+            "UID FETCH 1:5000 (FLAGS)",
+            "UID FETCH 5001:5002 (FLAGS)"
+        ]
+    );
+}
+
+#[test]
+fn append_time_grows_with_the_message() {
+    assert_eq!(append_timeout(1024), COMMAND_TIMEOUT);
+    assert_eq!(
+        append_timeout(30 * 1024 * 1024),
+        COMMAND_TIMEOUT + Duration::from_secs(480)
+    );
+}
+
+#[test]
+fn an_empty_message_id_is_never_searched() {
+    assert!(message_id_search("<>").unwrap().is_none());
+    assert!(message_id_search("  ").unwrap().is_none());
+    assert_eq!(
+        message_id_search("<a@b>").unwrap().as_deref(),
+        Some("UNDELETED HEADER Message-ID \"<a@b>\"")
+    );
+}
+
+#[test]
+fn imap4rev2_implies_move_and_uidplus() {
+    let rev2 = ServerCaps::from_names(|name| name == "IMAP4rev2").unwrap();
+    assert!(rev2.move_cmd && rev2.uidplus);
+    let rev1 = ServerCaps::from_names(|name| ["IMAP4rev1", "UIDPLUS"].contains(&name)).unwrap();
+    assert!(!rev1.move_cmd && rev1.uidplus);
+    assert!(
+        ServerCaps::from_names(|_| false).is_none(),
+        "an empty answer is no answer"
+    );
+}
+
+#[test]
+fn copy_reports_the_destination_uid_only_with_uidplus() {
+    use async_imap::imap_proto::{Response, parser::parse_response};
+
+    let code_of = |line: &'static [u8]| match parse_response(line).unwrap().1 {
+        Response::Done { code, .. } => code,
+        other => panic!("not a tagged reply: {other:?}"),
+    };
+    assert_eq!(
+        copied_uids(code_of(b"A3 OK [COPYUID 38505 304 3956] Done\r\n").as_ref()),
+        [(304, 3956)]
+    );
+    assert_eq!(
+        copied_uids(code_of(b"A3 OK [COPYUID 38505 304,319:320 3956:3958] Done\r\n").as_ref()),
+        [(304, 3956), (319, 3957), (320, 3958)]
+    );
+    assert!(copied_uids(code_of(b"A3 OK Done\r\n").as_ref()).is_empty());
+}
+
+#[test]
+fn test_imap_provider_creation() {
+    let provider = ImapEmailProvider::new(
+        "imap.example.com".to_string(),
+        993,
+        "user@example.com".to_string(),
+        Arc::new(LoginSecret::Password("password".to_string())),
+        true,
+        None, // no SMTP sender in unit test
+    );
+
+    let (host, port, username, use_tls) = provider.config();
+    assert_eq!(host, "imap.example.com");
+    assert_eq!(port, 993);
+    assert_eq!(username, "user@example.com");
+    assert!(use_tls);
+}
+
+#[test]
+fn xoauth2_sasl_string_has_expected_format() {
+    let mut auth = XOAuth2Authenticator {
+        user: "me@gmail.com".into(),
+        access_token: "ya29.abc".into(),
+        error: None,
+    };
+    let response = async_imap::Authenticator::process(&mut &mut auth, &[]);
+    assert_eq!(
+        response,
+        "user=me@gmail.com\x01auth=Bearer ya29.abc\x01\x01"
+    );
+
+    // The error challenge is answered empty, never with the token again.
+    let error = br#"{"status":"400","schemes":"Bearer","scope":"https://mail.google.com/"}"#;
+    assert_eq!(
+        async_imap::Authenticator::process(&mut &mut auth, error),
+        ""
+    );
+    assert!(xoauth2_rejects_token(auth.error.as_deref().unwrap()));
+    assert!(!xoauth2_rejects_token(br#"{"status":"503"}"#));
+}
