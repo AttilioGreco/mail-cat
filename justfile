@@ -97,6 +97,11 @@ itest-seed *args:
 itest *args:
     tests/itest/scenarios.py {{args}}
 
+# benchmark di sync con corpus da ~3000 messaggi e proxy che conta i byte
+# (es: just itest-bench branch; just itest-bench main --root ../mail-cat-bench-main)
+itest-bench label *args:
+    tests/itest/bench.py {{label}} {{args}}
+
 # ferma il server isolato e distrugge Stalwart con i suoi volumi
 itest-down:
     tests/itest/reset.sh --stop

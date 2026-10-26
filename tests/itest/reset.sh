@@ -13,8 +13,12 @@ ROOT=$(cd "$HERE/../.." && pwd)
 STATE="$HERE/.state"
 GRPC_PORT=50061
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
-BIN="$TARGET/debug/mail-cat-server"
-MC="$TARGET/debug/mc"
+BIN=${ITEST_BIN:-$TARGET/debug/mail-cat-server}
+MC=${ITEST_MC:-$TARGET/debug/mc}
+# Bench hooks: ITEST_NO_BUILD=1 skips cargo, ITEST_IMAP_PORT points the account
+# at another port (the wire-byte proxy), ITEST_PRESEED is run before the server
+# starts so it syncs a prepared corpus. $STATE/bench survives the wipe.
+IMAP_PORT=${ITEST_IMAP_PORT:-19993}
 CLI="$HERE/stalwart-cli"
 ALICE_PW=alice-itest-horse-battery
 BOB_PW=bob-itest-horse-battery
@@ -43,7 +47,7 @@ stop_server() {
 if [[ ${1:-} == --stop ]]; then stop_server; exit 0; fi
 
 log "building mail-cat-server + mc"
-(cd "$ROOT" && cargo build -q -p mc-server -p mc-cli)
+[[ -n ${ITEST_NO_BUILD:-} ]] || (cd "$ROOT" && cargo build -q -p mc-server -p mc-cli)
 
 stop_server
 if ss -ltn | grep -q "127.0.0.1:$GRPC_PORT "; then
@@ -68,7 +72,8 @@ docker compose -f "$HERE/compose.yaml" start stalwart >/dev/null 2>&1
 wait_for 60 curl -fs http://127.0.0.1:18080/healthz/live
 
 log "TLS certificate (private CA, trusted by mail-cat via SSL_CERT_FILE)"
-rm -rf "$STATE" && mkdir -p "$STATE/certs" "$STATE/mc" "$STATE/home" "$STATE/run"
+find "$STATE" -mindepth 1 -maxdepth 1 ! -name bench -exec rm -rf {} + 2>/dev/null || true
+mkdir -p "$STATE" && mkdir -p "$STATE/certs" "$STATE/mc" "$STATE/home" "$STATE/run"
 chmod 700 "$STATE/run"
 (
     cd "$STATE/certs"
@@ -111,6 +116,8 @@ for u in alice bob; do
     python3 "$HERE/imapctl.py" --user "$u" ensure-mailboxes
 done
 
+[[ -z ${ITEST_PRESEED:-} ]] || { log "preseed"; bash -c "$ITEST_PRESEED"; }
+
 log "isolated mail-cat-server on 127.0.0.1:$GRPC_PORT"
 cat > "$STATE/config.toml" <<EOF
 grpc_addr  = "127.0.0.1:$GRPC_PORT"
@@ -123,7 +130,7 @@ name          = "alice"
 email         = "alice@itest.local"
 provider_type = "imap"
 imap_host     = "localhost"
-imap_port     = 19993
+imap_port     = $IMAP_PORT
 use_tls       = true
 username      = "alice@itest.local"
 password      = "$ALICE_PW"
