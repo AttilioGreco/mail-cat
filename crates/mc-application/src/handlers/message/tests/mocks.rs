@@ -126,7 +126,16 @@ pub(super) struct MockEmailProvider {
     /// Message to return from fetch_message_detail.
     pub(super) detail_response: RwLock<Option<Message>>,
     pub(super) sent: RwLock<Vec<OutgoingMessage>>,
-    pub(super) appended: RwLock<Vec<(MailboxPath, OutgoingMessage, Vec<Flag>)>>,
+    /// The Sent mailbox each `send_message` was given.
+    pub(super) sent_to: RwLock<Vec<Option<MailboxPath>>>,
+    /// What `send_message` reports about the Sent copy (default: not stored).
+    pub(super) sent_copy: RwLock<Option<SentCopy>>,
+    /// Makes `send_message` fail, as an SMTP refusal.
+    pub(super) send_fails: RwLock<bool>,
+    /// Runs while the send is "on the wire", after the mail left.
+    pub(super) during_send: RwLock<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// (drafts mailbox, draft, draft it replaces) of each `save_draft`.
+    pub(super) saved_drafts: RwLock<Vec<(MailboxPath, OutgoingMessage, Option<RemoteId>)>>,
     pub(super) raw: RwLock<Vec<u8>>,
     /// Runs while the body fetch is "on the wire".
     pub(super) during_fetch: RwLock<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -262,21 +271,39 @@ impl EmailProvider for MockEmailProvider {
     ) -> Result<(), DomainError> {
         Ok(())
     }
-    async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError> {
-        self.sent.write().unwrap().push(message.clone());
-        Ok(())
-    }
-    async fn append_message(
+    async fn send_message(
         &self,
-        mailbox: &MailboxPath,
         message: &OutgoingMessage,
-        flags: &[Flag],
-    ) -> Result<Option<RemoteId>, DomainError> {
-        self.appended
-            .write()
+        sent: Option<&MailboxPath>,
+    ) -> Result<SendOutcome, DomainError> {
+        if *self.send_fails.read().unwrap() {
+            return Err(DomainError::Provider("SMTP refused".into()));
+        }
+        self.sent.write().unwrap().push(message.clone());
+        self.sent_to.write().unwrap().push(sent.cloned());
+        if let Some(during) = self.during_send.read().unwrap().as_ref() {
+            during();
+        }
+        let sent_copy = self
+            .sent_copy
+            .read()
             .unwrap()
-            .push((mailbox.clone(), message.clone(), flags.to_vec()));
-        Ok(Some(RemoteId::from(7)))
+            .clone()
+            .unwrap_or(SentCopy::NotStored);
+        Ok(SendOutcome { sent_copy })
+    }
+    async fn save_draft(
+        &self,
+        drafts: &MailboxPath,
+        message: &OutgoingMessage,
+        replacing: Option<&RemoteId>,
+    ) -> Result<RemoteId, DomainError> {
+        self.saved_drafts.write().unwrap().push((
+            drafts.clone(),
+            message.clone(),
+            replacing.cloned(),
+        ));
+        Ok(RemoteId::from(7))
     }
     fn watch_mailbox(
         &self,

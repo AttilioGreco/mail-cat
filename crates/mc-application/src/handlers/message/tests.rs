@@ -1,7 +1,8 @@
 use super::*;
 use mc_domain::{
     AggregateType, DomainError, EventEnvelope, Existing, Mailbox, MailboxChanges, MailboxCounts,
-    Membership, MessageEnvelopeSummary, ProviderNotification, RemoteId, SyncCursor,
+    Membership, MessageEnvelopeSummary, ProviderNotification, RemoteId, SendOutcome, SentCopy,
+    SyncCursor,
 };
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -144,6 +145,7 @@ struct Fixture {
     bus: Arc<MockEventBus>,
     sent_box: mc_domain::Mailbox,
     drafts_box: mc_domain::Mailbox,
+    es: Arc<MockEventStore>,
     /// A message stored in INBOX (event store + read model).
     seeded: Option<Message>,
     handler: MessageCommandHandler<
@@ -155,6 +157,15 @@ struct Fixture {
 }
 
 fn fixture(host: &str, seed: impl FnOnce(AccountId, MailboxId) -> Option<Message>) -> Fixture {
+    fixture_holding(host, seed, vec![])
+}
+
+/// A fixture whose read model already holds these remote ids in every mailbox.
+fn fixture_holding(
+    host: &str,
+    seed: impl FnOnce(AccountId, MailboxId) -> Option<Message>,
+    held: Vec<RemoteId>,
+) -> Fixture {
     let account = test_account("mario@example.com", host);
     let inbox = test_mailbox(account.id, "INBOX", MailboxType::Inbox);
     let seeded = seed(account.id, inbox.id);
@@ -169,8 +180,9 @@ fn fixture(host: &str, seed: impl FnOnce(AccountId, MailboxId) -> Option<Message
     let mut repo =
         MockMessageReadRepo::with_mailboxes(vec![inbox, sent_box.clone(), drafts_box.clone()]);
     repo.messages.extend(seeded.clone());
+    repo.held = held;
     let handler = MessageCommandHandler::new(
-        es,
+        es.clone(),
         Arc::new(MockProviderRegistry::new(provider.clone())),
         Arc::new(repo),
         bus.clone(),
@@ -181,6 +193,7 @@ fn fixture(host: &str, seed: impl FnOnce(AccountId, MailboxId) -> Option<Message
         bus,
         sent_box,
         drafts_box,
+        es,
         seeded,
         handler,
     }

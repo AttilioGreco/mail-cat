@@ -70,6 +70,7 @@ impl<Q: QueryBus + 'static> SearchService for SearchServiceImpl<Q> {
             .iter()
             .map(|hit| crate::grpc::proto::SearchHit {
                 message_id: hit.message_id.to_string(),
+                mailbox_ids: hit.mailbox_ids.iter().map(ToString::to_string).collect(),
                 score: hit.score,
                 snippet: hit.snippet.clone(),
                 subject: hit.subject.clone(),

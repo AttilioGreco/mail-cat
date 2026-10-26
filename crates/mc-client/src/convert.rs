@@ -178,6 +178,7 @@ pub fn message_flag_to_proto(flag: &MessageFlag) -> i32 {
 pub fn search_hit_from_proto(h: pb::SearchHit) -> SearchHit {
     SearchHit {
         message_id: h.message_id,
+        mailbox_ids: h.mailbox_ids,
         score: h.score,
         snippet: h.snippet,
         subject: h.subject,
@@ -205,6 +206,7 @@ pub fn thread_message_from_proto(m: pb::MessageDetail) -> ThreadMessage {
         subject: envelope.subject,
         date,
         is_read,
+        mailbox_ids: m.mailbox_ids,
         html_body: m.body_html,
         text_body: m.body_text,
         in_reply_to: m.in_reply_to,

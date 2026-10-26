@@ -141,20 +141,19 @@ where
             }
             Command::FetchMessageBody {
                 message_id,
-                mailbox_path,
+                mailbox_id,
             } => {
                 self.message_handler
-                    .handle_fetch_body(message_id, mailbox_path)
+                    .handle_fetch_body(message_id, mailbox_id)
                     .await
             }
             Command::SetMessageFlags {
                 message_id,
-                mailbox_path,
                 flags_to_add,
                 flags_to_remove,
             } => {
                 self.message_handler
-                    .handle_set_flags(message_id, mailbox_path, flags_to_add, flags_to_remove)
+                    .handle_set_flags(message_id, flags_to_add, flags_to_remove)
                     .await
             }
             Command::MarkMailboxRead {
@@ -169,44 +168,36 @@ where
                 message_id,
                 from_mailbox_id,
                 to_mailbox_id,
-                from_mailbox_path,
                 to_mailbox_path,
             } => {
                 self.message_handler
-                    .handle_move(
-                        message_id,
-                        from_mailbox_id,
-                        to_mailbox_id,
-                        from_mailbox_path,
-                        to_mailbox_path,
-                    )
+                    .handle_move(message_id, from_mailbox_id, to_mailbox_id, to_mailbox_path)
                     .await
             }
             Command::DeleteMessage {
                 message_id,
                 mailbox_id,
-                mailbox_path,
                 permanently,
             } => {
                 self.message_handler
-                    .handle_delete(message_id, mailbox_id, mailbox_path, permanently)
+                    .handle_delete(message_id, mailbox_id, permanently)
                     .await
             }
             Command::DeleteMessages {
-                message_ids,
+                messages,
                 permanently,
             } => {
                 self.message_handler
-                    .handle_delete_many(message_ids, permanently)
+                    .handle_delete_many(messages, permanently)
                     .await
             }
             Command::MoveMessages {
-                message_ids,
+                messages,
                 to_mailbox_id,
                 to_mailbox_path,
             } => {
                 self.message_handler
-                    .handle_move_many(message_ids, to_mailbox_id, to_mailbox_path)
+                    .handle_move_many(messages, to_mailbox_id, to_mailbox_path)
                     .await
             }
             Command::PrepareCompose {

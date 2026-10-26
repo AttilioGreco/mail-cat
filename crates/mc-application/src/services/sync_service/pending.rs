@@ -71,6 +71,11 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             })
             .partition(|&(_, in_mailbox)| in_mailbox == mailbox.id);
         for (waiting, _) in here {
+            // A Sent placeholder is superseded by the server copy, which has
+            // the real size, attachments and date, not adopted by it.
+            if self.is_sent_placeholder(&waiting).await {
+                continue;
+            }
             if self
                 .update_message(&waiting, |m| {
                     m.attach_remote_id(mailbox.id, env.remote_id.clone())

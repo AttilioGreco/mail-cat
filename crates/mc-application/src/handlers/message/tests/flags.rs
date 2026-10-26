@@ -14,7 +14,7 @@ async fn handle_set_flags_marks_as_read() {
     let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
     let result = handler
-        .handle_set_flags(msg_id, MailboxPath::inbox(), vec![Flag::Seen], vec![])
+        .handle_set_flags(msg_id, vec![Flag::Seen], vec![])
         .await
         .unwrap();
 

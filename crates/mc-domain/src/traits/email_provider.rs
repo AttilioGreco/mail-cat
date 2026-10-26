@@ -112,16 +112,25 @@ pub trait EmailProvider: Send + Sync {
     ) -> Result<(), DomainError>;
 
     /// Send a message via the provider's send mechanism (SMTP, API, etc.).
-    async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError>;
-
-    /// Store a message in a mailbox — the Sent copy or a draft.
-    /// Returns the id it landed on, when the provider lets us find it.
-    async fn append_message(
+    /// `sent` is the account's Sent mailbox, if known: the provider files the
+    /// sent copy there when the server does not do it by itself, and reports
+    /// what happened in [`SendOutcome`]. Failing to store the copy never fails
+    /// a send that went out.
+    async fn send_message(
         &self,
-        mailbox: &MailboxPath,
         message: &OutgoingMessage,
-        flags: &[Flag],
-    ) -> Result<Option<RemoteId>, DomainError>;
+        sent: Option<&MailboxPath>,
+    ) -> Result<SendOutcome, DomainError>;
+
+    /// Store `message` as a draft in `drafts`, then drop the draft it
+    /// `replacing` (best effort: the new one is already safe). Returns the id
+    /// the new draft has.
+    async fn save_draft(
+        &self,
+        drafts: &MailboxPath,
+        message: &OutgoingMessage,
+        replacing: Option<&RemoteId>,
+    ) -> Result<RemoteId, DomainError>;
 
     /// Subscribe to real-time notifications (IMAP IDLE, push, etc.).
     ///
@@ -131,6 +140,24 @@ pub trait EmailProvider: Send + Sync {
         &self,
         mailbox: &MailboxPath,
     ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>>;
+}
+
+/// What became of the copy of a sent message that belongs in Sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendOutcome {
+    pub sent_copy: SentCopy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SentCopy {
+    /// The provider filed it in the Sent mailbox (IMAP APPEND, JMAP
+    /// `onSuccessUpdateEmail`); its id there when known.
+    Stored { remote_id: Option<RemoteId> },
+    /// The server files submissions itself (Gmail SMTP): the next Sent sync
+    /// brings the copy.
+    ServerFiled,
+    /// No Sent mailbox was given, or the provider could not store the copy.
+    NotStored,
 }
 
 /// What a provider reports for one mailbox since a cursor.

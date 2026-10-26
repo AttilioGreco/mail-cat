@@ -25,6 +25,7 @@ message SearchHit {
   optional string from_name = 5;
   string from_email = 6;
   int64 date = 7;               // Unix timestamp
+  repeated string mailbox_ids = 8;  // Every mailbox the message is in
 }
 
 // === Requests/Responses ===

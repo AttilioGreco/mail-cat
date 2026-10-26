@@ -4,6 +4,7 @@ import type { SearchHit, Suggestion } from './types';
 
 interface SearchHitDto {
   message_id: string;
+  mailbox_ids: string[];
   score: number;
   snippet: string | null;
   subject: string;
@@ -24,6 +25,7 @@ async function fetchSearchResults(
   });
   return dtos.map((d) => ({
     messageId: d.message_id,
+    mailboxIds: d.mailbox_ids,
     score: d.score,
     snippet: d.snippet,
     subject: d.subject,

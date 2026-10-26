@@ -20,6 +20,8 @@ export interface ThreadMessage {
   subject: string;
   date: string; // ISO 8601
   isRead: boolean;
+  /** Every mailbox the message is in. */
+  mailboxIds: string[];
   htmlBody: string | null;
   textBody: string | null;
   inReplyTo: string | null;

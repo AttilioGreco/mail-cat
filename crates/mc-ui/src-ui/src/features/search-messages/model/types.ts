@@ -1,5 +1,7 @@
 export interface SearchHit {
   messageId: string;
+  /** Every mailbox the message is in. */
+  mailboxIds: string[];
   score: number;
   snippet: string | null;
   subject: string;

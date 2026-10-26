@@ -6,13 +6,14 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures::Stream;
 use tokio::sync::Semaphore;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
 use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::{Message, OutgoingMessage};
 use mc_domain::traits::email_provider::{
     EmailProvider, MailboxChanges, MessageBodyResult, MessageEnvelopeSummary, ProviderNotification,
+    SendOutcome, SentCopy,
 };
 use mc_domain::traits::login_gate::LoginGate;
 use mc_domain::value_objects::flag::Flag;
@@ -307,17 +308,67 @@ impl EmailProvider for ImapEmailProvider {
         Ok(moved)
     }
 
-    async fn send_message(&self, message: &OutgoingMessage) -> Result<(), DomainError> {
+    async fn send_message(
+        &self,
+        message: &OutgoingMessage,
+        sent: Option<&MailboxPath>,
+    ) -> Result<SendOutcome, DomainError> {
         let sender = self.smtp_sender.as_ref().ok_or_else(|| {
             DomainError::Provider(
                 "No SMTP configuration for this account — add an [smtp] block to config.toml"
                     .to_owned(),
             )
         })?;
-        sender.send(message).await
+        sender.send(message).await?;
+
+        let sent_copy = match sent {
+            None => SentCopy::NotStored,
+            Some(_) if files_submissions_itself(&self.host) => SentCopy::ServerFiled,
+            Some(sent) => sent_copy_of(self.append(sent, message, &[Flag::Seen]).await),
+        };
+        Ok(SendOutcome { sent_copy })
     }
 
-    async fn append_message(
+    async fn save_draft(
+        &self,
+        drafts: &MailboxPath,
+        message: &OutgoingMessage,
+        replacing: Option<&RemoteId>,
+    ) -> Result<RemoteId, DomainError> {
+        let appended = self
+            .append(drafts, message, &[Flag::Draft, Flag::Seen])
+            .await?;
+        let remote_id = match appended {
+            Some(id) => id,
+            None => match message.message_rfc_id.as_deref() {
+                Some(rfc_id) => self.find_by_message_id(drafts, rfc_id).await?.pop(),
+                None => None,
+            }
+            .ok_or_else(|| {
+                DomainError::Provider("draft stored but not found on the server".into())
+            })?,
+        };
+        if let Some(old) = replacing.filter(|old| **old != remote_id)
+            && let Err(e) = self
+                .delete_messages(drafts, std::slice::from_ref(old), true)
+                .await
+        {
+            warn!(%e, "new draft saved, but deleting the previous version failed");
+        }
+        Ok(remote_id)
+    }
+
+    fn watch_mailbox(
+        &self,
+        mailbox: &MailboxPath,
+    ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>> {
+        self.watch_stream(mailbox)
+    }
+}
+
+impl ImapEmailProvider {
+    /// APPEND `message` to `mailbox`; the id it landed on, when found.
+    async fn append(
         &self,
         mailbox: &MailboxPath,
         message: &OutgoingMessage,
@@ -363,12 +414,24 @@ impl EmailProvider for ImapEmailProvider {
         self.release(session);
         Ok(uid)
     }
+}
 
-    fn watch_mailbox(
-        &self,
-        mailbox: &MailboxPath,
-    ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>> {
-        self.watch_stream(mailbox)
+/// Gmail files every SMTP submission into "Sent Mail" itself; appending our
+/// own copy there would show the message twice.
+fn files_submissions_itself(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host.ends_with("gmail.com") || host.ends_with("googlemail.com")
+}
+
+/// The mail is out whatever happens to its copy: a failed APPEND is reported,
+/// not propagated.
+fn sent_copy_of(stored: Result<Option<RemoteId>, DomainError>) -> SentCopy {
+    match stored {
+        Ok(remote_id) => SentCopy::Stored { remote_id },
+        Err(e) => {
+            warn!(%e, "message sent, but storing the Sent copy failed");
+            SentCopy::NotStored
+        }
     }
 }
 

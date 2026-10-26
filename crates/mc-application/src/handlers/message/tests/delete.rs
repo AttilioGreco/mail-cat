@@ -14,10 +14,7 @@ async fn handle_delete_produces_event() {
     let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![inbox_of(&msg)]));
     let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
-    let result = handler
-        .handle_delete(msg_id, mbx_id, MailboxPath::inbox(), false)
-        .await
-        .unwrap();
+    let result = handler.handle_delete(msg_id, mbx_id, false).await.unwrap();
 
     assert!(matches!(result, CommandResult::MessageDeleted));
     assert_eq!(bus.last_event_name().unwrap(), "MessageDeleted");
@@ -53,10 +50,7 @@ async fn handle_delete_moves_to_trash_when_trash_exists() {
     ]));
     let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
-    let result = handler
-        .handle_delete(msg_id, mbx_id, MailboxPath::inbox(), false)
-        .await
-        .unwrap();
+    let result = handler.handle_delete(msg_id, mbx_id, false).await.unwrap();
 
     assert!(matches!(result, CommandResult::MessageDeleted));
     assert_eq!(bus.last_event_name().unwrap(), "MessageMailboxesChanged");
@@ -101,7 +95,13 @@ async fn handle_delete_many_counts_partial_success() {
 
     // One real message, one id that isn't in the event store.
     let result = handler
-        .handle_delete_many(vec![msg_id, MessageId::new()], false)
+        .handle_delete_many(
+            vec![
+                (msg_id, mailbox_of(&msg)),
+                (MessageId::new(), mailbox_of(&msg)),
+            ],
+            false,
+        )
         .await
         .unwrap();
 
@@ -148,10 +148,7 @@ async fn handle_delete_permanent_expunges_even_with_trash() {
     let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
 
     // permanently = true → expunge, MessageDeleted, even though Trash exists.
-    let result = handler
-        .handle_delete(msg_id, mbx_id, MailboxPath::inbox(), true)
-        .await
-        .unwrap();
+    let result = handler.handle_delete(msg_id, mbx_id, true).await.unwrap();
 
     assert!(matches!(result, CommandResult::MessageDeleted));
     assert_eq!(bus.last_event_name().unwrap(), "MessageDeleted");
@@ -168,41 +165,40 @@ async fn handle_nonexistent_message_returns_not_found() {
     let handler = MessageCommandHandler::new(es, registry, read_repo, bus);
 
     let err = handler
-        .handle_set_flags(
-            MessageId::new(),
-            MailboxPath::inbox(),
-            vec![Flag::Seen],
-            vec![],
-        )
+        .handle_set_flags(MessageId::new(), vec![Flag::Seen], vec![])
         .await
         .unwrap_err();
 
     assert!(matches!(err, ApplicationError::NotFound(..)));
 }
 
+/// An action names the mailbox it acts from; once the message has moved on,
+/// that is an error, not a silent switch to the mailbox it is in now.
 #[tokio::test]
-async fn a_delete_queued_behind_a_move_follows_it_to_trash() {
+async fn a_delete_from_where_the_message_no_longer_is_fails() {
     let msg = make_test_message();
     let m = moving(&msg, MockEmailProvider::moving_to(900));
     let archive = m.archive.clone();
 
     m.handler
-        .handle_move(
-            msg.id,
-            mailbox_of(&msg),
-            archive.id,
-            MailboxPath::inbox(),
-            archive.path.clone(),
-        )
+        .handle_move(msg.id, mailbox_of(&msg), archive.id, archive.path.clone())
         .await
         .unwrap();
-    let result = m
+    let err = m
         .handler
-        .handle_delete(msg.id, mailbox_of(&msg), MailboxPath::inbox(), false)
+        .handle_delete(msg.id, mailbox_of(&msg), false)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ApplicationError::NotFound(..)), "{err:?}");
+    assert_eq!(
+        m.location(msg.id).await,
+        (archive.id, Some(RemoteId::from(900)))
+    );
+
+    m.handler
+        .handle_delete(msg.id, archive.id, false)
         .await
         .unwrap();
-
-    assert!(matches!(result, CommandResult::MessageDeleted));
     assert_eq!(
         *m.provider.moved.read().unwrap(),
         [RemoteId::from(42), RemoteId::from(900)]
@@ -214,13 +210,7 @@ async fn a_delete_queued_behind_a_move_follows_it_to_trash() {
 
     // Moving it where it already is changes nothing.
     m.handler
-        .handle_move(
-            msg.id,
-            mailbox_of(&msg),
-            m.trash.id,
-            MailboxPath::inbox(),
-            m.trash.path.clone(),
-        )
+        .handle_move(msg.id, m.trash.id, m.trash.id, m.trash.path.clone())
         .await
         .unwrap();
     assert_eq!(m.provider.moved.read().unwrap().len(), 2);
@@ -232,12 +222,12 @@ async fn the_same_delete_sent_twice_is_done_once() {
     let m = moving(&msg, MockEmailProvider::new());
 
     m.handler
-        .handle_delete(msg.id, mailbox_of(&msg), MailboxPath::inbox(), true)
+        .handle_delete(msg.id, mailbox_of(&msg), true)
         .await
         .unwrap();
     let again = m
         .handler
-        .handle_delete(msg.id, mailbox_of(&msg), MailboxPath::inbox(), true)
+        .handle_delete(msg.id, mailbox_of(&msg), true)
         .await;
 
     assert!(
@@ -246,9 +236,9 @@ async fn the_same_delete_sent_twice_is_done_once() {
     );
 }
 
-/// A double click on delete: the second one, asked while the message was
-/// still in INBOX, finds it in Trash by its turn and leaves it there.
-/// Asked again once it is in Trash, a delete does purge it.
+/// A double click on delete: the second one, asked from INBOX, finds the
+/// message in Trash by its turn and fails instead of purging it. Asked from
+/// Trash, a delete does purge it.
 #[tokio::test]
 async fn a_double_delete_leaves_the_message_in_trash() {
     let msg = make_test_message();
@@ -258,28 +248,33 @@ async fn a_double_delete_leaves_the_message_in_trash() {
     let deletes: Vec<_> = (0..2)
         .map(|_| {
             let handler = m.handler.clone();
-            tokio::spawn(async move {
-                handler
-                    .handle_delete(msg_id, inbox, MailboxPath::inbox(), false)
-                    .await
-            })
+            tokio::spawn(async move { handler.handle_delete(msg_id, inbox, false).await })
         })
         .collect();
     drain_spawned().await;
     drop(turn);
+    let mut outcomes = Vec::new();
     for delete in deletes {
-        assert!(matches!(
-            delete.await.unwrap(),
-            Ok(CommandResult::MessageDeleted)
-        ));
+        outcomes.push(delete.await.unwrap());
     }
+    assert_eq!(
+        outcomes.iter().filter(|o| o.is_ok()).count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, Err(ApplicationError::NotFound(..)))),
+        "{outcomes:?}"
+    );
     assert_eq!(
         m.location(msg.id).await,
         (m.trash.id, Some(RemoteId::from(900)))
     );
 
     m.handler
-        .handle_delete(msg.id, m.trash.id, m.trash.path.clone(), false)
+        .handle_delete(msg.id, m.trash.id, false)
         .await
         .unwrap();
     assert!(matches!(
@@ -294,19 +289,49 @@ async fn a_double_bulk_delete_leaves_the_message_in_trash() {
     let msg = make_test_message();
     let m = moving(&msg, MockEmailProvider::moving_to(900));
     let turn = m.handler.turn(msg.account_id).await;
+    let inbox = mailbox_of(&msg);
     let deletes: Vec<_> = (0..2)
         .map(|_| {
             let handler = m.handler.clone();
-            tokio::spawn(async move { handler.handle_delete_many(vec![msg.id], false).await })
+            tokio::spawn(async move {
+                handler
+                    .handle_delete_many(vec![(msg.id, inbox)], false)
+                    .await
+            })
         })
         .collect();
     drain_spawned().await;
     drop(turn);
+    let mut counts = Vec::new();
     for delete in deletes {
-        delete.await.unwrap().unwrap();
+        let Ok(CommandResult::MessagesBulkChanged { succeeded, failed }) = delete.await.unwrap()
+        else {
+            panic!("expected a bulk result");
+        };
+        counts.push((succeeded, failed));
     }
+    counts.sort();
+    assert_eq!(counts, [(0, 1), (1, 0)]);
     assert_eq!(
         m.location(msg.id).await,
         (m.trash.id, Some(RemoteId::from(900)))
+    );
+}
+
+#[tokio::test]
+async fn a_delete_from_a_mailbox_the_message_is_not_in_fails() {
+    let msg = make_test_message();
+    let m = moving(&msg, MockEmailProvider::new());
+
+    let err = m
+        .handler
+        .handle_delete(msg.id, m.archive.id, true)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ApplicationError::NotFound(..)), "{err:?}");
+    assert!(
+        m.handler.load_message(&msg.id).await.is_ok(),
+        "nothing was deleted"
     );
 }

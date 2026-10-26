@@ -41,8 +41,8 @@ async function fetchEnvelopes(accountId: string, mailboxId: string): Promise<Mes
   }));
 }
 
-async function fetchBody(messageId: string): Promise<MessageBody> {
-  const dto = await invoke<MessageBodyDto>('get_message', { messageId });
+async function fetchBody(messageId: string, mailboxId: string): Promise<MessageBody> {
+  const dto = await invoke<MessageBodyDto>('get_message', { messageId, mailboxId });
   return {
     uid: dto.id,
     htmlBody: dto.html_body,
@@ -87,11 +87,12 @@ export function bodyPollInterval({ data, dataUpdateCount, errorUpdateCount }: Bo
   return missing && dataUpdateCount + errorUpdateCount < BODY_FETCHES ? BODY_POLL_MS : false;
 }
 
-export function useMessageBody(uid: string | null) {
+/** `mailboxId`: the mailbox the message is opened from. */
+export function useMessageBody(uid: string | null, mailboxId: string | null) {
   return useQuery({
     queryKey: ['body', uid],
-    queryFn: () => fetchBody(uid!),
-    enabled: uid !== null,
+    queryFn: () => fetchBody(uid!, mailboxId!),
+    enabled: uid !== null && mailboxId !== null,
     staleTime: Infinity,
     // A body not yet downloaded comes back empty when the server's on-open
     // fetch fails; with an infinite staleTime that empty answer would stay

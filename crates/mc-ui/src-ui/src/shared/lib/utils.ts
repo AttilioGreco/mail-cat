@@ -25,3 +25,10 @@ export function formatDate(isoDate: string): string {
 export function truncate(str: string, maxLen: number): string {
   return str.length > maxLen ? str.slice(0, maxLen) + '…' : str;
 }
+
+/** The mailbox to act on a message from, when all that is known is where it
+ *  is: the one on screen if it holds the message, else the first it is in
+ *  (a conversation or a search result spans folders). */
+export function sourceMailbox(mailboxIds: string[], shown: string | null): string {
+  return shown !== null && mailboxIds.includes(shown) ? shown : mailboxIds[0];
+}

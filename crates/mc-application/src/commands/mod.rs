@@ -38,16 +38,17 @@ pub enum Command {
     SyncAccount { account_id: AccountId },
 
     // ── Message ────────────────────────────────────────────────────────
-    /// Fetch the body and attachments for a message.
+    /// Fetch the body and attachments for a message, from its copy in
+    /// `mailbox_id`.
     FetchMessageBody {
         message_id: MessageId,
-        mailbox_path: MailboxPath,
+        mailbox_id: MailboxId,
     },
 
-    /// Set or unset flags on a message.
+    /// Set or unset flags on a message. Flags belong to the message, not to
+    /// one of its mailboxes: the server change goes to every copy.
     SetMessageFlags {
         message_id: MessageId,
-        mailbox_path: MailboxPath,
         flags_to_add: Vec<Flag>,
         flags_to_remove: Vec<Flag>,
     },
@@ -63,7 +64,6 @@ pub enum Command {
         message_id: MessageId,
         from_mailbox_id: MailboxId,
         to_mailbox_id: MailboxId,
-        from_mailbox_path: MailboxPath,
         to_mailbox_path: MailboxPath,
     },
 
@@ -71,21 +71,21 @@ pub enum Command {
     DeleteMessage {
         message_id: MessageId,
         mailbox_id: MailboxId,
-        mailbox_path: MailboxPath,
         permanently: bool,
     },
 
     /// Delete many messages (soft or permanent) in one provider round trip.
-    /// Mailbox paths are resolved per message inside the handler — a bulk
-    /// selection can span folders, so the caller cannot supply one path.
+    /// Each is named with the mailbox it is acted on from: a bulk selection
+    /// can span folders.
     DeleteMessages {
-        message_ids: Vec<MessageId>,
+        messages: Vec<(MessageId, MailboxId)>,
         permanently: bool,
     },
 
-    /// Move many messages to one destination mailbox.
+    /// Move many messages, each from the mailbox it is paired with, to one
+    /// destination mailbox.
     MoveMessages {
-        message_ids: Vec<MessageId>,
+        messages: Vec<(MessageId, MailboxId)>,
         to_mailbox_id: MailboxId,
         to_mailbox_path: MailboxPath,
     },

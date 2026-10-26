@@ -14,7 +14,7 @@ use crate::grpc::proto::{
     GetMessageRequest, GetMessageResponse, GetThreadRequest, GetThreadResponse,
     ListConversationsRequest, ListConversationsResponse,
     ListMessagesRequest, ListMessagesResponse, MailboxEvent, MarkMailboxReadRequest,
-    MarkMailboxReadResponse, MessageExpungedEvent,
+    MarkMailboxReadResponse, MessageExpungedEvent, MessageRef,
     MoveMessageRequest, MoveMessageResponse, NewMessageEvent,
     RebuildConversationIndexRequest, RebuildConversationIndexResponse,
     ComposeInput, ComposeView, DiscardDraftRequest, DiscardDraftResponse, PrepareComposeRequest,
@@ -31,14 +31,21 @@ use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::Message;
 use mc_domain::{AccountId, DomainEvent, MailboxId, MessageId};
 
+fn parse_mailbox_id(id: &str, field: &str) -> Result<MailboxId, Status> {
+    uuid::Uuid::parse_str(id)
+        .map(MailboxId::from_uuid)
+        .map_err(|e| Status::invalid_argument(format!("invalid {field}: {e}")))
+}
+
 /// Parse a bulk request's ids up-front: one malformed id means the caller sent
 /// garbage, so reject the whole request rather than half-deleting a selection.
-fn parse_message_ids(ids: &[String]) -> Result<Vec<MessageId>, Status> {
-    ids.iter()
-        .map(|id| {
-            uuid::Uuid::parse_str(id)
+fn parse_message_refs(refs: &[MessageRef]) -> Result<Vec<(MessageId, MailboxId)>, Status> {
+    refs.iter()
+        .map(|r| {
+            let message_id = uuid::Uuid::parse_str(&r.message_id)
                 .map(MessageId::from_uuid)
-                .map_err(|e| Status::invalid_argument(format!("invalid message_id {id}: {e}")))
+                .map_err(|e| Status::invalid_argument(format!("invalid message_id {}: {e}", r.message_id)))?;
+            Ok((message_id, parse_mailbox_id(&r.mailbox_id, "mailbox_id")?))
         })
         .collect()
 }
@@ -75,35 +82,36 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageServiceImpl<C, Q> {
         }
     }
 
-    /// Query the read model to get message + its mailbox context for command enrichment.
-    async fn get_message_context(
-        &self,
-        message_id_str: &str,
-    ) -> Result<(Message, Mailbox), Status> {
-        let message_id = MessageId::from_uuid(
-            uuid::Uuid::parse_str(message_id_str)
-                .map_err(|e| Status::invalid_argument(format!("invalid message_id: {e}")))?,
-        );
-
-        let message = self
-            .query_bus
+    async fn load_message(&self, message_id: MessageId) -> Result<Message, Status> {
+        self.query_bus
             .dispatch(Query::GetMessage { message_id })
             .await
             .map_err(application_error_to_status)?
             .into_message()
             .map_err(|e| Status::internal(e.to_string()))?
-            .ok_or_else(|| Status::not_found("message not found"))?;
+            .ok_or_else(|| Status::not_found("message not found"))
+    }
 
-        // Requests carry no source mailbox yet; a message is in one over IMAP.
-        let home = message
-            .memberships
-            .first()
-            .ok_or_else(|| Status::not_found("message is in no mailbox"))?;
+    /// The message and the mailbox a request acts from. A message that is not
+    /// in that mailbox is an error, never another of its mailboxes.
+    async fn message_in_mailbox(
+        &self,
+        message_id_str: &str,
+        mailbox_id_str: &str,
+    ) -> Result<(Message, Mailbox), Status> {
+        let message_id = MessageId::from_uuid(
+            uuid::Uuid::parse_str(message_id_str)
+                .map_err(|e| Status::invalid_argument(format!("invalid message_id: {e}")))?,
+        );
+        let mailbox_id = parse_mailbox_id(mailbox_id_str, "mailbox_id")?;
+
+        let message = self.load_message(message_id).await?;
+        if message.membership(mailbox_id).is_none() {
+            return Err(Status::not_found("message is not in that mailbox"));
+        }
         let mailbox = self
             .query_bus
-            .dispatch(Query::GetMailbox {
-                mailbox_id: home.mailbox_id,
-            })
+            .dispatch(Query::GetMailbox { mailbox_id })
             .await
             .map_err(application_error_to_status)?
             .into_mailbox()
@@ -208,7 +216,7 @@ where
     ) -> Result<Response<GetMessageResponse>, Status> {
         let req = request.into_inner();
 
-        let (message, mailbox) = self.get_message_context(&req.message_id).await?;
+        let (message, mailbox) = self.message_in_mailbox(&req.message_id, &req.mailbox_id).await?;
 
         // The background backfill worker drains newest-first, so a just-arrived
         // message can still be body-less when the user clicks it — which renders
@@ -224,7 +232,7 @@ where
                 .command_bus
                 .dispatch(Command::FetchMessageBody {
                     message_id,
-                    mailbox_path: mailbox.path.clone(),
+                    mailbox_id: mailbox.id,
                 })
                 .await
             {
@@ -354,16 +362,17 @@ where
     ) -> Result<Response<SetFlagsResponse>, Status> {
         let req = request.into_inner();
 
-        let (message, mailbox) = self.get_message_context(&req.message_id).await?;
+        let message_id = MessageId::from_uuid(
+            uuid::Uuid::parse_str(&req.message_id)
+                .map_err(|e| Status::invalid_argument(format!("invalid message_id: {e}")))?,
+        );
+        let message = self.load_message(message_id).await?;
 
         let flags_to_add = proto_flags_to_domain(&req.flags_to_add);
         let flags_to_remove = proto_flags_to_domain(&req.flags_to_remove);
 
-        let message_id = message.id;
-
         let command = Command::SetMessageFlags {
             message_id: message.id,
-            mailbox_path: mailbox.path,
             flags_to_add,
             flags_to_remove,
         };
@@ -437,7 +446,7 @@ where
     ) -> Result<Response<MoveMessageResponse>, Status> {
         let req = request.into_inner();
 
-        let (message, from_mailbox) = self.get_message_context(&req.message_id).await?;
+        let (message, from_mailbox) = self.message_in_mailbox(&req.message_id, &req.from_mailbox_id).await?;
 
         let to_mailbox_id = MailboxId::from_uuid(
             uuid::Uuid::parse_str(&req.to_mailbox_id)
@@ -461,7 +470,6 @@ where
             message_id: message.id,
             from_mailbox_id: from_mailbox.id,
             to_mailbox_id: to_mailbox.id,
-            from_mailbox_path: from_mailbox.path,
             to_mailbox_path: to_mailbox.path,
         };
 
@@ -491,12 +499,11 @@ where
     ) -> Result<Response<DeleteMessageResponse>, Status> {
         let req = request.into_inner();
 
-        let (message, mailbox) = self.get_message_context(&req.message_id).await?;
+        let (message, mailbox) = self.message_in_mailbox(&req.message_id, &req.mailbox_id).await?;
 
         let command = Command::DeleteMessage {
             message_id: message.id,
             mailbox_id: mailbox.id,
-            mailbox_path: mailbox.path,
             permanently: req.permanently,
         };
 
@@ -513,12 +520,12 @@ where
         request: Request<DeleteMessagesRequest>,
     ) -> Result<Response<BulkChangeResponse>, Status> {
         let req = request.into_inner();
-        let message_ids = parse_message_ids(&req.message_ids)?;
+        let messages = parse_message_refs(&req.messages)?;
 
         let result = self
             .command_bus
             .dispatch(Command::DeleteMessages {
-                message_ids,
+                messages,
                 permanently: req.permanently,
             })
             .await
@@ -533,7 +540,7 @@ where
         request: Request<MoveMessagesRequest>,
     ) -> Result<Response<BulkChangeResponse>, Status> {
         let req = request.into_inner();
-        let message_ids = parse_message_ids(&req.message_ids)?;
+        let messages = parse_message_refs(&req.messages)?;
 
         let to_mailbox_id = MailboxId::from_uuid(
             uuid::Uuid::parse_str(&req.to_mailbox_id)
@@ -553,7 +560,7 @@ where
         let result = self
             .command_bus
             .dispatch(Command::MoveMessages {
-                message_ids,
+                messages,
                 to_mailbox_id: to_mailbox.id,
                 to_mailbox_path: to_mailbox.path,
             })

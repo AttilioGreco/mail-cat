@@ -18,6 +18,9 @@ pub enum MessagesCmd {
     Get {
         /// Message ID (from `mc messages list <mailbox-id>`)
         message_id: String,
+        /// Mailbox ID the message is read from (from `mc mailboxes list <account-id>`)
+        #[arg(long)]
+        mailbox: String,
         /// Show raw text body instead of HTML (stripped)
         #[arg(long)]
         text: bool,
@@ -46,6 +49,9 @@ pub enum MessagesCmd {
     Delete {
         /// Message ID
         message_id: String,
+        /// Mailbox ID to delete the message from
+        #[arg(long)]
+        mailbox: String,
         /// Permanently expunge (instead of just marking as deleted)
         #[arg(long)]
         permanent: bool,
@@ -54,6 +60,9 @@ pub enum MessagesCmd {
     Move {
         /// Message ID
         message_id: String,
+        /// Mailbox ID to move the message out of
+        #[arg(long)]
+        mailbox: String,
         /// Target mailbox ID
         to_mailbox_id: String,
     },
@@ -80,6 +89,9 @@ pub enum MessagesCmd {
         /// Reply to an existing message (verifies threading)
         #[arg(long)]
         reply_to: Option<String>,
+        /// Mailbox ID of the message being replied to (required with --reply-to)
+        #[arg(long, requires = "reply_to")]
+        reply_mailbox: Option<String>,
     },
     /// Autocomplete suggestions for search-as-you-type
     Suggest {
@@ -97,7 +109,7 @@ pub enum MessagesCmd {
 pub async fn run(cmd: MessagesCmd, client: MailCatClient) -> Result<()> {
     match cmd {
         MessagesCmd::List { mailbox_id, verbose } => list(mailbox_id, verbose, client).await,
-        MessagesCmd::Get { message_id, text } => get(message_id, text, client).await,
+        MessagesCmd::Get { message_id, mailbox, text } => get(message_id, mailbox, text, client).await,
         MessagesCmd::MarkRead { message_id } => {
             set_flags(message_id, &["seen"], &[], "Marked as read", client).await
         }
@@ -112,12 +124,14 @@ pub async fn run(cmd: MessagesCmd, client: MailCatClient) -> Result<()> {
         }
         MessagesCmd::Delete {
             message_id,
+            mailbox,
             permanent,
-        } => delete(message_id, permanent, client).await,
+        } => delete(message_id, mailbox, permanent, client).await,
         MessagesCmd::Move {
             message_id,
+            mailbox,
             to_mailbox_id,
-        } => move_msg(message_id, to_mailbox_id, client).await,
+        } => move_msg(message_id, mailbox, to_mailbox_id, client).await,
         MessagesCmd::Search {
             query,
             account_id,
@@ -132,7 +146,8 @@ pub async fn run(cmd: MessagesCmd, client: MailCatClient) -> Result<()> {
             account_id,
             to,
             reply_to,
-        } => send_test(account_id, to, reply_to, client).await,
+            reply_mailbox,
+        } => send_test(account_id, to, reply_to.zip(reply_mailbox), client).await,
     }
 }
 
@@ -208,8 +223,8 @@ async fn list(mailbox_id: String, verbose: bool, client: MailCatClient) -> Resul
     Ok(())
 }
 
-async fn get(message_id: String, _text_only: bool, client: MailCatClient) -> Result<()> {
-    let body = client.get_message(&message_id).await?;
+async fn get(message_id: String, mailbox: String, _text_only: bool, client: MailCatClient) -> Result<()> {
+    let body = client.get_message(&message_id, &mailbox).await?;
 
     println!("{}", "─".repeat(60).dimmed());
 
@@ -268,7 +283,7 @@ async fn set_flags(
     Ok(())
 }
 
-async fn delete(message_id: String, permanent: bool, client: MailCatClient) -> Result<()> {
+async fn delete(message_id: String, mailbox: String, permanent: bool, client: MailCatClient) -> Result<()> {
     println!(
         "{} Deleting {} (permanent={})...",
         "→".blue(),
@@ -276,7 +291,7 @@ async fn delete(message_id: String, permanent: bool, client: MailCatClient) -> R
         permanent
     );
 
-    client.delete_message(&message_id, permanent).await?;
+    client.delete_message(&message_id, &mailbox, permanent).await?;
 
     println!("  {} Message deleted", "✓".green());
     Ok(())
@@ -284,6 +299,7 @@ async fn delete(message_id: String, permanent: bool, client: MailCatClient) -> R
 
 async fn move_msg(
     message_id: String,
+    mailbox: String,
     to_mailbox_id: String,
     client: MailCatClient,
 ) -> Result<()> {
@@ -294,7 +310,7 @@ async fn move_msg(
         to_mailbox_id[..8.min(to_mailbox_id.len())].bold(),
     );
 
-    let updated = client.move_message(&message_id, &to_mailbox_id).await?;
+    let updated = client.move_message(&message_id, &mailbox, &to_mailbox_id).await?;
 
     println!(
         "  {} Message moved (mailbox_ids={})",
@@ -403,11 +419,11 @@ async fn suggest(
 async fn send_test(
     account_id: String,
     to: String,
-    reply_to: Option<String>,
+    reply_to: Option<(String, String)>,
     client: MailCatClient,
 ) -> Result<()> {
-    if let Some(parent_id) = &reply_to
-        && client.get_message(parent_id).await?.rfc_message_id.is_none()
+    if let Some((parent_id, parent_mailbox)) = &reply_to
+        && client.get_message(parent_id, parent_mailbox).await?.rfc_message_id.is_none()
     {
         println!(
             "{}",
@@ -436,7 +452,7 @@ async fn send_test(
             subject,
             body_md: body_md.clone(),
             mode: if reply_to.is_some() { "reply" } else { "new" }.to_owned(),
-            source_message_id: reply_to.clone(),
+            source_message_id: reply_to.as_ref().map(|(id, _)| id.clone()),
             attachments: vec![],
             forwarded_attachment_ids: vec![],
         })
@@ -444,19 +460,7 @@ async fn send_test(
 
     println!("  {} sent, message_id={}", "✓".green(), message_id.bold());
 
-    // Verify (1): body round-trips instead of coming back empty. The stored
-    // text is the markdown plus signature and quote, so it starts with it.
-    let fetched = client.get_message(&message_id).await?;
-    let body_ok = fetched
-        .text_body
-        .as_deref()
-        .is_some_and(|t| t.starts_with(body_md.as_str()));
-    println!(
-        "  {} body persisted correctly",
-        if body_ok { "✓".green() } else { "✗".red() }
-    );
-
-    // Verify (2): message is visible in some mailbox's list right away
+    // Verify (1): message is visible in some mailbox's list right away
     // (should be the Sent folder), with sender/recipient populated.
     let mailboxes = client.list_mailboxes(&account_id).await?;
     let mut found = None;
@@ -467,7 +471,7 @@ async fn send_test(
             break;
         }
     }
-    match found {
+    match &found {
         Some((mbx, summary)) => {
             println!(
                 "  {} visible in mailbox list ({})",
@@ -485,8 +489,22 @@ async fn send_test(
         ),
     }
 
+    // Verify (2): body round-trips instead of coming back empty. The stored
+    // text is the markdown plus signature and quote, so it starts with it.
+    if let Some((mbx, _)) = &found {
+        let fetched = client.get_message(&message_id, &mbx.id).await?;
+        let body_ok = fetched
+            .text_body
+            .as_deref()
+            .is_some_and(|t| t.starts_with(body_md.as_str()));
+        println!(
+            "  {} body persisted correctly",
+            if body_ok { "✓".green() } else { "✗".red() }
+        );
+    }
+
     // Verify (3): if replying, the new message threads with its parent.
-    if let Some(parent_id) = &reply_to {
+    if let Some((parent_id, _)) = &reply_to {
         let thread = client.get_thread(&message_id).await?;
         let in_thread = thread.iter().any(|m| &m.id == parent_id);
         println!(
