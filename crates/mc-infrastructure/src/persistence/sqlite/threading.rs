@@ -51,10 +51,13 @@ pub(super) fn assign_thread(
     }
     let ids = json(&ids)?;
     // Smallest UUIDv7 = oldest thread wins, so the choice is the same on replay.
+    // The row-value IN keeps SQLite on the primary key: with `account_id = ?1
+    // AND rfc_id IN (...)` it scans the account's whole thread_links index per
+    // message, which made a 3000-message sync quadratic.
     let mut found = query_all(
         tx,
         "SELECT DISTINCT thread_id FROM thread_links \
-         WHERE account_id = ?1 AND rfc_id IN (SELECT value FROM json_each(?2)) ORDER BY thread_id",
+         WHERE (account_id, rfc_id) IN (SELECT ?1, value FROM json_each(?2)) ORDER BY thread_id",
         params![account_id, ids],
         |r| r.get::<_, Uuid>(0),
     )?

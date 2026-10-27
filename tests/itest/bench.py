@@ -3,7 +3,7 @@
 proxy (bench_proxy.py) in front of IMAPS, then an isolated mail-cat-server
 syncing alice while the SQLite DB is polled every second.
 
-  bench.py LABEL [--root REPO] [--timeout SEC] [--no-build] [-n MESSAGES]
+  bench.py LABEL [--root REPO] [--timeout SEC] [--no-build] [-n MESSAGES] [--latency-ms N]
 
 REPO selects the tree whose server/mc get built (target dir REPO/target) so
 two versions can be compared with the same corpus seed. Results land in
@@ -85,6 +85,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("-n", type=int, default=3000)
+    ap.add_argument("--latency-ms", type=int, default=0, help="one-way delay added by the proxy in each direction")
     a = ap.parse_args()
     root = Path(a.root).resolve()
     target = Path(os.environ.get("CARGO_TARGET_DIR", root / "target")) if root == HERE.parents[1] else root / "target"
@@ -95,7 +96,8 @@ def main():
     BENCH.mkdir(parents=True, exist_ok=True)
     csv = BENCH / f"{a.label}-{ts}.timeline.csv"
     subprocess.run(["bash", str(HERE / "reset.sh"), "--stop"], check=False)
-    proxy = subprocess.Popen([sys.executable, str(HERE / "bench_proxy.py"), str(PROXY_PORT), "19993", str(csv)])
+    proxy = subprocess.Popen([sys.executable, str(HERE / "bench_proxy.py"), str(PROXY_PORT), "19993", str(csv),
+                              "--latency-ms", str(a.latency_ms)])
     time.sleep(1)
     try:
         run = {**env, "ITEST_NO_BUILD": "1", "ITEST_IMAP_PORT": str(PROXY_PORT),

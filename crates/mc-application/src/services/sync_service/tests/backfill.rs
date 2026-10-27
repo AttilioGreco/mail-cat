@@ -302,3 +302,53 @@ async fn backfill_downloads_both_when_a_message_id_is_reused_with_another_size()
 
     assert_eq!(batch.len(), 2);
 }
+
+/// Regression: the worker starts before any envelope exists and used to sleep
+/// the whole idle poll (60 s) before noticing the first messages.
+#[tokio::test]
+async fn ingesting_wakes_an_idle_backfill_worker() {
+    let account_id = AccountId::new();
+    let (inbox, discovered) =
+        Mailbox::discover(account_id, MailboxPath::inbox(), MailboxType::Inbox);
+    let projector = Arc::new(MockProjector::new());
+    projector
+        .project(&EventEnvelope::new(
+            String::new(),
+            AggregateType::Message,
+            1,
+            discovered,
+        ))
+        .await
+        .unwrap();
+    let provider = Arc::new(MockEmailProvider::new());
+    let service = Arc::new(make_shared_service(
+        provider.clone(),
+        Arc::new(MockEventStore::new()),
+        projector,
+    ));
+    let mut progress = service.subscribe_progress();
+    let shutdown = CancellationToken::new();
+    let worker = tokio::spawn({
+        let (service, shutdown) = (Arc::clone(&service), shutdown.clone());
+        let gate: Arc<dyn LoginGate> = Arc::new(LoginSecret::Password("x".into()));
+        async move { service.run_backfill(account_id, None, gate, shutdown).await }
+    });
+    // Idle: the queue was empty.
+    while progress.recv().await.unwrap().message != "All message bodies downloaded" {}
+
+    let registry_provider = service.provider_registry.get_provider(&account_id).unwrap();
+    service
+        .ingest(&registry_provider, &inbox, &[envelope(1, "<a@x>")], false)
+        .await
+        .unwrap();
+
+    let woke = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while registry_provider.bulk_fetch_call_count() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    shutdown.cancel();
+    worker.await.unwrap();
+    assert!(woke.is_ok(), "the worker slept through the new message");
+}

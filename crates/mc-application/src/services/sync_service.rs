@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 
 use mc_domain::{
     AccountId, AggregateType, BodyBackfillQueue, DomainError, DomainEvent, EmailProvider,
@@ -133,6 +133,10 @@ pub struct SyncService<PR: ProviderRegistry, ES: EventStore, P: SyncStore> {
     last_progress: Mutex<HashMap<AccountId, ProgressKey>>,
     /// One sync at a time per account (see [`Self::exclusive`]).
     account_locks: Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Wakes an idle backfill worker when new messages (pending bodies) land.
+    /// `notify_one` stores a permit, so a wakeup between the worker's
+    /// empty-queue check and its wait is not lost.
+    backfill_wake: Notify,
 }
 
 /// What makes one progress event distinguishable from the previous one.
@@ -198,6 +202,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             progress_tx: broadcast::channel(64).0,
             last_progress: Mutex::new(HashMap::new()),
             account_locks: Mutex::new(HashMap::new()),
+            backfill_wake: Notify::new(),
         }
     }
 
@@ -461,6 +466,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             "Sync completed"
         );
 
+        self.backfill_wake.notify_one();
         self.emit(
             &mut progress,
             SyncProgressEvent {

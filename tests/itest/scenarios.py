@@ -122,8 +122,13 @@ def wait(cond, what, timeout=15):
     while time.time() < deadline:
         if cond():
             return
-        time.sleep(0.5)
+        time.sleep(0.2)
     raise Fail(f"timed out after {timeout}s waiting for: {what}")
+
+
+def idle_syncs():
+    """Partial (single-mailbox) syncs the server has finished so far."""
+    return (HERE / ".state" / "server.log").read_text(errors="replace").count("sync_mailbox: done")
 
 
 def on_server(w, tag, path):
@@ -176,13 +181,16 @@ def phone_moved_first(w):
     skipped: the stale INBOX row survives because IDLE's partial sync doesn't
     reconcile.)"""
     stale = w.mc_id("INBOX", 7)
+    seen = idle_syncs()
     imapctl.main(["move", "INBOX", "tag:7", "Archive"])
-    time.sleep(2)  # let the INBOX IDLE watcher react, as it would in real life
+    # the INBOX IDLE watcher reacts, as it would in real life
+    wait(lambda: idle_syncs() > seen, "the INBOX IDLE watcher to run its partial sync")
     try:
         mc("messages", "move", stale, w.boxes["Archive"]["ID"])
     except Fail as e:
         print("    (mc move of the stale row failed, tolerated: " + " ".join(str(e).splitlines()[1:]) + ")")
-    time.sleep(3)  # background IMAP move
+    wait(lambda: on_server(w, 7, "Archive") and not on_server(w, 7, "INBOX"),
+         "the background IMAP move of tag 7 to land on the server")
     w.sync()
     w.assert_where(7, {"Archive": (1, 1)})
     w.assert_consistent()

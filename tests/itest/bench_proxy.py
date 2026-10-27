@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Byte-counting TCP pass-through (TLS untouched) in front of Stalwart IMAPS.
 
-  bench_proxy.py LISTEN_PORT [UPSTREAM_PORT] CSV_PATH
+  bench_proxy.py LISTEN_PORT [UPSTREAM_PORT] CSV_PATH [--latency-ms N]
 
-Counts bytes per direction (down = server->client), connections, peak
+--latency-ms delays every forwarded chunk by N ms per direction (order kept),
+so a request/response round trip costs ~2N. Counts bytes per direction (down = server->client), connections, peak
 concurrency; writes a per-second timeline CSV (t,down,up,conns) and a final
 stats JSON next to it (<csv>.json). SIGTERM/SIGINT flush and exit.
 """
@@ -13,7 +14,13 @@ import signal
 import sys
 import time
 
-listen, upstream, csv_path = int(sys.argv[1]), int(sys.argv[2]) if len(sys.argv) > 3 else 19993, sys.argv[-1]
+args = sys.argv[1:]
+latency = 0.0
+if "--latency-ms" in args:
+    i = args.index("--latency-ms")
+    latency = int(args[i + 1]) / 1000
+    del args[i : i + 2]
+listen, upstream, csv_path = int(args[0]), int(args[1]) if len(args) > 2 else 19993, args[-1]
 st = dict(down=0, up=0, conns=0, open=0, peak=0, t0=None)
 timeline = {}  # second -> [down, up]
 
@@ -29,13 +36,26 @@ def bump(direction, n):
 
 
 async def pipe(r, w, direction):
+    # Chunks queue with a release time, so delay never reorders and never serialises.
+    q = asyncio.Queue()
+
+    async def deliver():
+        while (item := await q.get()) is not None:
+            release, data = item
+            if (wait := release - time.monotonic()) > 0:
+                await asyncio.sleep(wait)
+            w.write(data)
+            await w.drain()
+
+    sender = asyncio.create_task(deliver())
     try:
         while data := await r.read(65536):
             bump(direction, len(data))
-            w.write(data)
-            await w.drain()
+            q.put_nowait((time.monotonic() + latency, data))
+        q.put_nowait(None)
+        await sender
     except (ConnectionError, asyncio.CancelledError):
-        pass
+        sender.cancel()
     finally:
         w.close()
 

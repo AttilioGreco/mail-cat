@@ -70,6 +70,9 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             }
         }
 
+        if !new_messages.is_empty() {
+            self.backfill_wake.notify_one();
+        }
         if self.config.eager_body_fetch && !new_messages.is_empty() {
             self.fetch_eager_bodies(provider, local, &new_messages)
                 .await;

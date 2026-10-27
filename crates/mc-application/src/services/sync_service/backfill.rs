@@ -198,8 +198,10 @@ impl<PR: ProviderRegistry, ES: mc_domain::EventStore, P: SyncStore> SyncService<
                     message: "All message bodies downloaded".to_string(),
                 });
 
+                // The poll is a safety net; ingest and sync end wake us.
                 tokio::select! {
                     _ = shutdown.cancelled() => return,
+                    () = self.backfill_wake.notified() => continue,
                     _ = tokio::time::sleep(idle_poll) => continue,
                 }
             }
