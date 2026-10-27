@@ -4,16 +4,16 @@ import { RefreshCw, SearchX, Trash2 } from 'lucide-react';
 import { useSearchMessages } from '../model/useSearch';
 import { useSearchStore } from '../model/search-store';
 import { useSessionStore } from '@/entities/session';
-import { cn, formatDate } from '@/shared/lib/utils';
+import { cn, formatDate, sourceMailbox } from '@/shared/lib/utils';
 import type { SearchHit } from '../model/types';
 
 /** `deleteMany` is message-actions' bulk delete, handed in by the widget:
  *  features may not import each other. */
 export function SearchResults({ deleteMany }: {
-  deleteMany: UseMutationResult<[number, number], Error, { messageIds: string[] }>;
+  deleteMany: UseMutationResult<[number, number], Error, { messages: { messageId: string; mailboxId: string }[] }>;
 }) {
   const searchQuery = useSearchStore((s) => s.searchQuery);
-  const { selectedAccountId, selectedMessageId, selectMessage } = useSessionStore();
+  const { selectedAccountId, selectedMailboxId, selectedMessageId, selectMessage } = useSessionStore();
   const { data: hits = [], isLoading } = useSearchMessages(searchQuery, selectedAccountId);
   const [outcome, setOutcome] = useState<string | null>(null);
 
@@ -21,13 +21,16 @@ export function SearchResults({ deleteMany }: {
   // Trash only — a permanent bulk expunge driven by a search query is one
   // mistyped filter away from shredding a mailbox, so it isn't offered here.
   const trashAll = () => {
-    const ids = hits.map((h) => h.messageId);
-    if (ids.length === 0) return;
-    if (!window.confirm(`Sposti nel cestino ${ids.length} messaggi?`)) return;
+    const messages = hits.map((h) => ({
+      messageId: h.messageId,
+      mailboxId: sourceMailbox(h.mailboxIds, selectedMailboxId),
+    }));
+    if (messages.length === 0) return;
+    if (!window.confirm(`Sposti nel cestino ${messages.length} messaggi?`)) return;
 
     setOutcome(null);
     deleteMany.mutate(
-      { messageIds: ids },
+      { messages },
       {
         onSuccess: ([succeeded, failed]) => {
           selectMessage(null);

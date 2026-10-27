@@ -205,6 +205,7 @@ fn search_hit(message: &Message, score: f32, snippet: Option<String>) -> SearchH
     let names: Vec<&str> = from.iter().filter_map(|a| a.name.as_deref()).collect();
     SearchHit {
         message_id: message.id,
+        mailbox_ids: message.memberships.iter().map(|m| m.mailbox_id).collect(),
         score,
         snippet,
         subject: message.envelope.subject.clone(),

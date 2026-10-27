@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn send_compose_sends_appends_to_sent_and_records_it() {
+async fn send_compose_hands_the_sent_mailbox_to_the_provider_and_records_it() {
     let f = fixture("imap.example.com", |_, _| None);
     let result = f
         .handler
@@ -12,7 +12,6 @@ async fn send_compose_sends_appends_to_sent_and_records_it() {
         .await
         .unwrap();
     assert!(matches!(result, CommandResult::MessageSent { .. }));
-    drain_spawned().await;
 
     let sent = f.provider.sent.read().unwrap();
     let out = &sent[0];
@@ -27,10 +26,10 @@ async fn send_compose_sends_appends_to_sent_and_records_it() {
     );
     assert_eq!(out.body_text.as_deref(), Some("**ciao**\n\n-- \nMario"));
 
-    let appended = f.provider.appended.read().unwrap();
-    assert_eq!(appended.len(), 1);
-    assert_eq!(appended[0].0, f.sent_box.path);
-    assert_eq!(appended[0].1.message_rfc_id, out.message_rfc_id);
+    assert_eq!(
+        *f.provider.sent_to.read().unwrap(),
+        [Some(f.sent_box.path.clone())]
+    );
 
     // The sent event carries the body, or a refetch of the sent message comes back empty.
     let published = f.bus.published.read().unwrap();
@@ -46,18 +45,154 @@ async fn send_compose_sends_appends_to_sent_and_records_it() {
     assert_eq!(*mailbox_id, f.sent_box.id);
 }
 
-#[tokio::test]
-async fn gmail_sent_copy_is_not_appended() {
-    let f = fixture("imap.gmail.com", |_, _| None);
-    f.handler
+/// The placeholder `handle_send_compose` recorded: the one message in the
+/// store that starts with `MessageSent`.
+fn placeholder_of(es: &MockEventStore) -> MessageId {
+    es.events
+        .read()
+        .unwrap()
+        .values()
+        .find_map(|events| match events.first().map(|e| &e.payload) {
+            Some(DomainEvent::MessageSent { message_id, .. }) => Some(*message_id),
+            _ => None,
+        })
+        .expect("a sent placeholder")
+}
+
+async fn send_reporting(f: &Fixture, copy: SentCopy) -> MessageId {
+    *f.provider.sent_copy.write().unwrap() = Some(copy);
+    let CommandResult::MessageSent { message_id } = f
+        .handler
         .handle_send_compose(
             std::slice::from_ref(&f.account),
             compose_input(f.account.id),
         )
         .await
-        .unwrap();
-    drain_spawned().await;
-    assert!(f.provider.appended.read().unwrap().is_empty());
+        .unwrap()
+    else {
+        panic!("expected MessageSent");
+    };
+    message_id
+}
+
+/// The remote id the placeholder has in Sent; `Err` once it is gone.
+async fn sent_copy_id(f: &Fixture, id: MessageId) -> Result<Option<RemoteId>, ApplicationError> {
+    let (message, _) = f.handler.load_message(&id).await?;
+    Ok(message.membership(f.sent_box.id).unwrap().remote_id.clone())
+}
+
+fn event_names(es: &MockEventStore, id: MessageId) -> Vec<&'static str> {
+    es.events.read().unwrap()[&id.to_string()]
+        .iter()
+        .map(|e| e.payload.event_name())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_sent_copy_stored_with_its_id_makes_the_placeholder_that_message() {
+    let f = fixture("imap.example.com", |_, _| None);
+    let id = send_reporting(
+        &f,
+        SentCopy::Stored {
+            remote_id: Some(RemoteId::from(9)),
+        },
+    )
+    .await;
+
+    assert_eq!(sent_copy_id(&f, id).await.unwrap(), Some(RemoteId::from(9)));
+}
+
+/// Without an id, a stored copy is matched by Message-ID when Sent syncs;
+/// so is one the server files itself. A copy that could not be stored leaves
+/// the placeholder as the only trace of the message.
+#[tokio::test]
+async fn a_sent_copy_without_an_id_leaves_the_placeholder_for_the_sync() {
+    for copy in [
+        SentCopy::Stored { remote_id: None },
+        SentCopy::ServerFiled,
+        SentCopy::NotStored,
+    ] {
+        let f = fixture("imap.example.com", |_, _| None);
+        let id = send_reporting(&f, copy.clone()).await;
+
+        assert_eq!(sent_copy_id(&f, id).await.unwrap(), None, "{copy:?}");
+        assert_eq!(event_names(&f.es, id), ["MessageSent"], "{copy:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_send_takes_its_placeholder_back() {
+    let f = fixture("imap.example.com", |_, _| None);
+    *f.provider.send_fails.write().unwrap() = true;
+
+    let err = f
+        .handler
+        .handle_send_compose(
+            std::slice::from_ref(&f.account),
+            compose_input(f.account.id),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("SMTP refused"), "{err}");
+    let id = placeholder_of(&f.es);
+    assert_eq!(event_names(&f.es, id), ["MessageSent", "MessageDeleted"]);
+    assert!(matches!(
+        f.handler.load_message(&id).await,
+        Err(ApplicationError::NotFound(..))
+    ));
+}
+
+/// A Sent sync can store the server copy while the send is still returning:
+/// it supersedes the placeholder, so the id arriving afterwards has nowhere
+/// to go and must not bring the placeholder back.
+#[tokio::test]
+async fn an_id_arriving_after_a_sync_superseded_the_placeholder_is_dropped() {
+    let f = fixture("imap.example.com", |_, _| None);
+    let es = Arc::clone(&f.es);
+    *f.provider.during_send.write().unwrap() = Some(Box::new(move || {
+        let id = placeholder_of(&es);
+        let mut events = es.events.write().unwrap();
+        let list = events.get_mut(&id.to_string()).unwrap();
+        let seq = list.len() as u64 + 1;
+        list.push(EventEnvelope::new(
+            id.to_string(),
+            AggregateType::Message,
+            seq,
+            DomainEvent::MessageDeleted {
+                message_id: id,
+                mailbox_ids: vec![],
+            },
+        ));
+    }));
+
+    let id = send_reporting(
+        &f,
+        SentCopy::Stored {
+            remote_id: Some(RemoteId::from(9)),
+        },
+    )
+    .await;
+
+    assert_eq!(event_names(&f.es, id), ["MessageSent", "MessageDeleted"]);
+}
+
+/// The other order: the sync stored the server copy as a row of its own and
+/// has yet to supersede the placeholder. The id is that row's, not the
+/// placeholder's, or the message would be there twice.
+#[tokio::test]
+async fn an_id_another_row_already_holds_is_not_given_to_the_placeholder() {
+    let f = fixture_holding("imap.example.com", |_, _| None, vec![RemoteId::from(9)]);
+    let id = send_reporting(
+        &f,
+        SentCopy::Stored {
+            remote_id: Some(RemoteId::from(9)),
+        },
+    )
+    .await;
+
+    assert_eq!(sent_copy_id(&f, id).await.unwrap(), None);
+    assert_eq!(event_names(&f.es, id), ["MessageSent"]);
 }
 
 #[tokio::test]
@@ -277,11 +412,10 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
 }
 
 #[tokio::test]
-async fn save_draft_appends_stores_locally_and_replaces_previous() {
-    let f = fixture("imap.example.com", |account, inbox| {
-        Some(source_message(account, inbox))
-    });
-    let old = f.seeded.clone().unwrap();
+async fn save_draft_stores_locally_and_replaces_previous() {
+    let f = fixture("imap.example.com", |_, _| None);
+    let old = source_message(f.account.id, f.drafts_box.id);
+    f.es.add(&old);
     let mut input = compose_input(f.account.id);
     input.draft_id = Some(old.id);
     input.to.clear();
@@ -296,10 +430,14 @@ async fn save_draft_appends_stores_locally_and_replaces_previous() {
     };
     assert_ne!(message_id, old.id);
 
-    let appended = f.provider.appended.read().unwrap();
-    let (path, draft, flags) = &appended[0];
+    let saved = f.provider.saved_drafts.read().unwrap();
+    let (path, draft, replacing) = &saved[0];
     assert_eq!(*path, f.drafts_box.path);
-    assert!(flags.contains(&Flag::Draft));
+    assert_eq!(
+        *replacing,
+        Some(RemoteId::from(42)),
+        "the provider drops the old version"
+    );
     assert!(
         draft
             .extra_headers
@@ -319,4 +457,18 @@ async fn save_draft_appends_stores_locally_and_replaces_previous() {
     assert!(events.contains(&(message_id.to_string(), "MessageReceived")));
     assert!(events.contains(&(message_id.to_string(), "MessageBodyFetched")));
     assert!(events.contains(&(old.id.to_string(), "MessageDeleted")));
+}
+
+#[tokio::test]
+async fn a_first_draft_replaces_nothing() {
+    let f = fixture("imap.example.com", |_, _| None);
+    let mut input = compose_input(f.account.id);
+    input.to.clear();
+
+    f.handler
+        .handle_save_draft(std::slice::from_ref(&f.account), input)
+        .await
+        .unwrap();
+
+    assert_eq!(f.provider.saved_drafts.read().unwrap()[0].2, None);
 }

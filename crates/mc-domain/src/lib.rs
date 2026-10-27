@@ -26,7 +26,7 @@ pub use value_objects::sync_cursor::SyncCursor;
 pub use traits::account_event_source::AccountEventSource;
 pub use traits::email_provider::{
     EmailProvider, Existing, MailboxChanges, MailboxCounts, MessageBodyResult, MessageEnvelopeSummary,
-    ProviderNotification, Reset,
+    ProviderNotification, Reset, SendOutcome, SentCopy,
 };
 pub use traits::event_store::EventStore;
 pub use traits::login_gate::{login_with, LoginGate, LoginSecret};

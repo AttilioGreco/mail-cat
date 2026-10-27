@@ -18,10 +18,12 @@ import { EmailContent } from './EmailContent';
 
 interface MessageViewerProps {
   envelope: MessageEnvelope;
+  /** The mailbox the message is listed in: every action acts from it. */
+  mailboxId: string;
 }
 
-export function MessageViewer({ envelope }: MessageViewerProps) {
-  const { data: body, isLoading } = useMessageBody(envelope.uid);
+export function MessageViewer({ envelope, mailboxId }: MessageViewerProps) {
+  const { data: body, isLoading } = useMessageBody(envelope.uid, mailboxId);
   const setFlags = useSetFlags();
   const deleteMsg = useDeleteMessage();
   const moveMsg = useMoveMessage();
@@ -60,11 +62,11 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
     mailboxes.find((m) => m.kind === 'archive') ?? mailboxes.find((m) => m.kind === 'all');
   const spamMailbox = mailboxes.find((m) => m.kind === 'spam');
 
-  const moveTo = (mailboxId: string) => {
+  const moveTo = (toMailboxId: string) => {
     // Hand the selection on before mutating: once the cache is invalidated the
     // list no longer knows what came after this message.
     selectNeighbour(envelope.uid);
-    moveMsg.mutate({ messageId: envelope.uid, toMailboxId: mailboxId });
+    moveMsg.mutate({ messageId: envelope.uid, fromMailboxId: mailboxId, toMailboxId });
     setMenuOpen(false);
   };
 
@@ -76,7 +78,7 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
 
   const handleDelete = () => {
     selectNeighbour(envelope.uid);
-    deleteMsg.mutate({ messageId: envelope.uid });
+    deleteMsg.mutate({ messageId: envelope.uid, mailboxId });
   };
 
   const handleToggleRead = () => {
@@ -179,7 +181,7 @@ export function MessageViewer({ envelope }: MessageViewerProps) {
                   destructive
                   onClick={() => {
                     selectNeighbour(envelope.uid);
-                    deleteMsg.mutate({ messageId: envelope.uid, permanently: true });
+                    deleteMsg.mutate({ messageId: envelope.uid, mailboxId, permanently: true });
                     setMenuOpen(false);
                   }}
                 />

@@ -385,3 +385,37 @@ fn change_flags_no_duplicates() {
     let seen_count = msg.flags.iter().filter(|f| f.is_seen()).count();
     assert_eq!(seen_count, 1);
 }
+
+/// Mail sent from here is a message from its first event on: it can be
+/// given the id the provider files its Sent copy under, and be deleted.
+#[test]
+fn a_sent_placeholder_rehydrates_and_can_adopt_its_remote_id() {
+    let sent = MailboxId::new();
+    let sent_event = DomainEvent::MessageSent {
+        message_id: MessageId::new(),
+        account_id: AccountId::new(),
+        mailbox_id: sent,
+        envelope: test_envelope(),
+        message_rfc_id: Some("<sent@example.com>".into()),
+        in_reply_to: None,
+        references: vec![],
+        body_text: Some("hi".into()),
+        body_html: None,
+        sent_at: Utc::now(),
+    };
+
+    let mut msg = Message::rehydrate(std::slice::from_ref(&sent_event)).unwrap();
+    assert_eq!(
+        msg.membership(sent).map(|m| m.remote_id.clone()),
+        Some(None)
+    );
+    assert!(msg.is_read());
+    assert_eq!(msg.body_text.as_deref(), Some("hi"));
+
+    let attached = msg.attach_remote_id(sent, RemoteId::from(9)).unwrap();
+    let again = Message::rehydrate(&[sent_event, attached]).unwrap();
+    assert_eq!(
+        again.membership(sent).unwrap().remote_id,
+        Some(RemoteId::from(9))
+    );
+}

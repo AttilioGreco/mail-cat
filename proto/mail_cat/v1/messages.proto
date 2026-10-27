@@ -123,6 +123,9 @@ message ListMessagesResponse {
 
 message GetMessageRequest {
   string message_id = 1;
+  // The mailbox the message is opened from: its copy there is the one a
+  // missing body is fetched from. NotFound if the message is not in it.
+  string mailbox_id = 2;
 }
 
 message GetMessageResponse {
@@ -190,6 +193,8 @@ message MarkMailboxReadResponse {
 message MoveMessageRequest {
   string message_id = 1;
   string to_mailbox_id = 2;
+  // The mailbox the message is moved out of; NotFound if it is not in it.
+  string from_mailbox_id = 3;
 }
 
 message MoveMessageResponse {
@@ -199,15 +204,23 @@ message MoveMessageResponse {
 message DeleteMessageRequest {
   string message_id = 1;
   bool permanently = 2;  // If true, expunge; if false, mark as deleted
+  // The mailbox the message is deleted from; NotFound if it is not in it.
+  string mailbox_id = 3;
+}
+
+// A message as acted on from one of its mailboxes (it can be in several).
+message MessageRef {
+  string message_id = 1;
+  string mailbox_id = 2;
 }
 
 message DeleteMessagesRequest {
-  repeated string message_ids = 1;
+  repeated MessageRef messages = 1;
   bool permanently = 2;
 }
 
 message MoveMessagesRequest {
-  repeated string message_ids = 1;
+  repeated MessageRef messages = 1;
   string to_mailbox_id = 2;
 }
 

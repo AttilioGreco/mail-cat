@@ -3,7 +3,7 @@ import { Archive, ChevronDown, Forward, MailOpen, Reply, ReplyAll, Trash2 } from
 import { useQueryClient } from '@tanstack/react-query';
 import { useThread, type ThreadMessage } from '@/entities/conversation';
 import { useSessionStore, mailboxKey } from '@/entities/session';
-import { formatDate } from '@/shared/lib/utils';
+import { formatDate, sourceMailbox } from '@/shared/lib/utils';
 import { useSetFlags, useDeleteMessage, useMoveMessage, useToggleStar } from '@/features/message-actions';
 import { useMailboxes } from '@/entities/mailbox';
 import { useShortcuts } from '@/features/keyboard-shortcuts';
@@ -76,12 +76,16 @@ export function ThreadView() {
 
   /** Delete = move to Trash (see `handle_delete` on the server), so this is
    *  recoverable and needs no confirmation, like the single-message toolbar. */
-  async function deleteMessages(ids: string[], permanently = false) {
-    if (!ids.length) return;
-    await Promise.all(ids.map((id) => deleteMsg.mutateAsync({ messageId: id, permanently })));
+  async function deleteMessages(targets: ThreadMessage[], permanently = false) {
+    if (!targets.length) return;
+    await Promise.all(
+      targets.map((m) =>
+        deleteMsg.mutateAsync({ messageId: m.id, mailboxId: sourceMailbox(m.mailboxIds, selectedMailboxId), permanently }),
+      ),
+    );
     // Leave the thread only when nothing is left to show — deleting one message
     // out of five must keep the conversation open.
-    if (ids.length >= (messages?.length ?? 0)) selectThread(null);
+    if (targets.length >= (messages?.length ?? 0)) selectThread(null);
   }
 
   /** Move every message of the thread to `kind`, if the account has that folder. */
@@ -92,7 +96,13 @@ export function ThreadView() {
       (kind === 'archive' ? mailboxes.find((m) => m.kind === 'all') : undefined);
     if (!target || !messages?.length) return;
     await Promise.all(
-      messages.map((m) => moveMsg.mutateAsync({ messageId: m.id, toMailboxId: target.id })),
+      messages.map((m) =>
+        moveMsg.mutateAsync({
+          messageId: m.id,
+          fromMailboxId: sourceMailbox(m.mailboxIds, selectedMailboxId),
+          toMailboxId: target.id,
+        }),
+      ),
     );
     selectThread(null);
   }
@@ -100,11 +110,11 @@ export function ThreadView() {
   // Bound here, not in MessageList: the flat list only knows a conversation's
   // sample id, while the whole thread's message ids live in this component. Every
   // action here applies to the whole conversation — the labels say so too.
-  const threadIds = (messages ?? []).map((m) => m.id);
+  const thread = messages ?? [];
   const hasUnread = !!messages?.some((m) => !m.isRead);
   useShortcuts({
-    deleteMessage: () => void deleteMessages(threadIds),
-    deletePermanently: () => void deleteMessages(threadIds, true),
+    deleteMessage: () => void deleteMessages(thread),
+    deletePermanently: () => void deleteMessages(thread, true),
     archiveMessage: () => void moveThreadTo('archive'),
     markSpam: () => void moveThreadTo('spam'),
     toggleRead: () => void markConversation(hasUnread),
@@ -224,7 +234,7 @@ export function ThreadView() {
               type="button"
               title="Sposta la conversazione nel cestino"
               disabled={deleteMsg.isPending}
-              onClick={() => void deleteMessages(messages.map((m) => m.id))}
+              onClick={() => void deleteMessages(messages)}
               className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-destructive disabled:opacity-50"
             >
               <Trash2 size={15} />
@@ -254,7 +264,7 @@ export function ThreadView() {
                     onReply={() => openOn(message.id, 'reply')}
                     onReplyAll={() => openOn(message.id, 'replyAll')}
                     onForward={() => openOn(message.id, 'forward')}
-                    onDelete={() => void deleteMessages([message.id])}
+                    onDelete={() => void deleteMessages([message])}
                   />
                 ) : (
                   <CollapsedMessage

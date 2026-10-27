@@ -139,6 +139,7 @@ async fn fetches_on_open(body_text: Option<&str>, truncated: bool) -> u32 {
     );
     svc.get_message(Request::new(GetMessageRequest {
         message_id: message.id.to_string(),
+        mailbox_id: mailbox_id.to_string(),
     }))
     .await
     .unwrap();
@@ -384,6 +385,7 @@ async fn opening_a_message_without_uid_fetches_its_body() {
 
     svc.get_message(Request::new(GetMessageRequest {
         message_id: message.id.to_string(),
+        mailbox_id: mailbox_id.to_string(),
     }))
     .await
     .unwrap();
@@ -392,6 +394,52 @@ async fn opening_a_message_without_uid_fetches_its_body() {
         commands.0.lock().unwrap().as_slice(),
         [Command::FetchMessageBody { .. }]
     ));
+}
+
+/// A request names the mailbox it acts from; a message that is not in it is
+/// not found, whatever other mailbox it is in.
+#[tokio::test]
+async fn acting_from_a_mailbox_the_message_is_not_in_is_not_found() {
+    let (account_id, mailbox_id, elsewhere) =
+        (AccountId::new(), MailboxId::new(), MailboxId::new());
+    let message = message_in(account_id, mailbox_id);
+    let svc = MessageServiceImpl::new(
+        Arc::new(NopCommandBus),
+        Arc::new(MessageInMailbox(
+            message.clone(),
+            fake_mailbox(account_id, elsewhere),
+        )),
+        Arc::new(InProcessEventBus::new(16)),
+    );
+    let (message_id, elsewhere) = (message.id.to_string(), elsewhere.to_string());
+
+    let opened = svc
+        .get_message(Request::new(GetMessageRequest {
+            message_id: message_id.clone(),
+            mailbox_id: elsewhere.clone(),
+        }))
+        .await
+        .unwrap_err();
+    let moved = svc
+        .move_message(Request::new(MoveMessageRequest {
+            message_id: message_id.clone(),
+            from_mailbox_id: elsewhere.clone(),
+            to_mailbox_id: MailboxId::new().to_string(),
+        }))
+        .await
+        .unwrap_err();
+    let deleted = svc
+        .delete_message(Request::new(DeleteMessageRequest {
+            message_id,
+            mailbox_id: elsewhere,
+            permanently: true,
+        }))
+        .await
+        .unwrap_err();
+
+    for status in [opened, moved, deleted] {
+        assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
+    }
 }
 
 /// Query bus whose one message is in `mailbox` only.

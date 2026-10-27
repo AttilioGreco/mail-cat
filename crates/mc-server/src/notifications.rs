@@ -71,7 +71,6 @@ pub async fn run_action(
                             message_id,
                             from_mailbox_id: src.id,
                             to_mailbox_id: dst.id,
-                            from_mailbox_path: src.path.clone(),
                             to_mailbox_path: dst.path.clone(),
                         })
                         .await

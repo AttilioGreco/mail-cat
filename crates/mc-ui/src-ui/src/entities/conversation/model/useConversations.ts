@@ -26,6 +26,7 @@ function toThreadMessage(raw: Record<string, unknown>): ThreadMessage {
     subject: raw.subject as string,
     date: raw.date as string,
     isRead: raw.is_read as boolean,
+    mailboxIds: (raw.mailbox_ids as string[] | null) ?? [],
     htmlBody: (raw.html_body as string | null) ?? null,
     textBody: (raw.text_body as string | null) ?? null,
     inReplyTo: (raw.in_reply_to as string | null) ?? null,

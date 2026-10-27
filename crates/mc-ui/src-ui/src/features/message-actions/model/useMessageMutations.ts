@@ -212,9 +212,10 @@ export function useMarkMailboxRead() {
 export function useMoveMessage() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (params: { messageId: string; toMailboxId: string }) =>
+    mutationFn: (params: { messageId: string; fromMailboxId: string; toMailboxId: string }) =>
       invoke('move_message', {
         messageId: params.messageId,
+        fromMailboxId: params.fromMailboxId,
         toMailboxId: params.toMailboxId,
       }),
     onMutate: (params) => removeFromLists(qc, [params.messageId]),
@@ -224,6 +225,12 @@ export function useMoveMessage() {
 }
 
 // ── Bulk actions ────────────────────────────────────────────────────────────
+
+/** A message and the mailbox a bulk action takes it from. */
+export interface MessageRef {
+  messageId: string;
+  mailboxId: string;
+}
 
 /** `[succeeded, failed]`. The backend walks past messages it cannot touch
  *  (already gone, stale search index) instead of aborting the batch, so a
@@ -238,12 +245,12 @@ function invalidateMessageViews(qc: ReturnType<typeof useQueryClient>) {
 export function useDeleteMessages() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (params: { messageIds: string[]; permanently?: boolean }) =>
+    mutationFn: (params: { messages: MessageRef[]; permanently?: boolean }) =>
       invoke<BulkResult>('delete_messages', {
-        messageIds: params.messageIds,
+        messages: params.messages,
         permanently: params.permanently ?? false,
       }),
-    onMutate: (params) => removeFromLists(qc, params.messageIds),
+    onMutate: (params) => removeFromLists(qc, params.messages.map((m) => m.messageId)),
     onError: (_e, _params, snapshot) => restoreLists(qc, snapshot),
     onSettled: () => invalidateMessageViews(qc),
   });
@@ -253,12 +260,12 @@ export function useDeleteMessages() {
 export function useMoveMessages() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (params: { messageIds: string[]; toMailboxId: string }) =>
+    mutationFn: (params: { messages: MessageRef[]; toMailboxId: string }) =>
       invoke<BulkResult>('move_messages', {
-        messageIds: params.messageIds,
+        messages: params.messages,
         toMailboxId: params.toMailboxId,
       }),
-    onMutate: (params) => removeFromLists(qc, params.messageIds),
+    onMutate: (params) => removeFromLists(qc, params.messages.map((m) => m.messageId)),
     onError: (_e, _params, snapshot) => restoreLists(qc, snapshot),
     onSettled: () => invalidateMessageViews(qc),
   });
@@ -269,9 +276,10 @@ export function useMoveMessages() {
 export function useDeleteMessage() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (params: { messageId: string; permanently?: boolean }) =>
+    mutationFn: (params: { messageId: string; mailboxId: string; permanently?: boolean }) =>
       invoke('delete_message', {
         messageId: params.messageId,
+        mailboxId: params.mailboxId,
         permanently: params.permanently ?? false,
       }),
     onMutate: (params) => removeFromLists(qc, [params.messageId]),

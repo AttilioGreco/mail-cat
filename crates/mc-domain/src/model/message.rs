@@ -317,46 +317,74 @@ impl Message {
 
     /// Rehydrate a Message from a sequence of domain events.
     ///
-    /// The first event must be `MessageReceived`. Returns `None` if the
-    /// events slice is empty or doesn't start with a creation event.
+    /// The first event must create it: `MessageReceived`, or `MessageSent`
+    /// for mail sent from here, which then stands for its Sent copy (with no
+    /// remote id until the provider reports one or Sent syncs). `None` if the
+    /// events slice is empty or starts with anything else.
     pub fn rehydrate(events: &[DomainEvent]) -> Option<Self> {
-        let first = events.first()?;
-        let DomainEvent::MessageReceived {
-            message_id,
-            account_id,
-            mailbox_id,
-            remote_id,
-            message_rfc_id,
-            in_reply_to,
-            references,
-            envelope,
-            flags,
-            size_bytes,
-            has_attachments,
-            received_at,
-            ..
-        } = first
-        else {
-            return None;
-        };
-
-        let mut message = Self {
-            id: *message_id,
-            account_id: *account_id,
-            memberships: vec![Membership { mailbox_id: *mailbox_id, remote_id: Some(remote_id.clone()) }],
-            message_rfc_id: message_rfc_id.clone(),
-            in_reply_to: in_reply_to.clone(),
-            references: references.clone(),
-            envelope: envelope.clone(),
-            flags: flags.clone(),
-            size_bytes: *size_bytes,
-            has_attachments: *has_attachments,
-            attachments: Vec::new(),
-            body_text: None,
-            body_html: None,
-            body_truncated: false,
-            received_at: *received_at,
-            internal_date: *received_at,
+        let mut message = match events.first()? {
+            DomainEvent::MessageReceived {
+                message_id,
+                account_id,
+                mailbox_id,
+                remote_id,
+                message_rfc_id,
+                in_reply_to,
+                references,
+                envelope,
+                flags,
+                size_bytes,
+                has_attachments,
+                received_at,
+                ..
+            } => Self {
+                id: *message_id,
+                account_id: *account_id,
+                memberships: vec![Membership { mailbox_id: *mailbox_id, remote_id: Some(remote_id.clone()) }],
+                message_rfc_id: message_rfc_id.clone(),
+                in_reply_to: in_reply_to.clone(),
+                references: references.clone(),
+                envelope: envelope.clone(),
+                flags: flags.clone(),
+                size_bytes: *size_bytes,
+                has_attachments: *has_attachments,
+                attachments: Vec::new(),
+                body_text: None,
+                body_html: None,
+                body_truncated: false,
+                received_at: *received_at,
+                internal_date: *received_at,
+            },
+            DomainEvent::MessageSent {
+                message_id,
+                account_id,
+                mailbox_id,
+                envelope,
+                message_rfc_id,
+                in_reply_to,
+                references,
+                body_text,
+                body_html,
+                sent_at,
+            } => Self {
+                id: *message_id,
+                account_id: *account_id,
+                memberships: vec![Membership { mailbox_id: *mailbox_id, remote_id: None }],
+                message_rfc_id: message_rfc_id.clone(),
+                in_reply_to: in_reply_to.clone(),
+                references: references.clone(),
+                envelope: envelope.clone(),
+                flags: vec![Flag::Seen],
+                size_bytes: 0,
+                has_attachments: false,
+                attachments: Vec::new(),
+                body_text: body_text.clone(),
+                body_html: body_html.clone(),
+                body_truncated: false,
+                received_at: *sent_at,
+                internal_date: *sent_at,
+            },
+            _ => return None,
         };
 
         for event in &events[1..] {

@@ -254,17 +254,23 @@ impl EmailProvider for MockEmailProvider {
         Ok(())
     }
 
-    async fn send_message(&self, _message: &OutgoingMessage) -> Result<(), DomainError> {
-        Ok(())
+    async fn send_message(
+        &self,
+        _message: &OutgoingMessage,
+        _sent: Option<&MailboxPath>,
+    ) -> Result<mc_domain::SendOutcome, DomainError> {
+        Ok(mc_domain::SendOutcome {
+            sent_copy: mc_domain::SentCopy::NotStored,
+        })
     }
 
-    async fn append_message(
+    async fn save_draft(
         &self,
-        _mailbox: &MailboxPath,
+        _drafts: &MailboxPath,
         _message: &OutgoingMessage,
-        _flags: &[Flag],
-    ) -> Result<Option<RemoteId>, DomainError> {
-        Ok(None)
+        _replacing: Option<&RemoteId>,
+    ) -> Result<RemoteId, DomainError> {
+        Ok(RemoteId::from(1))
     }
 
     fn watch_mailbox(

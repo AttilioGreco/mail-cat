@@ -10,4 +10,4 @@ export {
   useDeleteMessages,
   useMoveMessages,
 } from './model/useMessageMutations';
-export type { BulkResult } from './model/useMessageMutations';
+export type { BulkResult, MessageRef } from './model/useMessageMutations';

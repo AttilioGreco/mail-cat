@@ -10,8 +10,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Datelike, TimeZone};
 use mailparse::{DispositionType, MailAddr, MailHeader, MailHeaderMap, ParsedMail};
 use mc_domain::{
-    Account, AccountId, Address, EmailAddress, Envelope, IncomingServer, MessageId,
-    OutgoingAttachment,
+    Account, AccountId, Address, EmailAddress, Envelope, MessageId, OutgoingAttachment,
 };
 use pulldown_cmark::{Event, Options, Parser};
 
@@ -134,16 +133,6 @@ pub fn sender_address(account: &Account) -> Address {
         name: (!name.is_empty()).then(|| name.to_owned()),
         email: account.identity.email.clone(),
     }
-}
-
-/// Gmail files every SMTP submission into "Sent Mail" itself; appending our
-/// own copy there would show the message twice.
-pub fn saves_sent_copy_itself(account: &Account) -> bool {
-    let IncomingServer::Imap { host, .. } = &account.connection_config.incoming else {
-        return false;
-    };
-    let host = host.to_ascii_lowercase();
-    host.ends_with("gmail.com") || host.ends_with("googlemail.com")
 }
 
 pub fn new_message_rfc_id(from: &EmailAddress) -> String {

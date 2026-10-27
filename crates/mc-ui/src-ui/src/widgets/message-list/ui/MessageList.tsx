@@ -160,25 +160,25 @@ export function MessageList() {
     // on to the next row first — `messages` (not the cache) because it is the
     // filtered list the user is actually looking at.
     deleteMessage: conversationMode ? undefined : () => {
-      if (!selected) return;
+      if (!selected || !selectedMailboxId) return;
       selectNeighbour(selected.uid, messages);
-      deleteMessage.mutate({ messageId: selected.uid });
+      deleteMessage.mutate({ messageId: selected.uid, mailboxId: selectedMailboxId });
     },
     deletePermanently: conversationMode ? undefined : () => {
-      if (!selected) return;
+      if (!selected || !selectedMailboxId) return;
       selectNeighbour(selected.uid, messages);
-      deleteMessage.mutate({ messageId: selected.uid, permanently: true });
+      deleteMessage.mutate({ messageId: selected.uid, mailboxId: selectedMailboxId, permanently: true });
     },
     markSpam: conversationMode ? undefined : () => {
       const spam = mailboxes.find((m) => m.kind === 'spam');
-      if (!selected || !spam) return;
+      if (!selected || !spam || !selectedMailboxId) return;
       selectNeighbour(selected.uid, messages);
-      moveMessage.mutate({ messageId: selected.uid, toMailboxId: spam.id });
+      moveMessage.mutate({ messageId: selected.uid, fromMailboxId: selectedMailboxId, toMailboxId: spam.id });
     },
     archiveMessage: conversationMode ? undefined : () => {
-      if (!selected || !archiveMailbox) return;
+      if (!selected || !archiveMailbox || !selectedMailboxId) return;
       selectNeighbour(selected.uid, messages);
-      moveMessage.mutate({ messageId: selected.uid, toMailboxId: archiveMailbox.id });
+      moveMessage.mutate({ messageId: selected.uid, fromMailboxId: selectedMailboxId, toMailboxId: archiveMailbox.id });
     },
   });
 

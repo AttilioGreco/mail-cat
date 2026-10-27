@@ -75,6 +75,78 @@ async fn sent_copy_syncing_back_replaces_the_one_shown_at_send_time() {
     );
 }
 
+/// The provider already filed the sent copy and reported its id, which went
+/// to the placeholder: the Sent sync that then sees that copy has nothing to
+/// store, and nothing to supersede.
+#[tokio::test]
+async fn a_placeholder_that_already_holds_the_copys_id_is_not_duplicated() {
+    let account_id = AccountId::new();
+    let (sent, _) = Mailbox::discover(
+        account_id,
+        MailboxPath::new(vec!["Sent".to_string()], '/').unwrap(),
+        MailboxType::Sent,
+    );
+    let placeholder = MessageSummary {
+        id: MessageId::new(),
+        account_id,
+        memberships: vec![Membership {
+            mailbox_id: sent.id,
+            remote_id: Some(RemoteId::from(7)),
+        }],
+        from_name: None,
+        from_email: "sender@example.com".into(),
+        to: vec![],
+        cc: vec![],
+        subject: "Test Subject".into(),
+        flags: vec![Flag::Seen],
+        size_bytes: 0,
+        has_attachments: false,
+        received_at: chrono::Utc::now(),
+    };
+    let mut server_copy = make_envelope_summary(7);
+    server_copy.message_rfc_id = Some("<sent@example.com>".into());
+
+    let projector = Arc::new(MockProjector::new());
+    projector.stored.lock().unwrap().push(placeholder.clone());
+    projector.mailboxes.lock().unwrap().push(sent.clone());
+    let event_store = Arc::new(MockEventStore::new());
+    event_store.events.lock().unwrap().push((
+        placeholder.id.to_string(),
+        DomainEvent::MessageSent {
+            message_id: placeholder.id,
+            account_id,
+            mailbox_id: sent.id,
+            envelope: test_envelope(),
+            message_rfc_id: Some("<sent@example.com>".into()),
+            in_reply_to: None,
+            references: vec![],
+            body_text: None,
+            body_html: None,
+            sent_at: chrono::Utc::now(),
+        },
+    ));
+    let provider = MockEmailProvider::new()
+        .with_mailboxes(vec![sent])
+        .with_envelopes(vec![server_copy]);
+    let service = make_service(provider, event_store, projector.clone());
+    service.start_sync(&account_id).await.unwrap();
+
+    let stored_or_dropped = projector
+        .projected_events()
+        .into_iter()
+        .filter(|e| {
+            matches!(
+                e,
+                DomainEvent::MessageReceived { .. } | DomainEvent::MessageDeleted { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        stored_or_dropped, 0,
+        "the placeholder is already the message"
+    );
+}
+
 #[tokio::test]
 async fn moved_message_gets_its_uid_back_instead_of_a_duplicate() {
     let account_id = AccountId::new();

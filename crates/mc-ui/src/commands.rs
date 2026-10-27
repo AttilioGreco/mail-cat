@@ -767,11 +767,12 @@ pub async fn list_messages(
 #[tauri::command]
 pub async fn get_message(
     message_id: String,
+    mailbox_id: String,
     state: State<'_, AppState>,
 ) -> Result<MessageBodyDto, String> {
     let client = get_or_connect(&state).await?;
     client
-        .get_message(&message_id)
+        .get_message(&message_id, &mailbox_id)
         .await
         .map(body_to_dto)
         .map_err(|e| e.to_string())
@@ -928,6 +929,7 @@ pub async fn stop_watching(
 #[derive(Serialize)]
 pub struct SearchHitDto {
     pub message_id: String,
+    pub mailbox_ids: Vec<String>,
     pub score: f32,
     pub snippet: Option<String>,
     pub subject: String,
@@ -939,6 +941,7 @@ pub struct SearchHitDto {
 fn search_hit_to_dto(h: SearchHit) -> SearchHitDto {
     SearchHitDto {
         message_id: h.message_id,
+        mailbox_ids: h.mailbox_ids,
         score: h.score,
         snippet: h.snippet,
         subject: h.subject,
@@ -994,12 +997,13 @@ pub async fn mark_mailbox_read(
 #[tauri::command]
 pub async fn move_message(
     message_id: String,
+    from_mailbox_id: String,
     to_mailbox_id: String,
     state: State<'_, AppState>,
 ) -> Result<MessageSummaryDto, String> {
     let client = get_or_connect(&state).await?;
     client
-        .move_message(&message_id, &to_mailbox_id)
+        .move_message(&message_id, &from_mailbox_id, &to_mailbox_id)
         .await
         .map(message_to_dto)
         .map_err(|e| e.to_string())
@@ -1008,27 +1012,43 @@ pub async fn move_message(
 #[tauri::command]
 pub async fn delete_message(
     message_id: String,
+    mailbox_id: String,
     permanently: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let client = get_or_connect(&state).await?;
     client
-        .delete_message(&message_id, permanently)
+        .delete_message(&message_id, &mailbox_id, permanently)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// A message and the mailbox a bulk action takes it from.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageRefDto {
+    pub message_id: String,
+    pub mailbox_id: String,
+}
+
+fn message_refs(messages: Vec<MessageRefDto>) -> Vec<(String, String)> {
+    messages
+        .into_iter()
+        .map(|m| (m.message_id, m.mailbox_id))
+        .collect()
 }
 
 /// Bulk delete. Returns `[succeeded, failed]` so the UI can report a partial
 /// result instead of claiming everything worked.
 #[tauri::command]
 pub async fn delete_messages(
-    message_ids: Vec<String>,
+    messages: Vec<MessageRefDto>,
     permanently: bool,
     state: State<'_, AppState>,
 ) -> Result<[u32; 2], String> {
     let client = get_or_connect(&state).await?;
     client
-        .delete_messages(message_ids, permanently)
+        .delete_messages(message_refs(messages), permanently)
         .await
         .map(|(ok, ko)| [ok, ko])
         .map_err(|e| e.to_string())
@@ -1036,13 +1056,13 @@ pub async fn delete_messages(
 
 #[tauri::command]
 pub async fn move_messages(
-    message_ids: Vec<String>,
+    messages: Vec<MessageRefDto>,
     to_mailbox_id: String,
     state: State<'_, AppState>,
 ) -> Result<[u32; 2], String> {
     let client = get_or_connect(&state).await?;
     client
-        .move_messages(message_ids, &to_mailbox_id)
+        .move_messages(message_refs(messages), &to_mailbox_id)
         .await
         .map(|(ok, ko)| [ok, ko])
         .map_err(|e| e.to_string())
@@ -1423,6 +1443,7 @@ pub struct ThreadMessageDto {
     pub subject: String,
     pub date: String, // ISO 8601
     pub is_read: bool,
+    pub mailbox_ids: Vec<String>,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
     pub in_reply_to: Option<String>,
@@ -1440,6 +1461,7 @@ fn thread_message_to_dto(m: ThreadMessage) -> ThreadMessageDto {
         subject: m.subject,
         date: m.date.to_rfc3339(),
         is_read: m.is_read,
+        mailbox_ids: m.mailbox_ids,
         html_body: m.html_body,
         text_body: m.text_body,
         in_reply_to: m.in_reply_to,

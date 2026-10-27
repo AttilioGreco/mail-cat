@@ -287,6 +287,7 @@ pub struct ComposeInput {
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub message_id: String,
+    pub mailbox_ids: Vec<String>,
     pub score: f32,
     pub snippet: Option<String>,
     pub subject: String,
@@ -321,6 +322,7 @@ pub struct ThreadMessage {
     pub subject: String,
     pub date: DateTime<Utc>,
     pub is_read: bool,
+    pub mailbox_ids: Vec<String>,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
     pub in_reply_to: Option<String>,

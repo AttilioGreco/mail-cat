@@ -247,11 +247,13 @@ impl MailCatClient {
         Ok(resp.events_replayed)
     }
 
-    pub async fn get_message(&self, message_id: &str) -> Result<MessageBody> {
+    /// A message as seen from `mailbox_id`, one of the mailboxes it is in.
+    pub async fn get_message(&self, message_id: &str, mailbox_id: &str) -> Result<MessageBody> {
         let mut client = MessageServiceClient::new(self.channel.clone());
         let resp = client
             .get_message(pb::GetMessageRequest {
                 message_id: message_id.to_owned(),
+                mailbox_id: mailbox_id.to_owned(),
             })
             .await?
             .into_inner();
@@ -302,16 +304,18 @@ impl MailCatClient {
         Ok(resp.marked_count)
     }
 
-    /// Move a message to another mailbox.
+    /// Move a message out of `from_mailbox_id` into another mailbox.
     pub async fn move_message(
         &self,
         message_id: &str,
+        from_mailbox_id: &str,
         to_mailbox_id: &str,
     ) -> Result<MessageSummary> {
         let mut client = MessageServiceClient::new(self.channel.clone());
         let resp = client
             .move_message(pb::MoveMessageRequest {
                 message_id: message_id.to_owned(),
+                from_mailbox_id: from_mailbox_id.to_owned(),
                 to_mailbox_id: to_mailbox_id.to_owned(),
             })
             .await?
@@ -324,12 +328,18 @@ impl MailCatClient {
         Ok(message_summary_from_proto(summary))
     }
 
-    /// Delete a message. If `permanently` is true, expunge immediately.
-    pub async fn delete_message(&self, message_id: &str, permanently: bool) -> Result<()> {
+    /// Delete a message from `mailbox_id`. If `permanently` is true, expunge immediately.
+    pub async fn delete_message(
+        &self,
+        message_id: &str,
+        mailbox_id: &str,
+        permanently: bool,
+    ) -> Result<()> {
         let mut client = MessageServiceClient::new(self.channel.clone());
         client
             .delete_message(pb::DeleteMessageRequest {
                 message_id: message_id.to_owned(),
+                mailbox_id: mailbox_id.to_owned(),
                 permanently,
             })
             .await?;
@@ -337,17 +347,18 @@ impl MailCatClient {
         Ok(())
     }
 
-    /// Delete many messages in one round-trip. Returns `(succeeded, failed)` —
+    /// Delete many messages, each `(message id, mailbox id)` from the mailbox
+    /// it is named with, in one round-trip. Returns `(succeeded, failed)` —
     /// partial success is expected when the search index is behind the mailbox.
     pub async fn delete_messages(
         &self,
-        message_ids: Vec<String>,
+        messages: Vec<(String, String)>,
         permanently: bool,
     ) -> Result<(u32, u32)> {
         let mut client = MessageServiceClient::new(self.channel.clone());
         let resp = client
             .delete_messages(pb::DeleteMessagesRequest {
-                message_ids,
+                messages: message_refs(messages),
                 permanently,
             })
             .await?
@@ -356,16 +367,17 @@ impl MailCatClient {
         Ok((resp.succeeded, resp.failed))
     }
 
-    /// Move many messages to one mailbox in a single round-trip.
+    /// Move many messages, each `(message id, mailbox id)` out of the mailbox
+    /// it is named with, to one mailbox in a single round-trip.
     pub async fn move_messages(
         &self,
-        message_ids: Vec<String>,
+        messages: Vec<(String, String)>,
         to_mailbox_id: &str,
     ) -> Result<(u32, u32)> {
         let mut client = MessageServiceClient::new(self.channel.clone());
         let resp = client
             .move_messages(pb::MoveMessagesRequest {
-                message_ids,
+                messages: message_refs(messages),
                 to_mailbox_id: to_mailbox_id.to_owned(),
             })
             .await?
@@ -660,4 +672,14 @@ impl MailCatClient {
                 .map_err(ClientError::Grpc)
         }))
     }
+}
+
+fn message_refs(messages: Vec<(String, String)>) -> Vec<pb::MessageRef> {
+    messages
+        .into_iter()
+        .map(|(message_id, mailbox_id)| pb::MessageRef {
+            message_id,
+            mailbox_id,
+        })
+        .collect()
 }

@@ -71,3 +71,24 @@ fn fetched_uids(command: &str) -> Vec<u32> {
         })
         .collect()
 }
+
+#[test]
+fn only_gmail_hosts_file_submissions_themselves() {
+    assert!(files_submissions_itself("imap.gmail.com"));
+    assert!(files_submissions_itself("IMAP.GoogleMail.com"));
+    assert!(!files_submissions_itself("imap.example.com"));
+}
+
+#[test]
+fn a_failed_append_after_the_send_leaves_the_copy_not_stored() {
+    assert_eq!(
+        sent_copy_of(Err(DomainError::Provider("append refused".into()))),
+        SentCopy::NotStored
+    );
+    assert_eq!(
+        sent_copy_of(Ok(Some(RemoteId::from(9)))),
+        SentCopy::Stored {
+            remote_id: Some(RemoteId::from(9))
+        }
+    );
+}

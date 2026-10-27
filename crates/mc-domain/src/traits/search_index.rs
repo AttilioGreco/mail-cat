@@ -101,6 +101,8 @@ pub struct SearchResults {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub message_id: MessageId,
+    /// Every mailbox the message is in: what a search result is acted on from.
+    pub mailbox_ids: Vec<MailboxId>,
     pub score: f32,
     pub snippet: Option<String>,
     pub subject: String,

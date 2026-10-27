@@ -1,7 +1,8 @@
 import { Mail, RefreshCw } from 'lucide-react';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useMessages, useMessageBody } from '@/entities/message';
-import { useSearchStore } from '@/features/search-messages';
+import { useSearchStore, useSearchMessages } from '@/features/search-messages';
+import { sourceMailbox } from '@/shared/lib/utils';
 import { MessageViewer } from './MessageViewer';
 import { ThreadView } from './ThreadView';
 import { EmailContent } from './EmailContent';
@@ -36,7 +37,7 @@ export function MessagePane() {
     return <SearchBodyViewer messageId={selectedMessageId} />;
   }
 
-  if (!envelope) {
+  if (!envelope || !selectedMailboxId) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
         <Mail size={40} strokeWidth={1.2} />
@@ -45,11 +46,18 @@ export function MessagePane() {
     );
   }
 
-  return <MessageViewer envelope={envelope} />;
+  return <MessageViewer envelope={envelope} mailboxId={selectedMailboxId} />;
 }
 
 function SearchBodyViewer({ messageId }: { messageId: string }) {
-  const { data: body, isLoading } = useMessageBody(messageId);
+  const { selectedAccountId, selectedMailboxId } = useSessionStore();
+  const searchQuery = useSearchStore((s) => s.searchQuery);
+  const { data: hits } = useSearchMessages(searchQuery, selectedAccountId);
+  const hit = hits?.find((h) => h.messageId === messageId);
+  const { data: body, isLoading } = useMessageBody(
+    messageId,
+    hit ? sourceMailbox(hit.mailboxIds, selectedMailboxId) : null,
+  );
 
   if (isLoading) {
     return (

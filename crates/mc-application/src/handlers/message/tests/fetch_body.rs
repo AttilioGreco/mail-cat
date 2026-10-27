@@ -18,7 +18,7 @@ async fn handle_fetch_body_stores_body_through_body_store() {
     let handler = MessageCommandHandler::new(es, registry, read_repo.clone(), bus.clone());
 
     handler
-        .handle_fetch_body(msg_id, MailboxPath::inbox())
+        .handle_fetch_body(msg_id, mailbox_of(&msg))
         .await
         .unwrap();
 
@@ -51,7 +51,7 @@ async fn handle_fetch_body_takes_a_full_body_from_another_copy() {
     let handler = MessageCommandHandler::new(es, registry, read_repo.clone(), bus.clone());
 
     handler
-        .handle_fetch_body(msg.id, MailboxPath::inbox())
+        .handle_fetch_body(msg.id, mailbox_of(&msg))
         .await
         .unwrap();
 
@@ -84,7 +84,7 @@ async fn handle_fetch_body_still_downloads_when_the_copy_is_truncated() {
     let handler = MessageCommandHandler::new(es, registry, read_repo.clone(), bus.clone());
 
     handler
-        .handle_fetch_body(msg.id, MailboxPath::inbox())
+        .handle_fetch_body(msg.id, mailbox_of(&msg))
         .await
         .unwrap();
 
@@ -136,7 +136,7 @@ async fn handle_fetch_body_survives_a_flag_change_during_the_download() {
     );
 
     handler
-        .handle_fetch_body(msg_id, MailboxPath::inbox())
+        .handle_fetch_body(msg_id, mailbox_of(&msg))
         .await
         .unwrap();
     assert_eq!(bus.last_event_name().unwrap(), "MessageBodyFetched");
