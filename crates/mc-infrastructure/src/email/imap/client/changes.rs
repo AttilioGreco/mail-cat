@@ -131,8 +131,7 @@ impl ImapEmailProvider {
         let mut session = self.selected(&name).await?;
         let fetches = uid_flags(&mut session).await?;
         self.release(session);
-        // ponytail: `* n FETCH (UID u FLAGS (...))` is about 40 bytes a message.
-        self.metered(fetches.len() as u64 * 40).await;
+        self.record_downloads().await;
         let listing: Listing = fetches
             .iter()
             .filter_map(|f| {

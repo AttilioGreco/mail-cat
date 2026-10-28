@@ -1,9 +1,14 @@
 //! Pooled connections, login and the provider's own helpers.
 
+use std::io;
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, warn};
 
@@ -220,18 +225,23 @@ impl ImapEmailProvider {
             idle_sessions: Mutex::default(),
             permits: Arc::new(Semaphore::new(MAX_POOLED_CONNECTIONS)),
             meter: None,
+            received: Arc::default(),
             caps: OnceLock::new(),
         }
     }
 
-    /// Count every message download against the account's daily cap.
+    /// Count everything the account's connections download against its daily cap.
     #[must_use]
     pub fn with_download_meter(mut self, meter: DownloadMeter) -> Self {
         self.meter = Some(meter);
         self
     }
 
-    pub(super) async fn metered(&self, bytes: u64) {
+    /// Hands the bytes read since the last call to the meter. Called after
+    /// each download; traffic in between (IDLE, STATUS, moves) rides along
+    /// with the next one.
+    pub(super) async fn record_downloads(&self) {
+        let bytes = self.received.swap(0, Ordering::Relaxed);
         if let Some(meter) = &self.meter {
             meter.record(bytes).await;
         }
@@ -249,12 +259,12 @@ impl ImapEmailProvider {
         let mut session = self.selected(mailbox_name).await?;
         // A failed response may be half-read: that connection is dropped, never
         // pooled, and before the caller checks out the next one.
-        let (found, bytes) = match text_bodies(&mut session, uids, cap).await {
-            Ok(fetched) => fetched,
+        let found = match text_bodies(&mut session, uids, cap).await {
+            Ok(found) => found,
             Err(e) => return Ok(Err(e)),
         };
         self.release(session);
-        self.metered(bytes).await;
+        self.record_downloads().await;
         Ok(Ok(found))
     }
 
@@ -266,12 +276,12 @@ impl ImapEmailProvider {
         uid: u32,
     ) -> Result<Result<Option<MessageBodyResult>, DomainError>, DomainError> {
         let mut session = self.selected(mailbox_name).await?;
-        let (found, bytes) = match message_start(&mut session, uid, TEXT_PART_CAP).await {
-            Ok(fetched) => fetched,
+        let found = match message_start(&mut session, uid, TEXT_PART_CAP).await {
+            Ok(found) => found,
             Err(e) => return Ok(Err(e)),
         };
         self.release(session);
-        self.metered(bytes).await;
+        self.record_downloads().await;
         Ok(Ok(found))
     }
 
@@ -305,7 +315,7 @@ impl ImapEmailProvider {
         let raw = Self::fetch_whole(&mut session, uid).await?;
         self.release(session);
         let Some(raw) = raw else { return Ok(None) };
-        self.metered(raw.len() as u64).await;
+        self.record_downloads().await;
         let (body_text, body_html) = whole_message_text(&raw);
         Ok(Some(MessageBodyResult {
             remote_id: RemoteId::from(uid),
@@ -414,7 +424,7 @@ impl ImapEmailProvider {
         let tcp_stream = tokio::net::TcpStream::connect((&self.host as &str, self.port))
             .await
             .map_err(|e| DomainError::ConnectionFailed(format!("TCP connection failed: {}", e)))?;
-        let compat_stream = tcp_stream.compat();
+        let compat_stream = Counted::new(tcp_stream, Arc::clone(&self.received)).compat();
 
         // TLS via async-native-tls (natively futures-compatible, no compat needed)
         let tls = async_native_tls::TlsConnector::new();
@@ -520,5 +530,52 @@ impl ImapEmailProvider {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+/// A stream adding every byte it reads to a shared total: the meter counts
+/// what the server actually sent, which is never less than what a provider's
+/// own download quota can see.
+#[derive(Debug)]
+pub(super) struct Counted<S> {
+    inner: S,
+    total: Arc<AtomicU64>,
+}
+
+impl<S> Counted<S> {
+    pub(super) fn new(inner: S, total: Arc<AtomicU64>) -> Self {
+        Self { inner, total }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Counted<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        self.total
+            .fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
+        poll
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }

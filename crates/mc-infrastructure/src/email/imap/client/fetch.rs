@@ -64,14 +64,7 @@ impl ImapEmailProvider {
                 batch_idx,
                 batch_results.len()
             );
-            // ponytail: the ENVELOPE structure repeats the header, so it costs
-            // about as much again; counted as the header bytes twice.
-            let header_bytes: usize = batch_results
-                .iter()
-                .filter_map(|f| f.header())
-                .map(<[u8]>::len)
-                .sum();
-            self.metered(2 * header_bytes as u64).await;
+            self.record_downloads().await;
 
             for fetch_data in &batch_results {
                 if let Some(envelope_data) = fetch_data.envelope() {
@@ -160,12 +153,12 @@ impl ImapEmailProvider {
 /// text/html parts, each cut at `cap` when given — never attachments: one
 /// BODYSTRUCTURE round trip, then one fetch per distinct part layout. Every
 /// UID that came back gets a result (bodiless if it has no text), so it
-/// dequeues. Also returns the bytes downloaded.
+/// dequeues.
 pub(super) async fn text_bodies<T>(
     session: &mut async_imap::Session<T>,
     uids: &[u32],
     cap: Option<u32>,
-) -> Result<(Vec<MessageBodyResult>, u64), DomainError>
+) -> Result<Vec<MessageBodyResult>, DomainError>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
@@ -192,8 +185,6 @@ where
             .or_default()
             .push(*uid);
     }
-    // ponytail: a BODYSTRUCTURE reply's size isn't exposed; 1 KiB is a typical one.
-    let mut bytes = structure_count as u64 * 1024;
     let range = cap.map_or_else(String::new, |n| format!("<0.{n}>"));
 
     let mut results = Vec::with_capacity(structure_count);
@@ -243,7 +234,6 @@ where
                 let Some(data) = item.section(Some(&part.section)) else {
                     continue;
                 };
-                bytes += data.len() as u64;
                 let cut = cap.is_some_and(|n| part.octets > n);
                 result.truncated |= cut;
                 let text = part.decode(if cut { whole_lines(data) } else { data });
@@ -256,7 +246,7 @@ where
             results.push(result);
         }
     }
-    Ok((results, bytes))
+    Ok(results)
 }
 
 /// A cut part up to its last line break: a base64 line or quoted-printable
@@ -269,12 +259,12 @@ fn whole_lines(data: &[u8]) -> &[u8] {
 
 /// The first `cap` bytes of a message, headers included, read like a whole
 /// one: the text of a message whose BODYSTRUCTURE can't be read, without
-/// ever pulling a multi-MB attachment. Also returns the bytes downloaded.
+/// ever pulling a multi-MB attachment.
 pub(super) async fn message_start<T>(
     session: &mut async_imap::Session<T>,
     uid: u32,
     cap: u32,
-) -> Result<(Option<MessageBodyResult>, u64), DomainError>
+) -> Result<Option<MessageBodyResult>, DomainError>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
@@ -289,7 +279,7 @@ where
     )
     .await?;
     let Some(raw) = fetched.iter().find_map(|f| f.section(None)) else {
-        return Ok((None, 0));
+        return Ok(None);
     };
     let truncated = raw.len() >= cap as usize;
     let (body_text, body_html) = whole_message_text(if truncated { whole_lines(raw) } else { raw });
@@ -299,7 +289,7 @@ where
         body_html,
         truncated,
     };
-    Ok((Some(result), raw.len() as u64))
+    Ok(Some(result))
 }
 
 /// `fetch` over `uids`; a set the parser rejected is split in halves until the

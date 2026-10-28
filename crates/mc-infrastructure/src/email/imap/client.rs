@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,7 @@ use self::commands::{
     sorted_uids, timed, uid_of, uids_of,
 };
 use self::fetch::isolating;
+use self::session::Counted;
 #[cfg(test)]
 use self::{
     commands::{copied_uids, uid_flags},
@@ -40,7 +42,7 @@ use super::mapper::{flag_to_imap, mailbox_path_to_string};
 use mc_domain::traits::login_gate::LoginSecret;
 
 type ImapSession = async_imap::Session<
-    async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>,
+    async_native_tls::TlsStream<tokio_util::compat::Compat<Counted<tokio::net::TcpStream>>>,
 >;
 
 /// Simultaneous pooled connections per account. Gmail caps an account at ~15
@@ -85,6 +87,9 @@ pub struct ImapEmailProvider {
     idle_sessions: Mutex<Vec<(ImapSession, Instant)>>,
     permits: Arc<Semaphore>,
     meter: Option<DownloadMeter>,
+    /// Bytes every connection of this account read off the socket, TLS
+    /// included, since the meter last took them.
+    received: Arc<AtomicU64>,
     /// Learned on the first login, or by [`known_caps`] before a move or delete.
     caps: OnceLock<ServerCaps>,
 }
@@ -210,7 +215,7 @@ impl EmailProvider for ImapEmailProvider {
             .await?
             .ok_or_else(|| DomainError::Provider("Message not found".into()))?;
         self.release(session);
-        self.metered(raw.len() as u64).await;
+        self.record_downloads().await;
         Ok(raw)
     }
 

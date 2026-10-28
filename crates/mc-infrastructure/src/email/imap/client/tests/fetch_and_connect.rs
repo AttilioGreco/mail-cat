@@ -99,7 +99,7 @@ fn backfill_server(command: &str) -> &'static str {
 async fn text_parts_are_fetched_up_to_the_cap_and_marked_truncated() {
     let (mut session, commands) = scripted(backfill_server).await;
 
-    let (found, bytes) = text_bodies(&mut session, &[7], Some(TEXT_PART_CAP))
+    let found = text_bodies(&mut session, &[7], Some(TEXT_PART_CAP))
         .await
         .unwrap();
 
@@ -113,14 +113,13 @@ async fn text_parts_are_fetched_up_to_the_cap_and_marked_truncated() {
     assert!(found[0].truncated, "a 900 kB part past the cap");
     // Up to its last whole line: the rest is fetched when it is opened.
     assert_eq!(found[0].body_text.as_deref(), Some("body-7\r\n"));
-    assert_eq!(bytes, 1024 + 11);
 }
 
 #[tokio::test]
 async fn without_a_cap_the_whole_part_is_fetched() {
     let (mut session, commands) = scripted(backfill_server).await;
 
-    let (found, _) = text_bodies(&mut session, &[7], None).await.unwrap();
+    let found = text_bodies(&mut session, &[7], None).await.unwrap();
 
     assert_eq!(uid_commands(&commands)[1], "UID FETCH 7 (UID BODY.PEEK[1])");
     assert!(!found[0].truncated);
@@ -137,7 +136,7 @@ async fn a_message_with_only_attachments_gets_an_empty_body() {
     })
     .await;
 
-    let (found, _) = text_bodies(&mut session, &[9], Some(TEXT_PART_CAP))
+    let found = text_bodies(&mut session, &[9], Some(TEXT_PART_CAP))
         .await
         .unwrap();
 
@@ -163,19 +162,11 @@ async fn one_unreadable_structure_costs_only_its_own_message() {
         &[1, 2, 3, 4, 5],
         |set| {
             let session = connect();
-            async move {
-                Ok(text_bodies(&mut session.await, set, Some(TEXT_PART_CAP))
-                    .await
-                    .map(|(r, _)| r))
-            }
+            async move { Ok(text_bodies(&mut session.await, set, Some(TEXT_PART_CAP)).await) }
         },
         |uid| {
             let session = connect();
-            async move {
-                Ok(message_start(&mut session.await, uid, TEXT_PART_CAP)
-                    .await
-                    .map(|(r, _)| r))
-            }
+            async move { Ok(message_start(&mut session.await, uid, TEXT_PART_CAP).await) }
         },
     )
     .await
@@ -238,19 +229,11 @@ async fn isolated_against(
         &[1, 2, 3, 4, 5],
         |set| {
             let session = connect();
-            async move {
-                Ok(text_bodies(&mut session.await, set, Some(TEXT_PART_CAP))
-                    .await
-                    .map(|(r, _)| r))
-            }
+            async move { Ok(text_bodies(&mut session.await, set, Some(TEXT_PART_CAP)).await) }
         },
         |uid| {
             let session = connect();
-            async move {
-                Ok(message_start(&mut session.await, uid, TEXT_PART_CAP)
-                    .await
-                    .map(|(r, _)| r))
-            }
+            async move { Ok(message_start(&mut session.await, uid, TEXT_PART_CAP).await) }
         },
     )
     .await;
@@ -472,4 +455,21 @@ async fn an_xoauth2_error_challenge_refuses_the_token() {
 fn a_validate_error_never_echoes_the_password() {
     let invalid = login_error(async_imap::error::ValidateError('§').into(), false);
     assert!(!invalid.to_string().contains('§'));
+}
+
+#[tokio::test]
+async fn counted_stream_adds_what_it_reads_to_the_shared_total() {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut server, client) = tokio::io::duplex(64);
+    let total = Arc::default();
+    let mut counted = Counted::new(client, Arc::clone(&total));
+
+    server.write_all(b"* OK hello\r\n").await.unwrap();
+    counted.write_all(b"A1 NOOP\r\n").await.unwrap();
+    let mut buf = [0u8; 12];
+    counted.read_exact(&mut buf).await.unwrap();
+
+    assert_eq!(total.load(Ordering::Relaxed), 12, "reads only, not writes");
 }
