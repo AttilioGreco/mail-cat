@@ -166,6 +166,20 @@ impl<PR: ProviderRegistry, ES: mc_domain::EventStore, P: SyncStore> SyncService<
                 .unwrap_or(0);
             if let Some(pause) = backfill_pause(spent, daily_limit) {
                 debug!(%account_id, spent, "backfill: daily download cap reached, waiting");
+                // Without this the bar freezes on the last batch with no reason
+                // given; an initial envelope sync alone can fill the cap.
+                let remaining = self
+                    .projector
+                    .count_pending_backfill(&account_id)
+                    .await
+                    .unwrap_or(0);
+                self.publish(SyncProgressEvent {
+                    account_id,
+                    state: SyncState::FetchingMessageBody,
+                    processed: drained,
+                    total: drained + remaining,
+                    message: "Daily download limit reached, resuming as it frees up".to_string(),
+                });
                 tokio::select! {
                     _ = shutdown.cancelled() => return,
                     _ = tokio::time::sleep(pause) => continue,

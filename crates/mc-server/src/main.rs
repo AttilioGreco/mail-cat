@@ -22,10 +22,8 @@ use config::ServerConfig;
 use wiring::AppContext;
 
 use mc_interfaces::grpc::proto::{
-    account_service_server::AccountServiceServer,
-    contact_service_server::ContactServiceServer,
-    mailbox_service_server::MailboxServiceServer,
-    message_service_server::MessageServiceServer,
+    account_service_server::AccountServiceServer, contact_service_server::ContactServiceServer,
+    mailbox_service_server::MailboxServiceServer, message_service_server::MessageServiceServer,
     search_service_server::SearchServiceServer,
 };
 
@@ -63,15 +61,17 @@ async fn run() -> anyhow::Result<()> {
     let config = ServerConfig::load_or_default(&config_path);
 
     // Initialize tracing. RUST_LOG always wins; otherwise config.log_level;
-    // otherwise the hardcoded default.
+    // otherwise the hardcoded default. Tantivy logs every segment commit at
+    // info, so it stays at warn unless the filter names it explicitly.
+    let mut filter = std::env::var("RUST_LOG")
+        .ok()
+        .or_else(|| config.log_level.clone())
+        .unwrap_or_else(|| "mc_server=info,mc_application=debug,mc_infrastructure=debug".into());
+    if !filter.contains("tantivy") {
+        filter.push_str(",tantivy=warn");
+    }
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            config
-                .log_level
-                .clone()
-                .unwrap_or_else(|| "mc_server=info,mc_application=debug,mc_infrastructure=debug".into())
-                .into()
-        }))
+        .with(tracing_subscriber::EnvFilter::new(filter))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -110,9 +110,14 @@ async fn run() -> anyhow::Result<()> {
     ));
 
     // Wire up all dependencies
-    let app_ctx = AppContext::new(&config, &config_path, secret_store.clone(), oauth_challenges)
-        .await
-        .context("failed to initialize application context")?;
+    let app_ctx = AppContext::new(
+        &config,
+        &config_path,
+        secret_store.clone(),
+        oauth_challenges,
+    )
+    .await
+    .context("failed to initialize application context")?;
 
     let shutdown = app_ctx.shutdown.clone();
 
