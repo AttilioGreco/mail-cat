@@ -194,6 +194,29 @@ impl MailCatClient {
             .collect())
     }
 
+    /// Every message in a mailbox, fetched a page at a time.
+    pub async fn list_all_messages(&self, mailbox_id: &str) -> Result<Vec<MessageSummary>> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let mut all = Vec::new();
+        for page in 1.. {
+            let resp = client
+                .list_messages(pb::ListMessagesRequest {
+                    mailbox_id: mailbox_id.to_owned(),
+                    pagination: Some(pb::Pagination {
+                        page,
+                        page_size: 1000,
+                    }),
+                })
+                .await?
+                .into_inner();
+            all.extend(resp.messages.into_iter().map(message_summary_from_proto));
+            if !resp.page_info.is_some_and(|p| p.has_next_page) {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
     /// List conversation summaries for an account (newest first).
     pub async fn list_conversations(
         &self,
