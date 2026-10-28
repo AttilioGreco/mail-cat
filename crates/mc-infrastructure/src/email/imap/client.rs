@@ -94,6 +94,13 @@ pub struct ImapEmailProvider {
     caps: OnceLock<ServerCaps>,
 }
 
+impl ImapEmailProvider {
+    /// Known once any session logged in; a session is always opened first.
+    pub(super) fn has_gmail_ext(&self) -> bool {
+        self.caps.get().is_some_and(|caps| caps.gmail)
+    }
+}
+
 #[async_trait]
 impl EmailProvider for ImapEmailProvider {
     async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {

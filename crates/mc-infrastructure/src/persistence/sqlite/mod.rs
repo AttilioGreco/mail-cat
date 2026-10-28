@@ -70,7 +70,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         sent_at         INTEGER NOT NULL,
         received_at     INTEGER NOT NULL,
         internal_date   INTEGER NOT NULL,
-        body_state      TEXT NOT NULL DEFAULT 'pending'
+        body_state      TEXT NOT NULL DEFAULT 'pending',
+        provider_key    TEXT
     );
     CREATE TABLE message_mailboxes (
         message_id   BLOB NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -83,6 +84,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX message_mailboxes_remote ON message_mailboxes(mailbox_id, remote_id);
     CREATE INDEX messages_thread ON messages(account_id, thread_id, received_at);
     CREATE INDEX messages_rfc ON messages(account_id, rfc_message_id);
+    CREATE INDEX messages_key ON messages(account_id, provider_key);
     CREATE INDEX messages_backfill ON messages(account_id, received_at DESC) WHERE body_state = 'pending';
     CREATE TABLE message_bodies (
         message_id BLOB PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,

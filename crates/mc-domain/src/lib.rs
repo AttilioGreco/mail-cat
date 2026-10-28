@@ -21,6 +21,7 @@ pub use value_objects::email_address::EmailAddress;
 pub use value_objects::flag::Flag;
 pub use value_objects::mailbox_path::MailboxPath;
 pub use value_objects::message_id::MessageId;
+pub use value_objects::message_key::MessageKey;
 pub use value_objects::remote_id::RemoteId;
 pub use value_objects::sync_cursor::SyncCursor;
 

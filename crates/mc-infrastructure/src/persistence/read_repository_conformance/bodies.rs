@@ -30,6 +30,7 @@ macro_rules! bodies_conformance {
                         references: vec![],
                         received_at: at,
                         restored: false,
+                        provider_key: None,
                     },
                 )
             };

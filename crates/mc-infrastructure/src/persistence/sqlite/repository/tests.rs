@@ -47,6 +47,7 @@ fn received(account_id: AccountId, mailbox_id: MailboxId, rfc: &str) -> (Message
         has_attachments: false,
         received_at: Utc::now(),
         restored: false,
+        provider_key: None,
     };
     (message_id, event)
 }

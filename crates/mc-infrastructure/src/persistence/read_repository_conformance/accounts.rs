@@ -122,6 +122,7 @@ macro_rules! accounts_conformance {
                         references: vec![],
                         received_at: chrono::Utc::now(),
                         restored: false,
+                        provider_key: None,
                     },
                 ))
                 .await

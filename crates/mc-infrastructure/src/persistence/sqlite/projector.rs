@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AccountStatus, ContactEmail, ContactId, DomainError, DomainEvent, Envelope,
-    EventEnvelope, Flag, MailboxId, MailboxType, Membership, MessageId, ReadModelProjector,
-    RemoteId,
+    EventEnvelope, Flag, MailboxId, MailboxType, Membership, MessageId, MessageKey,
+    ReadModelProjector, RemoteId,
 };
 
 use super::repo_err;
@@ -241,6 +241,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             size_bytes,
             has_attachments,
             received_at,
+            provider_key,
             ..
         } => {
             let thread_id = assign_thread(
@@ -265,6 +266,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     has_attachments: *has_attachments,
                     received_at: *received_at,
                     body_state: "pending",
+                    provider_key: provider_key.as_ref(),
                 },
             )?;
             if inserted {
@@ -362,6 +364,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                             has_attachments: false,
                             received_at: *sent_at,
                             body_state: "stored",
+                            provider_key: None,
                         },
                     )?;
             if inserted {
@@ -413,6 +416,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     has_attachments: false,
                     received_at: event.occurred_at,
                     body_state: "stored",
+                    provider_key: None,
                 },
             )?;
             store_body(
@@ -534,6 +538,7 @@ struct NewMessage<'a> {
     has_attachments: bool,
     received_at: DateTime<Utc>,
     body_state: &'static str,
+    provider_key: Option<&'a MessageKey>,
 }
 
 /// Inserts unless the id exists and reports whether it did. Message ids are
@@ -545,9 +550,10 @@ fn insert_message(tx: &Connection, m: &NewMessage) -> Result<bool, DomainError> 
         tx,
         "INSERT INTO messages (id, account_id, rfc_message_id, \
              in_reply_to, refs, thread_id, subject, from_name, from_email, addresses, flags, seen, \
-             size_bytes, has_attachments, attachments, sent_at, received_at, internal_date, body_state) \
+             size_bytes, has_attachments, attachments, sent_at, received_at, internal_date, body_state, \
+             provider_key) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, '[]', \
-             ?15, ?16, ?16, ?17) \
+             ?15, ?16, ?16, ?17, ?18) \
          ON CONFLICT(id) DO NOTHING",
         params![
             m.id.as_uuid(),
@@ -566,7 +572,8 @@ fn insert_message(tx: &Connection, m: &NewMessage) -> Result<bool, DomainError> 
             m.has_attachments,
             nanos(m.envelope.date),
             nanos(m.received_at),
-            m.body_state
+            m.body_state,
+            m.provider_key.map(MessageKey::as_str)
         ],
     )?;
     Ok(inserted == 1)

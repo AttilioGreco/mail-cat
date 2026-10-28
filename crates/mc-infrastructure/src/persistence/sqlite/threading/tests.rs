@@ -123,6 +123,7 @@ impl Mail {
             has_attachments: false,
             received_at: at,
             restored: false,
+            provider_key: None,
         })
         .await;
         message_id

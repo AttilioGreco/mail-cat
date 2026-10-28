@@ -161,9 +161,9 @@ def flags(w):
 def move_delete(w):
     """mc move to Archive, delete (to Trash) and permanent delete: server and
     mail-cat agree afterwards, one copy each, no ghost left in INBOX."""
-    mc("messages", "move", w.mc_id("INBOX", 2), w.boxes["Archive"]["ID"])
-    mc("messages", "delete", w.mc_id("INBOX", 4))
-    mc("messages", "delete", "--permanent", w.mc_id("INBOX", 6))
+    mc("messages", "move", w.mc_id("INBOX", 2), "--mailbox", w.boxes["INBOX"]["ID"], w.boxes["Archive"]["ID"])
+    mc("messages", "delete", w.mc_id("INBOX", 4), "--mailbox", w.boxes["INBOX"]["ID"])
+    mc("messages", "delete", "--permanent", w.mc_id("INBOX", 6), "--mailbox", w.boxes["INBOX"]["ID"])
     wait(lambda: on_server(w, 2, "Archive") and not on_server(w, 2, "INBOX"), "tag 2 moved on server")
     wait(lambda: on_server(w, 4, "Trash") and not on_server(w, 4, "INBOX"), "tag 4 in Trash on server")
     wait(lambda: not on_server(w, 6, "INBOX"), "tag 6 expunged on server")
@@ -186,7 +186,7 @@ def phone_moved_first(w):
     # the INBOX IDLE watcher reacts, as it would in real life
     wait(lambda: idle_syncs() > seen, "the INBOX IDLE watcher to run its partial sync")
     try:
-        mc("messages", "move", stale, w.boxes["Archive"]["ID"])
+        mc("messages", "move", stale, "--mailbox", w.boxes["INBOX"]["ID"], w.boxes["Archive"]["ID"])
     except Fail as e:
         print("    (mc move of the stale row failed, tolerated: " + " ".join(str(e).splitlines()[1:]) + ")")
     wait(lambda: on_server(w, 7, "Archive") and not on_server(w, 7, "INBOX"),
@@ -210,7 +210,7 @@ def reappear(w):
     into INBOX. The copy must be ingested (RFC 3501: a COPY always gets a UID
     >= UIDNEXT, so this exercises the cursor/reconcile boundary right
     after mail-cat's own move, not a UID strictly below the stored one)."""
-    mc("messages", "move", w.mc_id("INBOX", 11), w.boxes["Archive"]["ID"])
+    mc("messages", "move", w.mc_id("INBOX", 11), "--mailbox", w.boxes["INBOX"]["ID"], w.boxes["Archive"]["ID"])
     wait(lambda: on_server(w, 11, "Archive") and not on_server(w, 11, "INBOX"), "tag 11 moved on server")
     w.sync()
     w.assert_where(11, {"Archive": (1, 1)})
@@ -222,16 +222,17 @@ def reappear(w):
 
 def delete_twice(w):
     """Two deletes of the same message at once (double click): the second,
-    asked while it was still in INBOX, must not purge it from Trash. Both
-    succeed, it ends in Trash, both sides agree. (Sequential deletes are a
-    different case: the second one is asked with the message in Trash.)"""
+    asked while it was still in INBOX, must not purge it from Trash. It may
+    fail as not found (the message left INBOX before its turn); it ends in
+    Trash, both sides agree. (Sequential deletes are a different case: the
+    second one is asked with the message in Trash.)"""
     mid = w.mc_id("INBOX", 12)
-    clicks = [subprocess.Popen(MC + ["messages", "delete", mid], stdout=subprocess.PIPE,
+    clicks = [subprocess.Popen(MC + ["messages", "delete", mid, "--mailbox", w.boxes["INBOX"]["ID"]], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, env=ENV) for _ in range(2)]
-    for p in clicks:
-        out, _ = p.communicate()
-        if p.returncode:
-            raise Fail(f"a delete of the double click exited {p.returncode}:\n{out}")
+    outs = [(p.communicate()[0], p.returncode) for p in clicks]
+    failed = [out for out, code in outs if code]
+    if len(failed) == 2 or any("not found" not in out.lower() for out in failed):
+        raise Fail("the double click failed otherwise than one 'not found':\n" + "\n".join(failed))
     wait(lambda: on_server(w, 12, "Trash") and not on_server(w, 12, "INBOX"), "tag 12 in Trash on server")
     w.sync()
     w.assert_where(12, {"Trash": (1, 1)})
@@ -277,7 +278,7 @@ def backfill_text_only(w):
                    "WHERE m.rfc_message_id = '<big901@example.net>' AND b.truncated = 1")[0]
     if truncated != 2:
         raise Fail(f"{truncated} copies of the big text stored truncated, want both")
-    out = mc("messages", "get", "--text", w.mc_id("INBOX", 901))
+    out = mc("messages", "get", "--text", w.mc_id("INBOX", 901), "--mailbox", w.boxes["INBOX"]["ID"])
     if out.count("a line of a long pasted log") != 40_000:
         raise Fail(f"opening the message did not fetch its whole text ({out.count('a line')} lines)")
     w.assert_consistent()

@@ -132,6 +132,7 @@ macro_rules! mailboxes_conformance {
                     references: vec![],
                     received_at: chrono::Utc::now(),
                     restored: false,
+                    provider_key: None,
                 },
                 DomainEvent::MailboxCountsUpdated {
                     mailbox_id,

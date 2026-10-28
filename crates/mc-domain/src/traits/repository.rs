@@ -13,6 +13,7 @@ use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
 use crate::value_objects::message_id::MessageId;
+use crate::value_objects::message_key::MessageKey;
 use crate::value_objects::remote_id::RemoteId;
 use crate::value_objects::sync_cursor::SyncCursor;
 use crate::value_objects::thread_id::ThreadId;
@@ -144,6 +145,13 @@ pub trait MessageReadRepository: Send + Sync {
         mailbox_id: &MailboxId,
         ids: &[RemoteId],
     ) -> Result<std::collections::HashSet<RemoteId>, DomainError>;
+
+    /// The message each of `keys` names in the account, for those it has.
+    async fn find_by_keys(
+        &self,
+        account_id: &AccountId,
+        keys: &[MessageKey],
+    ) -> Result<std::collections::HashMap<MessageKey, MessageId>, DomainError>;
 
     /// Messages in `mailbox_id` whose remote id there is unknown.
     async fn pending_messages(&self, mailbox_id: &MailboxId)

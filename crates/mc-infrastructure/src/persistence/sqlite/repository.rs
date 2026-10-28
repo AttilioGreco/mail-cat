@@ -19,9 +19,9 @@ use mc_domain::{
     ContactId, ContactReadRepository, ContactSummary, ContactWriteRepository, Conversation,
     ConversationReadRepository, ConversationSummary, DomainError, DomainEvent, EmailAddress,
     Envelope, EventEnvelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository,
-    MailboxType, Membership, Message, MessageBodyStore, MessageId, MessageReadRepository,
-    MessageSummary, ProjectionCheckpoint, ReadModelProjector, RemoteId, SuggestScope, Suggestion,
-    SyncCursor, SyncCursorStore, ThreadId,
+    MailboxType, Membership, Message, MessageBodyStore, MessageId, MessageKey,
+    MessageReadRepository, MessageSummary, ProjectionCheckpoint, ReadModelProjector, RemoteId,
+    SuggestScope, Suggestion, SyncCursor, SyncCursorStore, ThreadId,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -1097,6 +1097,31 @@ impl MessageReadRepository for SqliteRepository {
             })
             .await?;
         Ok(held.into_iter().map(RemoteId::from).collect())
+    }
+
+    async fn find_by_keys(
+        &self,
+        account_id: &AccountId,
+        keys: &[MessageKey],
+    ) -> Result<HashMap<MessageKey, MessageId>, DomainError> {
+        let account = *account_id.as_uuid();
+        let keys = serde_json::to_string(keys).map_err(repo_err)?;
+        let found = self
+            .db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    "SELECT provider_key, id FROM messages WHERE account_id = ?1 \
+                     AND provider_key IN (SELECT value FROM json_each(?2))",
+                    params![account, keys],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Uuid>(1)?)),
+                )
+            })
+            .await?;
+        Ok(found
+            .into_iter()
+            .map(|(key, id)| (MessageKey::new(key), MessageId::from_uuid(id)))
+            .collect())
     }
 
     async fn pending_messages(

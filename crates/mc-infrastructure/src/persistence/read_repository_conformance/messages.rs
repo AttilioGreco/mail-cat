@@ -28,6 +28,7 @@ macro_rules! messages_conformance {
                     references: vec![],
                     received_at,
                     restored: false,
+                    provider_key: None,
                 },
             );
             repo.project(&env).await.unwrap();
@@ -178,6 +179,7 @@ macro_rules! messages_conformance {
                         references: vec![],
                         received_at: now,
                         restored: false,
+                        provider_key: None,
                     },
                 )
             };
@@ -314,6 +316,7 @@ macro_rules! messages_conformance {
                     references: vec![],
                     received_at,
                     restored: false,
+                    provider_key: None,
                 },
             );
             repo.project(&env).await.unwrap();
@@ -448,6 +451,7 @@ macro_rules! messages_conformance {
                     references: vec![],
                     received_at: chrono::Utc::now(),
                     restored: false,
+                    provider_key: None,
                 },
             );
             repo.project(&env).await.unwrap();

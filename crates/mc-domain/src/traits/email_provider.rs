@@ -11,6 +11,7 @@ use crate::model::mailbox::Mailbox;
 use crate::model::message::{Envelope, Message, OutgoingMessage};
 use crate::value_objects::flag::Flag;
 use crate::value_objects::mailbox_path::MailboxPath;
+use crate::value_objects::message_key::MessageKey;
 use crate::value_objects::remote_id::RemoteId;
 use crate::value_objects::sync_cursor::SyncCursor;
 
@@ -170,6 +171,9 @@ pub struct MailboxChanges {
     /// Arrived since the cursor (every message on a first sync or after a
     /// reset), newest first.
     pub added: Vec<RemoteId>,
+    /// The [`MessageKey`] of those `added` the provider can tell across
+    /// mailboxes; the others are absent.
+    pub keys: HashMap<RemoteId, MessageKey>,
     /// State of the messages already known.
     pub existing: Existing,
     /// The server's totals for the mailbox.
@@ -225,6 +229,7 @@ pub struct MessageEnvelopeSummary {
     pub size_bytes: u64,
     pub has_attachments: bool,
     pub internal_date: DateTime<Utc>,
+    pub key: Option<MessageKey>,
 }
 
 /// Result of a bulk body fetch for a single message.

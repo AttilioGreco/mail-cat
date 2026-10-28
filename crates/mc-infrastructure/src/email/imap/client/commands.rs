@@ -188,6 +188,9 @@ pub(super) struct ServerCaps {
     pub(super) move_cmd: bool,
     /// RFC 4315 `UIDPLUS`: `COPYUID` and `UID EXPUNGE`.
     pub(super) uidplus: bool,
+    /// Gmail's `X-GM-EXT-1`: `X-GM-MSGID` names a message across the labels
+    /// (mailboxes) it is in.
+    pub(super) gmail: bool,
 }
 
 impl ServerCaps {
@@ -199,6 +202,7 @@ impl ServerCaps {
         (rev2 || has("IMAP4rev1")).then(|| Self {
             move_cmd: rev2 || has("MOVE"),
             uidplus: rev2 || has("UIDPLUS"),
+            gmail: has("X-GM-EXT-1"),
         })
     }
 }
@@ -242,10 +246,12 @@ pub(super) fn quoted(value: &str) -> Result<String, DomainError> {
     ))
 }
 
-/// Every message's UID and flags in the selected mailbox, a bounded batch
-/// per command so a big mailbox is no single huge reply racing one timeout.
+/// Every message's UID and flags in the selected mailbox (and its
+/// `X-GM-MSGID` when `gmail`), a bounded batch per command so a big mailbox
+/// is no single huge reply racing one timeout.
 pub(super) async fn uid_flags<T>(
     session: &mut async_imap::Session<T>,
+    gmail: bool,
 ) -> Result<Vec<async_imap::types::Fetch>, DomainError>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
@@ -255,16 +261,17 @@ where
     let all = exchange(COMMAND_TIMEOUT, "UID SEARCH ALL", session.uid_search("ALL")).await?;
     let mut all: Vec<u32> = all.into_iter().collect();
     all.sort_unstable();
+    let items = if gmail {
+        "(FLAGS X-GM-MSGID)"
+    } else {
+        "(FLAGS)"
+    };
     let mut fetches = Vec::with_capacity(all.len());
     for chunk in all.chunks(ImapEmailProvider::FLAGS_BATCH_SIZE) {
         let set = ImapEmailProvider::compress_uid_ranges(chunk);
         let batch: Vec<async_imap::types::Fetch> =
             exchange(BODY_FETCH_TIMEOUT, "UID FETCH FLAGS", async {
-                session
-                    .uid_fetch(&set, "(FLAGS)")
-                    .await?
-                    .try_collect()
-                    .await
+                session.uid_fetch(&set, items).await?.try_collect().await
             })
             .await?;
         fetches.extend(batch);

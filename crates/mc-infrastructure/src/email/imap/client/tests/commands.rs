@@ -6,6 +6,7 @@ async fn move_uses_uid_move_and_reports_the_new_uid() {
     let caps = ServerCaps {
         move_cmd: true,
         uidplus: true,
+        gmail: false,
     };
 
     let moved = move_uids(&mut session, caps, &[5], "Archive")
@@ -22,6 +23,7 @@ async fn move_without_move_expunges_only_its_own_uids() {
     let caps = ServerCaps {
         move_cmd: false,
         uidplus: true,
+        gmail: false,
     };
 
     let moved = move_uids(&mut session, caps, &[5], "Archive")
@@ -112,7 +114,7 @@ async fn uid_flags_are_fetched_in_bounded_batches() {
     })
     .await;
 
-    uid_flags(&mut session).await.unwrap();
+    uid_flags(&mut session, false).await.unwrap();
 
     assert_eq!(
         uid_commands(&commands),
@@ -213,4 +215,44 @@ fn xoauth2_sasl_string_has_expected_format() {
     );
     assert!(xoauth2_rejects_token(auth.error.as_deref().unwrap()));
     assert!(!xoauth2_rejects_token(br#"{"status":"503"}"#));
+}
+
+#[test]
+fn gmail_extension_is_read_from_capabilities() {
+    let gmail = ServerCaps::from_names(|name| ["IMAP4rev1", "X-GM-EXT-1"].contains(&name)).unwrap();
+    assert!(gmail.gmail);
+    assert!(
+        !ServerCaps::from_names(|name| name == "IMAP4rev1")
+            .unwrap()
+            .gmail
+    );
+}
+
+#[tokio::test]
+async fn gmail_listing_asks_for_the_message_id_and_parses_it() {
+    let (mut session, commands) = scripted(|command| {
+        if command == "UID SEARCH ALL" {
+            "* SEARCH 4\r\n$T OK Done\r\n"
+        } else {
+            "* 1 FETCH (UID 4 FLAGS (\\Seen) X-GM-MSGID 1278455344230334865)\r\n$T OK Done\r\n"
+        }
+    })
+    .await;
+
+    let fetches = uid_flags(&mut session, true).await.unwrap();
+
+    assert_eq!(
+        uid_commands(&commands),
+        ["UID SEARCH ALL", "UID FETCH 4 (FLAGS X-GM-MSGID)"]
+    );
+    assert_eq!(fetches[0].gmail_msg_id(), Some(&1278455344230334865));
+}
+
+#[test]
+fn envelope_fetch_asks_for_the_message_id_only_on_gmail() {
+    assert!(super::fetch::envelope_items(true).contains("X-GM-MSGID"));
+    assert_eq!(
+        super::fetch::envelope_items(false),
+        "(ENVELOPE FLAGS INTERNALDATE BODY.PEEK[HEADER])"
+    );
 }

@@ -12,6 +12,7 @@ use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
 use crate::value_objects::mailbox_path::MailboxPath;
 use crate::value_objects::message_id::MessageId;
+use crate::value_objects::message_key::MessageKey;
 use crate::value_objects::remote_id::RemoteId;
 
 /// Metadata wrapper for all domain events.
@@ -190,6 +191,10 @@ pub enum DomainEvent {
         /// Brought back by a sync repairing local state (a row dropped while
         /// the server kept the message), not newly arrived: nothing to notify.
         restored: bool,
+        /// The provider's id for the message across mailboxes, when it has
+        /// one: later copies of it join this message instead of making rows.
+        #[serde(default)]
+        provider_key: Option<MessageKey>,
     },
 
     /// A message body was fetched and stored (`MessageBodyStore`). The body

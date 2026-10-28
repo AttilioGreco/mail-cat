@@ -28,6 +28,7 @@ async fn a_message_still_on_the_server_comes_back_below_the_checkpoint() {
             e,
             DomainEvent::MessageReceived {
                 restored: false,
+                provider_key: None,
                 ..
             }
         )),
@@ -155,6 +156,7 @@ fn scripted_changes(existing: Existing, reset: Option<Reset>) -> MailboxChanges 
         cursor: SyncCursor::new("scripted"),
         reset,
         added: vec![],
+        keys: Default::default(),
         existing,
         counts: MailboxCounts {
             total: 1,
@@ -242,4 +244,33 @@ async fn a_delta_applies_to_known_messages_and_a_rescan_forgets_nothing() {
             .any(|(_, e)| matches!(e, DomainEvent::MessageMailboxesChanged { added, .. } if added.iter().any(|m| m.remote_id.is_none()))),
         "no id was forgotten"
     );
+}
+
+/// Gmail lists one email under every label: the copy in the second
+/// mailbox joins the message the first created, and costs no envelope.
+#[tokio::test]
+async fn a_copy_with_a_known_key_joins_the_message_without_a_fetch() {
+    let account_id = AccountId::new();
+    let mailboxes = vec![inbox_mailbox(account_id), archive_mailbox(account_id)];
+    let mut copy = envelope(1, "<label@example.com>");
+    copy.key = Some(mc_domain::MessageKey::new("1278455344230334865"));
+    let provider = Arc::new(
+        MockEmailProvider::new()
+            .with_mailboxes(mailboxes)
+            .with_envelopes(vec![copy]),
+    );
+    let projector = Arc::new(MockProjector::new());
+    let service = make_shared_service(
+        provider.clone(),
+        Arc::new(MockEventStore::new()),
+        projector.clone(),
+    );
+
+    service.start_sync(&account_id).await.unwrap();
+
+    let stored = projector.stored.lock().unwrap();
+    assert_eq!(stored.len(), 1, "one message for the two copies");
+    assert_eq!(stored[0].memberships.len(), 2);
+    assert!(stored[0].memberships.iter().all(|m| m.remote_id.is_some()));
+    assert_eq!(*provider.envelope_fetches.lock().unwrap(), [1]);
 }

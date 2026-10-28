@@ -96,6 +96,7 @@ impl Message {
             has_attachments,
             received_at,
             restored: false,
+            provider_key: None,
         };
 
         let message = Self {

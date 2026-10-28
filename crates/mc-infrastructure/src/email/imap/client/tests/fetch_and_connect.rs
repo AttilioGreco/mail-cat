@@ -307,6 +307,7 @@ async fn a_command_left_unanswered_times_out() {
     let caps = ServerCaps {
         move_cmd: true,
         uidplus: true,
+        gmail: false,
     };
 
     let err = timed(

@@ -193,6 +193,7 @@ fn move_message() {
             has_attachments: false,
             received_at: Utc::now(),
             restored: false,
+            provider_key: None,
         },
         event,
         attached,
@@ -324,6 +325,7 @@ fn rehydrate_message_from_events() {
             has_attachments: false,
             received_at,
             restored: false,
+            provider_key: None,
         },
         DomainEvent::MessageBodyFetched {
             message_id: msg_id,

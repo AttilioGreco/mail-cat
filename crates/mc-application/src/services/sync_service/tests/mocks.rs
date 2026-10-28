@@ -164,6 +164,11 @@ impl EmailProvider for MockEmailProvider {
                 .filter(|(uid, _)| *uid >= first_new)
                 .map(|(uid, _)| RemoteId::from(*uid))
                 .collect(),
+            keys: self
+                .envelopes
+                .iter()
+                .filter_map(|e| Some((e.remote_id.clone(), e.key.clone()?)))
+                .collect(),
             existing: Existing::Snapshot(
                 live.into_iter()
                     .map(|(uid, flags)| (RemoteId::from(uid), flags))

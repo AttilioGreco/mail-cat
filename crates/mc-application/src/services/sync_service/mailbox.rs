@@ -8,7 +8,7 @@ use tracing::{debug, info, instrument, warn};
 
 use mc_domain::{
     AggregateType, DomainEvent, EmailProvider, EventStore, Existing, Flag, Mailbox, MailboxChanges,
-    MailboxType, MessageSummary, ProviderRegistry, RemoteId, Reset,
+    MailboxType, MessageKey, MessageSummary, ProviderRegistry, RemoteId, Reset,
 };
 
 use super::events::sync_failed;
@@ -90,7 +90,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         let reconciled = self.reconcile(local, &changes).await?;
         let restored = self.restore(provider, local, &reconciled.missing).await?;
         let Some(ingested) = self
-            .ingest_added(provider, local, &changes.added, progress)
+            .ingest_added(provider, local, &changes.added, &changes.keys, progress)
             .await?
         else {
             return Ok(None);
@@ -120,6 +120,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         provider: &Arc<PR::Provider>,
         local: &Mailbox,
         added: &[RemoteId],
+        keys: &HashMap<RemoteId, MessageKey>,
         mut progress: Option<&mut Vec<SyncProgressEvent>>,
     ) -> Result<Option<u32>, ApplicationError> {
         let label = format!("Fetching messages in {}", local.path);
@@ -144,6 +145,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                 );
             }
             let wanted = self.unheld(local, batch).await?;
+            let wanted = self.join_known(local, wanted, keys).await?;
             if wanted.is_empty() {
                 continue;
             }

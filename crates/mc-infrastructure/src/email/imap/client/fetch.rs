@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use async_imap::imap_proto::types::{BodyStructure, ContentEncoding};
 use tracing::{debug, info, warn};
 
+use mc_domain::MessageKey;
 use mc_domain::error::DomainError;
 use mc_domain::traits::email_provider::{MessageBodyResult, MessageEnvelopeSummary};
 use mc_domain::value_objects::flag::Flag;
@@ -30,6 +31,7 @@ impl ImapEmailProvider {
         uids_to_fetch.dedup();
         let mailbox_name = mapper::mailbox_path_to_string(mailbox);
         let mut session = self.selected(&mailbox_name).await?;
+        let items = envelope_items(self.has_gmail_ext());
 
         info!(
             "Fetching {} envelopes in batches of {}",
@@ -51,11 +53,7 @@ impl ImapEmailProvider {
             use futures::TryStreamExt;
             let batch_results: Vec<async_imap::types::Fetch> =
                 exchange(BODY_FETCH_TIMEOUT, "Fetch envelopes", async {
-                    session
-                        .uid_fetch(&query, "(ENVELOPE FLAGS INTERNALDATE BODY.PEEK[HEADER])")
-                        .await?
-                        .try_collect()
-                        .await
+                    session.uid_fetch(&query, items).await?.try_collect().await
                 })
                 .await?;
 
@@ -134,6 +132,9 @@ impl ImapEmailProvider {
                         size_bytes: 0,
                         has_attachments: false,
                         internal_date,
+                        key: fetch_data
+                            .gmail_msg_id()
+                            .map(|id| MessageKey::new(id.to_string())),
                     };
 
                     all_envelopes.push(summary);
@@ -146,6 +147,14 @@ impl ImapEmailProvider {
 
         info!("Fetched {} envelopes total", all_envelopes.len());
         Ok(all_envelopes)
+    }
+}
+
+pub(super) fn envelope_items(gmail: bool) -> &'static str {
+    if gmail {
+        "(ENVELOPE FLAGS INTERNALDATE X-GM-MSGID BODY.PEEK[HEADER])"
+    } else {
+        "(ENVELOPE FLAGS INTERNALDATE BODY.PEEK[HEADER])"
     }
 }
 

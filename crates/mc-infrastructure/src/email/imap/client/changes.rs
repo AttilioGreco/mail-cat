@@ -4,8 +4,11 @@
 //! CONDSTORE/QRESYNC an IMAP server cannot say what changed among the messages
 //! already known, so `existing` is always a full UID + FLAGS listing.
 
+use std::collections::HashMap;
+
 use tracing::debug;
 
+use mc_domain::MessageKey;
 use mc_domain::error::DomainError;
 use mc_domain::traits::email_provider::{Existing, MailboxChanges, MailboxCounts, Reset};
 use mc_domain::value_objects::flag::Flag;
@@ -14,7 +17,7 @@ use mc_domain::value_objects::remote_id::RemoteId;
 use mc_domain::value_objects::sync_cursor::SyncCursor;
 
 use super::super::mapper::{imap_flag_to_domain, mailbox_path_to_string, visible_flags};
-use super::commands::{exchange, uid_flags};
+use super::commands::{exchange, uid_flags, uid_of};
 use super::{COMMAND_TIMEOUT, ImapEmailProvider};
 
 const CURSOR_TAG: &str = "imap1";
@@ -92,6 +95,7 @@ fn changes_from(
         .cursor(),
         reset,
         added,
+        keys: HashMap::new(),
         existing: Existing::Snapshot(snapshot),
         counts,
     }
@@ -129,7 +133,7 @@ impl ImapEmailProvider {
         };
 
         let mut session = self.selected(&name).await?;
-        let fetches = uid_flags(&mut session).await?;
+        let fetches = uid_flags(&mut session, self.has_gmail_ext()).await?;
         self.release(session);
         self.record_downloads().await;
         let listing: Listing = fetches
@@ -144,7 +148,16 @@ impl ImapEmailProvider {
             })
             .collect();
 
-        let changes = changes_from(since, uid_validity, counts, listing);
+        let mut changes = changes_from(since, uid_validity, counts, listing);
+        let keys: HashMap<u32, MessageKey> = fetches
+            .iter()
+            .filter_map(|f| Some((f.uid?, MessageKey::new(f.gmail_msg_id()?.to_string()))))
+            .collect();
+        changes.keys = changes
+            .added
+            .iter()
+            .filter_map(|id| Some((id.clone(), keys.get(&uid_of(id).ok()?)?.clone())))
+            .collect();
         debug!(
             mailbox = %name,
             added = changes.added.len(),

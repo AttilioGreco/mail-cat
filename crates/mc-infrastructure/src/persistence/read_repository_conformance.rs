@@ -112,6 +112,7 @@ macro_rules! read_repository_conformance {
                     has_attachments: false,
                     received_at,
                     restored: false,
+                    provider_key: None,
                 },
             )
         }
@@ -197,6 +198,7 @@ macro_rules! read_repository_conformance {
                 has_attachments: false,
                 received_at,
                 restored: false,
+                provider_key: None,
             };
             (message_id, event)
         }

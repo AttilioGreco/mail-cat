@@ -7,8 +7,9 @@ use std::sync::Arc;
 use tracing::warn;
 
 use mc_domain::{
-    AggregateType, DomainEvent, EmailProvider, EventStore, Mailbox, MailboxType, Message,
-    MessageEnvelopeSummary, MessageId, MessageSummary, ProviderRegistry, RemoteId,
+    AggregateType, DomainEvent, EmailProvider, EventStore, Mailbox, MailboxType, Membership,
+    Message, MessageEnvelopeSummary, MessageId, MessageKey, MessageSummary, ProviderRegistry,
+    RemoteId,
 };
 
 use super::events::sync_failed;
@@ -42,6 +43,12 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                 other => other,
             };
 
+            if let Some(known) = self.known_key(local, env).await? {
+                self.join(known, local, env.remote_id.clone()).await?;
+                self.supersede(placeholder.filter(|p| p.id != known))
+                    .await?;
+                continue;
+            }
             let (_message, mut event) = Message::receive(
                 local.account_id,
                 local.id,
@@ -58,10 +65,12 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             if let DomainEvent::MessageReceived {
                 message_id,
                 restored: quiet,
+                provider_key,
                 ..
             } = &mut event
             {
                 *quiet = restored;
+                *provider_key = env.key.clone();
                 let message_id = *message_id;
                 new_messages.push((message_id, env.remote_id.clone()));
                 self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
@@ -112,6 +121,77 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             }
             Err(e) => warn!(path = %local.path, error = %e, "Bulk body fetch failed, skipping"),
         }
+    }
+
+    /// Copies of messages the account already has (same key, another
+    /// mailbox) join them as one more membership, and drop out of `ids`: no
+    /// header is downloaded for them.
+    pub(super) async fn join_known(
+        &self,
+        mailbox: &Mailbox,
+        ids: Vec<RemoteId>,
+        keys: &HashMap<RemoteId, MessageKey>,
+    ) -> Result<Vec<RemoteId>, ApplicationError> {
+        let batch: Vec<MessageKey> = ids.iter().filter_map(|id| keys.get(id).cloned()).collect();
+        if batch.is_empty() {
+            return Ok(ids);
+        }
+        let known = self
+            .projector
+            .find_by_keys(&mailbox.account_id, &batch)
+            .await
+            .map_err(sync_failed("find_by_keys"))?;
+        let mut unknown = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(message_id) = keys.get(&id).and_then(|key| known.get(key)) else {
+                unknown.push(id);
+                continue;
+            };
+            self.join(*message_id, mailbox, id).await?;
+            // Gmail may file our sent mail under another label first: the
+            // copy joins it here, so the placeholder shown at send time goes.
+            if mailbox.mailbox_type == MailboxType::Sent {
+                self.supersede(self.sent_placeholder_of(mailbox, message_id).await)
+                    .await?;
+            }
+        }
+        Ok(unknown)
+    }
+
+    /// The message an envelope's key already names, when a batch overlap or
+    /// a race made it arrive after all.
+    async fn known_key(
+        &self,
+        mailbox: &Mailbox,
+        env: &MessageEnvelopeSummary,
+    ) -> Result<Option<MessageId>, ApplicationError> {
+        let Some(key) = &env.key else {
+            return Ok(None);
+        };
+        let found = self
+            .projector
+            .find_by_keys(&mailbox.account_id, std::slice::from_ref(key))
+            .await
+            .map_err(sync_failed("find_by_keys"))?;
+        Ok(found.get(key).copied())
+    }
+
+    async fn join(
+        &self,
+        message_id: MessageId,
+        mailbox: &Mailbox,
+        remote_id: RemoteId,
+    ) -> Result<(), ApplicationError> {
+        let event = DomainEvent::MessageMailboxesChanged {
+            message_id,
+            added: vec![Membership {
+                mailbox_id: mailbox.id,
+                remote_id: Some(remote_id),
+            }],
+            removed: vec![],
+        };
+        self.append_and_project(&message_id.to_string(), AggregateType::Message, event)
+            .await
     }
 
     /// Which of `ids` no message in `mailbox` holds yet: the ones worth
@@ -169,6 +249,43 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                 }
             };
             if ours {
+                return Some(copy);
+            }
+        }
+        None
+    }
+
+    /// The `MessageSent` placeholder in Sent for the mail `message_id` is a
+    /// server copy of, matched by Message-ID.
+    async fn sent_placeholder_of(
+        &self,
+        sent: &Mailbox,
+        message_id: &MessageId,
+    ) -> Option<MessageSummary> {
+        let events = self
+            .event_store
+            .load_events(&message_id.to_string(), 0)
+            .await
+            .ok()?;
+        let Some(DomainEvent::MessageReceived {
+            message_rfc_id: Some(rfc_id),
+            ..
+        }) = events.first().map(|e| &e.payload)
+        else {
+            return None;
+        };
+        let copies = self
+            .projector
+            .find_by_rfc_id(&sent.account_id, rfc_id)
+            .await
+            .ok()?;
+        for copy in copies {
+            if copy.id != *message_id
+                && copy
+                    .membership(sent.id)
+                    .is_some_and(|m| m.remote_id.is_none())
+                && self.is_sent_placeholder(&copy.id).await
+            {
                 return Some(copy);
             }
         }

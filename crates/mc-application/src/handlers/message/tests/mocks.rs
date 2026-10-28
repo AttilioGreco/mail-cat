@@ -38,6 +38,7 @@ impl MockEventStore {
             has_attachments: message.has_attachments,
             received_at: message.received_at,
             restored: false,
+            provider_key: None,
         };
         let env = EventEnvelope::new(message.id.to_string(), AggregateType::Message, 1, event);
         self.events
@@ -187,6 +188,7 @@ impl EmailProvider for MockEmailProvider {
             cursor: SyncCursor::new("mock"),
             reset: None,
             added: vec![],
+            keys: Default::default(),
             existing: Existing::Snapshot(vec![]),
             counts: MailboxCounts {
                 total: 0,
@@ -457,6 +459,13 @@ impl MessageReadRepository for MockMessageReadRepo {
             .filter(|uid| uids.contains(uid))
             .cloned()
             .collect())
+    }
+    async fn find_by_keys(
+        &self,
+        _account_id: &AccountId,
+        _keys: &[mc_domain::MessageKey],
+    ) -> Result<std::collections::HashMap<mc_domain::MessageKey, MessageId>, DomainError> {
+        Ok(Default::default())
     }
     async fn pending_messages(
         &self,

@@ -93,6 +93,7 @@ pub(super) struct MockProjector {
     pub(super) stored: Mutex<Vec<MessageSummary>>,
     /// Message-IDs of `stored` rows; a row without one matches any lookup.
     pub(super) rfc_ids: Mutex<HashMap<MessageId, String>>,
+    pub(super) keys: Mutex<HashMap<mc_domain::MessageKey, MessageId>>,
 }
 
 impl MockProjector {
@@ -104,6 +105,7 @@ impl MockProjector {
             bodies: Mutex::new(HashMap::new()),
             stored: Mutex::new(vec![]),
             rfc_ids: Mutex::new(HashMap::new()),
+            keys: Mutex::new(HashMap::new()),
         }
     }
 
@@ -154,8 +156,12 @@ impl ReadModelProjector for MockProjector {
                 message_rfc_id,
                 flags,
                 size_bytes,
+                provider_key,
                 ..
             } => {
+                if let Some(key) = provider_key {
+                    self.keys.lock().unwrap().insert(key.clone(), *message_id);
+                }
                 stored.push(MessageSummary {
                     id: *message_id,
                     account_id: *account_id,
@@ -276,6 +282,18 @@ impl MessageReadRepository for MockProjector {
                     .is_some_and(|x| x.remote_id.as_ref() == Some(remote_id))
             })
             .cloned())
+    }
+
+    async fn find_by_keys(
+        &self,
+        _account_id: &AccountId,
+        keys: &[mc_domain::MessageKey],
+    ) -> Result<HashMap<mc_domain::MessageKey, MessageId>, DomainError> {
+        let known = self.keys.lock().unwrap();
+        Ok(keys
+            .iter()
+            .filter_map(|k| Some((k.clone(), *known.get(k)?)))
+            .collect())
     }
 
     async fn find_by_rfc_id(

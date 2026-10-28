@@ -73,6 +73,7 @@ mod tests {
                 cursor: SyncCursor::new("stub"),
                 reset: None,
                 added: vec![],
+                keys: Default::default(),
                 existing: Existing::Snapshot(vec![]),
                 counts: MailboxCounts {
                     total: 0,

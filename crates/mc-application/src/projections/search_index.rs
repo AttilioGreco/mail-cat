@@ -243,6 +243,14 @@ mod tests {
         ) -> Result<std::collections::HashSet<mc_domain::RemoteId>, DomainError> {
             Ok(Default::default())
         }
+        async fn find_by_keys(
+            &self,
+            _account_id: &AccountId,
+            _keys: &[mc_domain::MessageKey],
+        ) -> Result<std::collections::HashMap<mc_domain::MessageKey, MessageId>, DomainError>
+        {
+            Ok(Default::default())
+        }
         async fn pending_messages(
             &self,
             _mailbox_id: &MailboxId,
@@ -409,6 +417,7 @@ mod tests {
                     has_attachments: false,
                     received_at: chrono::Utc::now(),
                     restored: false,
+                    provider_key: None,
                 },
             )],
         };

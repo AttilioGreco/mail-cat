@@ -75,6 +75,82 @@ async fn sent_copy_syncing_back_replaces_the_one_shown_at_send_time() {
     );
 }
 
+/// Gmail files our sent mail under another label too, and that label syncs
+/// first: the Sent copy joins the stored message by key, and the placeholder
+/// shown at send time still goes.
+#[tokio::test]
+async fn a_sent_copy_joining_by_key_replaces_the_placeholder() {
+    let account_id = AccountId::new();
+    let inbox = inbox_mailbox(account_id);
+    let (sent, _) = Mailbox::discover(
+        account_id,
+        MailboxPath::new(vec!["Sent".to_string()], '/').unwrap(),
+        MailboxType::Sent,
+    );
+    let placeholder = MessageSummary {
+        id: MessageId::new(),
+        account_id,
+        memberships: vec![Membership {
+            mailbox_id: sent.id,
+            remote_id: None,
+        }],
+        from_name: None,
+        from_email: "sender@example.com".into(),
+        to: vec![],
+        cc: vec![],
+        subject: "Test Subject".into(),
+        flags: vec![Flag::Seen],
+        size_bytes: 0,
+        has_attachments: false,
+        received_at: chrono::Utc::now(),
+    };
+    let mut server_copy = make_envelope_summary(7);
+    server_copy.message_rfc_id = Some("<sent@example.com>".into());
+    server_copy.key = Some(mc_domain::MessageKey::new("1278455344230334865"));
+
+    let projector = Arc::new(MockProjector::new());
+    projector.stored.lock().unwrap().push(placeholder.clone());
+    projector
+        .rfc_ids
+        .lock()
+        .unwrap()
+        .insert(placeholder.id, "<sent@example.com>".into());
+    projector
+        .mailboxes
+        .lock()
+        .unwrap()
+        .extend([inbox.clone(), sent.clone()]);
+    let event_store = Arc::new(MockEventStore::new());
+    event_store.events.lock().unwrap().push((
+        placeholder.id.to_string(),
+        DomainEvent::MessageSent {
+            message_id: placeholder.id,
+            account_id,
+            mailbox_id: sent.id,
+            envelope: test_envelope(),
+            message_rfc_id: Some("<sent@example.com>".into()),
+            in_reply_to: None,
+            references: vec![],
+            body_text: None,
+            body_html: None,
+            sent_at: chrono::Utc::now(),
+        },
+    ));
+    let provider = MockEmailProvider::new()
+        .with_mailboxes(vec![inbox, sent])
+        .with_envelopes(vec![server_copy]);
+    let service = make_service(provider, event_store, projector.clone());
+    service.start_sync(&account_id).await.unwrap();
+
+    let stored = projector.stored.lock().unwrap();
+    assert!(
+        stored.iter().all(|m| m.id != placeholder.id),
+        "placeholder superseded: {stored:?}"
+    );
+    assert_eq!(stored.len(), 1, "one message, in Inbox and Sent");
+    assert_eq!(stored[0].memberships.len(), 2);
+}
+
 /// The provider already filed the sent copy and reported its id, which went
 /// to the placeholder: the Sent sync that then sees that copy has nothing to
 /// store, and nothing to supersede.

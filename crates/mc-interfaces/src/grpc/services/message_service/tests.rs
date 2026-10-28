@@ -194,6 +194,7 @@ async fn new_message_reaches_watch_stream() {
         references: vec![],
         received_at: chrono::Utc::now(),
         restored: false,
+        provider_key: None,
     }));
 
     let event = timeout(Duration::from_secs(1), stream.next())
@@ -249,6 +250,7 @@ async fn events_from_other_account_are_filtered() {
         references: vec![],
         received_at: chrono::Utc::now(),
         restored: false,
+        provider_key: None,
     }));
     // Correct account → arrives
     bus.publish(envelope(DomainEvent::MessageReceived {
@@ -273,6 +275,7 @@ async fn events_from_other_account_are_filtered() {
         references: vec![],
         received_at: chrono::Utc::now(),
         restored: false,
+        provider_key: None,
     }));
 
     let event = timeout(Duration::from_secs(1), stream.next())
