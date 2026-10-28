@@ -19,9 +19,6 @@ impl EmailAddress {
         if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
             return Err(DomainError::InvalidEmailAddress(raw));
         }
-        if !parts[1].contains('.') {
-            return Err(DomainError::InvalidEmailAddress(raw));
-        }
         Ok(Self(raw))
     }
 
@@ -90,8 +87,9 @@ mod tests {
     }
 
     #[test]
-    fn domain_without_dot_is_invalid() {
-        assert!(EmailAddress::new("user@localhost").is_err());
+    fn domain_without_dot_is_valid() {
+        // What Django and cron send from by default; dropping it lost the sender.
+        assert!(EmailAddress::new("root@localhost").is_ok());
     }
 
     #[test]

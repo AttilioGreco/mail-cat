@@ -170,6 +170,10 @@ fn addresses_round_trip_through_ui_strings() {
     let err = parse_address("not an address").unwrap_err().to_string();
     assert!(err.contains("not an address"), "{err}");
     assert!(
+        parse_address("mario@gmail").is_err(),
+        "a typed dotless domain is a typo"
+    );
+    assert!(
         parse_addresses(&["a@example.com".into(), " ".into()])
             .unwrap()
             .len()

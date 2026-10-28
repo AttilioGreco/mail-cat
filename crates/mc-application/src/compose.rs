@@ -208,6 +208,11 @@ pub fn parse_address(raw: &str) -> Result<Address, ApplicationError> {
         return Err(invalid());
     };
     let email = EmailAddress::new(&info.addr).map_err(|_| invalid())?;
+    // Valid, but typed by hand a dotless domain is a typo far more often
+    // than a real host (`mario@gmail`).
+    if !email.domain().contains('.') {
+        return Err(invalid());
+    }
     Ok(Address {
         name: info.display_name.clone().filter(|n| !n.trim().is_empty()),
         email,
