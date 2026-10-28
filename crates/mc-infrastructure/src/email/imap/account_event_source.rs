@@ -36,7 +36,8 @@ impl AccountEventSource for ImapAccountEventSource {
     fn watch(
         &self,
         mailboxes: &[MailboxPath],
-    ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + 'static>>
+    {
         // Clone all owned data before passing to the static stream factory,
         // ensuring the returned stream has no lifetime dependency on &self.
         watch_mailboxes(Arc::clone(&self.provider), mailboxes.to_vec())

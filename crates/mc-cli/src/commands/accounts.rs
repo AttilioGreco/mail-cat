@@ -1,8 +1,8 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use colored::Colorize;
-use mc_client::types::{OAuthLoginEvent, OAuthProvider};
 use mc_client::MailCatClient;
+use mc_client::types::{OAuthLoginEvent, OAuthProvider};
 use tabled::{Table, Tabled};
 use tokio_stream::StreamExt;
 
@@ -54,9 +54,11 @@ pub async fn run(cmd: AccountsCmd, client: MailCatClient) -> Result<()> {
     match cmd {
         AccountsCmd::List => list(client).await,
         AccountsCmd::Status => status(client).await,
-        AccountsCmd::AddOauth { provider, email, name } => {
-            add_oauth(client, provider.into(), email, name).await
-        }
+        AccountsCmd::AddOauth {
+            provider,
+            email,
+            name,
+        } => add_oauth(client, provider.into(), email, name).await,
         AccountsCmd::Rename { email, name } => rename(client, email, name).await,
     }
 }
@@ -69,7 +71,12 @@ async fn rename(client: MailCatClient, email: String, name: String) -> Result<()
         .find(|a| a.email == email)
         .with_context(|| format!("nessun account con email {email}"))?;
     client.rename_account(&account.id, &name).await?;
-    println!("{} account {} rinominato in \"{}\"", "✓".green(), email, name);
+    println!(
+        "{} account {} rinominato in \"{}\"",
+        "✓".green(),
+        email,
+        name
+    );
     Ok(())
 }
 
@@ -88,7 +95,11 @@ async fn add_oauth(
     while let Some(event) = stream.next().await {
         match event.context("reading OAuth login progress")? {
             OAuthLoginEvent::AwaitingBrowser { authorize_url } => {
-                println!("{} {}", "Apro il browser per il login:".cyan(), authorize_url);
+                println!(
+                    "{} {}",
+                    "Apro il browser per il login:".cyan(),
+                    authorize_url
+                );
                 if let Err(e) = mc_shared::browser::open_browser(&authorize_url) {
                     println!(
                         "{} apri manualmente questo link: {}",
@@ -112,7 +123,6 @@ async fn add_oauth(
     }
     bail!("Login OAuth interrotto: stream terminato senza un evento finale");
 }
-
 
 #[derive(Tabled)]
 struct AccountRow {
@@ -143,7 +153,9 @@ async fn list(client: MailCatClient) -> Result<()> {
             status: match a.status {
                 mc_client::AccountStatus::Active => "active".green().to_string(),
                 mc_client::AccountStatus::NeedsReauth => "needs re-auth".yellow().to_string(),
-                mc_client::AccountStatus::CredentialsRejected => "password rejected".yellow().to_string(),
+                mc_client::AccountStatus::CredentialsRejected => {
+                    "password rejected".yellow().to_string()
+                }
                 other => other.as_str().red().to_string(),
             },
         })
@@ -176,7 +188,11 @@ struct StatusRow {
 async fn status(client: MailCatClient) -> Result<()> {
     use mc_client::AuthState;
 
-    let local = |t: chrono::DateTime<chrono::Utc>| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string();
+    let local = |t: chrono::DateTime<chrono::Utc>| {
+        t.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    };
     let dash = || "-".to_owned();
     let rows: Vec<StatusRow> = client
         .list_accounts()
@@ -208,11 +224,15 @@ async fn status(client: MailCatClient) -> Result<()> {
                 since: auth.since.map_or_else(dash, local),
                 last_error: auth.last_error.unwrap_or_else(dash),
                 token_expires: auth.token_expires_at.map_or_else(dash, local),
-                next_retry: auth.next_retry.map_or_else(dash, |t| match (t - chrono::Utc::now()).num_seconds() {
-                    secs if secs > 0 => format!("in {secs}s"),
-                    _ => "due now".into(),
+                next_retry: auth.next_retry.map_or_else(dash, |t| {
+                    match (t - chrono::Utc::now()).num_seconds() {
+                        secs if secs > 0 => format!("in {secs}s"),
+                        _ => "due now".into(),
+                    }
                 }),
-                smtp: auth.smtp_error.map_or_else(dash, |e| format!("refused: {e}")),
+                smtp: auth
+                    .smtp_error
+                    .map_or_else(dash, |e| format!("refused: {e}")),
             }
         })
         .collect();

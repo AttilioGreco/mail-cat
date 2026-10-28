@@ -21,7 +21,8 @@ use futures::StreamExt;
 use tracing::{debug, info};
 
 use mc_domain::{
-    DomainEvent, EventEnvelope, EventStore, MessageReadRepository, ProjectionCheckpoint, SearchIndex,
+    DomainEvent, EventEnvelope, EventStore, MessageReadRepository, ProjectionCheckpoint,
+    SearchIndex,
 };
 
 use crate::error::ApplicationError;
@@ -242,7 +243,10 @@ mod tests {
         ) -> Result<std::collections::HashSet<mc_domain::RemoteId>, DomainError> {
             Ok(Default::default())
         }
-        async fn pending_messages(&self, _mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
+        async fn pending_messages(
+            &self,
+            _mailbox_id: &MailboxId,
+        ) -> Result<Vec<MessageId>, DomainError> {
             Ok(vec![])
         }
         async fn find_by_rfc_id(
@@ -305,19 +309,16 @@ mod tests {
         ) -> Result<u64, DomainError> {
             unimplemented!()
         }
-        async fn load_events(
-            &self,
-            _a: &str,
-            _s: u64,
-        ) -> Result<Vec<EventEnvelope>, DomainError> {
+        async fn load_events(&self, _a: &str, _s: u64) -> Result<Vec<EventEnvelope>, DomainError> {
             unimplemented!()
         }
         fn load_all_events(
             &self,
             _t: Option<AggregateType>,
             from: u64,
-        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<EventEnvelope, DomainError>> + Send + '_>>
-        {
+        ) -> std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<EventEnvelope, DomainError>> + Send + '_>,
+        > {
             let events: Vec<_> = self
                 .events
                 .iter()
@@ -350,7 +351,10 @@ mod tests {
         Message {
             id: MessageId::from_uuid(uuid::Uuid::parse_str(id).unwrap()),
             account_id: AccountId::new(),
-            memberships: vec![mc_domain::Membership { mailbox_id: MailboxId::new(), remote_id: None }],
+            memberships: vec![mc_domain::Membership {
+                mailbox_id: MailboxId::new(),
+                remote_id: None,
+            }],
             message_rfc_id: None,
             in_reply_to: None,
             references: vec![],
@@ -380,7 +384,10 @@ mod tests {
         let index = FakeIndex::default();
         let repo = FakeRepo::default();
         let mid = MessageId::from_uuid(uuid::Uuid::parse_str(ID1).unwrap());
-        repo.messages.lock().unwrap().insert(ID1.to_string(), msg(ID1));
+        repo.messages
+            .lock()
+            .unwrap()
+            .insert(ID1.to_string(), msg(ID1));
 
         let handler =
             SearchProjectionHandler::new(index.clone(), repo.clone(), FakeCheckpoint::default());
@@ -427,12 +434,14 @@ mod tests {
     async fn catch_up_advances_checkpoint_and_is_idempotent() {
         let index = FakeIndex::default();
         let repo = FakeRepo::default();
-        repo.messages.lock().unwrap().insert(ID1.to_string(), msg(ID1));
+        repo.messages
+            .lock()
+            .unwrap()
+            .insert(ID1.to_string(), msg(ID1));
         let checkpoint = FakeCheckpoint::default();
         let mid = MessageId::from_uuid(uuid::Uuid::parse_str(ID1).unwrap());
 
-        let handler =
-            SearchProjectionHandler::new(index.clone(), repo.clone(), checkpoint.clone());
+        let handler = SearchProjectionHandler::new(index.clone(), repo.clone(), checkpoint.clone());
         let store = FakeStore {
             events: vec![env(
                 7,

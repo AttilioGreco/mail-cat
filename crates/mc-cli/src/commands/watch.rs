@@ -9,7 +9,10 @@ pub async fn run(mailbox_id: String, client: MailCatClient) -> Result<()> {
         "→".blue(),
         mailbox_id.bold(),
     );
-    println!("{}", "  (Flag changes trigger ApplyRemoteFlagChange on the server)".dimmed());
+    println!(
+        "{}",
+        "  (Flag changes trigger ApplyRemoteFlagChange on the server)".dimmed()
+    );
 
     let mut stream = client.watch_mailbox(&mailbox_id).await?;
 

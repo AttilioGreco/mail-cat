@@ -28,7 +28,11 @@ pub enum ConversationsCmd {
 
 pub async fn run(cmd: ConversationsCmd, client: MailCatClient) -> Result<()> {
     match cmd {
-        ConversationsCmd::List { account_id, limit, mailbox } => {
+        ConversationsCmd::List {
+            account_id,
+            limit,
+            mailbox,
+        } => {
             let convs = client
                 .list_conversations(&account_id, mailbox.as_deref(), 1, limit)
                 .await?;
@@ -39,7 +43,10 @@ pub async fn run(cmd: ConversationsCmd, client: MailCatClient) -> Result<()> {
                 return Ok(());
             }
 
-            println!("{:<6} {:<40} {:<25} {:>5} {:>6}", "UNREAD", "SUBJECT", "FROM", "MSGS", "LATEST");
+            println!(
+                "{:<6} {:<40} {:<25} {:>5} {:>6}",
+                "UNREAD", "SUBJECT", "FROM", "MSGS", "LATEST"
+            );
             println!("{}", "─".repeat(90));
 
             for c in &convs {

@@ -179,36 +179,57 @@ pub enum Command {
 /// Result of a successfully dispatched command.
 #[derive(Debug, Clone)]
 pub enum CommandResult {
-    AccountAdded { account_id: AccountId },
+    AccountAdded {
+        account_id: AccountId,
+    },
     AccountUpdated,
     AccountRemoved,
     SyncStarted,
     MessageBodyFetched,
     FlagsSet,
     /// Count of messages marked read.
-    MailboxMarkedRead { count: u32 },
+    MailboxMarkedRead {
+        count: u32,
+    },
     MessageMoved,
     MessageDeleted,
     /// Bulk result: `succeeded` messages changed locally, `failed` were skipped
     /// (already gone, no provider UID, stale search index). Partial success is
     /// normal here and must be reported, not swallowed.
-    MessagesBulkChanged { succeeded: u32, failed: u32 },
+    MessagesBulkChanged {
+        succeeded: u32,
+        failed: u32,
+    },
     ComposePrepared(Box<ComposeView>),
-    MessageSent { message_id: MessageId },
-    DraftSaved { message_id: MessageId },
+    MessageSent {
+        message_id: MessageId,
+    },
+    DraftSaved {
+        message_id: MessageId,
+    },
     DraftDiscarded,
     RemoteFlagApplied,
-    ContactAdded { contact_id: ContactId },
+    ContactAdded {
+        contact_id: ContactId,
+    },
     /// EnsureContact result: `created = true` if a new contact was created,
     /// `false` if it already existed (no-op).
-    ContactEnsured { created: bool, contact_id: ContactId },
+    ContactEnsured {
+        created: bool,
+        contact_id: ContactId,
+    },
     ContactUpdated,
     ContactRemoved,
     ContactsMerged,
     /// Number of contacts that were successfully (re-)indexed.
-    ContactIndexRebuilt { indexed_count: u32 },
+    ContactIndexRebuilt {
+        indexed_count: u32,
+    },
     /// Result of `BackfillContactsFromMessages`.
     /// `new_contacts` = contacts created for the first time.
     /// `already_existed` = addresses already in the address book (skipped).
-    ContactsBackfilled { new_contacts: u32, already_existed: u32 },
+    ContactsBackfilled {
+        new_contacts: u32,
+        already_existed: u32,
+    },
 }

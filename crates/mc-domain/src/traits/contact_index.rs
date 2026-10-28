@@ -27,11 +27,16 @@ impl ContactSearchHit {
     /// cross-account.
     pub fn from_summary(summary: ContactSummary, requesting_account: Option<&AccountId>) -> Self {
         Self {
-            is_cross_account: requesting_account.is_some_and(|a| summary.account_scope.as_ref() != Some(a)),
+            is_cross_account: requesting_account
+                .is_some_and(|a| summary.account_scope.as_ref() != Some(a)),
             id: summary.id,
             display_name: summary.display_name,
             primary_email: summary.primary_email.as_str().to_owned(),
-            all_emails: summary.emails.iter().map(|e| e.address.as_str().to_owned()).collect(),
+            all_emails: summary
+                .emails
+                .iter()
+                .map(|e| e.address.as_str().to_owned())
+                .collect(),
             organization: summary.organization,
             account_scope: summary.account_scope,
         }

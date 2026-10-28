@@ -2,8 +2,12 @@
 
 use super::*;
 
-impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static, B: EventPublisher + 'static>
-    MessageCommandHandler<ES, PR, MR, B>
+impl<
+    ES: EventStore + 'static,
+    PR: ProviderRegistry + 'static,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    B: EventPublisher + 'static,
+> MessageCommandHandler<ES, PR, MR, B>
 {
     pub async fn handle_prepare_compose(
         &self,
@@ -12,9 +16,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         message_id: Option<MessageId>,
         account_id: Option<AccountId>,
     ) -> Result<CommandResult, ApplicationError> {
-        let first = accounts
-            .first()
-            .ok_or_else(|| ApplicationError::PreconditionFailed("Nessun account configurato".into()))?;
+        let first = accounts.first().ok_or_else(|| {
+            ApplicationError::PreconditionFailed("Nessun account configurato".into())
+        })?;
         let mut view = ComposeView {
             draft_id: None,
             account_id: account_id
@@ -36,7 +40,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
         if mode != ComposeMode::New {
             let id = message_id.ok_or_else(|| {
-                ApplicationError::PreconditionFailed(format!("{}: manca il messaggio di partenza", mode.as_str()))
+                ApplicationError::PreconditionFailed(format!(
+                    "{}: manca il messaggio di partenza",
+                    mode.as_str()
+                ))
             })?;
             if mode == ComposeMode::Draft {
                 self.restore_draft(&mut view, id).await?;
@@ -68,7 +75,11 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         Ok(CommandResult::ComposePrepared(Box::new(view)))
     }
 
-    async fn restore_draft(&self, view: &mut ComposeView, id: MessageId) -> Result<(), ApplicationError> {
+    async fn restore_draft(
+        &self,
+        view: &mut ComposeView,
+        id: MessageId,
+    ) -> Result<(), ApplicationError> {
         let draft = self
             .message_read_repo
             .get_message(&id)
@@ -108,8 +119,11 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             }
         }
         view.forwarded_attachments = compose::listable_parts(id, &parsed, &shown_html);
-        view.inline_images =
-            parsed.parts.into_iter().filter(|p| compose::referenced_inline(p, &shown_html)).collect();
+        view.inline_images = parsed
+            .parts
+            .into_iter()
+            .filter(|p| compose::referenced_inline(p, &shown_html))
+            .collect();
         Ok(())
     }
 
@@ -145,9 +159,13 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             body_html: outgoing.body_html.clone(),
             sent_at: chrono::Utc::now(),
         };
-        self.append_and_publish(&message_id, AggregateType::Message, 0, event).await?;
+        self.append_and_publish(&message_id, AggregateType::Message, 0, event)
+            .await?;
 
-        let outcome = match provider.send_message(&outgoing, sent.as_ref().map(|s| &s.path)).await {
+        let outcome = match provider
+            .send_message(&outgoing, sent.as_ref().map(|s| &s.path))
+            .await
+        {
             Ok(outcome) => outcome,
             Err(e) => {
                 if let Err(undo) = self.record(&message_id, |m| Some(m.delete())).await {
@@ -159,13 +177,21 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         // `Stored { None }` and `ServerFiled` leave the placeholder for the
         // Sent sync to supersede by Message-ID; `NotStored` keeps it as the
         // only local trace of the message.
-        if let (SentCopy::Stored { remote_id: Some(remote_id) }, Some(sent)) = (outcome.sent_copy, &sent) {
+        if let (
+            SentCopy::Stored {
+                remote_id: Some(remote_id),
+            },
+            Some(sent),
+        ) = (outcome.sent_copy, &sent)
+        {
             self.attach_sent_id(message_id, sent.id, remote_id).await;
         }
 
         if input.mode.is_reply()
             && let Some(source) = &source
-            && let Err(e) = self.handle_set_flags(source.id, vec![Flag::Answered], vec![]).await
+            && let Err(e) = self
+                .handle_set_flags(source.id, vec![Flag::Answered], vec![])
+                .await
         {
             tracing::warn!(%e, "Failed to set \\Answered on replied-to message");
         }
@@ -185,15 +211,24 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     /// a row already holds the id or superseded the placeholder.
     async fn attach_sent_id(&self, message_id: MessageId, sent: MailboxId, remote_id: RemoteId) {
         let attached = async {
-            if self.message_read_repo.held_ids(&sent, std::slice::from_ref(&remote_id)).await?.contains(&remote_id) {
+            if self
+                .message_read_repo
+                .held_ids(&sent, std::slice::from_ref(&remote_id))
+                .await?
+                .contains(&remote_id)
+            {
                 return Ok(());
             }
-            self.record(&message_id, |m| m.attach_remote_id(sent, remote_id.clone())).await.map(drop)
+            self.record(&message_id, |m| m.attach_remote_id(sent, remote_id.clone()))
+                .await
+                .map(drop)
         }
         .await;
         match attached {
             Ok(()) | Err(ApplicationError::NotFound(..)) => {}
-            Err(e) => warn!(%e, %message_id, "Sent copy stored, but its id was not recorded; the next sync will match it"),
+            Err(e) => {
+                warn!(%e, %message_id, "Sent copy stored, but its id was not recorded; the next sync will match it")
+            }
         }
     }
 
@@ -212,7 +247,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             .into_iter()
             .find(|m| m.mailbox_type == MailboxType::Drafts)
             .ok_or_else(|| {
-                ApplicationError::PreconditionFailed("Cartella Bozze non trovata: sincronizza l'account".into())
+                ApplicationError::PreconditionFailed(
+                    "Cartella Bozze non trovata: sincronizza l'account".into(),
+                )
             })?;
 
         let replacing = match input.draft_id {
@@ -232,7 +269,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         {
             // A Drafts sync stored it first.
             Some(existing) => existing.id,
-            None => self.store_draft_locally(account.id, drafts.id, remote_id, &outgoing).await?,
+            None => {
+                self.store_draft_locally(account.id, drafts.id, remote_id, &outgoing)
+                    .await?
+            }
         };
 
         // The provider already dropped the old version from the server.
@@ -250,7 +290,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     async fn draft_remote_id(&self, id: MessageId, drafts: &Mailbox) -> Option<RemoteId> {
         let (mut message, mut seq) = self.load_message(&id).await.ok()?;
         message.membership(drafts.id)?;
-        self.remote_id(&mut message, &mut seq, &drafts.path).await.ok()
+        self.remote_id(&mut message, &mut seq, &drafts.path)
+            .await
+            .ok()
     }
 
     pub async fn handle_discard_draft(
@@ -276,7 +318,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let cc = compose::parse_addresses(&input.cc)?;
         let bcc = compose::parse_addresses(&input.bcc)?;
         if !draft && to.is_empty() && cc.is_empty() && bcc.is_empty() {
-            return Err(ApplicationError::PreconditionFailed("Aggiungi almeno un destinatario".into()));
+            return Err(ApplicationError::PreconditionFailed(
+                "Aggiungi almeno un destinatario".into(),
+            ));
         }
 
         let mode = input.mode;
@@ -290,10 +334,16 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             None => None,
         };
         let quote = source.as_ref().and_then(|s| compose::quote_for(mode, s));
-        let body_html =
-            compose::assemble_html(&input.body_md, account.identity.signature_html.as_deref(), quote.as_ref());
-        let body_text =
-            compose::assemble_text(&input.body_md, compose::signature_text(account).as_deref(), quote.as_ref());
+        let body_html = compose::assemble_html(
+            &input.body_md,
+            account.identity.signature_html.as_deref(),
+            quote.as_ref(),
+        );
+        let body_text = compose::assemble_text(
+            &input.body_md,
+            compose::signature_text(account).as_deref(),
+            quote.as_ref(),
+        );
 
         // The user's files, the parts of existing messages they kept, and every
         // inline image the HTML shows (forwarded original, restored draft).
@@ -325,7 +375,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 .flat_map(|(_, parsed)| &parsed.parts)
                 .find(|p| compose::part_fingerprint(p) == fingerprint)
                 .ok_or_else(|| {
-                    ApplicationError::PreconditionFailed("un allegato inoltrato non è più disponibile".into())
+                    ApplicationError::PreconditionFailed(
+                        "un allegato inoltrato non è più disponibile".into(),
+                    )
                 })?;
             attachments.push(part.clone());
         }
@@ -398,7 +450,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         let (mut aggregate, mut seq) = match self.load_message(&message.id).await {
             Ok(loaded) => loaded,
             Err(ApplicationError::NotFound(..)) => {
-                return Err(ApplicationError::PreconditionFailed("il messaggio non esiste più".into()));
+                return Err(ApplicationError::PreconditionFailed(
+                    "il messaggio non esiste più".into(),
+                ));
             }
             Err(e) => return Err(e),
         };
@@ -443,14 +497,25 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             chrono::Utc::now(),
         );
         let id = message.id;
-        self.append_and_publish(&id, AggregateType::Message, 0, received).await?;
+        self.append_and_publish(&id, AggregateType::Message, 0, received)
+            .await?;
 
-        let fetched = message.set_body(outgoing.body_text.clone(), outgoing.body_html.clone(), attachments);
+        let fetched = message.set_body(
+            outgoing.body_text.clone(),
+            outgoing.body_html.clone(),
+            attachments,
+        );
         // Body before the event, as in SyncService::store_body.
         self.message_read_repo
-            .put_body(&id, outgoing.body_text.clone(), outgoing.body_html.clone(), false)
+            .put_body(
+                &id,
+                outgoing.body_text.clone(),
+                outgoing.body_html.clone(),
+                false,
+            )
             .await?;
-        self.append_and_publish(&id, AggregateType::Message, 1, fetched).await?;
+        self.append_and_publish(&id, AggregateType::Message, 1, fetched)
+            .await?;
         Ok(id)
     }
 
@@ -464,9 +529,14 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             .await?
             .into_iter()
             .find(|m| m.mailbox_type == MailboxType::Drafts && message.membership(m.id).is_some())
-            .ok_or_else(|| ApplicationError::PreconditionFailed("il messaggio non è una bozza".into()))?;
+            .ok_or_else(|| {
+                ApplicationError::PreconditionFailed("il messaggio non è una bozza".into())
+            })?;
         // No server copy to find is no reason to keep the local one.
-        let remote_id = self.remote_id(&mut message, &mut seq, &drafts.path).await.ok();
+        let remote_id = self
+            .remote_id(&mut message, &mut seq, &drafts.path)
+            .await
+            .ok();
         self.append_and_publish(&id, AggregateType::Message, seq, message.delete())
             .await?;
 
@@ -475,7 +545,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             let this = self.clone();
             tokio::spawn(async move {
                 let _turn = this.turn(message.account_id).await;
-                if let Err(e) = provider.delete_messages(&drafts.path, &[remote_id], true).await {
+                if let Err(e) = provider
+                    .delete_messages(&drafts.path, &[remote_id], true)
+                    .await
+                {
                     tracing::warn!(%e, "Background draft delete failed — next sync will reconcile");
                 }
             });

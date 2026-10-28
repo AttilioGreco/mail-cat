@@ -4,9 +4,8 @@ use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::application_error_to_status;
 use crate::grpc::proto::{
-    RebuildIndexProgress, RebuildIndexRequest, SearchRequest, SearchResponse,
-    SuggestRequest, SuggestResponse,
-    search_service_server::SearchService,
+    RebuildIndexProgress, RebuildIndexRequest, SearchRequest, SearchResponse, SuggestRequest,
+    SuggestResponse, search_service_server::SearchService,
 };
 use mc_application::{bus::QueryBus, queries::Query};
 use mc_domain::{AccountId, MailboxId, SuggestScope};
@@ -104,17 +103,21 @@ impl<Q: QueryBus + 'static> SearchService for SearchServiceImpl<Q> {
     ) -> Result<Response<SuggestResponse>, Status> {
         let req = request.into_inner();
 
-        let scope = req.scope.and_then(|s| {
-            match crate::grpc::proto::SuggestScope::try_from(s) {
+        let scope = req
+            .scope
+            .and_then(|s| match crate::grpc::proto::SuggestScope::try_from(s) {
                 Ok(crate::grpc::proto::SuggestScope::From) => Some(SuggestScope::From),
                 Ok(crate::grpc::proto::SuggestScope::To) => Some(SuggestScope::To),
                 Ok(crate::grpc::proto::SuggestScope::Subject) => Some(SuggestScope::Subject),
                 Ok(crate::grpc::proto::SuggestScope::Body) => Some(SuggestScope::Body),
                 _ => None,
-            }
-        });
+            });
 
-        let max_per_field = if req.max_per_field == 0 { 5 } else { req.max_per_field as usize };
+        let max_per_field = if req.max_per_field == 0 {
+            5
+        } else {
+            req.max_per_field as usize
+        };
 
         let query = Query::SuggestMessages {
             prefix: req.prefix,

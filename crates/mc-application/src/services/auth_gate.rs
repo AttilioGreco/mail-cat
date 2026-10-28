@@ -34,7 +34,11 @@ const TIMER_PERIOD: std::time::Duration = std::time::Duration::from_secs(5 * 60)
 /// user is usually waiting, then every 5 minutes.
 fn offline_delay(round: u32) -> TimeDelta {
     const SECS: [i64; 6] = [2, 5, 10, 30, 60, 120];
-    TimeDelta::seconds(SECS.get(round.saturating_sub(1) as usize).copied().unwrap_or(300))
+    TimeDelta::seconds(
+        SECS.get(round.saturating_sub(1) as usize)
+            .copied()
+            .unwrap_or(300),
+    )
 }
 
 /// Retry delays once the server says the account is over a usage limit
@@ -54,7 +58,9 @@ fn throttled_delay(round: u32) -> TimeDelta {
 pub enum AuthState {
     Active,
     /// The server or the token endpoint is unreachable.
-    Offline { next_retry: DateTime<Utc> },
+    Offline {
+        next_retry: DateTime<Utc>,
+    },
     /// The OAuth grant is gone or its token is refused: the user has to log in.
     NeedsReauth,
     /// The server refused the password: the user has to change it.
@@ -66,7 +72,10 @@ pub enum AuthState {
 impl AuthState {
     /// Nothing connects again until the user acts.
     pub fn is_paused(self) -> bool {
-        matches!(self, Self::NeedsReauth | Self::CredentialsRejected | Self::OAuthClientInvalid)
+        matches!(
+            self,
+            Self::NeedsReauth | Self::CredentialsRejected | Self::OAuthClientInvalid
+        )
     }
 
     /// The part of the state that survives a restart.
@@ -101,12 +110,18 @@ pub struct AuthStatus {
 }
 
 /// Exchanges a refresh token for fresh tokens at the provider.
-pub type RefreshFn =
-    Arc<dyn Fn(OAuthProvider, String) -> BoxFuture<'static, Result<OAuthSecrets, DomainError>> + Send + Sync>;
+pub type RefreshFn = Arc<
+    dyn Fn(OAuthProvider, String) -> BoxFuture<'static, Result<OAuthSecrets, DomainError>>
+        + Send
+        + Sync,
+>;
 
 pub enum Credential {
     Password(String),
-    OAuth { provider: OAuthProvider, tokens: OAuthSecrets },
+    OAuth {
+        provider: OAuthProvider,
+        tokens: OAuthSecrets,
+    },
 }
 
 struct Tracked {
@@ -174,7 +189,9 @@ impl AuthGate {
         let state = match account.status {
             AccountStatus::NeedsReauth if oauth => AuthState::NeedsReauth,
             // Older builds flagged a rejected password as NeedsReauth; no login fixes that.
-            AccountStatus::NeedsReauth | AccountStatus::CredentialsRejected => AuthState::CredentialsRejected,
+            AccountStatus::NeedsReauth | AccountStatus::CredentialsRejected => {
+                AuthState::CredentialsRejected
+            }
             _ => return,
         };
         self.tracked.send_modify(|t| {
@@ -211,12 +228,16 @@ impl AuthGate {
         };
         match login(secret).await {
             Ok(()) => {
-                info!("{}: login works again after the restart, resuming", self.email);
+                info!(
+                    "{}: login works again after the restart, resuming",
+                    self.email
+                );
                 self.recover();
             }
             Err(e) => {
                 info!("{}: still refused after the restart ({e})", self.email);
-                self.tracked.send_modify(|t| t.last_error = Some(e.to_string()));
+                self.tracked
+                    .send_modify(|t| t.last_error = Some(e.to_string()));
             }
         }
     }
@@ -260,13 +281,17 @@ impl AuthGate {
         if let AuthState::Offline { next_retry } = self.tracked.borrow().state
             && Utc::now() < next_retry
         {
-            return Err(DomainError::ConnectionFailed(format!("offline, next retry at {next_retry}")));
+            return Err(DomainError::ConnectionFailed(format!(
+                "offline, next retry at {next_retry}"
+            )));
         }
         self.refresh_now().await
     }
 
     fn credential(&self) -> std::sync::MutexGuard<'_, Credential> {
-        self.credential.lock().unwrap_or_else(PoisonError::into_inner)
+        self.credential
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn current_secret(&self, margin: TimeDelta) -> Option<LoginSecret> {
@@ -313,9 +338,11 @@ impl AuthGate {
             }
             Err(e) => {
                 match e {
-                    DomainError::AuthenticationFailed(_) => {
-                        self.enter(AuthState::NeedsReauth, "refresh token revoked or expired", &e)
-                    }
+                    DomainError::AuthenticationFailed(_) => self.enter(
+                        AuthState::NeedsReauth,
+                        "refresh token revoked or expired",
+                        &e,
+                    ),
                     DomainError::OAuthClientInvalid(_) => self.enter(
                         AuthState::OAuthClientInvalid,
                         "the OAuth provider rejected the app's client id",
@@ -335,13 +362,19 @@ impl AuthGate {
         let mut bundle = match self.secret_store.load(&self.email) {
             Ok(existing) => existing.unwrap_or_default(),
             Err(e) => {
-                error!("OAuth refresh for {}: keychain read failed, not persisting: {e}", self.email);
+                error!(
+                    "OAuth refresh for {}: keychain read failed, not persisting: {e}",
+                    self.email
+                );
                 return;
             }
         };
         bundle.oauth = Some(fresh.clone());
         if let Err(e) = self.secret_store.store(&self.email, &bundle) {
-            error!("OAuth refresh for {}: keychain write failed: {e}", self.email);
+            error!(
+                "OAuth refresh for {}: keychain write failed: {e}",
+                self.email
+            );
         }
     }
 
@@ -408,7 +441,9 @@ impl AuthGate {
         let account_id = self.account_id;
         match state.persisted() {
             AccountStatus::NeedsReauth => DomainEvent::AccountAuthExpired { account_id, error },
-            AccountStatus::CredentialsRejected => DomainEvent::AccountCredentialsRejected { account_id, error },
+            AccountStatus::CredentialsRejected => {
+                DomainEvent::AccountCredentialsRejected { account_id, error }
+            }
             _ => DomainEvent::AccountReauthenticated { account_id },
         }
     }
@@ -437,8 +472,17 @@ impl AuthGate {
                         t.offline_rounds += 1;
                         offline_delay(t.offline_rounds)
                     };
-                    t.state = AuthState::Offline { next_retry: now + delay };
-                    t.reason = Some(if throttled { "over the server's usage limit" } else { "server unreachable" }.into());
+                    t.state = AuthState::Offline {
+                        next_retry: now + delay,
+                    };
+                    t.reason = Some(
+                        if throttled {
+                            "over the server's usage limit"
+                        } else {
+                            "server unreachable"
+                        }
+                        .into(),
+                    );
                 }
                 _ => {}
             }
@@ -500,15 +544,24 @@ impl LoginGate for AuthGate {
                 self.enter(AuthState::CredentialsRejected, &reason, error);
                 false
             }
-            (DomainError::AuthenticationFailed(_), LoginSecret::OAuthToken(rejected)) if !retried => {
+            (DomainError::AuthenticationFailed(_), LoginSecret::OAuthToken(rejected))
+                if !retried =>
+            {
                 self.refresh_rejected(rejected).await
             }
             (DomainError::AuthenticationFailed(text), LoginSecret::OAuthToken(_)) => {
-                let reason = format!("the server rejects a freshly refreshed token for this account: {text}");
+                let reason = format!(
+                    "the server rejects a freshly refreshed token for this account: {text}"
+                );
                 self.enter(AuthState::NeedsReauth, &reason, error);
                 false
             }
-            (DomainError::ConnectionFailed(_) | DomainError::ConnectionTimeout(_) | DomainError::Throttled(_), _) => {
+            (
+                DomainError::ConnectionFailed(_)
+                | DomainError::ConnectionTimeout(_)
+                | DomainError::Throttled(_),
+                _,
+            ) => {
                 self.went_offline(error);
                 false
             }
@@ -532,7 +585,10 @@ impl LoginGate for AuthGate {
     }
 
     fn smtp_login(&self, refused: Option<String>) {
-        if self.tracked.send_if_modified(|t| std::mem::replace(&mut t.smtp_error, refused.clone()) != refused) {
+        if self
+            .tracked
+            .send_if_modified(|t| std::mem::replace(&mut t.smtp_error, refused.clone()) != refused)
+        {
             let _ = self.changes.send(self.account_id);
         }
     }
@@ -585,7 +641,12 @@ impl AuthGates {
         }
     }
 
-    pub fn add(&mut self, account_id: AccountId, email: &str, credential: Credential) -> Arc<AuthGate> {
+    pub fn add(
+        &mut self,
+        account_id: AccountId,
+        email: &str,
+        credential: Credential,
+    ) -> Arc<AuthGate> {
         let gate = Arc::new(AuthGate {
             account_id,
             email: email.to_owned(),

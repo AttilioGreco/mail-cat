@@ -289,8 +289,10 @@ impl EmailProvider for ImapEmailProvider {
         let caps = known_caps(&self.caps, &mut session).await?;
         let mut uids = uids_of(ids)?;
         uids.sort_unstable();
-        let mut moved: HashMap<RemoteId, Option<RemoteId>> =
-            uids.iter().map(|&uid| (RemoteId::from(uid), None)).collect();
+        let mut moved: HashMap<RemoteId, Option<RemoteId>> = uids
+            .iter()
+            .map(|&uid| (RemoteId::from(uid), None))
+            .collect();
         for chunk in uids.chunks(Self::FETCH_BATCH_SIZE) {
             let pairs = timed(
                 COMMAND_TIMEOUT,

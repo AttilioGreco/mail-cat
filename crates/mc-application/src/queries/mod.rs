@@ -5,8 +5,7 @@
 
 use mc_domain::{
     AccountId, AccountSummary, AccountSyncStats, ContactSearchHit, ConversationSummary, Mailbox,
-    MailboxId, Message,
-    MessageSummary, SearchResults, SuggestScope, Suggestion, ThreadId,
+    MailboxId, Message, MessageSummary, SearchResults, SuggestScope, Suggestion, ThreadId,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -238,9 +237,7 @@ impl QueryResult {
         }
     }
 
-    pub fn into_conversations(
-        self,
-    ) -> Result<PagedResult<ConversationSummary>, ApplicationError> {
+    pub fn into_conversations(self) -> Result<PagedResult<ConversationSummary>, ApplicationError> {
         match self {
             Self::Conversations(v) => Ok(v),
             _ => Err(ApplicationError::Internal(

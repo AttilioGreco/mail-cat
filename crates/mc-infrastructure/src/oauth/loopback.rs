@@ -5,8 +5,7 @@ use mc_domain::DomainError;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
-const SUCCESS_BODY: &str =
-    "<html><body><h1>mail-cat</h1><p>Login completato, puoi chiudere questa scheda.</p></body></html>";
+const SUCCESS_BODY: &str = "<html><body><h1>mail-cat</h1><p>Login completato, puoi chiudere questa scheda.</p></body></html>";
 
 /// Accepts exactly one HTTP GET request on `listener`, parses `code`/`state`
 /// from its query string, and replies with a static confirmation page.
@@ -70,7 +69,9 @@ mod tests {
         let client = tokio::spawn(async move {
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
             stream
-                .write_all(b"GET /callback?code=abc123&state=xyz789 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                .write_all(
+                    b"GET /callback?code=abc123&state=xyz789 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+                )
                 .await
                 .unwrap();
             let mut buf = String::new();

@@ -9,8 +9,8 @@ use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let endpoint = std::env::var("MAIL_CAT_ENDPOINT")
-        .unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
+    let endpoint =
+        std::env::var("MAIL_CAT_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
 
     println!("Connecting to {}...", endpoint);
     let client = MailCatClient::connect(&endpoint).await?;
@@ -73,9 +73,7 @@ async fn main() -> anyhow::Result<()> {
                             MailboxNotificationKind::NewMessage { remote_id } => {
                                 format!("NewMessage id={}", remote_id)
                             }
-                            MailboxNotificationKind::FlagsChanged => {
-                                "FlagsChanged".to_string()
-                            }
+                            MailboxNotificationKind::FlagsChanged => "FlagsChanged".to_string(),
                             MailboxNotificationKind::MessageExpunged { message_id } => {
                                 format!("MessageExpunged message={}", message_id)
                             }

@@ -65,6 +65,7 @@ pub struct Message {
 
 impl Message {
     /// Create a message from provider data (received during sync) and produce the event.
+    #[allow(clippy::too_many_arguments)]
     pub fn receive(
         account_id: AccountId,
         mailbox_id: MailboxId,
@@ -100,7 +101,10 @@ impl Message {
         let message = Self {
             id,
             account_id,
-            memberships: vec![Membership { mailbox_id, remote_id: Some(remote_id) }],
+            memberships: vec![Membership {
+                mailbox_id,
+                remote_id: Some(remote_id),
+            }],
             message_rfc_id,
             in_reply_to,
             references,
@@ -199,13 +203,29 @@ impl Message {
         remote_id: Option<RemoteId>,
     ) -> Option<DomainEvent> {
         self.membership(from)?;
-        Some(self.change_mailboxes(vec![Membership { mailbox_id: to, remote_id }], vec![from]))
+        Some(self.change_mailboxes(
+            vec![Membership {
+                mailbox_id: to,
+                remote_id,
+            }],
+            vec![from],
+        ))
     }
 
     /// Put the message in one more mailbox. `None` when it is already there.
-    pub fn add_to(&mut self, mailbox_id: MailboxId, remote_id: Option<RemoteId>) -> Option<DomainEvent> {
+    pub fn add_to(
+        &mut self,
+        mailbox_id: MailboxId,
+        remote_id: Option<RemoteId>,
+    ) -> Option<DomainEvent> {
         self.membership(mailbox_id).is_none().then(|| {
-            self.change_mailboxes(vec![Membership { mailbox_id, remote_id }], vec![])
+            self.change_mailboxes(
+                vec![Membership {
+                    mailbox_id,
+                    remote_id,
+                }],
+                vec![],
+            )
         })
     }
 
@@ -222,7 +242,11 @@ impl Message {
     /// Record the remote id the message has in `mailbox_id`, learned after the move
     /// that cleared it. `None` when the message has since left that mailbox or
     /// already has an id: the information arrived late and no longer applies.
-    pub fn attach_remote_id(&mut self, mailbox_id: MailboxId, remote_id: RemoteId) -> Option<DomainEvent> {
+    pub fn attach_remote_id(
+        &mut self,
+        mailbox_id: MailboxId,
+        remote_id: RemoteId,
+    ) -> Option<DomainEvent> {
         self.membership(mailbox_id)
             .is_some_and(|m| m.remote_id.is_none())
             .then(|| self.set_remote_id(mailbox_id, Some(remote_id)))
@@ -238,26 +262,44 @@ impl Message {
     }
 
     fn set_remote_id(&mut self, mailbox_id: MailboxId, remote_id: Option<RemoteId>) -> DomainEvent {
-        self.change_mailboxes(vec![Membership { mailbox_id, remote_id }], vec![])
+        self.change_mailboxes(
+            vec![Membership {
+                mailbox_id,
+                remote_id,
+            }],
+            vec![],
+        )
     }
 
     fn change_mailboxes(&mut self, added: Vec<Membership>, removed: Vec<MailboxId>) -> DomainEvent {
         self.apply_mailbox_change(&added, &removed);
-        DomainEvent::MessageMailboxesChanged { message_id: self.id, added, removed }
+        DomainEvent::MessageMailboxesChanged {
+            message_id: self.id,
+            added,
+            removed,
+        }
     }
 
     /// Remove the message everywhere.
     pub fn delete(&mut self) -> DomainEvent {
         let mailbox_ids = self.memberships.drain(..).map(|m| m.mailbox_id).collect();
-        DomainEvent::MessageDeleted { message_id: self.id, mailbox_ids }
+        DomainEvent::MessageDeleted {
+            message_id: self.id,
+            mailbox_ids,
+        }
     }
 
     /// `added` upserts: an entry for a mailbox the message is already in
     /// replaces its remote id.
     fn apply_mailbox_change(&mut self, added: &[Membership], removed: &[MailboxId]) {
-        self.memberships.retain(|m| !removed.contains(&m.mailbox_id));
+        self.memberships
+            .retain(|m| !removed.contains(&m.mailbox_id));
         for new in added {
-            match self.memberships.iter_mut().find(|m| m.mailbox_id == new.mailbox_id) {
+            match self
+                .memberships
+                .iter_mut()
+                .find(|m| m.mailbox_id == new.mailbox_id)
+            {
                 Some(existing) => *existing = new.clone(),
                 None => self.memberships.push(new.clone()),
             }
@@ -340,7 +382,10 @@ impl Message {
             } => Self {
                 id: *message_id,
                 account_id: *account_id,
-                memberships: vec![Membership { mailbox_id: *mailbox_id, remote_id: Some(remote_id.clone()) }],
+                memberships: vec![Membership {
+                    mailbox_id: *mailbox_id,
+                    remote_id: Some(remote_id.clone()),
+                }],
                 message_rfc_id: message_rfc_id.clone(),
                 in_reply_to: in_reply_to.clone(),
                 references: references.clone(),
@@ -369,7 +414,10 @@ impl Message {
             } => Self {
                 id: *message_id,
                 account_id: *account_id,
-                memberships: vec![Membership { mailbox_id: *mailbox_id, remote_id: None }],
+                memberships: vec![Membership {
+                    mailbox_id: *mailbox_id,
+                    remote_id: None,
+                }],
                 message_rfc_id: message_rfc_id.clone(),
                 in_reply_to: in_reply_to.clone(),
                 references: references.clone(),

@@ -33,9 +33,13 @@ where
     B: EventPublisher,
 {
     pub fn new(write_repo: Arc<W>, event_bus: Arc<B>) -> Self {
-        Self { write_repo, event_bus }
+        Self {
+            write_repo,
+            event_bus,
+        }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_add(
         &self,
         display_name: String,
@@ -62,7 +66,6 @@ where
         let contact_id = contact.id;
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
-
 
         info!(%contact_id, "contact added");
         Ok(CommandResult::ContactAdded { contact_id })
@@ -108,9 +111,11 @@ where
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
 
-
         info!(%contact_id, "contact auto-created from email activity");
-        Ok(CommandResult::ContactEnsured { created: true, contact_id })
+        Ok(CommandResult::ContactEnsured {
+            created: true,
+            contact_id,
+        })
     }
 
     pub async fn handle_update(
@@ -130,7 +135,6 @@ where
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
 
-
         info!(%contact_id, "contact updated");
         Ok(CommandResult::ContactUpdated)
     }
@@ -144,7 +148,6 @@ where
 
         self.write_repo.save(&contact, vec![event.clone()]).await?;
         self.publish_event(contact_id.to_string(), event);
-
 
         info!(%contact_id, "contact removed");
         Ok(CommandResult::ContactRemoved)
@@ -163,14 +166,15 @@ where
         let remove_event = discarded.remove();
 
         // Save both events
-        self.write_repo.save(&kept, vec![merge_event.clone()]).await?;
+        self.write_repo
+            .save(&kept, vec![merge_event.clone()])
+            .await?;
         self.write_repo
             .save(&discarded, vec![remove_event.clone()])
             .await?;
 
         self.publish_event(keep_id.to_string(), merge_event);
         self.publish_event(discard_id.to_string(), remove_event);
-
 
         info!(%keep_id, %discard_id, "contacts merged");
         Ok(CommandResult::ContactsMerged)
@@ -182,8 +186,14 @@ where
         &self,
         _account_id: Option<AccountId>,
     ) -> Result<CommandResult, ApplicationError> {
-        let total = self.write_repo.list_contacts(&Pagination::new(1, 1)).await?.total_count;
-        Ok(CommandResult::ContactIndexRebuilt { indexed_count: u32::try_from(total).unwrap_or(u32::MAX) })
+        let total = self
+            .write_repo
+            .list_contacts(&Pagination::new(1, 1))
+            .await?
+            .total_count;
+        Ok(CommandResult::ContactIndexRebuilt {
+            indexed_count: u32::try_from(total).unwrap_or(u32::MAX),
+        })
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

@@ -34,7 +34,12 @@ impl ReauthTrigger {
         names: HashMap<AccountId, String>,
         secret_store: Arc<dyn SecretStore>,
     ) -> Self {
-        Self { inner, gates, names, secret_store }
+        Self {
+            inner,
+            gates,
+            names,
+            secret_store,
+        }
     }
 }
 
@@ -72,11 +77,18 @@ impl OAuthLoginTrigger for ReauthTrigger {
 
     fn start_reauth(&self, account_id: AccountId) -> mpsc::Receiver<OAuthLoginProgress> {
         let target = self.gates.get(&account_id).and_then(|gate| {
-            Some((self.names.get(&account_id)?.clone(), gate.email().to_owned(), gate.oauth_provider()?))
+            Some((
+                self.names.get(&account_id)?.clone(),
+                gate.email().to_owned(),
+                gate.oauth_provider()?,
+            ))
         });
         match target {
             Some((name, email, provider)) => self.start_login(name, email, provider),
-            None => failed(format!("account {} is not a known OAuth account", account_id.as_uuid())),
+            None => failed(format!(
+                "account {} is not a known OAuth account",
+                account_id.as_uuid()
+            )),
         }
     }
 }
@@ -95,7 +107,10 @@ async fn apply_fresh_tokens(gate: &AuthGate, secret_store: &dyn SecretStore) {
     let tokens = match secret_store.load(gate.email()) {
         Ok(bundle) => bundle.and_then(|b| b.oauth),
         Err(e) => {
-            tracing::warn!("Re-auth succeeded for {} but re-reading keychain failed: {e}", gate.email());
+            tracing::warn!(
+                "Re-auth succeeded for {} but re-reading keychain failed: {e}",
+                gate.email()
+            );
             None
         }
     };
@@ -145,7 +160,10 @@ mod tests {
         let gate = gates.add(
             AccountId::new(),
             "me@gmail.com",
-            Credential::OAuth { provider: OAuthProvider::Google, tokens: stale },
+            Credential::OAuth {
+                provider: OAuthProvider::Google,
+                tokens: stale,
+            },
         );
         gate.secret().await.unwrap_err();
         assert_eq!(gate.status().state, AuthState::NeedsReauth);
@@ -156,12 +174,21 @@ mod tests {
             expires_at: Utc::now() + Duration::hours(1),
         };
         store
-            .store("me@gmail.com", &AccountSecrets { oauth: Some(fresh), ..Default::default() })
+            .store(
+                "me@gmail.com",
+                &AccountSecrets {
+                    oauth: Some(fresh),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         apply_fresh_tokens(&gate, store.as_ref()).await;
 
         assert_eq!(gate.status().state, AuthState::Active);
-        assert_eq!(gate.secret().await.unwrap(), LoginSecret::OAuthToken("new-access".into()));
+        assert_eq!(
+            gate.secret().await.unwrap(),
+            LoginSecret::OAuthToken("new-access".into())
+        );
     }
 }

@@ -240,7 +240,12 @@ impl SqliteDb {
     }
 
     fn checkout_reader(&self) -> Result<Connection, DomainError> {
-        if let Some(conn) = self.readers.lock().unwrap_or_else(PoisonError::into_inner).pop() {
+        if let Some(conn) = self
+            .readers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+        {
             return Ok(conn);
         }
         let conn = Connection::open_with_flags(
@@ -248,7 +253,8 @@ impl SqliteDb {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(repo_err)?;
-        conn.execute_batch("PRAGMA cache_size = -2000;").map_err(repo_err)?;
+        conn.execute_batch("PRAGMA cache_size = -2000;")
+            .map_err(repo_err)?;
         Ok(conn)
     }
 }
@@ -266,7 +272,8 @@ fn migrate(conn: &mut Connection) -> Result<(), DomainError> {
     let tx = conn.transaction().map_err(repo_err)?;
     for (version, sql) in (1..).zip(MIGRATIONS).skip(applied as usize) {
         tx.execute_batch(sql).map_err(repo_err)?;
-        tx.pragma_update(None, "user_version", version).map_err(repo_err)?;
+        tx.pragma_update(None, "user_version", version)
+            .map_err(repo_err)?;
     }
     tx.commit().map_err(repo_err)
 }
@@ -290,10 +297,12 @@ mod tests {
 
         let (mode, version) = db
             .read(|conn| {
-                let mode: String =
-                    conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).map_err(repo_err)?;
-                let version: i64 =
-                    conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(repo_err)?;
+                let mode: String = conn
+                    .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                    .map_err(repo_err)?;
+                let version: i64 = conn
+                    .query_row("PRAGMA user_version", [], |r| r.get(0))
+                    .map_err(repo_err)?;
                 Ok((mode, version))
             })
             .await
@@ -353,7 +362,10 @@ mod tests {
         .unwrap();
 
         let v: i64 = db
-            .read(|conn| conn.query_row("SELECT v FROM t", [], |r| r.get(0)).map_err(repo_err))
+            .read(|conn| {
+                conn.query_row("SELECT v FROM t", [], |r| r.get(0))
+                    .map_err(repo_err)
+            })
             .await
             .unwrap();
         assert_eq!(v, 42);

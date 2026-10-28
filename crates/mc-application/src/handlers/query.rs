@@ -112,7 +112,12 @@ where
             } => {
                 let found = self
                     .search_index
-                    .search(&query, account_id.as_ref(), mailbox_id.as_ref(), &pagination)
+                    .search(
+                        &query,
+                        account_id.as_ref(),
+                        mailbox_id.as_ref(),
+                        &pagination,
+                    )
                     .await?;
                 let mut hits = Vec::with_capacity(found.hits.len());
                 for IndexHit { message_id, score } in found.hits {
@@ -123,21 +128,30 @@ where
                     let snippet = self.search_index.snippet(&query, &message);
                     hits.push(search_hit(&message, score, snippet));
                 }
-                Ok(QueryResult::SearchResults(SearchResults { hits, total_count: found.total_count }))
+                Ok(QueryResult::SearchResults(SearchResults {
+                    hits,
+                    total_count: found.total_count,
+                }))
             }
             Query::SuggestMessages {
                 prefix,
                 scope,
                 max_per_field,
             } => {
-                let suggestions = self.message_repo.suggest(&prefix, scope, max_per_field).await?;
+                let suggestions = self
+                    .message_repo
+                    .suggest(&prefix, scope, max_per_field)
+                    .await?;
                 Ok(QueryResult::Suggestions(suggestions))
             }
-            Query::SearchContacts { query, limit, requesting_account_id } => {
-                Ok(QueryResult::ContactHits(
-                    self.search_contacts(&query, limit, requesting_account_id.as_ref()).await?,
-                ))
-            }
+            Query::SearchContacts {
+                query,
+                limit,
+                requesting_account_id,
+            } => Ok(QueryResult::ContactHits(
+                self.search_contacts(&query, limit, requesting_account_id.as_ref())
+                    .await?,
+            )),
             Query::FindContactDuplicates { account_id } => {
                 let pairs = self
                     .contact_repo
@@ -145,19 +159,29 @@ where
                     .await?
                     .into_iter()
                     .map(|(a, b)| {
-                        (ContactSearchHit::from_summary(a, None), ContactSearchHit::from_summary(b, None))
+                        (
+                            ContactSearchHit::from_summary(a, None),
+                            ContactSearchHit::from_summary(b, None),
+                        )
                     })
                     .collect();
                 Ok(QueryResult::ContactDuplicates(pairs))
             }
-            Query::ListConversations { account_id, mailbox_id, pagination } => {
+            Query::ListConversations {
+                account_id,
+                mailbox_id,
+                pagination,
+            } => {
                 let convs = self
                     .conversation_repo
                     .list_conversations(&account_id, mailbox_id.as_ref(), &pagination)
                     .await?;
                 Ok(QueryResult::Conversations(convs))
             }
-            Query::GetConversation { thread_id, account_id } => {
+            Query::GetConversation {
+                thread_id,
+                account_id,
+            } => {
                 let conv = self
                     .conversation_repo
                     .get_conversation(&thread_id, &account_id)
@@ -210,7 +234,11 @@ fn search_hit(message: &Message, score: f32, snippet: Option<String>) -> SearchH
         snippet,
         subject: message.envelope.subject.clone(),
         from_name: (!names.is_empty()).then(|| names.join(" ")),
-        from_email: from.iter().map(|a| a.email.as_str()).collect::<Vec<_>>().join(" "),
+        from_email: from
+            .iter()
+            .map(|a| a.email.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
         date: message.envelope.date.timestamp(),
     }
 }

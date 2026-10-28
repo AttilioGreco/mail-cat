@@ -108,8 +108,15 @@ pub enum MessagesCmd {
 
 pub async fn run(cmd: MessagesCmd, client: MailCatClient) -> Result<()> {
     match cmd {
-        MessagesCmd::List { mailbox_id, verbose } => list(mailbox_id, verbose, client).await,
-        MessagesCmd::Get { message_id, mailbox, text } => get(message_id, mailbox, text, client).await,
+        MessagesCmd::List {
+            mailbox_id,
+            verbose,
+        } => list(mailbox_id, verbose, client).await,
+        MessagesCmd::Get {
+            message_id,
+            mailbox,
+            text,
+        } => get(message_id, mailbox, text, client).await,
         MessagesCmd::MarkRead { message_id } => {
             set_flags(message_id, &["seen"], &[], "Marked as read", client).await
         }
@@ -137,11 +144,7 @@ pub async fn run(cmd: MessagesCmd, client: MailCatClient) -> Result<()> {
             account_id,
             mailbox_id,
         } => search(query, account_id, mailbox_id, client).await,
-        MessagesCmd::Suggest {
-            prefix,
-            scope,
-            max,
-        } => suggest(prefix, scope, max, client).await,
+        MessagesCmd::Suggest { prefix, scope, max } => suggest(prefix, scope, max, client).await,
         MessagesCmd::SendTest {
             account_id,
             to,
@@ -223,7 +226,12 @@ async fn list(mailbox_id: String, verbose: bool, client: MailCatClient) -> Resul
     Ok(())
 }
 
-async fn get(message_id: String, mailbox: String, _text_only: bool, client: MailCatClient) -> Result<()> {
+async fn get(
+    message_id: String,
+    mailbox: String,
+    _text_only: bool,
+    client: MailCatClient,
+) -> Result<()> {
     let body = client.get_message(&message_id, &mailbox).await?;
 
     println!("{}", "─".repeat(60).dimmed());
@@ -283,7 +291,12 @@ async fn set_flags(
     Ok(())
 }
 
-async fn delete(message_id: String, mailbox: String, permanent: bool, client: MailCatClient) -> Result<()> {
+async fn delete(
+    message_id: String,
+    mailbox: String,
+    permanent: bool,
+    client: MailCatClient,
+) -> Result<()> {
     println!(
         "{} Deleting {} (permanent={})...",
         "→".blue(),
@@ -291,7 +304,9 @@ async fn delete(message_id: String, mailbox: String, permanent: bool, client: Ma
         permanent
     );
 
-    client.delete_message(&message_id, &mailbox, permanent).await?;
+    client
+        .delete_message(&message_id, &mailbox, permanent)
+        .await?;
 
     println!("  {} Message deleted", "✓".green());
     Ok(())
@@ -310,7 +325,9 @@ async fn move_msg(
         to_mailbox_id[..8.min(to_mailbox_id.len())].bold(),
     );
 
-    let updated = client.move_message(&message_id, &mailbox, &to_mailbox_id).await?;
+    let updated = client
+        .move_message(&message_id, &mailbox, &to_mailbox_id)
+        .await?;
 
     println!(
         "  {} Message moved (mailbox_ids={})",
@@ -326,11 +343,7 @@ async fn search(
     mailbox_id: Option<String>,
     client: MailCatClient,
 ) -> Result<()> {
-    println!(
-        "{} Searching: {}",
-        "→".blue(),
-        query.bold()
-    );
+    println!("{} Searching: {}", "→".blue(), query.bold());
 
     let hits = client
         .search(&query, account_id.as_deref(), mailbox_id.as_deref())
@@ -359,7 +372,12 @@ async fn search(
         .into_iter()
         .map(|h| HitRow {
             score: format!("{:.2}", h.score),
-            from: h.from_name.unwrap_or(h.from_email).chars().take(25).collect(),
+            from: h
+                .from_name
+                .unwrap_or(h.from_email)
+                .chars()
+                .take(25)
+                .collect(),
             subject: h.subject.chars().take(40).collect(),
             id: h.message_id[..8.min(h.message_id.len())].to_string() + "…",
         })
@@ -382,9 +400,7 @@ async fn suggest(
         scope
     );
 
-    let suggestions = client
-        .suggest(&prefix, scope.as_deref(), max)
-        .await?;
+    let suggestions = client.suggest(&prefix, scope.as_deref(), max).await?;
 
     if suggestions.is_empty() {
         println!("{}", "  No suggestions.".yellow());
@@ -423,7 +439,11 @@ async fn send_test(
     client: MailCatClient,
 ) -> Result<()> {
     if let Some((parent_id, parent_mailbox)) = &reply_to
-        && client.get_message(parent_id, parent_mailbox).await?.rfc_message_id.is_none()
+        && client
+            .get_message(parent_id, parent_mailbox)
+            .await?
+            .rfc_message_id
+            .is_none()
     {
         println!(
             "{}",
@@ -478,10 +498,7 @@ async fn send_test(
                 "✓".green(),
                 mbx.display_name
             );
-            println!(
-                "      from={} to={:?}",
-                summary.from_email, summary.to
-            );
+            println!("      from={} to={:?}", summary.from_email, summary.to);
         }
         None => println!(
             "  {} not visible in any mailbox list yet (should appear immediately after send)",
@@ -509,7 +526,11 @@ async fn send_test(
         let in_thread = thread.iter().any(|m| &m.id == parent_id);
         println!(
             "  {} threaded with parent message ({} message(s) in thread)",
-            if in_thread { "✓".green() } else { "✗".red() },
+            if in_thread {
+                "✓".green()
+            } else {
+                "✗".red()
+            },
             thread.len()
         );
     }
@@ -530,21 +551,18 @@ fn strip_html(html: &str) -> String {
     }
     // Collapse multiple blank lines
     out.lines()
-        .fold(
-            (String::new(), 0usize),
-            |(mut acc, blanks), line| {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    if blanks < 1 {
-                        acc.push('\n');
-                    }
-                    (acc, blanks + 1)
-                } else {
-                    acc.push_str(trimmed);
+        .fold((String::new(), 0usize), |(mut acc, blanks), line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                if blanks < 1 {
                     acc.push('\n');
-                    (acc, 0)
                 }
-            },
-        )
+                (acc, blanks + 1)
+            } else {
+                acc.push_str(trimmed);
+                acc.push('\n');
+                (acc, 0)
+            }
+        })
         .0
 }

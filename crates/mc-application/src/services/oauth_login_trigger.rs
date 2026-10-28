@@ -43,10 +43,19 @@ mod tests {
     struct FakeTrigger;
 
     impl OAuthLoginTrigger for FakeTrigger {
-        fn start_login(&self, _name: String, email: String, _provider: OAuthProvider) -> mpsc::Receiver<OAuthLoginProgress> {
+        fn start_login(
+            &self,
+            _name: String,
+            email: String,
+            _provider: OAuthProvider,
+        ) -> mpsc::Receiver<OAuthLoginProgress> {
             let (tx, rx) = mpsc::channel(2);
             tokio::spawn(async move {
-                let _ = tx.send(OAuthLoginProgress::AwaitingBrowser { authorize_url: "https://example.com".into() }).await;
+                let _ = tx
+                    .send(OAuthLoginProgress::AwaitingBrowser {
+                        authorize_url: "https://example.com".into(),
+                    })
+                    .await;
                 let _ = tx.send(OAuthLoginProgress::Succeeded { email }).await;
             });
             rx
@@ -60,7 +69,8 @@ mod tests {
     #[tokio::test]
     async fn trigger_yields_awaiting_then_succeeded() {
         let trigger = FakeTrigger;
-        let mut rx = trigger.start_login("Work".into(), "me@gmail.com".into(), OAuthProvider::Google);
+        let mut rx =
+            trigger.start_login("Work".into(), "me@gmail.com".into(), OAuthProvider::Google);
 
         match rx.recv().await {
             Some(OAuthLoginProgress::AwaitingBrowser { authorize_url }) => {

@@ -10,16 +10,17 @@ use rusqlite::{Connection, params};
 use uuid::Uuid;
 
 use mc_domain::{
-    AccountId, AccountStatus, ContactEmail, ContactId, DomainError, DomainEvent,
-    Envelope, EventEnvelope, Flag, MailboxId, MailboxType, Membership, MessageId, RemoteId, ReadModelProjector,
+    AccountId, AccountStatus, ContactEmail, ContactId, DomainError, DomainEvent, Envelope,
+    EventEnvelope, Flag, MailboxId, MailboxType, Membership, MessageId, ReadModelProjector,
+    RemoteId,
 };
 
 use super::repo_err;
-use super::threading::{assign_thread, refresh_conversation, threads_in_mailbox};
 use super::repository::{
     Addresses, SqliteRepository, exec, json, nanos, query_all, query_one, save_checkpoint_in,
     sql_int, store_body,
 };
+use super::threading::{assign_thread, refresh_conversation, threads_in_mailbox};
 
 #[async_trait]
 impl ReadModelProjector for SqliteRepository {
@@ -59,7 +60,12 @@ impl ReadModelProjector for SqliteRepository {
 
 fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
     match &event.payload {
-        DomainEvent::AccountAdded { account_id, name, email, provider_type } => {
+        DomainEvent::AccountAdded {
+            account_id,
+            name,
+            email,
+            provider_type,
+        } => {
             exec(
                 tx,
                 "INSERT INTO accounts (id, name, email, provider_type, status) \
@@ -75,29 +81,66 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 ],
             )?;
         }
-        DomainEvent::AccountUpdated { account_id, name, .. } => {
+        DomainEvent::AccountUpdated {
+            account_id, name, ..
+        } => {
             if let Some(name) = name {
-                exec(tx, "UPDATE accounts SET name = ?2 WHERE id = ?1", params![account_id.as_uuid(), name])?;
+                exec(
+                    tx,
+                    "UPDATE accounts SET name = ?2 WHERE id = ?1",
+                    params![account_id.as_uuid(), name],
+                )?;
             }
         }
         DomainEvent::AccountRemoved { account_id } => {
-            exec(tx, "DELETE FROM accounts WHERE id = ?1", [account_id.as_uuid()])?;
-            exec(tx, "DELETE FROM sync_cursors WHERE account_id = ?1", [account_id.as_uuid()])?;
+            exec(
+                tx,
+                "DELETE FROM accounts WHERE id = ?1",
+                [account_id.as_uuid()],
+            )?;
+            exec(
+                tx,
+                "DELETE FROM sync_cursors WHERE account_id = ?1",
+                [account_id.as_uuid()],
+            )?;
         }
         DomainEvent::AccountAuthExpired { account_id, error } => {
-            set_account_status(tx, account_id, AccountStatus::NeedsReauth, Some(error), event.occurred_at)?;
+            set_account_status(
+                tx,
+                account_id,
+                AccountStatus::NeedsReauth,
+                Some(error),
+                event.occurred_at,
+            )?;
         }
         DomainEvent::AccountCredentialsRejected { account_id, error } => {
-            set_account_status(tx, account_id, AccountStatus::CredentialsRejected, Some(error), event.occurred_at)?;
+            set_account_status(
+                tx,
+                account_id,
+                AccountStatus::CredentialsRejected,
+                Some(error),
+                event.occurred_at,
+            )?;
         }
         DomainEvent::AccountReauthenticated { account_id } => {
-            set_account_status(tx, account_id, AccountStatus::Active, None, event.occurred_at)?;
+            set_account_status(
+                tx,
+                account_id,
+                AccountStatus::Active,
+                None,
+                event.occurred_at,
+            )?;
         }
         DomainEvent::AccountSyncStarted { .. }
         | DomainEvent::AccountSyncCompleted { .. }
         | DomainEvent::AccountSyncFailed { .. } => {}
 
-        DomainEvent::MailboxDiscovered { mailbox_id, account_id, path, mailbox_type } => {
+        DomainEvent::MailboxDiscovered {
+            mailbox_id,
+            account_id,
+            path,
+            mailbox_type,
+        } => {
             // Counts are transient (never in the log), so a replay must keep them.
             exec(
                 tx,
@@ -116,7 +159,10 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 ],
             )?;
         }
-        DomainEvent::MailboxTypeChanged { mailbox_id, mailbox_type } => {
+        DomainEvent::MailboxTypeChanged {
+            mailbox_id,
+            mailbox_type,
+        } => {
             exec(
                 tx,
                 "UPDATE mailboxes SET mailbox_type = ?2 WHERE id = ?1",
@@ -124,14 +170,22 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             )?;
             refresh_threads(tx, &threads_in_mailbox(tx, mailbox_id.as_uuid())?)?;
         }
-        DomainEvent::MailboxCountsUpdated { mailbox_id, total_messages, unread_messages } => {
+        DomainEvent::MailboxCountsUpdated {
+            mailbox_id,
+            total_messages,
+            unread_messages,
+        } => {
             exec(
                 tx,
                 "UPDATE mailboxes SET total_messages = ?2, unread_messages = ?3 WHERE id = ?1",
                 params![mailbox_id.as_uuid(), total_messages, unread_messages],
             )?;
         }
-        DomainEvent::MailboxRenamed { mailbox_id, new_path, .. } => {
+        DomainEvent::MailboxRenamed {
+            mailbox_id,
+            new_path,
+            ..
+        } => {
             exec(
                 tx,
                 "UPDATE mailboxes SET path = ?2, delimiter = ?3, display_name = ?4 WHERE id = ?1",
@@ -156,10 +210,22 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             for id in only_here {
                 delete_message(tx, &MessageId::from_uuid(id))?;
             }
-            exec(tx, "DELETE FROM message_mailboxes WHERE mailbox_id = ?1", [mailbox_id.as_uuid()])?;
+            exec(
+                tx,
+                "DELETE FROM message_mailboxes WHERE mailbox_id = ?1",
+                [mailbox_id.as_uuid()],
+            )?;
             refresh_threads(tx, &threads)?;
-            exec(tx, "DELETE FROM mailboxes WHERE id = ?1", [mailbox_id.as_uuid()])?;
-            exec(tx, "DELETE FROM sync_cursors WHERE collection = ?1", [mailbox_id.to_string()])?;
+            exec(
+                tx,
+                "DELETE FROM mailboxes WHERE id = ?1",
+                [mailbox_id.as_uuid()],
+            )?;
+            exec(
+                tx,
+                "DELETE FROM sync_cursors WHERE collection = ?1",
+                [mailbox_id.to_string()],
+            )?;
         }
 
         DomainEvent::MessageReceived {
@@ -177,8 +243,13 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             received_at,
             ..
         } => {
-            let thread_id =
-                assign_thread(tx, account_id.as_uuid(), message_rfc_id.as_deref(), in_reply_to.as_deref(), references)?;
+            let thread_id = assign_thread(
+                tx,
+                account_id.as_uuid(),
+                message_rfc_id.as_deref(),
+                in_reply_to.as_deref(),
+                references,
+            )?;
             let inserted = insert_message(
                 tx,
                 &NewMessage {
@@ -204,14 +275,29 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     adjust_unread(tx, mailbox_id.as_uuid(), 1)?;
                 }
                 refresh_conversation(tx, account_id.as_uuid(), &thread_id)?;
-                note_synced_message(tx, account_id, mailbox_id, message_id, message_rfc_id.as_deref(), envelope, *received_at)?;
+                note_synced_message(
+                    tx,
+                    account_id,
+                    mailbox_id,
+                    message_id,
+                    message_rfc_id.as_deref(),
+                    envelope,
+                    *received_at,
+                )?;
             }
         }
-        DomainEvent::MessageBodyFetched { message_id, attachments } => {
+        DomainEvent::MessageBodyFetched {
+            message_id,
+            attachments,
+        } => {
             // A text-only fetch (backfill, a shared body) knows nothing of the
             // attachments: the envelope's flag stays.
             if attachments.is_empty() {
-                exec(tx, "UPDATE messages SET body_state = 'stored' WHERE id = ?1", params![message_id.as_uuid()])?;
+                exec(
+                    tx,
+                    "UPDATE messages SET body_state = 'stored' WHERE id = ?1",
+                    params![message_id.as_uuid()],
+                )?;
             } else {
                 exec(
                     tx,
@@ -221,10 +307,19 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 )?;
             }
         }
-        DomainEvent::MessageFlagged { message_id, flags_added, flags_removed, .. } => {
+        DomainEvent::MessageFlagged {
+            message_id,
+            flags_added,
+            flags_removed,
+            ..
+        } => {
             flag_message(tx, message_id, flags_added, flags_removed)?;
         }
-        DomainEvent::MessageMailboxesChanged { message_id, added, removed } => {
+        DomainEvent::MessageMailboxesChanged {
+            message_id,
+            added,
+            removed,
+        } => {
             change_mailboxes(tx, message_id, added, removed)?;
         }
         DomainEvent::MessageDeleted { message_id, .. } => delete_message(tx, message_id)?,
@@ -240,39 +335,69 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             body_html,
             sent_at,
         } => {
-            let thread_id =
-                assign_thread(tx, account_id.as_uuid(), message_rfc_id.as_deref(), in_reply_to.as_deref(), references)?;
+            let thread_id = assign_thread(
+                tx,
+                account_id.as_uuid(),
+                message_rfc_id.as_deref(),
+                in_reply_to.as_deref(),
+                references,
+            )?;
             // The server copy can sync into Sent before this lands (Gmail files
             // it during SMTP): it already is the message, a placeholder would
             // only duplicate it.
-            let inserted = !server_copy_exists(tx, account_id, mailbox_id, message_rfc_id.as_deref())?
-                && insert_message(
-                tx,
-                &NewMessage {
-                    id: message_id,
-                    account_id,
-                    rfc_message_id: message_rfc_id.as_deref(),
-                    in_reply_to: in_reply_to.as_deref(),
-                    references,
-                    thread_id: Some(thread_id),
-                    envelope,
-                    flags: &[Flag::Seen],
-                    size_bytes: 0,
-                    has_attachments: false,
-                    received_at: *sent_at,
-                    body_state: "stored",
-                },
-            )?;
+            let inserted =
+                !server_copy_exists(tx, account_id, mailbox_id, message_rfc_id.as_deref())?
+                    && insert_message(
+                        tx,
+                        &NewMessage {
+                            id: message_id,
+                            account_id,
+                            rfc_message_id: message_rfc_id.as_deref(),
+                            in_reply_to: in_reply_to.as_deref(),
+                            references,
+                            thread_id: Some(thread_id),
+                            envelope,
+                            flags: &[Flag::Seen],
+                            size_bytes: 0,
+                            has_attachments: false,
+                            received_at: *sent_at,
+                            body_state: "stored",
+                        },
+                    )?;
             if inserted {
                 upsert_membership(tx, message_id, mailbox_id, None)?;
-                store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), false, *sent_at)?;
+                store_body(
+                    tx,
+                    message_id,
+                    body_text.as_deref(),
+                    body_html.as_deref(),
+                    false,
+                    *sent_at,
+                )?;
                 refresh_conversation(tx, account_id.as_uuid(), &thread_id)?;
             }
-            note_sent_once(tx, account_id, message_id, message_rfc_id.as_deref(), envelope, *sent_at)?;
+            note_sent_once(
+                tx,
+                account_id,
+                message_id,
+                message_rfc_id.as_deref(),
+                envelope,
+                *sent_at,
+            )?;
         }
-        DomainEvent::DraftSaved { message_id, account_id, envelope, body_text, body_html } => {
+        DomainEvent::DraftSaved {
+            message_id,
+            account_id,
+            envelope,
+            body_text,
+            body_html,
+        } => {
             // Each save replaces the draft; the event's own time keeps replays deterministic.
-            exec(tx, "DELETE FROM messages WHERE id = ?1", [message_id.as_uuid()])?;
+            exec(
+                tx,
+                "DELETE FROM messages WHERE id = ?1",
+                [message_id.as_uuid()],
+            )?;
             insert_message(
                 tx,
                 &NewMessage {
@@ -290,13 +415,31 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     body_state: "stored",
                 },
             )?;
-            store_body(tx, message_id, body_text.as_deref(), body_html.as_deref(), false, event.occurred_at)?;
+            store_body(
+                tx,
+                message_id,
+                body_text.as_deref(),
+                body_html.as_deref(),
+                false,
+                event.occurred_at,
+            )?;
         }
         DomainEvent::DraftDiscarded { message_id } => {
-            exec(tx, "DELETE FROM messages WHERE id = ?1", [message_id.as_uuid()])?;
+            exec(
+                tx,
+                "DELETE FROM messages WHERE id = ?1",
+                [message_id.as_uuid()],
+            )?;
         }
 
-        DomainEvent::ContactAdded { contact_id, display_name, emails, source, account_scope, .. } => {
+        DomainEvent::ContactAdded {
+            contact_id,
+            display_name,
+            emails,
+            source,
+            account_scope,
+            ..
+        } => {
             exec(
                 tx,
                 "INSERT INTO contacts (id, display_name, primary_email, source, account_scope, emails) \
@@ -315,7 +458,13 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             )?;
             index_contact_emails(tx, contact_id, emails)?;
         }
-        DomainEvent::ContactUpdated { contact_id, display_name, emails, organization, .. } => {
+        DomainEvent::ContactUpdated {
+            contact_id,
+            display_name,
+            emails,
+            organization,
+            ..
+        } => {
             if let Some(name) = display_name {
                 exec(
                     tx,
@@ -335,11 +484,23 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             }
         }
         DomainEvent::ContactRemoved { contact_id } => {
-            exec(tx, "DELETE FROM contacts WHERE id = ?1", [contact_id.as_uuid()])?;
+            exec(
+                tx,
+                "DELETE FROM contacts WHERE id = ?1",
+                [contact_id.as_uuid()],
+            )?;
         }
-        DomainEvent::ContactMerged { kept_id, discarded_id, merged_emails } => {
+        DomainEvent::ContactMerged {
+            kept_id,
+            discarded_id,
+            merged_emails,
+        } => {
             set_contact_emails(tx, kept_id, merged_emails)?;
-            exec(tx, "DELETE FROM contacts WHERE id = ?1", [discarded_id.as_uuid()])?;
+            exec(
+                tx,
+                "DELETE FROM contacts WHERE id = ?1",
+                [discarded_id.as_uuid()],
+            )?;
         }
     }
     Ok(())
@@ -425,7 +586,11 @@ fn upsert_membership(
         "INSERT INTO message_mailboxes (message_id, mailbox_id, remote_id, received_at) \
          SELECT id, ?2, ?3, received_at FROM messages WHERE id = ?1 \
          ON CONFLICT(message_id, mailbox_id) DO UPDATE SET remote_id = excluded.remote_id",
-        params![id.as_uuid(), mailbox_id.as_uuid(), remote_id.map(RemoteId::as_str)],
+        params![
+            id.as_uuid(),
+            mailbox_id.as_uuid(),
+            remote_id.map(RemoteId::as_str)
+        ],
     )
     .map(drop)
 }
@@ -510,7 +675,9 @@ fn drop_sent_placeholders(
         params![account_id.as_uuid(), rfc_message_id, sent.as_uuid()],
         |r| r.get::<_, Uuid>(0),
     )?;
-    placeholders.into_iter().try_for_each(|id| delete_message(tx, &MessageId::from_uuid(id)))
+    placeholders
+        .into_iter()
+        .try_for_each(|id| delete_message(tx, &MessageId::from_uuid(id)))
 }
 
 /// Counts a sent message's recipients once per Message-ID, however many
@@ -531,8 +698,13 @@ fn note_sent_once(
     if first == 0 {
         return Ok(());
     }
-    let recipients: BTreeSet<&str> =
-        envelope.to.iter().chain(&envelope.cc).chain(&envelope.bcc).map(|a| a.email.as_str()).collect();
+    let recipients: BTreeSet<&str> = envelope
+        .to
+        .iter()
+        .chain(&envelope.cc)
+        .chain(&envelope.bcc)
+        .map(|a| a.email.as_str())
+        .collect();
     for email in recipients {
         exec(
             tx,
@@ -564,7 +736,13 @@ fn flag_message(
         tx,
         "SELECT flags, account_id, thread_id FROM messages WHERE id = ?1",
         [id.as_uuid()],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Uuid>(1)?, r.get::<_, Option<Uuid>>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Uuid>(1)?,
+                r.get::<_, Option<Uuid>>(2)?,
+            ))
+        },
     )?
     else {
         return Ok(());
@@ -607,9 +785,12 @@ fn change_mailboxes(
     added: &[Membership],
     removed: &[MailboxId],
 ) -> Result<(), DomainError> {
-    let Some(seen) = query_one(tx, "SELECT seen FROM messages WHERE id = ?1", [id.as_uuid()], |r| {
-        r.get::<_, bool>(0)
-    })?
+    let Some(seen) = query_one(
+        tx,
+        "SELECT seen FROM messages WHERE id = ?1",
+        [id.as_uuid()],
+        |r| r.get::<_, bool>(0),
+    )?
     else {
         return Ok(());
     };
@@ -623,7 +804,11 @@ fn change_mailboxes(
             adjust_unread(tx, mailbox_id.as_uuid(), -1)?;
         }
     }
-    for Membership { mailbox_id, remote_id } in added {
+    for Membership {
+        mailbox_id,
+        remote_id,
+    } in added
+    {
         let existed = query_one(
             tx,
             "SELECT 1 FROM message_mailboxes WHERE message_id = ?1 AND mailbox_id = ?2",
@@ -665,7 +850,9 @@ fn thread_of(tx: &Connection, id: &MessageId) -> Result<Option<(Uuid, Uuid)>, Do
 }
 
 fn refresh_threads(tx: &Connection, threads: &[(Uuid, Uuid)]) -> Result<(), DomainError> {
-    threads.iter().try_for_each(|(account, thread)| refresh_conversation(tx, account, thread))
+    threads
+        .iter()
+        .try_for_each(|(account, thread)| refresh_conversation(tx, account, thread))
 }
 
 fn delete_message(tx: &Connection, id: &MessageId) -> Result<(), DomainError> {
@@ -673,7 +860,13 @@ fn delete_message(tx: &Connection, id: &MessageId) -> Result<(), DomainError> {
         tx,
         "SELECT account_id, thread_id, seen FROM messages WHERE id = ?1",
         [id.as_uuid()],
-        |r| Ok((r.get::<_, Uuid>(0)?, r.get::<_, Option<Uuid>>(1)?, r.get::<_, bool>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, Uuid>(0)?,
+                r.get::<_, Option<Uuid>>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
+        },
     )?
     else {
         return Ok(());
@@ -727,7 +920,11 @@ fn index_contact_emails(
     contact_id: &ContactId,
     emails: &[ContactEmail],
 ) -> Result<(), DomainError> {
-    exec(tx, "DELETE FROM contact_emails WHERE contact_id = ?1", [contact_id.as_uuid()])?;
+    exec(
+        tx,
+        "DELETE FROM contact_emails WHERE contact_id = ?1",
+        [contact_id.as_uuid()],
+    )?;
     for email in emails {
         exec(
             tx,

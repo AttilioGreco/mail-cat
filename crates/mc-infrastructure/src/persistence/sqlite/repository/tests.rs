@@ -242,7 +242,11 @@ async fn deleting_one_rfc_copy_keeps_the_conversation() {
         .list_conversations(&account, None, &Pagination::new(1, 10))
         .await
         .unwrap();
-    assert_eq!(convs.items.len(), 1, "the other copy still holds the thread");
+    assert_eq!(
+        convs.items.len(),
+        1,
+        "the other copy still holds the thread"
+    );
     assert_eq!(convs.items[0].message_count, 1);
 }
 
@@ -263,7 +267,11 @@ async fn uid_lookup_breaks_received_at_ties_by_newest_id() {
         ids.push(id);
     }
 
-    let found = repo.find_by_remote_id(&inbox, &RemoteId::from(1)).await.unwrap().unwrap();
+    let found = repo
+        .find_by_remote_id(&inbox, &RemoteId::from(1))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(found.id, ids[1]);
 }
 

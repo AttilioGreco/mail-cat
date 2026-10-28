@@ -18,7 +18,11 @@ use mc_client::MailCatClient;
 )]
 struct Cli {
     /// gRPC server URL
-    #[arg(long, env = "MAILCAT_SERVER_URL", default_value = "http://localhost:50051")]
+    #[arg(
+        long,
+        env = "MAILCAT_SERVER_URL",
+        default_value = "http://localhost:50051"
+    )]
     server: String,
 
     #[command(subcommand)]

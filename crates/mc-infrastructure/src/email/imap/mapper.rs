@@ -41,7 +41,9 @@ pub fn classify_mailbox(name: &str, attributes: &[NameAttribute<'_>]) -> Mailbox
             NameAttribute::Archive => MailboxType::Archive,
             NameAttribute::All => MailboxType::All,
             // Gmail's own attribute, not RFC 6154.
-            NameAttribute::Extension(name) if name.eq_ignore_ascii_case("\\Important") => MailboxType::Important,
+            NameAttribute::Extension(name) if name.eq_ignore_ascii_case("\\Important") => {
+                MailboxType::Important
+            }
             _ => continue,
         };
         return special;
@@ -67,7 +69,14 @@ pub fn infer_mailbox_type(name: &str) -> MailboxType {
         MailboxType::Sent
     } else if has(&["draft", "bozze", "entwür", "brouillon", "borrador"]) {
         MailboxType::Drafts
-    } else if has(&["trash", "deleted", "cestino", "papierkorb", "corbeille", "papelera"]) {
+    } else if has(&[
+        "trash",
+        "deleted",
+        "cestino",
+        "papierkorb",
+        "corbeille",
+        "papelera",
+    ]) {
         MailboxType::Trash
     } else if has(&["spam", "junk", "indesiderat", "pourriel"]) {
         MailboxType::Spam
@@ -260,14 +269,14 @@ mod tests {
             MailboxType::Sent
         );
         assert_eq!(
-            classify_mailbox("[Gmail]/Importanti", &[NameAttribute::Extension("\\Important".into())]),
+            classify_mailbox(
+                "[Gmail]/Importanti",
+                &[NameAttribute::Extension("\\Important".into())]
+            ),
             MailboxType::Important
         );
         // No attributes → fall back to the name.
-        assert_eq!(
-            classify_mailbox("Archivio", &[]),
-            MailboxType::Archive
-        );
+        assert_eq!(classify_mailbox("Archivio", &[]), MailboxType::Archive);
         // INBOX is a reserved name, not a special-use attribute.
         assert_eq!(classify_mailbox("INBOX", &[]), MailboxType::Inbox);
         // Non-special-use attributes must not shadow the name.

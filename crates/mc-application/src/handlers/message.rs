@@ -11,10 +11,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mc_domain::{
-    Account, AccountId, AggregateType, Attachment, AttachmentId, DomainError, DomainEvent, EmailProvider,
-    Envelope, EventEnvelope, EventStore, Flag, Mailbox, MailboxId, MailboxPath, MailboxReadRepository,
-    MailboxType, Membership, Message, MessageId, MessageBodyStore, MessageReadRepository, OutgoingMessage,
-    ProviderRegistry, ReadModelProjector, SentCopy, value_objects::remote_id::RemoteId,
+    Account, AccountId, AggregateType, Attachment, AttachmentId, DomainError, DomainEvent,
+    EmailProvider, Envelope, EventEnvelope, EventStore, Flag, Mailbox, MailboxId, MailboxPath,
+    MailboxReadRepository, MailboxType, Membership, Message, MessageBodyStore, MessageId,
+    MessageReadRepository, OutgoingMessage, ProviderRegistry, ReadModelProjector, SentCopy,
+    value_objects::remote_id::RemoteId,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
@@ -29,7 +30,12 @@ use crate::error::ApplicationError;
 /// Works directly with the EventStore for message aggregate persistence
 /// (pure ES pattern). Uses ProviderRegistry to resolve the correct
 /// EmailProvider per account for remote operations.
-pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore, B: EventPublisher> {
+pub struct MessageCommandHandler<
+    ES: EventStore,
+    PR: ProviderRegistry,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
+    B: EventPublisher,
+> {
     event_store: Arc<ES>,
     provider_registry: Arc<PR>,
     message_read_repo: Arc<MR>,
@@ -44,8 +50,12 @@ pub struct MessageCommandHandler<ES: EventStore, PR: ProviderRegistry, MR: Messa
     resync: Option<UnboundedSender<(AccountId, MailboxPath)>>,
 }
 
-impl<ES: EventStore, PR: ProviderRegistry, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore, B: EventPublisher> Clone
-    for MessageCommandHandler<ES, PR, MR, B>
+impl<
+    ES: EventStore,
+    PR: ProviderRegistry,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
+    B: EventPublisher,
+> Clone for MessageCommandHandler<ES, PR, MR, B>
 {
     fn clone(&self) -> Self {
         Self {
@@ -68,8 +78,12 @@ const SERVER_CHUNK: usize = 500;
 /// (a sync append, a flag change) keeps landing first.
 const RECORD_ATTEMPTS: u32 = 3;
 
-impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static, B: EventPublisher + 'static>
-    MessageCommandHandler<ES, PR, MR, B>
+impl<
+    ES: EventStore + 'static,
+    PR: ProviderRegistry + 'static,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    B: EventPublisher + 'static,
+> MessageCommandHandler<ES, PR, MR, B>
 {
     pub fn new(
         event_store: Arc<ES>,
@@ -89,7 +103,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
     /// Where to ask for a mailbox sync when local state fell behind the server.
     #[must_use]
-    pub fn with_resync_requests(mut self, resync: UnboundedSender<(AccountId, MailboxPath)>) -> Self {
+    pub fn with_resync_requests(
+        mut self,
+        resync: UnboundedSender<(AccountId, MailboxPath)>,
+    ) -> Self {
         self.resync = Some(resync);
         self
     }
@@ -104,9 +121,13 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         // Another copy (Gmail: the same mail under another label) may already
         // hold the whole text.
         if let Some(rfc_id) = message.message_rfc_id.clone() {
-            let shared = self.message_read_repo.share_bodies(&message.account_id, &[rfc_id]).await?;
+            let shared = self
+                .message_read_repo
+                .share_bodies(&message.account_id, &[rfc_id])
+                .await?;
             for (copy, _) in &shared {
-                self.record(copy, |m| Some(m.set_body(None, None, vec![]))).await?;
+                self.record(copy, |m| Some(m.set_body(None, None, vec![])))
+                    .await?;
             }
             if shared.contains(&(message_id, false)) {
                 info!(%message_id, "message body taken from another copy");
@@ -117,7 +138,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 (message, seq) = self.load_message(&message_id).await?;
             }
         }
-        let (mailbox_path, remote_id) = self.readable_copy(&mut message, &mut seq, Some(mailbox_id)).await?;
+        let (mailbox_path, remote_id) = self
+            .readable_copy(&mut message, &mut seq, Some(mailbox_id))
+            .await?;
 
         let provider = self.provider_registry.get_provider(&message.account_id)?;
 
@@ -137,7 +160,12 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
         // Body before the event, as in SyncService::store_body.
         self.message_read_repo
-            .put_body(&message_id, detail.body_text.clone(), detail.body_html.clone(), false)
+            .put_body(
+                &message_id,
+                detail.body_text.clone(),
+                detail.body_html.clone(),
+                false,
+            )
             .await?;
 
         self.append_and_publish(&message_id, AggregateType::Message, seq, event)
@@ -157,11 +185,18 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
         // Optimistic update: persist locally first for instant UI feedback,
         // then sync to IMAP in background. Next sync reconciles if IMAP fails.
-        self.record(&message_id, |m| Some(m.change_flags(flags_to_add.clone(), flags_to_remove.clone())))
-            .await?;
+        self.record(&message_id, |m| {
+            Some(m.change_flags(flags_to_add.clone(), flags_to_remove.clone()))
+        })
+        .await?;
 
         info!(%message_id, "message flags updated locally, syncing to IMAP in background");
-        self.push_flags(message.account_id, vec![message_id], flags_to_add, flags_to_remove);
+        self.push_flags(
+            message.account_id,
+            vec![message_id],
+            flags_to_add,
+            flags_to_remove,
+        );
         Ok(CommandResult::FlagsSet)
     }
 
@@ -200,19 +235,33 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
     /// Record `\Seen` on one message, finding its remote id on the server first
     /// when it has none so the flag can reach the server too.
-    async fn mark_seen(&self, message_id: &MessageId, mailbox_path: &MailboxPath) -> Result<(), ApplicationError> {
+    async fn mark_seen(
+        &self,
+        message_id: &MessageId,
+        mailbox_path: &MailboxPath,
+    ) -> Result<(), ApplicationError> {
         let (mut message, mut seq) = self.load_message(message_id).await?;
         if let Err(e) = self.remote_id(&mut message, &mut seq, mailbox_path).await {
             warn!(%message_id, %e, "marked read locally only");
         }
-        self.record(message_id, |m| Some(m.change_flags(vec![Flag::Seen], vec![]))).await.map(drop)
+        self.record(message_id, |m| {
+            Some(m.change_flags(vec![Flag::Seen], vec![]))
+        })
+        .await
+        .map(drop)
     }
 
     /// Store a flag change on the server in the background, in the account's
     /// turn: each message's mailbox and remote id are read when the store is sent,
     /// so a move queued ahead of it (open, mark read, archive) is followed
     /// rather than racing it with an id that no longer exists.
-    fn push_flags(&self, account_id: AccountId, message_ids: Vec<MessageId>, add: Vec<Flag>, remove: Vec<Flag>) {
+    fn push_flags(
+        &self,
+        account_id: AccountId,
+        message_ids: Vec<MessageId>,
+        add: Vec<Flag>,
+        remove: Vec<Flag>,
+    ) {
         if message_ids.is_empty() {
             return;
         }
@@ -237,10 +286,14 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 return;
             };
             for (mailbox_id, ids) in by_mailbox {
-                let Ok(Some(mailbox)) = this.message_read_repo.get_mailbox(&mailbox_id).await else {
+                let Ok(Some(mailbox)) = this.message_read_repo.get_mailbox(&mailbox_id).await
+                else {
                     continue;
                 };
-                if let Err(e) = provider.set_flags_bulk(&mailbox.path, &ids, &add, &remove).await {
+                if let Err(e) = provider
+                    .set_flags_bulk(&mailbox.path, &ids, &add, &remove)
+                    .await
+                {
                     warn!(%e, "Background flag store failed — next sync will reconcile");
                 }
             }
@@ -250,7 +303,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     /// Every copy of the message the server has, as (mailbox, remote id).
     /// A copy without an id is looked up first, as for any other action; one
     /// that cannot be found is left out.
-    async fn server_copies(&self, id: &MessageId) -> Result<Vec<(MailboxId, RemoteId)>, ApplicationError> {
+    async fn server_copies(
+        &self,
+        id: &MessageId,
+    ) -> Result<Vec<(MailboxId, RemoteId)>, ApplicationError> {
         let (mut message, mut seq) = self.load_message(id).await?;
         let mut copies = Vec::with_capacity(message.memberships.len());
         for membership in message.memberships.clone() {
@@ -258,12 +314,18 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 copies.push((membership.mailbox_id, remote_id));
                 continue;
             }
-            let Some(mailbox) = self.message_read_repo.get_mailbox(&membership.mailbox_id).await? else {
+            let Some(mailbox) = self
+                .message_read_repo
+                .get_mailbox(&membership.mailbox_id)
+                .await?
+            else {
                 continue;
             };
             match self.remote_id(&mut message, &mut seq, &mailbox.path).await {
                 Ok(remote_id) => copies.push((mailbox.id, remote_id)),
-                Err(e) => warn!(message_id = %id, %e, "not found in {}, flags not stored there", mailbox.path),
+                Err(e) => {
+                    warn!(message_id = %id, %e, "not found in {}, flags not stored there", mailbox.path)
+                }
             }
         }
         Ok(copies)
@@ -332,7 +394,13 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
 
     /// The account's turn for a server-side change; see `account_queues`.
     async fn turn(&self, account_id: AccountId) -> tokio::sync::OwnedMutexGuard<()> {
-        let queue = Arc::clone(self.account_queues.lock().unwrap().entry(account_id).or_default());
+        let queue = Arc::clone(
+            self.account_queues
+                .lock()
+                .unwrap()
+                .entry(account_id)
+                .or_default(),
+        );
         queue.lock_owned().await
     }
 
@@ -350,8 +418,13 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             let Some(event) = change(&mut message) else {
                 return Ok(false);
             };
-            match self.append_and_publish(message_id, AggregateType::Message, seq, event).await {
-                Err(ApplicationError::Domain(DomainError::ConcurrencyConflict { .. })) if attempt < RECORD_ATTEMPTS => {
+            match self
+                .append_and_publish(message_id, AggregateType::Message, seq, event)
+                .await
+            {
+                Err(ApplicationError::Domain(DomainError::ConcurrencyConflict { .. }))
+                    if attempt < RECORD_ATTEMPTS =>
+                {
                     attempt += 1;
                 }
                 recorded => return recorded.map(|()| true),
@@ -392,7 +465,13 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             require_membership(message, preferred)?;
         }
         let mut copies = message.memberships.clone();
-        copies.sort_by_key(|m| (Some(m.mailbox_id) != preferred, m.remote_id.is_none(), *m.mailbox_id.as_uuid()));
+        copies.sort_by_key(|m| {
+            (
+                Some(m.mailbox_id) != preferred,
+                m.remote_id.is_none(),
+                *m.mailbox_id.as_uuid(),
+            )
+        });
         let mut first_error = None;
         for (rank, copy) in copies.iter().enumerate() {
             // Past the first, only copies already known on the server: no
@@ -404,7 +483,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 .message_read_repo
                 .get_mailbox(&copy.mailbox_id)
                 .await?
-                .ok_or_else(|| ApplicationError::NotFound("Mailbox", copy.mailbox_id.to_string()))?;
+                .ok_or_else(|| {
+                    ApplicationError::NotFound("Mailbox", copy.mailbox_id.to_string())
+                })?;
             match self.remote_id(message, seq, &mailbox.path).await {
                 Ok(remote_id) => return Ok((mailbox.path, remote_id)),
                 Err(e) => {
@@ -412,8 +493,11 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 }
             }
         }
-        Err(first_error
-            .unwrap_or_else(|| ApplicationError::PreconditionFailed("il messaggio non è più su nessuna cartella".into())))
+        Err(first_error.unwrap_or_else(|| {
+            ApplicationError::PreconditionFailed(
+                "il messaggio non è più su nessuna cartella".into(),
+            )
+        }))
     }
 
     /// The message's remote id in its mailbox, at `mailbox_path`. One without (a
@@ -435,7 +519,9 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                 .message_read_repo
                 .get_mailbox(&membership.mailbox_id)
                 .await?
-                .ok_or_else(|| ApplicationError::NotFound("Mailbox", membership.mailbox_id.to_string()))?;
+                .ok_or_else(|| {
+                    ApplicationError::NotFound("Mailbox", membership.mailbox_id.to_string())
+                })?;
             if mailbox.path.full_path() == mailbox_path.full_path() {
                 here = Some((membership.clone(), mailbox));
                 break;
@@ -452,14 +538,24 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             return Ok(remote_id);
         }
         let provider = self.provider_registry.get_provider(&message.account_id)?;
-        let remote_id = self.locate(&provider, message, &mailbox.id, &mailbox.path).await?.ok_or_else(|| {
-            ApplicationError::NotFound(
-                "Message on the server",
-                format!("{} in {mailbox_path}", message.message_rfc_id.as_deref().unwrap_or("(no Message-ID)")),
-            )
-        })?;
+        let remote_id = self
+            .locate(&provider, message, &mailbox.id, &mailbox.path)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::NotFound(
+                    "Message on the server",
+                    format!(
+                        "{} in {mailbox_path}",
+                        message
+                            .message_rfc_id
+                            .as_deref()
+                            .unwrap_or("(no Message-ID)")
+                    ),
+                )
+            })?;
         if let Some(event) = message.attach_remote_id(mailbox.id, remote_id.clone()) {
-            self.append_and_publish(&message.id, AggregateType::Message, *seq, event).await?;
+            self.append_and_publish(&message.id, AggregateType::Message, *seq, event)
+                .await?;
             *seq += 1;
         }
         Ok(remote_id)
@@ -497,13 +593,16 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             )
             .await?;
 
-        let envelope =
-            EventEnvelope::new(message_id.to_string(), aggregate_type, new_seq, event);
+        let envelope = EventEnvelope::new(message_id.to_string(), aggregate_type, new_seq, event);
 
         // Project inline so the read model is updated BEFORE we return.
         // This ensures that any re-query after the command sees fresh data.
         if let Err(e) = self.message_read_repo.project(&envelope).await {
-            tracing::warn!("Inline projection failed for {}: {}", envelope.payload.event_name(), e);
+            tracing::warn!(
+                "Inline projection failed for {}: {}",
+                envelope.payload.event_name(),
+                e
+            );
         }
 
         self.event_bus.publish(envelope);
@@ -512,11 +611,13 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
     }
 }
 
-
 /// The message is in `mailbox_id`, or an action naming that mailbox is an
 /// error: falling back to another of its mailboxes would act on a copy nobody
 /// asked about.
-fn require_membership(message: &Message, mailbox_id: MailboxId) -> Result<&Membership, ApplicationError> {
+fn require_membership(
+    message: &Message,
+    mailbox_id: MailboxId,
+) -> Result<&Membership, ApplicationError> {
     message.membership(mailbox_id).ok_or_else(|| {
         ApplicationError::NotFound("Message", format!("{} in mailbox {mailbox_id}", message.id))
     })

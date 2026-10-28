@@ -272,7 +272,9 @@ mod tests {
             &self,
             _aggregate_type: Option<AggregateType>,
             from_global_position: u64,
-        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<EventEnvelope, DomainError>> + Send + '_>> {
+        ) -> std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<EventEnvelope, DomainError>> + Send + '_>,
+        > {
             let events: Vec<_> = self
                 .events
                 .iter()
@@ -398,7 +400,9 @@ mod tests {
         let checkpoint = MockCheckpoint::new();
         let handler = ProjectionEventHandler::new(projector.clone(), checkpoint.clone());
         let store = MockEventStore::new(
-            (1..=2500).map(|p| make_envelope(p, account_added_event())).collect(),
+            (1..=2500)
+                .map(|p| make_envelope(p, account_added_event()))
+                .collect(),
         );
 
         assert_eq!(handler.catch_up(&store).await.unwrap(), 2500);
@@ -424,7 +428,10 @@ mod tests {
             events: Vec<EventEnvelope>,
         ) -> Result<bool, DomainError> {
             let last = events.last().unwrap().global_position;
-            self.batches.lock().unwrap().push((checkpoint.to_owned(), events.len(), last));
+            self.batches
+                .lock()
+                .unwrap()
+                .push((checkpoint.to_owned(), events.len(), last));
             Ok(true)
         }
     }
@@ -436,14 +443,23 @@ mod tests {
         checkpoint.set_position(2);
         let handler = ProjectionEventHandler::new(projector.clone(), checkpoint.clone());
         let store = MockEventStore::new(
-            (1..=2002).map(|p| make_envelope(p, account_added_event())).collect(),
+            (1..=2002)
+                .map(|p| make_envelope(p, account_added_event()))
+                .collect(),
         );
 
         assert_eq!(handler.catch_up(&store).await.unwrap(), 2000);
         assert_eq!(
             *projector.batches.lock().unwrap(),
-            [("read_model".to_owned(), 1000, 1002), ("read_model".to_owned(), 1000, 2002)]
+            [
+                ("read_model".to_owned(), 1000, 1002),
+                ("read_model".to_owned(), 1000, 2002)
+            ]
         );
-        assert_eq!(checkpoint.get_position(), 2, "the projector owns the checkpoint");
+        assert_eq!(
+            checkpoint.get_position(),
+            2,
+            "the projector owns the checkpoint"
+        );
     }
 }

@@ -2,8 +2,12 @@
 
 use super::*;
 
-impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static, B: EventPublisher + 'static>
-    MessageCommandHandler<ES, PR, MR, B>
+impl<
+    ES: EventStore + 'static,
+    PR: ProviderRegistry + 'static,
+    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    B: EventPublisher + 'static,
+> MessageCommandHandler<ES, PR, MR, B>
 {
     /// Move the message out of `from_mailbox_id`, which must still hold it
     /// when the account's turn comes: an action queued ahead may have moved
@@ -16,7 +20,12 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         to_mailbox_id: MailboxId,
         to_mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
-        self.apply_one(message_id, from_mailbox_id, to_mailbox(to_mailbox_id, to_mailbox_path)).await?;
+        self.apply_one(
+            message_id,
+            from_mailbox_id,
+            to_mailbox(to_mailbox_id, to_mailbox_path),
+        )
+        .await?;
         info!(%message_id, "message moved");
         Ok(CommandResult::MessageMoved)
     }
@@ -33,7 +42,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         mailbox_id: MailboxId,
         permanently: bool,
     ) -> Result<CommandResult, ApplicationError> {
-        self.apply_one(message_id, mailbox_id, to_trash_or_expunged(permanently)).await?;
+        self.apply_one(message_id, mailbox_id, to_trash_or_expunged(permanently))
+            .await?;
         info!(%message_id, "message deleted");
         Ok(CommandResult::MessageDeleted)
     }
@@ -68,7 +78,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         };
         let remote_id = self.remote_id(&mut message, &mut seq, &source.path).await?;
         let dest = dest.as_ref().map(|(id, path)| (*id, path));
-        match self.apply_on_server(account_id, source, dest, vec![(message_id, remote_id)]).await {
+        match self
+            .apply_on_server(account_id, source, dest, vec![(message_id, remote_id)])
+            .await
+        {
             (_, Some(refused)) => Err(refused),
             _ => Ok(()),
         }
@@ -89,7 +102,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         messages: Vec<(MessageId, MailboxId)>,
         permanently: bool,
     ) -> Result<CommandResult, ApplicationError> {
-        self.apply_many(messages, to_trash_or_expunged(permanently)).await
+        self.apply_many(messages, to_trash_or_expunged(permanently))
+            .await
     }
 
     /// Bulk move to a single destination, grouped like [`Self::handle_delete_many`].
@@ -99,7 +113,8 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         to_mailbox_id: MailboxId,
         to_mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
-        self.apply_many(messages, to_mailbox(to_mailbox_id, to_mailbox_path)).await
+        self.apply_many(messages, to_mailbox(to_mailbox_id, to_mailbox_path))
+            .await
     }
 
     /// Bulk move/delete of (message, mailbox it is acted on from). `destination` picks,
@@ -116,7 +131,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         for (message_id, source_id) in messages {
             match self.load_message(&message_id).await {
                 Ok((message, _)) if message.membership(source_id).is_some() => {
-                    by_account.entry(message.account_id).or_default().push((message_id, source_id));
+                    by_account
+                        .entry(message.account_id)
+                        .or_default()
+                        .push((message_id, source_id));
                 }
                 _ => failed += 1,
             }
@@ -133,18 +151,23 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                     continue;
                 };
                 let source = mailboxes.iter().find(|m| m.id == source_id);
-                let Some(source) = source.filter(|_| message.membership(source_id).is_some()) else {
+                let Some(source) = source.filter(|_| message.membership(source_id).is_some())
+                else {
                     failed += 1;
                     continue;
                 };
                 let Some(dest) = destination(source, &mailboxes) else {
                     continue;
                 };
-                let Ok(remote_id) = self.remote_id(&mut message, &mut seq, &source.path).await else {
+                let Ok(remote_id) = self.remote_id(&mut message, &mut seq, &source.path).await
+                else {
                     failed += 1;
                     continue;
                 };
-                groups.entry((source.id, dest)).or_default().push((message_id, remote_id));
+                groups
+                    .entry((source.id, dest))
+                    .or_default()
+                    .push((message_id, remote_id));
             }
 
             for ((from, dest), members) in groups {
@@ -152,8 +175,14 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
                     continue;
                 };
                 let count = members.len() as u32;
-                let (done, refused) =
-                    self.apply_on_server(account_id, from, dest.as_ref().map(|(id, path)| (*id, path)), members).await;
+                let (done, refused) = self
+                    .apply_on_server(
+                        account_id,
+                        from,
+                        dest.as_ref().map(|(id, path)| (*id, path)),
+                        members,
+                    )
+                    .await;
                 if let Some(e) = refused {
                     warn!(%e, from = %from.path, applied = done, "bulk change refused by the server part-way");
                 }
@@ -188,7 +217,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             let ids: Vec<RemoteId> = chunk.iter().map(|(_, id)| id.clone()).collect();
             let applied = match dest {
                 Some((_, to)) => provider.move_messages(&ids, &from.path, to).await,
-                None => provider.delete_messages(&from.path, &ids, true).await.map(|()| HashMap::new()),
+                None => provider
+                    .delete_messages(&from.path, &ids, true)
+                    .await
+                    .map(|()| HashMap::new()),
             };
             let new_ids = match applied {
                 Ok(new_ids) => new_ids,
@@ -201,7 +233,16 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
             };
             for (message_id, id) in chunk {
                 let message_id = *message_id;
-                if let Err(e) = self.record_applied(&provider, message_id, from.id, dest, new_ids.get(id).cloned().flatten()).await {
+                if let Err(e) = self
+                    .record_applied(
+                        &provider,
+                        message_id,
+                        from.id,
+                        dest,
+                        new_ids.get(id).cloned().flatten(),
+                    )
+                    .await
+                {
                     warn!(%message_id, %e, "done on the server but not recorded here, resyncing");
                     out_of_step = true;
                 }
@@ -230,7 +271,10 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         reported_id: Option<RemoteId>,
     ) -> Result<(), ApplicationError> {
         let Some((to_id, to_path)) = dest else {
-            return self.record(&message_id, |m| m.remove_from(from)).await.map(drop);
+            return self
+                .record(&message_id, |m| m.remove_from(from))
+                .await
+                .map(drop);
         };
         let new_id = match reported_id {
             Some(id) => Some(id),
@@ -244,15 +288,29 @@ impl<ES: EventStore + 'static, PR: ProviderRegistry + 'static, MR: MessageReadRe
         };
         let Some(new_id) = new_id else {
             self.record(&message_id, |m| m.remove_from(from)).await?;
-            return Err(ApplicationError::Internal(format!("server confirmed the move to {to_path} without the new id")));
+            return Err(ApplicationError::Internal(format!(
+                "server confirmed the move to {to_path} without the new id"
+            )));
         };
         // The destination already had that copy as a row of its own: a
         // Gmail label the message already carried, All Mail as the archive.
         // Recording the move too would make two rows of one server message.
-        if self.message_read_repo.held_ids(&to_id, std::slice::from_ref(&new_id)).await?.contains(&new_id) {
-            return self.record(&message_id, |m| m.remove_from(from)).await.map(drop);
+        if self
+            .message_read_repo
+            .held_ids(&to_id, std::slice::from_ref(&new_id))
+            .await?
+            .contains(&new_id)
+        {
+            return self
+                .record(&message_id, |m| m.remove_from(from))
+                .await
+                .map(drop);
         }
-        self.record(&message_id, |m| m.move_to(from, to_id, Some(new_id.clone()))).await.map(drop)
+        self.record(&message_id, |m| {
+            m.move_to(from, to_id, Some(new_id.clone()))
+        })
+        .await
+        .map(drop)
     }
 
     fn request_resync(&self, account_id: AccountId, from: &MailboxPath, to: Option<&MailboxPath>) {
@@ -283,7 +341,9 @@ fn to_trash_or_expunged(permanently: bool) -> impl Fn(&Mailbox, &[Mailbox]) -> D
         if permanently || source.mailbox_type == MailboxType::Trash {
             return Some(None);
         }
-        let trash = mailboxes.iter().find(|m| m.mailbox_type == MailboxType::Trash);
+        let trash = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Trash);
         Some(trash.map(|t| (t.id, t.path.clone())))
     }
 }

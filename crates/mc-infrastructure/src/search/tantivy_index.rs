@@ -78,7 +78,8 @@ impl TantivySearchIndex {
             stale => {
                 if stale.is_some() {
                     warn!(path = %path.display(), "search index schema changed, recreating it");
-                    std::fs::remove_dir_all(path).map_err(|e| search_err("remove stale index", e))?;
+                    std::fs::remove_dir_all(path)
+                        .map_err(|e| search_err("remove stale index", e))?;
                 }
                 std::fs::create_dir_all(path).map_err(|e| search_err("create index dir", e))?;
                 let index = Index::create_in_dir(path, schema.clone())
@@ -91,7 +92,9 @@ impl TantivySearchIndex {
         let email_analyzer = TextAnalyzer::builder(tantivy::tokenizer::SimpleTokenizer::default())
             .filter(tantivy::tokenizer::LowerCaser)
             .build();
-        index.tokenizers().register("email_tokenizer", email_analyzer);
+        index
+            .tokenizers()
+            .register("email_tokenizer", email_analyzer);
 
         let writer = index
             .writer_with_num_threads(1, WRITER_MEMORY_BYTES)
@@ -173,8 +176,14 @@ impl TantivySearchIndex {
         doc.add_u64(f.flags, flag_bits(&message.flags));
         doc.add_bool(f.has_attachment, message.has_attachments);
         doc.add_text(f.subject, &e.subject);
-        doc.add_text(f.from_name, join(e.from.iter().filter_map(|a| a.name.as_deref()).collect()));
-        doc.add_text(f.from_email, join(e.from.iter().map(|a| a.email.as_str()).collect()));
+        doc.add_text(
+            f.from_name,
+            join(e.from.iter().filter_map(|a| a.name.as_deref()).collect()),
+        );
+        doc.add_text(
+            f.from_email,
+            join(e.from.iter().map(|a| a.email.as_str()).collect()),
+        );
         doc.add_text(f.to, join(e.to.iter().map(|a| a.email.as_str()).collect()));
         doc.add_text(f.cc, join(e.cc.iter().map(|a| a.email.as_str()).collect()));
         if let Some(body) = body_of(message) {
@@ -202,13 +211,20 @@ impl TantivySearchIndex {
         if let Some(mailbox_id) = mailbox_id {
             query.push_str(&format!(" AND mailbox_id:\"{mailbox_id}\""));
         }
-        parser.parse_query(&query).map_err(|e| search_err("parse query", e))
+        parser
+            .parse_query(&query)
+            .map_err(|e| search_err("parse query", e))
     }
 
     fn commit_and_reload(&self) -> Result<(), DomainError> {
-        self.writer.lock().commit().map_err(|e| search_err("commit", e))?;
+        self.writer
+            .lock()
+            .commit()
+            .map_err(|e| search_err("commit", e))?;
         self.pending_count.store(0, Ordering::Relaxed);
-        self.reader.reload().map_err(|e| search_err("reload reader", e))
+        self.reader
+            .reload()
+            .map_err(|e| search_err("reload reader", e))
     }
 }
 
@@ -256,7 +272,10 @@ impl SearchIndex for TantivySearchIndex {
         let offset = ((pagination.page.max(1) - 1) * pagination.page_size) as usize;
         let limit = pagination.page_size as usize;
         let (top_docs, total) = searcher
-            .search(&parsed, &(TopDocs::with_limit(offset + limit).order_by_score(), Count))
+            .search(
+                &parsed,
+                &(TopDocs::with_limit(offset + limit).order_by_score(), Count),
+            )
             .map_err(|e| search_err("search", e))?;
 
         let hits = top_docs
@@ -269,7 +288,10 @@ impl SearchIndex for TantivySearchIndex {
                 Some(IndexHit { message_id, score })
             })
             .collect();
-        Ok(IndexResults { hits, total_count: total as u64 })
+        Ok(IndexResults {
+            hits,
+            total_count: total as u64,
+        })
     }
 
     // ponytail: parses the query and builds a generator per message; batch it
@@ -332,10 +354,7 @@ fn rewrite_scoped_query(query: &str) -> String {
     if lower.starts_with("from:") {
         let value = trimmed[5..].trim();
         if !value.is_empty() {
-            return format!(
-                "from_email:\"{}\" OR from_name:\"{}\"",
-                value, value
-            );
+            return format!("from_email:\"{}\" OR from_name:\"{}\"", value, value);
         }
     }
     // "to: value" → search to field

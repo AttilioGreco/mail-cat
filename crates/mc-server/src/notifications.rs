@@ -200,7 +200,9 @@ impl NotificationCenter {
     ) {
         use futures::StreamExt;
 
-        let Some(conn) = self.conn.clone() else { return };
+        let Some(conn) = self.conn.clone() else {
+            return;
+        };
         tokio::spawn(async move {
             if let Err(e) = add_notification_matches(&conn).await {
                 tracing::warn!("Notification action listener not started: {e}");

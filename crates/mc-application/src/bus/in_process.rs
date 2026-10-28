@@ -50,7 +50,11 @@ where
     CW: ContactWriteRepository + ContactReadRepository,
     ES: EventStore + 'static,
     PR: ProviderRegistry + 'static,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    MR: MessageReadRepository
+        + ReadModelProjector
+        + MailboxReadRepository
+        + MessageBodyStore
+        + 'static,
     B: EventPublisher + 'static,
 {
     pub fn new(
@@ -62,7 +66,10 @@ where
         event_bus: Arc<B>,
     ) -> Self {
         Self {
-            account_handler: AccountCommandHandler::new(account_write_repo.clone(), event_bus.clone()),
+            account_handler: AccountCommandHandler::new(
+                account_write_repo.clone(),
+                event_bus.clone(),
+            ),
             contact_handler: ContactCommandHandler::new(contact_write_repo, event_bus.clone()),
             message_handler: MessageCommandHandler::new(
                 event_store,
@@ -106,7 +113,11 @@ where
     CW: ContactWriteRepository + ContactReadRepository,
     ES: EventStore + 'static,
     PR: ProviderRegistry + 'static,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    MR: MessageReadRepository
+        + ReadModelProjector
+        + MailboxReadRepository
+        + MessageBodyStore
+        + 'static,
     B: EventPublisher + 'static,
 {
     async fn dispatch(&self, command: Command) -> Result<CommandResult, ApplicationError> {
@@ -212,11 +223,15 @@ where
             }
             Command::SendCompose { input } => {
                 let accounts = self.accounts().await?;
-                self.message_handler.handle_send_compose(&accounts, input).await
+                self.message_handler
+                    .handle_send_compose(&accounts, input)
+                    .await
             }
             Command::SaveDraft { input } => {
                 let accounts = self.accounts().await?;
-                self.message_handler.handle_save_draft(&accounts, input).await
+                self.message_handler
+                    .handle_save_draft(&accounts, input)
+                    .await
             }
             Command::DiscardDraft { message_id } => {
                 self.message_handler.handle_discard_draft(message_id).await
@@ -253,7 +268,11 @@ where
                     )
                     .await
             }
-            Command::EnsureContact { email, display_name, account_id } => {
+            Command::EnsureContact {
+                email,
+                display_name,
+                account_id,
+            } => {
                 self.contact_handler
                     .handle_ensure(email, display_name, account_id)
                     .await
@@ -267,15 +286,23 @@ where
                 notes,
             } => {
                 self.contact_handler
-                    .handle_update(contact_id, display_name, emails, phones, organization, notes)
+                    .handle_update(
+                        contact_id,
+                        display_name,
+                        emails,
+                        phones,
+                        organization,
+                        notes,
+                    )
                     .await
             }
             Command::RemoveContact { contact_id } => {
                 self.contact_handler.handle_remove(contact_id).await
             }
-            Command::MergeContacts { keep_id, discard_id } => {
-                self.contact_handler.handle_merge(keep_id, discard_id).await
-            }
+            Command::MergeContacts {
+                keep_id,
+                discard_id,
+            } => self.contact_handler.handle_merge(keep_id, discard_id).await,
             Command::RebuildContactIndex { account_id } => {
                 self.contact_handler.handle_rebuild_index(account_id).await
             }
@@ -289,8 +316,11 @@ where
 
                 // Deduplicate: (account_id_str, email_str) → (email, name, account_id)
                 let mut seen: HashSet<(String, String)> = HashSet::new();
-                let mut to_ensure: Vec<(mc_domain::EmailAddress, Option<String>, mc_domain::AccountId)> =
-                    Vec::new();
+                let mut to_ensure: Vec<(
+                    mc_domain::EmailAddress,
+                    Option<String>,
+                    mc_domain::AccountId,
+                )> = Vec::new();
 
                 for msg in messages {
                     let aid = msg.account_id;
@@ -316,7 +346,8 @@ where
                     if let CommandResult::ContactEnsured { created, .. } = self
                         .contact_handler
                         .handle_ensure(email, display_name, acct_id)
-                        .await? {
+                        .await?
+                    {
                         if created {
                             new_contacts += 1;
                         } else {
@@ -325,7 +356,10 @@ where
                     }
                 }
 
-                Ok(CommandResult::ContactsBackfilled { new_contacts, already_existed })
+                Ok(CommandResult::ContactsBackfilled {
+                    new_contacts,
+                    already_existed,
+                })
             }
         }
     }

@@ -15,8 +15,7 @@ use crate::value_objects::email_address::EmailAddress;
 // ── ContactEmailLabel ────────────────────────────────────────────────────────
 
 /// Label for a contact email address.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ContactEmailLabel {
     Work,
     Home,
@@ -24,7 +23,6 @@ pub enum ContactEmailLabel {
     Other,
     Custom(String),
 }
-
 
 // ── ContactEmail ─────────────────────────────────────────────────────────────
 
@@ -38,11 +36,19 @@ pub struct ContactEmail {
 
 impl ContactEmail {
     pub fn new(address: EmailAddress, label: ContactEmailLabel, is_primary: bool) -> Self {
-        Self { address, label, is_primary }
+        Self {
+            address,
+            label,
+            is_primary,
+        }
     }
 
     pub fn primary(address: EmailAddress) -> Self {
-        Self { address, label: ContactEmailLabel::Work, is_primary: true }
+        Self {
+            address,
+            label: ContactEmailLabel::Work,
+            is_primary: true,
+        }
     }
 }
 
@@ -97,6 +103,7 @@ impl Contact {
     ///
     /// `display_name` may be empty — contacts auto-created from email headers
     /// often have no known display name; search falls back to email address.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         display_name: String,
         emails: Vec<ContactEmail>,
@@ -153,7 +160,9 @@ impl Contact {
     ) -> Result<DomainEvent, DomainError> {
         if let Some(ref name) = display_name {
             if name.trim().is_empty() {
-                return Err(DomainError::Validation("display_name cannot be empty".into()));
+                return Err(DomainError::Validation(
+                    "display_name cannot be empty".into(),
+                ));
             }
             self.display_name = name.clone();
         }
@@ -199,8 +208,11 @@ impl Contact {
     /// `self`'s primary designation. Phone numbers and organization are
     /// updated only if `self` has no value. Returns the event to persist.
     pub fn merge_from(&mut self, other: &Contact) -> DomainEvent {
-        let existing: std::collections::HashSet<String> =
-            self.emails.iter().map(|e| e.address.as_str().to_lowercase()).collect();
+        let existing: std::collections::HashSet<String> = self
+            .emails
+            .iter()
+            .map(|e| e.address.as_str().to_lowercase())
+            .collect();
 
         for email in &other.emails {
             if !existing.contains(&email.address.as_str().to_lowercase()) {
@@ -347,7 +359,10 @@ mod tests {
         let (contact, event) = create("Alice Rossi", "alice@example.com");
         assert_eq!(contact.display_name, "Alice Rossi");
         assert!(matches!(event, DomainEvent::ContactAdded { .. }));
-        assert_eq!(contact.primary_email().unwrap().as_str(), "alice@example.com");
+        assert_eq!(
+            contact.primary_email().unwrap().as_str(),
+            "alice@example.com"
+        );
     }
 
     #[test]
@@ -375,7 +390,9 @@ mod tests {
     #[test]
     fn update_changes_name() {
         let (mut contact, _) = create("Old Name", "old@example.com");
-        let event = contact.update(Some("New Name".into()), None, None, None, None).unwrap();
+        let event = contact
+            .update(Some("New Name".into()), None, None, None, None)
+            .unwrap();
         assert_eq!(contact.display_name, "New Name");
         assert!(matches!(event, DomainEvent::ContactUpdated { .. }));
     }
@@ -386,7 +403,11 @@ mod tests {
         let (other, _) = create("Alice Personal", "alice@home.com");
         kept.merge_from(&other);
         assert_eq!(kept.emails.len(), 2);
-        assert!(kept.emails.iter().any(|e| e.address.as_str() == "alice@home.com"));
+        assert!(
+            kept.emails
+                .iter()
+                .any(|e| e.address.as_str() == "alice@home.com")
+        );
     }
 
     #[test]
@@ -395,11 +416,11 @@ mod tests {
 
         let updated_event = {
             let mut c = contact.clone();
-            c.update(Some("Carlo Bianchi".into()), None, None, None, None).unwrap()
+            c.update(Some("Carlo Bianchi".into()), None, None, None, None)
+                .unwrap()
         };
 
-        let rehydrated =
-            Contact::rehydrate(&[added_event, updated_event]).unwrap();
+        let rehydrated = Contact::rehydrate(&[added_event, updated_event]).unwrap();
 
         assert_eq!(rehydrated.display_name, "Carlo Bianchi");
         assert_eq!(rehydrated.id, contact.id);

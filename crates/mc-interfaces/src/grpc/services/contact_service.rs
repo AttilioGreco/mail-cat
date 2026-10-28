@@ -3,13 +3,11 @@ use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::application_error_to_status;
 use crate::grpc::proto::{
-    BackfillContactsRequest, BackfillContactsResponse,
-    ContactDuplicatePair, ContactSearchHit as ProtoContactSearchHit,
-    FindContactDuplicatesRequest, FindContactDuplicatesResponse,
-    MergeContactsRequest, MergeContactsResponse,
-    RebuildContactIndexRequest, RebuildContactIndexResponse,
-    SearchContactsRequest, SearchContactsResponse,
-    contact_service_server::ContactService,
+    BackfillContactsRequest, BackfillContactsResponse, ContactDuplicatePair,
+    ContactSearchHit as ProtoContactSearchHit, FindContactDuplicatesRequest,
+    FindContactDuplicatesResponse, MergeContactsRequest, MergeContactsResponse,
+    RebuildContactIndexRequest, RebuildContactIndexResponse, SearchContactsRequest,
+    SearchContactsResponse, contact_service_server::ContactService,
 };
 use mc_application::{
     bus::{CommandBus, QueryBus},
@@ -27,7 +25,10 @@ pub struct ContactServiceImpl<Q: QueryBus + 'static, C: CommandBus + 'static> {
 
 impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactServiceImpl<Q, C> {
     pub fn new(query_bus: Arc<Q>, command_bus: Arc<C>) -> Self {
-        Self { query_bus, command_bus }
+        Self {
+            query_bus,
+            command_bus,
+        }
     }
 }
 
@@ -38,7 +39,11 @@ impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactService for ContactS
         request: Request<SearchContactsRequest>,
     ) -> Result<Response<SearchContactsResponse>, Status> {
         let req = request.into_inner();
-        let limit = if req.limit == 0 { 10 } else { req.limit as usize };
+        let limit = if req.limit == 0 {
+            10
+        } else {
+            req.limit as usize
+        };
 
         let requesting_account_id = req
             .requesting_account_id
@@ -93,7 +98,9 @@ impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactService for ContactS
             })
             .collect();
 
-        Ok(Response::new(FindContactDuplicatesResponse { pairs: proto_pairs }))
+        Ok(Response::new(FindContactDuplicatesResponse {
+            pairs: proto_pairs,
+        }))
     }
 
     async fn merge_contacts(
@@ -106,7 +113,10 @@ impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactService for ContactS
         let discard_id = parse_contact_id(&req.discard_id)?;
 
         self.command_bus
-            .dispatch(Command::MergeContacts { keep_id, discard_id })
+            .dispatch(Command::MergeContacts {
+                keep_id,
+                discard_id,
+            })
             .await
             .map_err(application_error_to_status)?;
 
@@ -131,7 +141,9 @@ impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactService for ContactS
             .map_err(application_error_to_status)?;
 
         let indexed_count = match result {
-            mc_application::commands::CommandResult::ContactIndexRebuilt { indexed_count } => indexed_count,
+            mc_application::commands::CommandResult::ContactIndexRebuilt { indexed_count } => {
+                indexed_count
+            }
             _ => 0,
         };
 
@@ -163,7 +175,10 @@ impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactService for ContactS
             _ => (0, 0),
         };
 
-        Ok(Response::new(BackfillContactsResponse { new_contacts, already_existed }))
+        Ok(Response::new(BackfillContactsResponse {
+            new_contacts,
+            already_existed,
+        }))
     }
 }
 

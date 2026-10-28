@@ -298,7 +298,7 @@ async fn sync_emits_account_lifecycle_events() {
     assert!(
         matches!(&projected[0], DomainEvent::AccountSyncStarted { .. }),
         "First event should be AccountSyncStarted, got {:?}",
-        &projected[0]
+        projected[0]
     );
 
     // Last event should be AccountSyncCompleted

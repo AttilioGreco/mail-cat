@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chrono::DateTime;
 use mc_domain::{
     AccountId, ConversationReadRepository, DomainEvent, Envelope, EventEnvelope, Flag, MailboxId,
-    MailboxPath, MailboxType, Membership, MessageId, RemoteId, ReadModelProjector,
+    MailboxPath, MailboxType, Membership, MessageId, ReadModelProjector, RemoteId,
 };
 use mc_shared::pagination::Pagination;
 use uuid::Uuid;

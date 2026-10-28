@@ -46,9 +46,11 @@ pub enum ContactsCmd {
 
 pub async fn run(cmd: ContactsCmd, client: MailCatClient) -> Result<()> {
     match cmd {
-        ContactsCmd::Search { query, limit, account_id } => {
-            search(query, limit, account_id, client).await
-        }
+        ContactsCmd::Search {
+            query,
+            limit,
+            account_id,
+        } => search(query, limit, account_id, client).await,
         ContactsCmd::Backfill { account_id } => backfill(account_id, client).await,
         ContactsCmd::RebuildIndex { account_id } => rebuild_index(account_id, client).await,
     }
@@ -111,7 +113,10 @@ async fn backfill(account_id: Option<String>, client: MailCatClient) -> Result<(
         None => "all accounts".to_string(),
     };
 
-    println!("Backfilling contacts from stored messages for {}…", scope_msg.bold());
+    println!(
+        "Backfilling contacts from stored messages for {}…",
+        scope_msg.bold()
+    );
     println!("{}", "This may take a while for large mailboxes.".dimmed());
 
     let (new_contacts, already_existed) =

@@ -74,7 +74,10 @@ mod tests {
                 reset: None,
                 added: vec![],
                 existing: Existing::Snapshot(vec![]),
-                counts: MailboxCounts { total: 0, unread: 0 },
+                counts: MailboxCounts {
+                    total: 0,
+                    unread: 0,
+                },
             })
         }
         async fn fetch_envelopes(
@@ -159,7 +162,8 @@ mod tests {
             &self,
             _mailbox: &MailboxPath,
             _ids: &[RemoteId],
-        ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError> {
+        ) -> Result<Vec<mc_domain::traits::email_provider::MessageBodyResult>, DomainError>
+        {
             Ok(vec![])
         }
     }

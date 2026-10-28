@@ -134,8 +134,12 @@ impl EventStore for SqliteEventStore {
                         )
                         .map_err(store_err)?;
                     for (sequence, event) in (current + 1..).zip(events) {
-                        let mut envelope =
-                            EventEnvelope::new(aggregate_id.clone(), aggregate_type, sequence, event);
+                        let mut envelope = EventEnvelope::new(
+                            aggregate_id.clone(),
+                            aggregate_type,
+                            sequence,
+                            event,
+                        );
                         let occurred_at = envelope
                             .occurred_at
                             .timestamp_nanos_opt()
@@ -164,7 +168,9 @@ impl EventStore for SqliteEventStore {
                 // anything at or below the last position seen) get them in
                 // order, and a caller cancelled after commit cannot swallow
                 // committed events. No live subscriber is not an error.
-                let last_sequence = envelopes.last().map_or(expected_sequence, |e| e.sequence_number);
+                let last_sequence = envelopes
+                    .last()
+                    .map_or(expected_sequence, |e| e.sequence_number);
                 for envelope in envelopes {
                     let _ = notifier.send(envelope);
                 }
@@ -175,7 +181,9 @@ impl EventStore for SqliteEventStore {
 
     async fn current_sequence(&self, aggregate_id: &str) -> Result<u64, DomainError> {
         let aggregate_id = aggregate_id.to_owned();
-        self.db.read(move |conn| max_sequence(conn, &aggregate_id)).await
+        self.db
+            .read(move |conn| max_sequence(conn, &aggregate_id))
+            .await
     }
 
     async fn load_events(
@@ -294,7 +302,9 @@ mod tests {
         let tasks = (0..2).map(|_| {
             let store = Arc::clone(&store);
             tokio::spawn(async move {
-                store.append("acc-1", AggregateType::Account, 0, vec![event("x")]).await
+                store
+                    .append("acc-1", AggregateType::Account, 0, vec![event("x")])
+                    .await
             })
         });
         let results = futures::future::join_all(tasks).await;
@@ -317,7 +327,14 @@ mod tests {
         let appends = (0..64).map(|i| {
             let store = Arc::clone(&store);
             tokio::spawn(async move {
-                store.append(&format!("acc-{i}"), AggregateType::Account, 0, vec![event("x")]).await
+                store
+                    .append(
+                        &format!("acc-{i}"),
+                        AggregateType::Account,
+                        0,
+                        vec![event("x")],
+                    )
+                    .await
             })
         });
         for result in futures::future::join_all(appends).await {
@@ -337,15 +354,21 @@ mod tests {
         let store = open(&dir);
         let total = STREAM_PAGE as usize * 2 + 1;
         let batch = (0..total).map(|i| event(&i.to_string())).collect();
-        store.append("acc-1", AggregateType::Account, 0, batch).await.unwrap();
+        store
+            .append("acc-1", AggregateType::Account, 0, batch)
+            .await
+            .unwrap();
 
         let all: Vec<EventEnvelope> = store.load_all_events(None, 0).try_collect().await.unwrap();
         let positions: Vec<u64> = all.iter().map(|e| e.global_position).collect();
         assert_eq!(positions, (1..=total as u64).collect::<Vec<_>>());
 
         let from = STREAM_PAGE as u64 + 7;
-        let tail: Vec<EventEnvelope> =
-            store.load_all_events(None, from).try_collect().await.unwrap();
+        let tail: Vec<EventEnvelope> = store
+            .load_all_events(None, from)
+            .try_collect()
+            .await
+            .unwrap();
         assert_eq!(tail.first().map(|e| e.global_position), Some(from));
         assert_eq!(tail.len() as u64, total as u64 - from + 1);
     }
@@ -353,11 +376,17 @@ mod tests {
     #[tokio::test]
     async fn reopen_keeps_events_and_continues_positions() {
         let dir = tempfile::tempdir().unwrap();
-        open(&dir).append("acc-1", AggregateType::Account, 0, vec![event("a")]).await.unwrap();
+        open(&dir)
+            .append("acc-1", AggregateType::Account, 0, vec![event("a")])
+            .await
+            .unwrap();
 
         let store = open(&dir);
         assert_eq!(store.current_sequence("acc-1").await.unwrap(), 1);
-        store.append("acc-2", AggregateType::Account, 0, vec![event("b")]).await.unwrap();
+        store
+            .append("acc-2", AggregateType::Account, 0, vec![event("b")])
+            .await
+            .unwrap();
 
         let all: Vec<EventEnvelope> = store.load_all_events(None, 0).try_collect().await.unwrap();
         let positions: Vec<u64> = all.iter().map(|e| e.global_position).collect();
@@ -368,17 +397,26 @@ mod tests {
     async fn rejected_append_broadcasts_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let store = open(&dir);
-        store.append("acc-1", AggregateType::Account, 0, vec![event("a")]).await.unwrap();
+        store
+            .append("acc-1", AggregateType::Account, 0, vec![event("a")])
+            .await
+            .unwrap();
 
         let mut live = store.subscribe();
         store
             .append("acc-1", AggregateType::Account, 0, vec![event("stale")])
             .await
             .unwrap_err();
-        store.append("acc-1", AggregateType::Account, 1, vec![event("b")]).await.unwrap();
+        store
+            .append("acc-1", AggregateType::Account, 1, vec![event("b")])
+            .await
+            .unwrap();
 
         let first = live.next().await.unwrap();
-        assert_eq!(first.sequence_number, 2, "only the committed append is broadcast");
+        assert_eq!(
+            first.sequence_number, 2,
+            "only the committed append is broadcast"
+        );
     }
 
     #[tokio::test]
@@ -387,7 +425,12 @@ mod tests {
         let store = open(&dir);
         let mut live = store.subscribe();
         store
-            .append("acc-1", AggregateType::Account, 0, vec![event("Zoë ✉ 日本")])
+            .append(
+                "acc-1",
+                AggregateType::Account,
+                0,
+                vec![event("Zoë ✉ 日本")],
+            )
             .await
             .unwrap();
 

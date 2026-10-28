@@ -27,7 +27,12 @@ macro_rules! event_store_conformance {
                 .unwrap();
             assert_eq!(seq, 1);
             let seq = store
-                .append("acc-1", AggregateType::Account, 1, vec![make_event(), make_event()])
+                .append(
+                    "acc-1",
+                    AggregateType::Account,
+                    1,
+                    vec![make_event(), make_event()],
+                )
                 .await
                 .unwrap();
             assert_eq!(seq, 3);
@@ -70,7 +75,13 @@ macro_rules! event_store_conformance {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(err, DomainError::ConcurrencyConflict { expected: 0, actual: 1 }),
+                matches!(
+                    err,
+                    DomainError::ConcurrencyConflict {
+                        expected: 0,
+                        actual: 1
+                    }
+                ),
                 "got {err:?}"
             );
         }
@@ -89,8 +100,10 @@ macro_rules! event_store_conformance {
 
             let all: Vec<EventEnvelope> =
                 store.load_all_events(None, 0).try_collect().await.unwrap();
-            let order: Vec<(u64, &str)> =
-                all.iter().map(|e| (e.global_position, e.aggregate_id.as_str())).collect();
+            let order: Vec<(u64, &str)> = all
+                .iter()
+                .map(|e| (e.global_position, e.aggregate_id.as_str()))
+                .collect();
             assert_eq!(order, [(1, "acc-1"), (2, "acc-2")]);
         }
 
@@ -101,7 +114,9 @@ macro_rules! event_store_conformance {
                 .append("acc-1", AggregateType::Account, 0, vec![make_event()])
                 .await
                 .unwrap();
-            let discarded = DomainEvent::DraftDiscarded { message_id: mc_domain::MessageId::new() };
+            let discarded = DomainEvent::DraftDiscarded {
+                message_id: mc_domain::MessageId::new(),
+            };
             store
                 .append("msg-1", AggregateType::Message, 0, vec![discarded])
                 .await
@@ -112,8 +127,11 @@ macro_rules! event_store_conformance {
                 (Some(AggregateType::Message), 1),
                 (None, 2),
             ] {
-                let events: Vec<EventEnvelope> =
-                    store.load_all_events(filter, 0).try_collect().await.unwrap();
+                let events: Vec<EventEnvelope> = store
+                    .load_all_events(filter, 0)
+                    .try_collect()
+                    .await
+                    .unwrap();
                 assert_eq!(events.len(), expected, "filter {filter:?}");
             }
         }
@@ -121,7 +139,10 @@ macro_rules! event_store_conformance {
         #[tokio::test]
         async fn empty_append_returns_expected_sequence() {
             let (_guard, store) = $make;
-            let seq = store.append("acc-1", AggregateType::Account, 0, vec![]).await.unwrap();
+            let seq = store
+                .append("acc-1", AggregateType::Account, 0, vec![])
+                .await
+                .unwrap();
             assert_eq!(seq, 0);
         }
 
@@ -129,7 +150,10 @@ macro_rules! event_store_conformance {
         async fn separate_aggregates_have_independent_sequences() {
             let (_guard, store) = $make;
             for id in ["acc-1", "acc-2"] {
-                store.append(id, AggregateType::Account, 0, vec![make_event()]).await.unwrap();
+                store
+                    .append(id, AggregateType::Account, 0, vec![make_event()])
+                    .await
+                    .unwrap();
             }
             for id in ["acc-1", "acc-2"] {
                 let events = store.load_events(id, 0).await.unwrap();

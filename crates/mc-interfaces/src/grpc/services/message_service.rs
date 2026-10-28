@@ -4,22 +4,20 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::{
-    application_error_to_status, domain_message_to_detail, domain_message_to_summary,
-    compose_view_to_proto, paged_result_to_page_info, proto_compose_input_to_app,
+    application_error_to_status, compose_view_to_proto, domain_message_to_detail,
+    domain_message_to_summary, paged_result_to_page_info, proto_compose_input_to_app,
     proto_compose_mode, proto_flags_to_domain, proto_to_domain_pagination,
 };
 use crate::grpc::proto::{
-    BulkChangeResponse, CountsChangedEvent, DeleteMessageRequest, DeleteMessageResponse,
-    DeleteMessagesRequest, MoveMessagesRequest, FlagsChangedEvent,
-    GetMessageRequest, GetMessageResponse, GetThreadRequest, GetThreadResponse,
-    ListConversationsRequest, ListConversationsResponse,
-    ListMessagesRequest, ListMessagesResponse, MailboxEvent, MarkMailboxReadRequest,
-    MarkMailboxReadResponse, MessageExpungedEvent, MessageRef,
-    MoveMessageRequest, MoveMessageResponse, NewMessageEvent,
-    RebuildConversationIndexRequest, RebuildConversationIndexResponse,
-    ComposeInput, ComposeView, DiscardDraftRequest, DiscardDraftResponse, PrepareComposeRequest,
-    SaveDraftResponse, SendComposeResponse, SetFlagsRequest, SetFlagsResponse,
-    WatchMailboxRequest, mailbox_event, message_service_server::MessageService,
+    BulkChangeResponse, ComposeInput, ComposeView, CountsChangedEvent, DeleteMessageRequest,
+    DeleteMessageResponse, DeleteMessagesRequest, DiscardDraftRequest, DiscardDraftResponse,
+    FlagsChangedEvent, GetMessageRequest, GetMessageResponse, GetThreadRequest, GetThreadResponse,
+    ListConversationsRequest, ListConversationsResponse, ListMessagesRequest, ListMessagesResponse,
+    MailboxEvent, MarkMailboxReadRequest, MarkMailboxReadResponse, MessageExpungedEvent,
+    MessageRef, MoveMessageRequest, MoveMessageResponse, MoveMessagesRequest, NewMessageEvent,
+    PrepareComposeRequest, RebuildConversationIndexRequest, RebuildConversationIndexResponse,
+    SaveDraftResponse, SendComposeResponse, SetFlagsRequest, SetFlagsResponse, WatchMailboxRequest,
+    mailbox_event, message_service_server::MessageService,
 };
 use mc_application::{
     InProcessEventBus,
@@ -44,7 +42,9 @@ fn parse_message_refs(refs: &[MessageRef]) -> Result<Vec<(MessageId, MailboxId)>
         .map(|r| {
             let message_id = uuid::Uuid::parse_str(&r.message_id)
                 .map(MessageId::from_uuid)
-                .map_err(|e| Status::invalid_argument(format!("invalid message_id {}: {e}", r.message_id)))?;
+                .map_err(|e| {
+                    Status::invalid_argument(format!("invalid message_id {}: {e}", r.message_id))
+                })?;
             Ok((message_id, parse_mailbox_id(&r.mailbox_id, "mailbox_id")?))
         })
         .collect()
@@ -70,11 +70,7 @@ pub struct MessageServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
 }
 
 impl<C: CommandBus + 'static, Q: QueryBus + 'static> MessageServiceImpl<C, Q> {
-    pub fn new(
-        command_bus: Arc<C>,
-        query_bus: Arc<Q>,
-        event_bus: Arc<InProcessEventBus>,
-    ) -> Self {
+    pub fn new(command_bus: Arc<C>, query_bus: Arc<Q>, event_bus: Arc<InProcessEventBus>) -> Self {
         Self {
             command_bus,
             query_bus,
@@ -182,13 +178,19 @@ where
                         })
                         .collect(),
                     subject: summary.subject.clone(),
-                    date: Some(crate::grpc::mappers::datetime_to_timestamp(&summary.received_at)),
+                    date: Some(crate::grpc::mappers::datetime_to_timestamp(
+                        &summary.received_at,
+                    )),
                     ..Default::default()
                 };
                 crate::grpc::proto::MessageSummary {
                     id: summary.id.to_string(),
                     account_id: summary.account_id.to_string(),
-                    mailbox_ids: summary.memberships.iter().map(|m| m.mailbox_id.to_string()).collect(),
+                    mailbox_ids: summary
+                        .memberships
+                        .iter()
+                        .map(|m| m.mailbox_id.to_string())
+                        .collect(),
                     envelope: Some(envelope),
                     flags: summary
                         .flags
@@ -216,7 +218,9 @@ where
     ) -> Result<Response<GetMessageResponse>, Status> {
         let req = request.into_inner();
 
-        let (message, mailbox) = self.message_in_mailbox(&req.message_id, &req.mailbox_id).await?;
+        let (message, mailbox) = self
+            .message_in_mailbox(&req.message_id, &req.mailbox_id)
+            .await?;
 
         // The background backfill worker drains newest-first, so a just-arrived
         // message can still be body-less when the user clicks it — which renders
@@ -226,7 +230,9 @@ where
         // erroring the whole read: the backfill worker will retry.
         // A message without a known UID still goes: the handler finds it by
         // Message-ID. So does one the backfill only got the start of.
-        let message = if message.body_truncated || (message.body_text.is_none() && message.body_html.is_none()) {
+        let message = if message.body_truncated
+            || (message.body_text.is_none() && message.body_html.is_none())
+        {
             let message_id = message.id;
             match self
                 .command_bus
@@ -278,7 +284,11 @@ where
             })
             .transpose()?;
 
-        let query = Query::ListConversations { account_id, mailbox_id, pagination };
+        let query = Query::ListConversations {
+            account_id,
+            mailbox_id,
+            pagination,
+        };
         let result = self
             .query_bus
             .dispatch(query)
@@ -353,7 +363,9 @@ where
             .into_index_rebuilt()
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(RebuildConversationIndexResponse { events_replayed }))
+        Ok(Response::new(RebuildConversationIndexResponse {
+            events_replayed,
+        }))
     }
 
     async fn set_flags(
@@ -437,7 +449,9 @@ where
             }
         };
 
-        Ok(Response::new(MarkMailboxReadResponse { marked_count: count }))
+        Ok(Response::new(MarkMailboxReadResponse {
+            marked_count: count,
+        }))
     }
 
     async fn move_message(
@@ -446,7 +460,9 @@ where
     ) -> Result<Response<MoveMessageResponse>, Status> {
         let req = request.into_inner();
 
-        let (message, from_mailbox) = self.message_in_mailbox(&req.message_id, &req.from_mailbox_id).await?;
+        let (message, from_mailbox) = self
+            .message_in_mailbox(&req.message_id, &req.from_mailbox_id)
+            .await?;
 
         let to_mailbox_id = MailboxId::from_uuid(
             uuid::Uuid::parse_str(&req.to_mailbox_id)
@@ -499,7 +515,9 @@ where
     ) -> Result<Response<DeleteMessageResponse>, Status> {
         let req = request.into_inner();
 
-        let (message, mailbox) = self.message_in_mailbox(&req.message_id, &req.mailbox_id).await?;
+        let (message, mailbox) = self
+            .message_in_mailbox(&req.message_id, &req.mailbox_id)
+            .await?;
 
         let command = Command::DeleteMessage {
             message_id: message.id,
@@ -588,9 +606,16 @@ where
             message_id: parse("message_id", req.message_id)?.map(MessageId::from_uuid),
             account_id: parse("account_id", req.account_id)?.map(AccountId::from_uuid),
         };
-        match self.command_bus.dispatch(command).await.map_err(application_error_to_status)? {
+        match self
+            .command_bus
+            .dispatch(command)
+            .await
+            .map_err(application_error_to_status)?
+        {
             CommandResult::ComposePrepared(view) => Ok(Response::new(compose_view_to_proto(*view))),
-            other => Err(Status::internal(format!("unexpected command result: {other:?}"))),
+            other => Err(Status::internal(format!(
+                "unexpected command result: {other:?}"
+            ))),
         }
     }
 
@@ -598,7 +623,8 @@ where
         &self,
         request: Request<ComposeInput>,
     ) -> Result<Response<SendComposeResponse>, Status> {
-        let input = proto_compose_input_to_app(request.into_inner()).map_err(Status::invalid_argument)?;
+        let input =
+            proto_compose_input_to_app(request.into_inner()).map_err(Status::invalid_argument)?;
         match self
             .command_bus
             .dispatch(Command::SendCompose { input })
@@ -608,7 +634,9 @@ where
             CommandResult::MessageSent { message_id } => Ok(Response::new(SendComposeResponse {
                 message_id: message_id.to_string(),
             })),
-            other => Err(Status::internal(format!("unexpected command result: {other:?}"))),
+            other => Err(Status::internal(format!(
+                "unexpected command result: {other:?}"
+            ))),
         }
     }
 
@@ -616,7 +644,8 @@ where
         &self,
         request: Request<ComposeInput>,
     ) -> Result<Response<SaveDraftResponse>, Status> {
-        let input = proto_compose_input_to_app(request.into_inner()).map_err(Status::invalid_argument)?;
+        let input =
+            proto_compose_input_to_app(request.into_inner()).map_err(Status::invalid_argument)?;
         match self
             .command_bus
             .dispatch(Command::SaveDraft { input })
@@ -626,7 +655,9 @@ where
             CommandResult::DraftSaved { message_id } => Ok(Response::new(SaveDraftResponse {
                 draft_id: message_id.to_string(),
             })),
-            other => Err(Status::internal(format!("unexpected command result: {other:?}"))),
+            other => Err(Status::internal(format!(
+                "unexpected command result: {other:?}"
+            ))),
         }
     }
 
@@ -661,9 +692,7 @@ where
         // Resolve mailbox to get account_id and mailbox_path.
         let mailbox = self
             .query_bus
-            .dispatch(Query::GetMailbox {
-                mailbox_id,
-            })
+            .dispatch(Query::GetMailbox { mailbox_id })
             .await
             .map_err(application_error_to_status)?
             .into_mailbox()
@@ -694,9 +723,10 @@ where
                     &mailbox_id_str,
                 );
                 if let Some(event) = event_opt
-                    && tx.send(Ok(event)).await.is_err() {
-                        break; // Client disconnected
-                    }
+                    && tx.send(Ok(event)).await.is_err()
+                {
+                    break; // Client disconnected
+                }
             }
         });
 
@@ -707,15 +737,21 @@ where
 fn expunged(message_id: &MessageId, mailbox_id_str: &str) -> MailboxEvent {
     MailboxEvent {
         mailbox_id: mailbox_id_str.to_owned(),
-        event_type: Some(mailbox_event::EventType::MessageExpunged(MessageExpungedEvent {
-            message_id: message_id.to_string(),
-        })),
+        event_type: Some(mailbox_event::EventType::MessageExpunged(
+            MessageExpungedEvent {
+                message_id: message_id.to_string(),
+            },
+        )),
     }
 }
 
 /// A failed lookup counts as "not there": a missed refresh beats one per
 /// watcher for every flag change.
-async fn is_in_mailbox<Q: QueryBus>(query_bus: &Q, message_id: MessageId, mailbox_id: MailboxId) -> bool {
+async fn is_in_mailbox<Q: QueryBus>(
+    query_bus: &Q,
+    message_id: MessageId,
+    mailbox_id: MailboxId,
+) -> bool {
     let Ok(result) = query_bus.dispatch(Query::GetMessage { message_id }).await else {
         return false;
     };
@@ -755,22 +791,25 @@ fn domain_event_to_mailbox_event(
             unread_messages,
         } if evt_mailbox == mailbox_id => Some(MailboxEvent {
             mailbox_id: mailbox_id_str.to_owned(),
-            event_type: Some(mailbox_event::EventType::CountsChanged(CountsChangedEvent {
-                total: *total_messages,
-                unseen: *unread_messages,
-            })),
+            event_type: Some(mailbox_event::EventType::CountsChanged(
+                CountsChangedEvent {
+                    total: *total_messages,
+                    unseen: *unread_messages,
+                },
+            )),
         }),
 
-        DomainEvent::MessageDeleted { message_id, mailbox_ids }
-            if mailbox_ids.contains(mailbox_id) =>
-        {
-            Some(expunged(message_id, mailbox_id_str))
-        }
+        DomainEvent::MessageDeleted {
+            message_id,
+            mailbox_ids,
+        } if mailbox_ids.contains(mailbox_id) => Some(expunged(message_id, mailbox_id_str)),
 
         // Gaining a mailbox is not announced, as before.
-        DomainEvent::MessageMailboxesChanged { message_id, removed, .. } if removed.contains(mailbox_id) => {
-            Some(expunged(message_id, mailbox_id_str))
-        }
+        DomainEvent::MessageMailboxesChanged {
+            message_id,
+            removed,
+            ..
+        } if removed.contains(mailbox_id) => Some(expunged(message_id, mailbox_id_str)),
 
         DomainEvent::MessageFlagged {
             message_id,

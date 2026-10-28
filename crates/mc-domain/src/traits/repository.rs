@@ -13,9 +13,9 @@ use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
 use crate::value_objects::message_id::MessageId;
-use crate::value_objects::thread_id::ThreadId;
 use crate::value_objects::remote_id::RemoteId;
 use crate::value_objects::sync_cursor::SyncCursor;
+use crate::value_objects::thread_id::ThreadId;
 
 // ── Write-side Repositories ─────────────────────────────────────────────
 //
@@ -146,7 +146,8 @@ pub trait MessageReadRepository: Send + Sync {
     ) -> Result<std::collections::HashSet<RemoteId>, DomainError>;
 
     /// Messages in `mailbox_id` whose remote id there is unknown.
-    async fn pending_messages(&self, mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError>;
+    async fn pending_messages(&self, mailbox_id: &MailboxId)
+    -> Result<Vec<MessageId>, DomainError>;
 
     /// Every copy of an RFC Message-ID (`<…>`) stored for an account.
     async fn find_by_rfc_id(
@@ -199,9 +200,22 @@ pub trait ProjectionCheckpoint: Send + Sync {
 /// address book or calendar later.
 #[async_trait]
 pub trait SyncCursorStore: Send + Sync {
-    async fn get_cursor(&self, account_id: &AccountId, collection: &str) -> Result<Option<SyncCursor>, DomainError>;
-    async fn put_cursor(&self, account_id: &AccountId, collection: &str, cursor: &SyncCursor) -> Result<(), DomainError>;
-    async fn delete_cursor(&self, account_id: &AccountId, collection: &str) -> Result<(), DomainError>;
+    async fn get_cursor(
+        &self,
+        account_id: &AccountId,
+        collection: &str,
+    ) -> Result<Option<SyncCursor>, DomainError>;
+    async fn put_cursor(
+        &self,
+        account_id: &AccountId,
+        collection: &str,
+        cursor: &SyncCursor,
+    ) -> Result<(), DomainError>;
+    async fn delete_cursor(
+        &self,
+        account_id: &AccountId,
+        collection: &str,
+    ) -> Result<(), DomainError>;
 }
 
 /// A message whose body still needs downloading, drained by the background
@@ -312,10 +326,8 @@ pub trait ContactReadRepository: Send + Sync {
     ) -> Result<PagedResult<ContactSummary>, DomainError>;
 
     /// Find contacts that have the given email address (any label).
-    async fn find_by_email(
-        &self,
-        email: &EmailAddress,
-    ) -> Result<Vec<ContactSummary>, DomainError>;
+    async fn find_by_email(&self, email: &EmailAddress)
+    -> Result<Vec<ContactSummary>, DomainError>;
 
     /// Find contacts scoped to a specific account that have the given email address.
     async fn find_by_email_in_account(

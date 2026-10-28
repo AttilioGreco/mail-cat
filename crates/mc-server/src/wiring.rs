@@ -829,7 +829,7 @@ impl AppContext {
 
             if let Ok(provider) = provider_registry.get_provider(account_id) {
                 let event_source = ImapAccountEventSource::new(provider);
-                let mut stream = event_source.watch(&[inbox_path.clone()]);
+                let mut stream = event_source.watch(std::slice::from_ref(&inbox_path));
 
                 let sync = Arc::clone(&sync_service);
                 let cmd_bus = command_bus.clone();
@@ -856,7 +856,10 @@ impl AppContext {
                                     // and advances the cursor so start_sync
                                     // won't re-fetch on the next periodic run.
                                     ProviderNotification::NewMessage { ref mailbox, .. }
-                                    | ProviderNotification::MailboxCountChanged { ref mailbox, .. } => {
+                                    | ProviderNotification::MailboxCountChanged {
+                                        ref mailbox,
+                                        ..
+                                    } => {
                                         if let Ok(permit) = sync_gate.clone().try_acquire_owned() {
                                             let sync_clone = Arc::clone(&sync);
                                             let id_clone = id;

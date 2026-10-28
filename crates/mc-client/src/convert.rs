@@ -26,7 +26,9 @@ pub fn account_from_proto(a: pb::AccountSummary) -> Account {
 }
 
 pub fn auth_status_from_proto(s: pb::AccountAuthStatus) -> AuthStatus {
-    let time = |ts: Option<pb::Timestamp>| ts.and_then(|t| Utc.timestamp_opt(t.seconds, t.nanos as u32).single());
+    let time = |ts: Option<pb::Timestamp>| {
+        ts.and_then(|t| Utc.timestamp_opt(t.seconds, t.nanos as u32).single())
+    };
     AuthStatus {
         account_id: s.account_id,
         state: match pb::AuthState::try_from(s.state) {
@@ -150,19 +152,23 @@ pub fn mailbox_notification_from_proto(e: pb::MailboxEvent) -> MailboxNotificati
     use pb::mailbox_event::EventType;
 
     let kind = match e.event_type {
-        Some(EventType::CountsChanged(c)) => {
-            MailboxNotificationKind::CountsChanged { total: c.total, unseen: c.unseen }
-        }
-        Some(EventType::NewMessage(m)) => {
-            MailboxNotificationKind::NewMessage { remote_id: m.remote_id }
-        }
-        Some(EventType::MessageExpunged(m)) => {
-            MailboxNotificationKind::MessageExpunged { message_id: m.message_id }
-        }
+        Some(EventType::CountsChanged(c)) => MailboxNotificationKind::CountsChanged {
+            total: c.total,
+            unseen: c.unseen,
+        },
+        Some(EventType::NewMessage(m)) => MailboxNotificationKind::NewMessage {
+            remote_id: m.remote_id,
+        },
+        Some(EventType::MessageExpunged(m)) => MailboxNotificationKind::MessageExpunged {
+            message_id: m.message_id,
+        },
         Some(EventType::FlagsChanged(_)) | None => MailboxNotificationKind::FlagsChanged,
     };
 
-    MailboxNotification { mailbox_id: e.mailbox_id, event: kind }
+    MailboxNotification {
+        mailbox_id: e.mailbox_id,
+        event: kind,
+    }
 }
 
 pub fn message_flag_to_proto(flag: &MessageFlag) -> i32 {
@@ -251,7 +257,11 @@ pub fn contact_hit_from_proto(h: pb::ContactSearchHit) -> ContactHit {
         primary_email: h.primary_email,
         all_emails: h.all_emails,
         organization: h.organization,
-        account_scope: if h.account_scope.is_empty() { None } else { Some(h.account_scope) },
+        account_scope: if h.account_scope.is_empty() {
+            None
+        } else {
+            Some(h.account_scope)
+        },
         is_cross_account: h.is_cross_account,
     }
 }
@@ -264,12 +274,14 @@ fn proto_ts_to_datetime(ts: Option<pb::Timestamp>) -> DateTime<Utc> {
 pub fn oauth_login_event_from_proto(event: pb::OAuthLoginEvent) -> crate::types::OAuthLoginEvent {
     use pb::o_auth_login_event::Event;
     match event.event {
-        Some(Event::AwaitingBrowser(e)) => {
-            crate::types::OAuthLoginEvent::AwaitingBrowser { authorize_url: e.authorize_url }
-        }
+        Some(Event::AwaitingBrowser(e)) => crate::types::OAuthLoginEvent::AwaitingBrowser {
+            authorize_url: e.authorize_url,
+        },
         Some(Event::Succeeded(e)) => crate::types::OAuthLoginEvent::Succeeded { email: e.email },
         Some(Event::Failed(e)) => crate::types::OAuthLoginEvent::Failed { message: e.message },
-        None => crate::types::OAuthLoginEvent::Failed { message: "empty OAuth login event".into() },
+        None => crate::types::OAuthLoginEvent::Failed {
+            message: "empty OAuth login event".into(),
+        },
     }
 }
 
@@ -314,7 +326,11 @@ pub fn compose_view_from_proto(v: pb::ComposeView) -> ComposeView {
         inline_images: v
             .inline_images
             .into_iter()
-            .map(|i| InlineImage { content_id: i.content_id, mime_type: i.mime_type, data: i.data })
+            .map(|i| InlineImage {
+                content_id: i.content_id,
+                mime_type: i.mime_type,
+                data: i.data,
+            })
             .collect(),
         mode: v.mode,
         source_message_id: v.source_message_id,
@@ -353,9 +369,11 @@ mod oauth_tests {
     #[test]
     fn awaiting_browser_event_converts() {
         let proto_event = pb::OAuthLoginEvent {
-            event: Some(pb::o_auth_login_event::Event::AwaitingBrowser(pb::AwaitingBrowser {
-                authorize_url: "https://accounts.google.com/x".into(),
-            })),
+            event: Some(pb::o_auth_login_event::Event::AwaitingBrowser(
+                pb::AwaitingBrowser {
+                    authorize_url: "https://accounts.google.com/x".into(),
+                },
+            )),
         };
         match oauth_login_event_from_proto(proto_event) {
             crate::types::OAuthLoginEvent::AwaitingBrowser { authorize_url } => {

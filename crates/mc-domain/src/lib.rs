@@ -14,7 +14,9 @@ pub use model::account::{
 pub use model::attachment::{Attachment, AttachmentId};
 pub use model::identity::Identity;
 pub use model::mailbox::{Mailbox, MailboxId, MailboxType};
-pub use model::message::{Address, Envelope, Membership, Message, OutgoingAttachment, OutgoingMessage};
+pub use model::message::{
+    Address, Envelope, Membership, Message, OutgoingAttachment, OutgoingMessage,
+};
 pub use value_objects::email_address::EmailAddress;
 pub use value_objects::flag::Flag;
 pub use value_objects::mailbox_path::MailboxPath;
@@ -23,28 +25,27 @@ pub use value_objects::remote_id::RemoteId;
 pub use value_objects::sync_cursor::SyncCursor;
 
 // Trait re-exports
+pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource};
+pub use model::conversation::Conversation;
 pub use traits::account_event_source::AccountEventSource;
+pub use traits::contact_index::ContactSearchHit;
 pub use traits::email_provider::{
-    EmailProvider, Existing, MailboxChanges, MailboxCounts, MessageBodyResult, MessageEnvelopeSummary,
-    ProviderNotification, Reset, SendOutcome, SentCopy,
+    EmailProvider, Existing, MailboxChanges, MailboxCounts, MessageBodyResult,
+    MessageEnvelopeSummary, ProviderNotification, Reset, SendOutcome, SentCopy,
 };
 pub use traits::event_store::EventStore;
-pub use traits::login_gate::{login_with, LoginGate, LoginSecret};
+pub use traits::login_gate::{LoginGate, LoginSecret, login_with};
 pub use traits::provider_registry::ProviderRegistry;
-pub use traits::secret_store::{AccountSecrets, OAuthSecrets, SecretStore};
 pub use traits::read_model_projector::ReadModelProjector;
 pub use traits::repository::{
     AccountReadRepository, AccountSummary, AccountSyncStats, AccountWriteRepository, BackfillEntry,
-    BodyBackfillQueue,
-    ContactReadRepository, ContactSummary, ContactWriteRepository, ConversationReadRepository,
-    ConversationSummary, MailboxReadRepository, MessageReadRepository, MessageSummary,
-    MessageBodyStore, ProjectionCheckpoint, SyncCursorStore,
+    BodyBackfillQueue, ContactReadRepository, ContactSummary, ContactWriteRepository,
+    ConversationReadRepository, ConversationSummary, MailboxReadRepository, MessageBodyStore,
+    MessageReadRepository, MessageSummary, ProjectionCheckpoint, SyncCursorStore,
 };
-pub use model::conversation::Conversation;
-pub use value_objects::thread_id::ThreadId;
-pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource};
-pub use value_objects::contact_id::ContactId;
-pub use traits::contact_index::ContactSearchHit;
 pub use traits::search_index::{
     IndexHit, IndexResults, SearchHit, SearchIndex, SearchResults, SuggestScope, Suggestion,
 };
+pub use traits::secret_store::{AccountSecrets, OAuthSecrets, SecretStore};
+pub use value_objects::contact_id::ContactId;
+pub use value_objects::thread_id::ThreadId;

@@ -58,7 +58,9 @@ impl<T: SearchIndex + ?Sized> SearchIndex for std::sync::Arc<T> {
         mailbox_id: Option<&MailboxId>,
         pagination: &Pagination,
     ) -> Result<IndexResults, DomainError> {
-        (**self).search(query, account_id, mailbox_id, pagination).await
+        (**self)
+            .search(query, account_id, mailbox_id, pagination)
+            .await
     }
     fn snippet(&self, query: &str, message: &Message) -> Option<String> {
         (**self).snippet(query, message)

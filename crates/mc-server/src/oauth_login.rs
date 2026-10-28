@@ -10,7 +10,7 @@ use mc_application::OAuthLoginProgress;
 use mc_domain::{DomainError, LoginSecret, OAuthProvider, OAuthSecrets, SecretStore};
 use mc_infrastructure::ImapEmailProvider;
 use tokio::sync::mpsc;
-use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 #[derive(Clone)]
 pub struct OAuthChallengeManager {
@@ -23,7 +23,10 @@ pub struct OAuthChallengeManager {
 /// live-state reconciliation a running server needs.
 impl OAuthChallengeManager {
     pub fn new(config_path: PathBuf, secret_store: Arc<dyn SecretStore>) -> Self {
-        Self { config_path, secret_store }
+        Self {
+            config_path,
+            secret_store,
+        }
     }
 
     pub fn start_login(
@@ -37,13 +40,18 @@ impl OAuthChallengeManager {
         let config_path = self.config_path.clone();
 
         tokio::spawn(async move {
-            let (authorize_url, pending) = match mc_infrastructure::oauth::begin_authorization(provider, &email).await {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = tx.send(OAuthLoginProgress::Failed { message: e.to_string() }).await;
-                    return;
-                }
-            };
+            let (authorize_url, pending) =
+                match mc_infrastructure::oauth::begin_authorization(provider, &email).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = tx
+                            .send(OAuthLoginProgress::Failed {
+                                message: e.to_string(),
+                            })
+                            .await;
+                        return;
+                    }
+                };
             if tx
                 .send(OAuthLoginProgress::AwaitingBrowser { authorize_url })
                 .await
@@ -61,7 +69,11 @@ impl OAuthChallengeManager {
             let secrets = match result {
                 Ok(Ok(secrets)) => secrets,
                 Ok(Err(e)) => {
-                    let _ = tx.send(OAuthLoginProgress::Failed { message: e.to_string() }).await;
+                    let _ = tx
+                        .send(OAuthLoginProgress::Failed {
+                            message: e.to_string(),
+                        })
+                        .await;
                     return;
                 }
                 Err(_) => {
@@ -75,14 +87,18 @@ impl OAuthChallengeManager {
             };
 
             let verified = verify_imap_login(provider, &email, &secrets.access_token).await;
-            if let Err(message) = store_tokens(secret_store.as_ref(), &email, provider, secrets, verified) {
+            if let Err(message) =
+                store_tokens(secret_store.as_ref(), &email, provider, secrets, verified)
+            {
                 let _ = tx.send(OAuthLoginProgress::Failed { message }).await;
                 return;
             }
 
             if let Err(e) = append_oauth_account(&config_path, &name, &email, provider) {
                 let _ = tx
-                    .send(OAuthLoginProgress::Failed { message: format!("writing account to config: {e}") })
+                    .send(OAuthLoginProgress::Failed {
+                        message: format!("writing account to config: {e}"),
+                    })
                     .await;
                 return;
             }
@@ -96,7 +112,11 @@ impl OAuthChallengeManager {
 
 /// The provider grants consent for whichever account the browser picked, which
 /// need not be `email`; only an IMAP login as `email` proves the token fits it.
-async fn verify_imap_login(provider: OAuthProvider, email: &str, access_token: &str) -> Result<(), DomainError> {
+async fn verify_imap_login(
+    provider: OAuthProvider,
+    email: &str,
+    access_token: &str,
+) -> Result<(), DomainError> {
     let preset = mc_infrastructure::oauth::provider_preset(provider);
     ImapEmailProvider::new(
         preset.imap_host.into(),
@@ -123,8 +143,12 @@ fn store_tokens(
     match verified {
         Ok(()) => {}
         // Google asks for something first (a browser login…): say what, in its words.
-        Err(DomainError::AuthenticationFailed(detail)) if mc_infrastructure::email::imap::asks_the_user_to_act(&detail) => {
-            return Err(format!("{provider:?} chiede un'azione prima dell'accesso: {detail}"));
+        Err(DomainError::AuthenticationFailed(detail))
+            if mc_infrastructure::email::imap::asks_the_user_to_act(&detail) =>
+        {
+            return Err(format!(
+                "{provider:?} chiede un'azione prima dell'accesso: {detail}"
+            ));
         }
         Err(DomainError::AuthenticationFailed(detail)) => {
             tracing::warn!(%email, %detail, "IMAP rejected the newly granted OAuth token");
@@ -132,7 +156,9 @@ fn store_tokens(
                 "{provider:?} ha autorizzato un account diverso da {email}: rifai il login scegliendo {email}"
             ));
         }
-        Err(e) => tracing::warn!(%email, error = %e, "could not verify the new OAuth token over IMAP, storing it anyway"),
+        Err(e) => {
+            tracing::warn!(%email, error = %e, "could not verify the new OAuth token over IMAP, storing it anyway")
+        }
     }
     let mut bundle = secret_store
         .load(email)
@@ -265,17 +291,31 @@ mod tests {
     }
 
     fn tokens(access_token: &str) -> OAuthSecrets {
-        OAuthSecrets { access_token: access_token.into(), refresh_token: "r".into(), expires_at: chrono::Utc::now() }
+        OAuthSecrets {
+            access_token: access_token.into(),
+            refresh_token: "r".into(),
+            expires_at: chrono::Utc::now(),
+        }
     }
 
     #[test]
     fn rejected_verification_leaves_keychain_untouched() {
         let store = MockStore::default();
-        let old = AccountSecrets { oauth: Some(tokens("old")), ..Default::default() };
+        let old = AccountSecrets {
+            oauth: Some(tokens("old")),
+            ..Default::default()
+        };
         store.store("me@gmail.com", &old).unwrap();
 
         let rejected = Err(DomainError::AuthenticationFailed("400".into()));
-        let err = store_tokens(&store, "me@gmail.com", OAuthProvider::Google, tokens("new"), rejected).unwrap_err();
+        let err = store_tokens(
+            &store,
+            "me@gmail.com",
+            OAuthProvider::Google,
+            tokens("new"),
+            rejected,
+        )
+        .unwrap_err();
 
         assert!(err.contains("me@gmail.com"));
         assert_eq!(store.load("me@gmail.com").unwrap(), Some(old));
@@ -285,10 +325,22 @@ mod tests {
     fn a_google_alert_is_shown_in_its_own_words() {
         let store = MockStore::default();
 
-        let alert = Err(DomainError::AuthenticationFailed("Please log in via your web browser: https://x (Failure)".into()));
-        let err = store_tokens(&store, "me@gmail.com", OAuthProvider::Google, tokens("new"), alert).unwrap_err();
+        let alert = Err(DomainError::AuthenticationFailed(
+            "Please log in via your web browser: https://x (Failure)".into(),
+        ));
+        let err = store_tokens(
+            &store,
+            "me@gmail.com",
+            OAuthProvider::Google,
+            tokens("new"),
+            alert,
+        )
+        .unwrap_err();
 
-        assert!(err.contains("Please log in via your web browser") && !err.contains("diverso"), "{err}");
+        assert!(
+            err.contains("Please log in via your web browser") && !err.contains("diverso"),
+            "{err}"
+        );
         assert_eq!(store.load("me@gmail.com").unwrap(), None);
     }
 
@@ -297,7 +349,14 @@ mod tests {
         let store = MockStore::default();
 
         let offline = Err(DomainError::Provider("TCP connection failed".into()));
-        store_tokens(&store, "me@gmail.com", OAuthProvider::Google, tokens("new"), offline).unwrap();
+        store_tokens(
+            &store,
+            "me@gmail.com",
+            OAuthProvider::Google,
+            tokens("new"),
+            offline,
+        )
+        .unwrap();
 
         let stored = store.load("me@gmail.com").unwrap().unwrap().oauth.unwrap();
         assert_eq!(stored.access_token, "new");
@@ -313,7 +372,8 @@ mod tests {
         std::fs::write(&path, "grpc_addr = \"127.0.0.1:50051\"\n").unwrap();
         let manager = OAuthChallengeManager::new(path, Arc::new(MockStore::default()));
 
-        let mut rx = manager.start_login("Work".into(), "me@gmail.com".into(), OAuthProvider::Google);
+        let mut rx =
+            manager.start_login("Work".into(), "me@gmail.com".into(), OAuthProvider::Google);
         match rx.recv().await {
             Some(OAuthLoginProgress::AwaitingBrowser { authorize_url }) => {
                 assert!(authorize_url.contains("accounts.google.com"));

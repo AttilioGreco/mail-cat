@@ -197,7 +197,10 @@ pub enum Existing {
     /// from it is gone.
     Snapshot(Vec<(RemoteId, Vec<Flag>)>),
     /// Only what changed since the cursor.
-    Delta { changed: Vec<(RemoteId, Vec<Flag>)>, removed: Vec<RemoteId> },
+    Delta {
+        changed: Vec<(RemoteId, Vec<Flag>)>,
+        removed: Vec<RemoteId>,
+    },
 }
 
 /// Message counts as the server reports them.

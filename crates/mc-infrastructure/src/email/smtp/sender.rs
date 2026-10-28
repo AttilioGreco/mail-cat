@@ -1,23 +1,23 @@
 use std::sync::Arc;
 
 use lettre::{
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::{
-        header::{ContentType, HeaderName, HeaderValue},
         Attachment, Mailbox, MultiPart, SinglePart,
+        header::{ContentType, HeaderName, HeaderValue},
     },
     transport::smtp::{
         authentication::{Credentials, Mechanism},
         response::{Category, Code, Detail, Severity},
     },
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use mc_domain::{
     error::DomainError,
-    traits::login_gate::{login_with, LoginGate, LoginSecret},
     model::{
         account::{SmtpConnectionConfig, SmtpSecurity},
         message::{Address, OutgoingAttachment, OutgoingMessage},
     },
+    traits::login_gate::{LoginGate, LoginSecret, login_with},
 };
 /// Async SMTP sender. `Static` builds its transport once at startup, for an
 /// SMTP password of its own. `Gated` logs in with the account's gate secret
@@ -55,18 +55,28 @@ impl SmtpSender {
 
         let builder = Self::transport_builder(&config.host, config.security)?;
         let transport = builder.port(config.port).credentials(creds).build();
-        Ok(Self { backend: SmtpBackend::Static(transport), gate })
+        Ok(Self {
+            backend: SmtpBackend::Static(transport),
+            gate,
+        })
     }
 
     /// A sender that logs in with the account's own credential from its gate:
     /// a refused OAuth token gets the forced refresh and one retry.
-    pub fn build_gated(config: &SmtpConnectionConfig, fallback_username: &str, gate: Arc<dyn LoginGate>) -> Self {
+    pub fn build_gated(
+        config: &SmtpConnectionConfig,
+        fallback_username: &str,
+        gate: Arc<dyn LoginGate>,
+    ) -> Self {
         Self {
             backend: SmtpBackend::Gated {
                 host: config.host.clone(),
                 port: config.port,
                 security: config.security,
-                username: config.username.clone().unwrap_or_else(|| fallback_username.to_owned()),
+                username: config
+                    .username
+                    .clone()
+                    .unwrap_or_else(|| fallback_username.to_owned()),
             },
             gate,
         }
@@ -93,7 +103,9 @@ impl SmtpSender {
     ) -> Result<AsyncSmtpTransport<Tokio1Executor>, DomainError> {
         let builder = Self::transport_builder(host, security)?.port(port);
         Ok(match secret {
-            LoginSecret::Password(password) => builder.credentials(Credentials::new(username.to_owned(), password)),
+            LoginSecret::Password(password) => {
+                builder.credentials(Credentials::new(username.to_owned(), password))
+            }
             LoginSecret::OAuthToken(token) => builder
                 .credentials(Credentials::new(username.to_owned(), token))
                 .authentication(vec![Mechanism::Xoauth2]),
@@ -105,10 +117,18 @@ impl SmtpSender {
     pub async fn test_connection(&self) -> Result<bool, DomainError> {
         let context = "SMTP connection test failed";
         match &self.backend {
-            SmtpBackend::Static(t) => {
-                noted(self.gate.as_ref(), t.test_connection().await.map_err(|e| smtp_error(context, &e, false)))
-            }
-            SmtpBackend::Gated { host, port, security, username } => {
+            SmtpBackend::Static(t) => noted(
+                self.gate.as_ref(),
+                t.test_connection()
+                    .await
+                    .map_err(|e| smtp_error(context, &e, false)),
+            ),
+            SmtpBackend::Gated {
+                host,
+                port,
+                security,
+                username,
+            } => {
                 login_with(&SmtpView(self.gate.as_ref()), |secret| async move {
                     let oauth = matches!(secret, LoginSecret::OAuthToken(_));
                     Self::gated_transport(host, *port, *security, username, secret)?
@@ -130,9 +150,20 @@ impl SmtpSender {
         match &self.backend {
             SmtpBackend::Static(t) => {
                 let gate = self.gate.as_ref();
-                noted(gate, t.send(email).await.map(drop).map_err(|e| sent_error(gate, context, &e, false)))
+                noted(
+                    gate,
+                    t.send(email)
+                        .await
+                        .map(drop)
+                        .map_err(|e| sent_error(gate, context, &e, false)),
+                )
             }
-            SmtpBackend::Gated { host, port, security, username } => {
+            SmtpBackend::Gated {
+                host,
+                port,
+                security,
+                username,
+            } => {
                 let gate = self.gate.as_ref();
                 login_with(&SmtpView(gate), |secret| {
                     let email = email.clone();
@@ -175,7 +206,9 @@ impl LoginGate for SmtpView<'_> {
     }
 
     async fn login_failed(&self, secret: &LoginSecret, error: &DomainError, retried: bool) -> bool {
-        let DomainError::AuthenticationFailed(why) = error else { return false };
+        let DomainError::AuthenticationFailed(why) = error else {
+            return false;
+        };
         self.0.smtp_login(Some(why.clone()));
         // The token is shared with IMAP: a refused one may be refreshed once.
         !retried && self.0.smtp_token_refused(secret).await
@@ -192,9 +225,16 @@ impl LoginGate for SmtpView<'_> {
 
 /// A send that failed after the login (a refused recipient, a full mailbox)
 /// still proves the SMTP login works, so its earlier refusal is cleared.
-fn sent_error(gate: &dyn LoginGate, context: &str, e: &lettre::transport::smtp::Error, oauth: bool) -> DomainError {
+fn sent_error(
+    gate: &dyn LoginGate,
+    context: &str,
+    e: &lettre::transport::smtp::Error,
+    oauth: bool,
+) -> DomainError {
     // Replies outside the 53x authentication family come from MAIL/RCPT/DATA.
-    if e.status().is_some_and(|code| code.category != Category::Unspecified3) {
+    if e.status()
+        .is_some_and(|code| code.category != Category::Unspecified3)
+    {
         gate.smtp_login(None);
     }
     smtp_error(context, e, oauth)
@@ -213,12 +253,15 @@ fn smtp_error(context: &str, e: &lettre::transport::smtp::Error, oauth: bool) ->
     let message = format!("{context}: {e}");
     // A refused XOAUTH2 token comes back as a 334 error challenge, which lettre
     // fails on client-side before anything else is sent.
-    let refused_token = oauth && e.is_client() && e.to_string().contains("does not expect a challenge");
+    let refused_token =
+        oauth && e.is_client() && e.to_string().contains("does not expect a challenge");
     if refused_token || e.status().is_some_and(rejects_credentials) {
         DomainError::AuthenticationFailed(message)
     } else if e.is_timeout() {
         DomainError::ConnectionTimeout(message)
-    } else if e.is_tls() || !(e.is_response() || e.is_client() || e.is_transient() || e.is_permanent()) {
+    } else if e.is_tls()
+        || !(e.is_response() || e.is_client() || e.is_transient() || e.is_permanent())
+    {
         DomainError::ConnectionFailed(message)
     } else {
         DomainError::Provider(message)
@@ -269,7 +312,8 @@ fn build_message(msg: &OutgoingMessage, keep_bcc: bool) -> Result<Message, Domai
     }
 
     let text = SinglePart::plain(msg.body_text.clone().unwrap_or_default());
-    let build_err = |e: lettre::error::Error| DomainError::Provider(format!("SMTP message build error: {e}"));
+    let build_err =
+        |e: lettre::error::Error| DomainError::Provider(format!("SMTP message build error: {e}"));
 
     let (inline, attached): (Vec<_>, Vec<_>) = msg
         .attachments
@@ -282,7 +326,9 @@ fn build_message(msg: &OutgoingMessage, keep_bcc: bool) -> Result<Message, Domai
         }
         let mixed = attached
             .into_iter()
-            .fold(MultiPart::mixed().singlepart(text), |mp, a| mp.singlepart(attachment_part(a)));
+            .fold(MultiPart::mixed().singlepart(text), |mp, a| {
+                mp.singlepart(attachment_part(a))
+            });
         return builder.multipart(mixed).map_err(build_err);
     };
 
@@ -294,14 +340,18 @@ fn build_message(msg: &OutgoingMessage, keep_bcc: bool) -> Result<Message, Domai
     } else {
         inline
             .into_iter()
-            .fold(MultiPart::related().multipart(alternative), |mp, a| mp.singlepart(attachment_part(a)))
+            .fold(MultiPart::related().multipart(alternative), |mp, a| {
+                mp.singlepart(attachment_part(a))
+            })
     };
     let body = if attached.is_empty() {
         content
     } else {
         attached
             .into_iter()
-            .fold(MultiPart::mixed().multipart(content), |mp, a| mp.singlepart(attachment_part(a)))
+            .fold(MultiPart::mixed().multipart(content), |mp, a| {
+                mp.singlepart(attachment_part(a))
+            })
     };
     builder.multipart(body).map_err(build_err)
 }
@@ -317,11 +367,9 @@ fn attachment_part(a: &OutgoingAttachment) -> SinglePart {
 }
 
 fn to_mailbox(addr: &Address) -> Result<Mailbox, DomainError> {
-    let email: lettre::Address = addr
-        .email
-        .as_str()
-        .parse()
-        .map_err(|e| DomainError::Provider(format!("Indirizzo non valido '{}': {e}", addr.email)))?;
+    let email: lettre::Address = addr.email.as_str().parse().map_err(|e| {
+        DomainError::Provider(format!("Indirizzo non valido '{}': {e}", addr.email))
+    })?;
     Ok(Mailbox::new(addr.name.clone(), email))
 }
 

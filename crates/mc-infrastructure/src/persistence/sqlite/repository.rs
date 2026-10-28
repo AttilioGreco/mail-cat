@@ -18,9 +18,10 @@ use mc_domain::{
     AccountWriteRepository, Address, AggregateType, BackfillEntry, BodyBackfillQueue, Contact,
     ContactId, ContactReadRepository, ContactSummary, ContactWriteRepository, Conversation,
     ConversationReadRepository, ConversationSummary, DomainError, DomainEvent, EmailAddress,
-    Envelope, EventEnvelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, MailboxType, Membership, Message,
-    MessageBodyStore, MessageId, MessageReadRepository, MessageSummary, ProjectionCheckpoint,
-    ReadModelProjector, RemoteId, SuggestScope, Suggestion, SyncCursor, SyncCursorStore, ThreadId,
+    Envelope, EventEnvelope, EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository,
+    MailboxType, Membership, Message, MessageBodyStore, MessageId, MessageReadRepository,
+    MessageSummary, ProjectionCheckpoint, ReadModelProjector, RemoteId, SuggestScope, Suggestion,
+    SyncCursor, SyncCursorStore, ThreadId,
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
@@ -58,7 +59,8 @@ impl SqliteRepository {
             .append(&aggregate_id, aggregate_type, expected, events.clone())
             .await?;
         for (sequence, event) in (last + 1 - count..).zip(events) {
-            let envelope = EventEnvelope::new(aggregate_id.clone(), aggregate_type, sequence, event);
+            let envelope =
+                EventEnvelope::new(aggregate_id.clone(), aggregate_type, sequence, event);
             ReadModelProjector::project(self, &envelope).await?;
         }
         Ok(())
@@ -70,8 +72,11 @@ impl SqliteRepository {
 /// Unix nanoseconds, like the event log, so timestamps round-trip exactly.
 /// Dates outside 1677–2262 only come from broken headers; they clamp.
 pub(super) fn nanos(t: DateTime<Utc>) -> i64 {
-    t.timestamp_nanos_opt()
-        .unwrap_or(if t.timestamp() < 0 { i64::MIN } else { i64::MAX })
+    t.timestamp_nanos_opt().unwrap_or(if t.timestamp() < 0 {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
 }
 
 pub(super) fn sql_int(v: u64) -> i64 {
@@ -150,7 +155,11 @@ impl Addresses {
 
 // ── SQL helpers ─────────────────────────────────────────────────────────
 
-pub(super) fn exec(conn: &Connection, sql: &str, params: impl Params) -> Result<usize, DomainError> {
+pub(super) fn exec(
+    conn: &Connection,
+    sql: &str,
+    params: impl Params,
+) -> Result<usize, DomainError> {
     conn.prepare_cached(sql)
         .and_then(|mut stmt| stmt.execute(params))
         .map_err(repo_err)
@@ -209,7 +218,11 @@ pub(super) fn store_body(
 /// best stored copy has, each given that body: blobs are copied, not shared,
 /// so every copy keeps its own row and is deleted with it. Copies are of one
 /// message only if size and sender agree too; anyone can reuse a Message-ID.
-fn share_body(conn: &Connection, account: Uuid, rfc_id: &str) -> Result<Vec<(MessageId, bool)>, DomainError> {
+fn share_body(
+    conn: &Connection,
+    account: Uuid,
+    rfc_id: &str,
+) -> Result<Vec<(MessageId, bool)>, DomainError> {
     let rows = query_all(
         conn,
         "SELECT m.id, m.body_state = 'pending', b.truncated, m.size_bytes, m.from_email FROM messages m \
@@ -217,7 +230,11 @@ fn share_body(conn: &Connection, account: Uuid, rfc_id: &str) -> Result<Vec<(Mes
          WHERE m.account_id = ?1 AND m.rfc_message_id = ?2",
         params![account, rfc_id],
         |r| {
-            let copy = (r.get::<_, Uuid>(0)?, r.get::<_, bool>(1)?, r.get::<_, Option<bool>>(2)?);
+            let copy = (
+                r.get::<_, Uuid>(0)?,
+                r.get::<_, bool>(1)?,
+                r.get::<_, Option<bool>>(2)?,
+            );
             Ok(((r.get::<_, i64>(3)?, r.get::<_, String>(4)?), copy))
         },
     )?;
@@ -336,8 +353,12 @@ fn memberships_col(row: &Row, idx: usize) -> rusqlite::Result<Vec<Membership>> {
     let mut memberships = rows
         .into_iter()
         .map(|(mailbox, remote_id)| {
-            let mailbox = Uuid::parse_str(&mailbox).map_err(|e| conversion_err(idx, Type::Text, e))?;
-            Ok(Membership { mailbox_id: MailboxId::from_uuid(mailbox), remote_id: remote_id.map(RemoteId::from) })
+            let mailbox =
+                Uuid::parse_str(&mailbox).map_err(|e| conversion_err(idx, Type::Text, e))?;
+            Ok(Membership {
+                mailbox_id: MailboxId::from_uuid(mailbox),
+                remote_id: remote_id.map(RemoteId::from),
+            })
         })
         .collect::<rusqlite::Result<Vec<_>>>()?;
     memberships.sort_by_key(|m| *m.mailbox_id.as_uuid());
@@ -353,13 +374,22 @@ fn message_with_body(row: &Row) -> rusqlite::Result<Message> {
 }
 
 fn summary_of(m: Message) -> MessageSummary {
-    let Envelope { from, to, cc, subject, .. } = m.envelope;
+    let Envelope {
+        from,
+        to,
+        cc,
+        subject,
+        ..
+    } = m.envelope;
     let sender = from.into_iter().next();
     MessageSummary {
         id: m.id,
         account_id: m.account_id,
         memberships: m.memberships,
-        from_email: sender.as_ref().map(|a| a.email.to_string()).unwrap_or_default(),
+        from_email: sender
+            .as_ref()
+            .map(|a| a.email.to_string())
+            .unwrap_or_default(),
         from_name: sender.and_then(|a| a.name),
         to: to.into_iter().map(|a| a.email.to_string()).collect(),
         cc: cc.into_iter().map(|a| a.email.to_string()).collect(),
@@ -375,8 +405,7 @@ fn summary_from_row(row: &Row) -> rusqlite::Result<MessageSummary> {
     message_from_row(row).map(summary_of)
 }
 
-const SELECT_ACCOUNT: &str =
-    "SELECT id, name, email, provider_type, status, total_unread, status_error, status_since FROM accounts";
+const SELECT_ACCOUNT: &str = "SELECT id, name, email, provider_type, status, total_unread, status_error, status_since FROM accounts";
 
 fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
     Ok(AccountSummary {
@@ -387,7 +416,9 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
         status: json_col(row, 4)?,
         total_unread: row.get(5)?,
         status_error: row.get(6)?,
-        status_since: row.get::<_, Option<i64>>(7)?.map(DateTime::from_timestamp_nanos),
+        status_since: row
+            .get::<_, Option<i64>>(7)?
+            .map(DateTime::from_timestamp_nanos),
     })
 }
 
@@ -464,7 +495,9 @@ fn contact_from_row(row: &Row, at: usize) -> rusqlite::Result<ContactSummary> {
         emails: json_col(row, at + 3)?,
         organization: row.get(at + 4)?,
         source: json_col(row, at + 5)?,
-        account_scope: row.get::<_, Option<Uuid>>(at + 6)?.map(AccountId::from_uuid),
+        account_scope: row
+            .get::<_, Option<Uuid>>(at + 6)?
+            .map(AccountId::from_uuid),
     })
 }
 
@@ -541,7 +574,10 @@ const SUGGEST_SUBJECT: (&str, &str) = (
 );
 
 fn page_bounds(pagination: &Pagination) -> (i64, i64) {
-    (i64::from(pagination.page_size), sql_int(pagination.offset()))
+    (
+        i64::from(pagination.page_size),
+        sql_int(pagination.offset()),
+    )
 }
 
 // ── Write side ──────────────────────────────────────────────────────────
@@ -549,7 +585,8 @@ fn page_bounds(pagination: &Pagination) -> (i64, i64) {
 #[async_trait]
 impl AccountWriteRepository for SqliteRepository {
     async fn save(&self, account: &Account, events: Vec<DomainEvent>) -> Result<(), DomainError> {
-        self.append_and_project(account.id.to_string(), AggregateType::Account, events).await
+        self.append_and_project(account.id.to_string(), AggregateType::Account, events)
+            .await
     }
 
     async fn load(&self, id: &AccountId) -> Result<Option<Account>, DomainError> {
@@ -565,7 +602,8 @@ impl AccountWriteRepository for SqliteRepository {
 #[async_trait]
 impl ContactWriteRepository for SqliteRepository {
     async fn save(&self, contact: &Contact, events: Vec<DomainEvent>) -> Result<(), DomainError> {
-        self.append_and_project(contact.id.to_string(), AggregateType::Contact, events).await
+        self.append_and_project(contact.id.to_string(), AggregateType::Contact, events)
+            .await
     }
 
     async fn load(&self, id: &ContactId) -> Result<Option<Contact>, DomainError> {
@@ -609,7 +647,11 @@ impl ProjectionCheckpoint for SqliteRepository {
 
 #[async_trait]
 impl SyncCursorStore for SqliteRepository {
-    async fn get_cursor(&self, account_id: &AccountId, collection: &str) -> Result<Option<SyncCursor>, DomainError> {
+    async fn get_cursor(
+        &self,
+        account_id: &AccountId,
+        collection: &str,
+    ) -> Result<Option<SyncCursor>, DomainError> {
         let (account, collection) = (*account_id.as_uuid(), collection.to_owned());
         self.db
             .read(move |conn| {
@@ -624,8 +666,17 @@ impl SyncCursorStore for SqliteRepository {
             .map(|cursor| cursor.map(SyncCursor::new))
     }
 
-    async fn put_cursor(&self, account_id: &AccountId, collection: &str, cursor: &SyncCursor) -> Result<(), DomainError> {
-        let (account, collection, cursor) = (*account_id.as_uuid(), collection.to_owned(), cursor.to_string());
+    async fn put_cursor(
+        &self,
+        account_id: &AccountId,
+        collection: &str,
+        cursor: &SyncCursor,
+    ) -> Result<(), DomainError> {
+        let (account, collection, cursor) = (
+            *account_id.as_uuid(),
+            collection.to_owned(),
+            cursor.to_string(),
+        );
         self.db
             .write(move |conn| {
                 exec(
@@ -639,7 +690,11 @@ impl SyncCursorStore for SqliteRepository {
             .await
     }
 
-    async fn delete_cursor(&self, account_id: &AccountId, collection: &str) -> Result<(), DomainError> {
+    async fn delete_cursor(
+        &self,
+        account_id: &AccountId,
+        collection: &str,
+    ) -> Result<(), DomainError> {
         let (account, collection) = (*account_id.as_uuid(), collection.to_owned());
         self.db
             .write(move |conn| {
@@ -666,7 +721,14 @@ impl MessageBodyStore for SqliteRepository {
         let id = *message_id;
         self.db
             .write(move |conn| {
-                store_body(conn, &id, body_text.as_deref(), body_html.as_deref(), truncated, Utc::now())
+                store_body(
+                    conn,
+                    &id,
+                    body_text.as_deref(),
+                    body_html.as_deref(),
+                    truncated,
+                    Utc::now(),
+                )
             })
             .await
     }
@@ -677,8 +739,11 @@ impl MessageBodyStore for SqliteRepository {
         rfc_message_ids: &[String],
     ) -> Result<Vec<(MessageId, bool)>, DomainError> {
         // An empty `<>` would pair unrelated messages.
-        let rfc_ids: Vec<String> =
-            rfc_message_ids.iter().filter(|id| !id.trim_matches(['<', '>', ' ']).is_empty()).cloned().collect();
+        let rfc_ids: Vec<String> = rfc_message_ids
+            .iter()
+            .filter(|id| !id.trim_matches(['<', '>', ' ']).is_empty())
+            .cloned()
+            .collect();
         if rfc_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -751,7 +816,11 @@ impl BodyBackfillQueue for SqliteRepository {
         let account = *account_id.as_uuid();
         self.db
             .read(move |conn| {
-                count_rows(conn, &format!("SELECT COUNT(DISTINCT m.id) {BACKFILLABLE}"), [account])
+                count_rows(
+                    conn,
+                    &format!("SELECT COUNT(DISTINCT m.id) {BACKFILLABLE}"),
+                    [account],
+                )
                 .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
             })
             .await
@@ -791,7 +860,10 @@ impl DownloadMeter {
 
     /// Keyed like the stored account, which `EmailAddress` lowercases.
     pub fn new(db: Arc<SqliteDb>, account_email: &str) -> Self {
-        Self { db, account_email: account_email.trim().to_lowercase() }
+        Self {
+            db,
+            account_email: account_email.trim().to_lowercase(),
+        }
     }
 
     /// Never fails the download it measures: a lost row only under-counts.
@@ -829,14 +901,26 @@ impl AccountReadRepository for SqliteRepository {
         let id = *id.as_uuid();
         self.db
             .read(move |conn| {
-                query_one(conn, &format!("{SELECT_ACCOUNT} WHERE id = ?1"), [id], account_from_row)
+                query_one(
+                    conn,
+                    &format!("{SELECT_ACCOUNT} WHERE id = ?1"),
+                    [id],
+                    account_from_row,
+                )
             })
             .await
     }
 
     async fn list_accounts(&self) -> Result<Vec<AccountSummary>, DomainError> {
         self.db
-            .read(|conn| query_all(conn, &format!("{SELECT_ACCOUNT} ORDER BY id"), [], account_from_row))
+            .read(|conn| {
+                query_all(
+                    conn,
+                    &format!("{SELECT_ACCOUNT} ORDER BY id"),
+                    [],
+                    account_from_row,
+                )
+            })
             .await
     }
 
@@ -872,7 +956,12 @@ impl MailboxReadRepository for SqliteRepository {
         let id = *id.as_uuid();
         self.db
             .read(move |conn| {
-                query_one(conn, &format!("{SELECT_MAILBOX} WHERE id = ?1"), [id], mailbox_from_row)
+                query_one(
+                    conn,
+                    &format!("{SELECT_MAILBOX} WHERE id = ?1"),
+                    [id],
+                    mailbox_from_row,
+                )
             })
             .await
     }
@@ -898,7 +987,12 @@ impl MessageReadRepository for SqliteRepository {
         let id = *id.as_uuid();
         self.db
             .read(move |conn| {
-                query_one(conn, &select_messages_with_body("WHERE m.id = ?1"), [id], message_with_body)
+                query_one(
+                    conn,
+                    &select_messages_with_body("WHERE m.id = ?1"),
+                    [id],
+                    message_with_body,
+                )
             })
             .await
     }
@@ -1005,7 +1099,10 @@ impl MessageReadRepository for SqliteRepository {
         Ok(held.into_iter().map(RemoteId::from).collect())
     }
 
-    async fn pending_messages(&self, mailbox_id: &MailboxId) -> Result<Vec<MessageId>, DomainError> {
+    async fn pending_messages(
+        &self,
+        mailbox_id: &MailboxId,
+    ) -> Result<Vec<MessageId>, DomainError> {
         let mailbox = *mailbox_id.as_uuid();
         let ids = self
             .db
@@ -1085,7 +1182,12 @@ impl MessageReadRepository for SqliteRepository {
     ) -> Result<Vec<Suggestion>, DomainError> {
         let fields: &[(&str, &str)] = match scope {
             _ if prefix.is_empty() => &[],
-            None => &[SUGGEST_FROM_EMAIL, SUGGEST_FROM_NAME, SUGGEST_TO, SUGGEST_SUBJECT],
+            None => &[
+                SUGGEST_FROM_EMAIL,
+                SUGGEST_FROM_NAME,
+                SUGGEST_TO,
+                SUGGEST_SUBJECT,
+            ],
             Some(SuggestScope::From) => &[SUGGEST_FROM_EMAIL, SUGGEST_FROM_NAME],
             Some(SuggestScope::To) => &[SUGGEST_TO],
             Some(SuggestScope::Subject) => &[SUGGEST_SUBJECT],
@@ -1143,7 +1245,11 @@ impl ConversationReadRepository for SqliteRepository {
             .read(move |conn| {
                 let (total, items) = match mailbox {
                     None => (
-                        count_rows(conn, "SELECT COUNT(*) FROM conversations WHERE account_id = ?1", [account])?,
+                        count_rows(
+                            conn,
+                            "SELECT COUNT(*) FROM conversations WHERE account_id = ?1",
+                            [account],
+                        )?,
                         query_all(
                             conn,
                             &format!(
@@ -1203,7 +1309,9 @@ impl ContactReadRepository for SqliteRepository {
         let id = *id.as_uuid();
         self.db
             .read(move |conn| {
-                query_one(conn, &select_contacts("WHERE c.id = ?1"), [id], |r| contact_from_row(r, 0))
+                query_one(conn, &select_contacts("WHERE c.id = ?1"), [id], |r| {
+                    contact_from_row(r, 0)
+                })
             })
             .await
     }
@@ -1228,7 +1336,10 @@ impl ContactReadRepository for SqliteRepository {
             .await
     }
 
-    async fn find_by_email(&self, email: &EmailAddress) -> Result<Vec<ContactSummary>, DomainError> {
+    async fn find_by_email(
+        &self,
+        email: &EmailAddress,
+    ) -> Result<Vec<ContactSummary>, DomainError> {
         let email = email.as_str().to_owned();
         self.db
             .read(move |conn| {

@@ -265,7 +265,7 @@ impl ImapEmailProvider {
                 flags: Vec::new(),
                 total_messages: 0,
                 unread_messages: 0,
-                            };
+            };
 
             mailboxes.push(mailbox);
         }

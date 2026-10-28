@@ -4,7 +4,7 @@
 pub mod loopback;
 mod presets;
 
-pub use presets::{provider_preset, ProviderPreset};
+pub use presets::{ProviderPreset, provider_preset};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use mc_domain::{DomainError, OAuthProvider, OAuthSecrets};
@@ -34,9 +34,9 @@ pub async fn begin_authorization(
     login_hint: &str,
 ) -> Result<(String, PendingLogin), DomainError> {
     let preset = provider_preset(provider);
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| DomainError::Provider(format!("failed to bind OAuth loopback listener: {e}")))?;
+    let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| {
+        DomainError::Provider(format!("failed to bind OAuth loopback listener: {e}"))
+    })?;
     let port = listener
         .local_addr()
         .map_err(|e| DomainError::Provider(format!("failed to read loopback port: {e}")))?
@@ -73,7 +73,12 @@ pub async fn begin_authorization(
 
     Ok((
         authorize_url.to_string(),
-        PendingLogin { client, pkce_verifier, csrf_token, listener },
+        PendingLogin {
+            client,
+            pkce_verifier,
+            csrf_token,
+            listener,
+        },
     ))
 }
 
@@ -82,7 +87,9 @@ pub async fn begin_authorization(
 pub async fn complete_authorization(pending: PendingLogin) -> Result<OAuthSecrets, DomainError> {
     let (code, state) = loopback::accept_one_redirect(&pending.listener).await?;
     if state != *pending.csrf_token.secret() {
-        return Err(DomainError::Provider("OAuth state mismatch — possible CSRF".into()));
+        return Err(DomainError::Provider(
+            "OAuth state mismatch — possible CSRF".into(),
+        ));
     }
 
     let token = pending
@@ -97,7 +104,10 @@ pub async fn complete_authorization(pending: PendingLogin) -> Result<OAuthSecret
 }
 
 /// Exchanges a refresh token for a fresh access token.
-pub async fn refresh(provider: OAuthProvider, refresh_token: &str) -> Result<OAuthSecrets, DomainError> {
+pub async fn refresh(
+    provider: OAuthProvider,
+    refresh_token: &str,
+) -> Result<OAuthSecrets, DomainError> {
     let preset = provider_preset(provider);
     let client = BasicClient::new(
         ClientId::new(preset.client_id()),
@@ -128,13 +138,20 @@ pub async fn refresh(provider: OAuthProvider, refresh_token: &str) -> Result<OAu
 /// full user re-auth) and a refused app (a configuration problem) from a
 /// transient failure (network hiccup, timeout, provider 5xx — safe to retry).
 fn classify_refresh_error<RE: std::error::Error + 'static>(
-    e: oauth2::RequestTokenError<RE, oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>>,
+    e: oauth2::RequestTokenError<
+        RE,
+        oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>,
+    >,
 ) -> DomainError {
     use oauth2::basic::BasicErrorResponseType::{InvalidClient, InvalidGrant, UnauthorizedClient};
     match e {
         oauth2::RequestTokenError::ServerResponse(resp) => match resp.error() {
-            InvalidGrant => DomainError::AuthenticationFailed(format!("refresh token invalid or revoked: {resp}")),
-            InvalidClient | UnauthorizedClient => DomainError::OAuthClientInvalid(format!("{resp}")),
+            InvalidGrant => DomainError::AuthenticationFailed(format!(
+                "refresh token invalid or revoked: {resp}"
+            )),
+            InvalidClient | UnauthorizedClient => {
+                DomainError::OAuthClientInvalid(format!("{resp}"))
+            }
             _ => DomainError::Provider(format!("OAuth token refresh failed: {resp}")),
         },
         other => DomainError::Provider(format!("OAuth token refresh failed: {other}")),
@@ -144,12 +161,17 @@ fn classify_refresh_error<RE: std::error::Error + 'static>(
 fn token_response_to_secrets<TR: TokenResponse<oauth2::basic::BasicTokenType>>(
     token: &TR,
 ) -> Result<OAuthSecrets, DomainError> {
-    let expires_in = token.expires_in().unwrap_or(std::time::Duration::from_secs(3600));
+    let expires_in = token
+        .expires_in()
+        .unwrap_or(std::time::Duration::from_secs(3600));
     let expires_at: DateTime<Utc> =
         Utc::now() + ChronoDuration::from_std(expires_in).unwrap_or(ChronoDuration::hours(1));
     Ok(OAuthSecrets {
         access_token: token.access_token().secret().clone(),
-        refresh_token: token.refresh_token().map(|t| t.secret().clone()).unwrap_or_default(),
+        refresh_token: token
+            .refresh_token()
+            .map(|t| t.secret().clone())
+            .unwrap_or_default(),
         expires_at,
     })
 }
@@ -160,7 +182,9 @@ mod tests {
 
     #[tokio::test]
     async fn begin_authorization_builds_google_url_with_scope_and_pkce() {
-        let (url, _pending) = begin_authorization(OAuthProvider::Google, "me@gmail.com").await.unwrap();
+        let (url, _pending) = begin_authorization(OAuthProvider::Google, "me@gmail.com")
+            .await
+            .unwrap();
         assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth"));
         assert!(url.contains("code_challenge"));
         assert!(url.contains("mail.google.com"));
@@ -197,9 +221,14 @@ mod tests {
             let err: oauth2::RequestTokenError<
                 std::io::Error,
                 oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>,
-            > = oauth2::RequestTokenError::ServerResponse(oauth2::StandardErrorResponse::new(kind, None, None));
+            > = oauth2::RequestTokenError::ServerResponse(oauth2::StandardErrorResponse::new(
+                kind, None, None,
+            ));
 
-            assert!(matches!(classify_refresh_error(err), DomainError::OAuthClientInvalid(_)));
+            assert!(matches!(
+                classify_refresh_error(err),
+                DomainError::OAuthClientInvalid(_)
+            ));
         }
     }
 

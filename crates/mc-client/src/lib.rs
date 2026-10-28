@@ -1,4 +1,5 @@
 mod convert;
+#[allow(clippy::enum_variant_names)]
 mod proto {
     pub mod mail_cat {
         pub mod v1 {
