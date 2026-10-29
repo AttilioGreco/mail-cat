@@ -424,7 +424,111 @@ def jmap_write(w):
     wait(lambda: 30 in jmap_snapshot(bob)[1], "pushed mail to appear without `mc sync`", timeout=20)
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write]
+def jmap_labels(w):
+    """bob, a JMAP account on the Labels model, adds and removes mailbox labels
+    (one message row in several mailboxes), archives by dropping the Inbox
+    label, refuses to unfile a message entirely, and round-trips tags with
+    another client. Switching the model changes no data."""
+    bob = account_id("bob")
+    run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
+    jmap_sync_all(bob)
+    boxes, msgs = jmap_snapshot(bob)
+    inbox, archive, projects = (boxes[n]["id"] for n in ("Inbox", "Archive", "Projects"))
+
+    def server(path):
+        m = imapctl.connect("bob")
+        try:
+            return imapctl.messages(m, path)
+        finally:
+            m.logout()
+
+    def where(tag):
+        return sorted(p for p in ("INBOX", "Archive", "Projects")
+                      if any(imapctl.tag_of(x["subject"]) == tag for x in server(p)))
+
+    def msg(tag):
+        return msgs[tag][1]["id"]
+
+    def rows(tag):
+        mine = ("subject like '%[itest-{:03d}]%' and account_id = "
+                "(select id from accounts where name = 'bob')").format(tag)
+        return (db(f"select count(*) from messages where {mine}")[0],
+                db("select count(*) from message_mailboxes where message_id = "
+                   f"(select id from messages where {mine})")[0])
+
+    account = next(a for a in json.loads(mc("--json", "accounts", "list")) if a["id"] == bob)
+    if account["mailbox_model"] != "Labels":
+        raise Fail(f"bob's model is {account['mailbox_model']}, expected Labels")
+
+    mc("messages", "labels", msg(1), "--add", projects)
+    if where(1) != ["INBOX", "Projects"]:
+        raise Fail(f"tag 1 after adding a label: {where(1)}")
+    jmap_sync_all(bob)
+    if rows(1) != (1, 2):
+        raise Fail(f"tag 1 has (message rows, mailbox rows) {rows(1)}, expected (1, 2)")
+    jmap_sync_all(bob)
+    boxes, msgs = jmap_snapshot(bob)
+    if int(boxes["Projects"]["total_messages"]) != 2 or rows(1) != (1, 2):
+        raise Fail("syncing after a label change duplicated or lost a row")
+
+    mc("messages", "labels", msg(1), "--remove", projects)
+    if where(1) != ["INBOX"]:
+        raise Fail(f"tag 1 after removing the label: {where(1)}")
+    try:
+        mc("messages", "labels", msg(1), "--remove", inbox)
+    except Fail:
+        pass
+    else:
+        raise Fail("removing the last label was accepted")
+    if where(1) != ["INBOX"]:
+        raise Fail("a refused unfile still changed tag 1")
+
+    # Archive: a lone Inbox message goes to Archive; one with another label keeps it only.
+    mc("messages", "archive", msg(4))
+    if where(4) != ["Archive"]:
+        raise Fail(f"tag 4 after archive: {where(4)}")
+    mc("messages", "labels", msg(2), "--add", projects)
+    mc("messages", "archive", msg(2))
+    if where(2) != ["Projects"]:
+        raise Fail(f"tag 2 after archive: {where(2)}")
+    jmap_sync_all(bob)
+    if rows(4) != (1, 1) or rows(2) != (1, 1):
+        raise Fail(f"rows after archive: tag 4 {rows(4)}, tag 2 {rows(2)}")
+
+    # Tags round-trip through the other client.
+    def server_flags(tag):
+        return next(x["flags"] for p in ("INBOX", "Archive", "Projects") for x in server(p)
+                    if imapctl.tag_of(x["subject"]) == tag)
+
+    def tags(tag):
+        box = {1: inbox, 4: archive}[tag]
+        line = next(l for l in mc("messages", "show", msg(tag), "--mailbox", box).splitlines()
+                    if l.startswith("tags:"))
+        return line.split()[1:]
+
+    mc("messages", "tag", msg(1), "--add", "work")
+    wait(lambda: any(f.lower() == "work" for f in server_flags(1)), "tag work on the server")
+    imapctl.main(["--user", "bob", "store", "INBOX", "tag:1", "+phone"])
+    jmap_sync_all(bob)
+    if sorted(tags(1)) != ["phone", "work"]:
+        raise Fail(f"tags of tag 1 after the phone added one: {tags(1)}")
+    mc("messages", "tag", msg(1), "--remove", "work")
+    wait(lambda: not any(f.lower() == "work" for f in server_flags(1)), "tag work removed on the server")
+
+    # The model is presentation only.
+    before = jmap_snapshot(bob)[1]
+    mc("accounts", "set-model", "bob", "folders")
+    account = next(a for a in json.loads(mc("--json", "accounts", "list")) if a["id"] == bob)
+    if account["mailbox_model"] != "Folders" or account["supports_tags"] is not True:
+        raise Fail(f"after set-model folders: {account}")
+    after = jmap_snapshot(bob)[1]
+    if {t: (p, m["mailbox_ids"]) for t, (p, m) in before.items()} != \
+            {t: (p, m["mailbox_ids"]) for t, (p, m) in after.items()}:
+        raise Fail("switching the model changed stored data")
+    mc("accounts", "set-model", "bob", "labels")
+
+
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels]
 
 
 def fresh_world():
