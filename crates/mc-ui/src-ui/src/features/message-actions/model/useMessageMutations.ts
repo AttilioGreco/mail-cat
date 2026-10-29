@@ -276,6 +276,18 @@ export function useDeleteMessages() {
   });
 }
 
+/** Archive many messages. The backend applies the account's mailbox model:
+ *  move to Archive on Folders, drop the Inbox label on Labels. */
+export function useArchiveMessages() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (messageIds: string[]) => invoke<BulkResult>('archive_messages', { messageIds }),
+    onMutate: (messageIds) => removeFromLists(qc, messageIds),
+    onError: (_e, _ids, snapshot) => restoreLists(qc, snapshot),
+    onSettled: () => invalidateMessageViews(qc),
+  });
+}
+
 /** Move many messages to one mailbox in one provider round trip. */
 export function useMoveMessages() {
   const qc = useQueryClient();

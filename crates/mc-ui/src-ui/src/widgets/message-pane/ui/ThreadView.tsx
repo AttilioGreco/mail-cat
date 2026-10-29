@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useThread, type ThreadMessage } from '@/entities/conversation';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { formatDate, sourceMailbox } from '@/shared/lib/utils';
-import { useSetFlags, useDeleteMessage, useMoveMessage, useToggleStar } from '@/features/message-actions';
+import { useSetFlags, useDeleteMessage, useMoveMessage, useArchiveMessages, useToggleStar } from '@/features/message-actions';
 import { useMailboxes } from '@/entities/mailbox';
 import { useShortcuts } from '@/features/keyboard-shortcuts';
 import { useComposeStore, type ComposeMode } from '@/features/compose-message';
@@ -26,6 +26,7 @@ export function ThreadView() {
   const setFlags = useSetFlags();
   const deleteMsg = useDeleteMessage();
   const moveMsg = useMoveMessage();
+  const archive = useArchiveMessages();
   const toggleStar = useToggleStar();
   const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
   const qc = useQueryClient();
@@ -89,12 +90,9 @@ export function ThreadView() {
     if (targets.length >= (messages?.length ?? 0)) selectThread(null);
   }
 
-  /** Move every message of the thread to `kind`, if the account has that folder. */
-  async function moveThreadTo(kind: 'archive' | 'all' | 'spam') {
-    const target =
-      mailboxes.find((m) => m.kind === kind) ??
-      // Gmail has no \\Archive; its All Mail doubles as the archive target.
-      (kind === 'archive' ? mailboxes.find((m) => m.kind === 'all') : undefined);
+  /** Move every message of the thread to the spam folder, if the account has one. */
+  async function moveThreadToSpam() {
+    const target = mailboxes.find((m) => m.kind === 'spam');
     if (!target || !messages?.length) return;
     await Promise.all(
       messages.map((m) =>
@@ -108,6 +106,12 @@ export function ThreadView() {
     selectThread(null);
   }
 
+  async function archiveThread() {
+    if (!messages?.length) return;
+    await archive.mutateAsync(messages.map((m) => m.id));
+    selectThread(null);
+  }
+
   // Bound here, not in MessageList: the flat list only knows a conversation's
   // sample id, while the whole thread's message ids live in this component. Every
   // action here applies to the whole conversation — the labels say so too.
@@ -118,8 +122,8 @@ export function ThreadView() {
   useShortcuts({
     deleteMessage: multiSelected ? undefined : () => void deleteMessages(thread),
     deletePermanently: multiSelected ? undefined : () => void deleteMessages(thread, true),
-    archiveMessage: () => void moveThreadTo('archive'),
-    markSpam: () => void moveThreadTo('spam'),
+    archiveMessage: () => void archiveThread(),
+    markSpam: () => void moveThreadToSpam(),
     toggleRead: () => void markConversation(hasUnread),
     toggleFlag: () => {
       // Star the newest message: starring an entire thread is not a thing IMAP
@@ -227,8 +231,8 @@ export function ThreadView() {
             <button
               type="button"
               title="Archivia la conversazione"
-              disabled={moveMsg.isPending}
-              onClick={() => void moveThreadTo('archive')}
+              disabled={archive.isPending}
+              onClick={() => void archiveThread()}
               className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground disabled:opacity-50"
             >
               <Archive size={15} />

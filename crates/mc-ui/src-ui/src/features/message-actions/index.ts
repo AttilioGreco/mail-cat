@@ -9,6 +9,7 @@ export {
   useSelectNeighbour,
   useDeleteMessages,
   useMoveMessages,
+  useArchiveMessages,
   useTrashThreads,
 } from './model/useMessageMutations';
 export type { BulkResult, MessageRef } from './model/useMessageMutations';
