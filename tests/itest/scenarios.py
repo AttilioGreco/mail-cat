@@ -288,23 +288,27 @@ def backfill_text_only(w):
     w.assert_consistent()
 
 
+def jmap_snapshot(account):
+    """({display_path: mailbox}, {tag: (display_path, message)}) as mail-cat has them."""
+    boxes = {m["display_path"]: m for m in json.loads(mc("--json", "mailboxes", "list", account))}
+    msgs = {}
+    for path, box in boxes.items():
+        for m in json.loads(mc("--json", "messages", "list", "-v", box["id"])):
+            msgs[imapctl.tag_of(m["subject"])] = (path, m)
+    return boxes, msgs
+
+
+def jmap_sync_all(account):
+    for box in jmap_snapshot(account)[0].values():
+        mc("sync", account, "--mailbox", box["id"])
+
+
 def jmap_sync(w):
     """bob, a JMAP account, syncs from scratch and incrementally: mailbox list,
     per-mailbox counts, read state, a body fetch, then flag and delete changes
     made by another client arrive through Email/changes."""
     bob = account_id("bob")
-
-    def snapshot():
-        boxes = {m["display_path"]: m for m in json.loads(mc("--json", "mailboxes", "list", bob))}
-        msgs = {}
-        for path, box in boxes.items():
-            for m in json.loads(mc("--json", "messages", "list", "-v", box["id"])):
-                msgs[imapctl.tag_of(m["subject"])] = (path, m)
-        return boxes, msgs
-
-    def sync_bob():
-        for box in snapshot()[0].values():
-            mc("sync", bob, "--mailbox", box["id"])
+    snapshot, sync_bob = (lambda: jmap_snapshot(bob)), (lambda: jmap_sync_all(bob))
 
     def check(boxes, msgs, expected):
         for path, n in expected.items():
@@ -343,7 +347,84 @@ def jmap_sync(w):
         raise Fail("tag 2 was marked read on the server but not in mail-cat")
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync]
+def jmap_write(w):
+    """bob, a JMAP account, changes flags, moves, deletes (soft and permanent),
+    saves and replaces a draft and sends to alice; the server sees each. New
+    mail from another client then appears through push, without `mc sync`."""
+    bob = account_id("bob")
+    run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
+    jmap_sync_all(bob)
+    boxes, msgs = jmap_snapshot(bob)
+
+    def server(path, user="bob"):
+        m = imapctl.connect(user)
+        try:
+            return imapctl.messages(m, path)
+        finally:
+            m.logout()
+
+    def by_tag(path, tag):
+        return [x for x in server(path) if imapctl.tag_of(x["subject"]) == tag]
+
+    def subjects(path, user="bob"):
+        return [x["subject"] for x in server(path, user)]
+
+    def msg(tag):
+        return msgs[tag][1]["id"]
+
+    mc("messages", "mark-read", msg(1))
+    mc("messages", "star", msg(1))
+    flags = by_tag("INBOX", 1)[0]["flags"]
+    if r"\Seen" not in flags or r"\Flagged" not in flags:
+        raise Fail(f"tag 1 flags on the server: {flags}")
+    mc("messages", "mark-unread", msg(1))
+    if r"\Seen" in by_tag("INBOX", 1)[0]["flags"]:
+        raise Fail("tag 1 still \\Seen on the server after mark-unread")
+
+    inbox, archive = boxes["Inbox"]["id"], boxes["Archive"]["id"]
+    mc("messages", "move", msg(2), "--mailbox", inbox, archive)
+    if by_tag("INBOX", 2) or not by_tag("Archive", 2):
+        raise Fail("tag 2 did not move from INBOX to Archive on the server")
+
+    mc("messages", "delete", msg(4), "--mailbox", inbox)
+    if by_tag("INBOX", 4) or not by_tag("Trash", 4):
+        raise Fail("soft delete did not file tag 4 into Trash")
+    mc("messages", "delete", msg(6), "--mailbox", inbox, "--permanent")
+    if any(by_tag(p, 6) for p in ("INBOX", "Trash", "Archive")):
+        raise Fail("permanent delete left tag 6 on the server")
+
+    args = ["messages", "draft", bob, "--to", "alice@itest.local", "--body", "draft body"]
+    draft = mc(*args, "--subject", "draft one").strip().splitlines()[-1]
+    wait(lambda: subjects("Drafts") == ["draft one"], "draft one on the server")
+    if r"\Draft" not in server("Drafts")[0]["flags"]:
+        raise Fail("the saved draft lacks \\Draft")
+    mc(*args, "--subject", "draft two", "--replace", draft)
+    wait(lambda: subjects("Drafts") == ["draft two"], "draft two to replace draft one")
+
+    mc("messages", "send-test", bob, "--to", "alice@itest.local")
+    wait(lambda: any(s.startswith("[mail-cat test]") for s in subjects("INBOX", "alice")),
+         "the sent mail in alice's INBOX")
+    wait(lambda: any(s.startswith("[mail-cat test]") for s in subjects("Sent")),
+         "the sent copy in bob's Sent")
+    if any(s.startswith("[mail-cat test]") for s in subjects("Drafts")):
+        raise Fail("the sent mail was left in Drafts")
+
+    # What mail-cat believes after all that matches the server.
+    jmap_sync_all(bob)
+    boxes, msgs = jmap_snapshot(bob)
+    for path, name in (("INBOX", "Inbox"), ("Archive", "Archive"), ("Trash", "Trash")):
+        got = sorted(tag for tag, (p, _) in msgs.items() if p == name and tag is not None)
+        want = sorted(t for t in map(imapctl.tag_of, subjects(path)) if t is not None)
+        if got != want:
+            raise Fail(f"{name}: mail-cat has {got}, the server {want}")
+
+    if os.environ.get("MAIL_CAT_NO_IDLE"):
+        return
+    run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "--start", "30", "-n", "1"])
+    wait(lambda: 30 in jmap_snapshot(bob)[1], "pushed mail to appear without `mc sync`", timeout=20)
+
+
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write]
 
 
 def fresh_world():

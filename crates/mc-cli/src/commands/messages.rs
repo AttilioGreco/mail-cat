@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use mc_client::{MailCatClient, MessageFlag};
+use mc_client::{ComposeInput, MailCatClient, MessageFlag};
 mod delete_matching;
 mod send_test;
 
@@ -126,6 +126,20 @@ pub enum MessagesCmd {
         #[arg(long, requires = "reply_to")]
         reply_mailbox: Option<String>,
     },
+    /// Save a draft; prints its id. `--replace` saves a new version of an earlier draft.
+    Draft {
+        /// Account ID to save the draft in
+        account_id: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        body: String,
+        /// Draft ID (from an earlier `draft`) this one replaces
+        #[arg(long)]
+        replace: Option<String>,
+    },
     /// Autocomplete suggestions for search-as-you-type
     Suggest {
         /// Prefix to search for
@@ -189,6 +203,31 @@ pub async fn run(cmd: MessagesCmd, client: MailCatClient, json: bool) -> Result<
             mailbox_id,
         } => search(query, account_id, mailbox_id, client).await,
         MessagesCmd::Suggest { prefix, scope, max } => suggest(prefix, scope, max, client).await,
+        MessagesCmd::Draft {
+            account_id,
+            to,
+            subject,
+            body,
+            replace,
+        } => {
+            let id = client
+                .save_draft(ComposeInput {
+                    draft_id: replace,
+                    account_id,
+                    to: vec![to],
+                    cc: vec![],
+                    bcc: vec![],
+                    subject,
+                    body_md: body,
+                    mode: "new".to_owned(),
+                    source_message_id: None,
+                    attachments: vec![],
+                    forwarded_attachment_ids: vec![],
+                })
+                .await?;
+            println!("{id}");
+            Ok(())
+        }
         MessagesCmd::SendTest {
             account_id,
             to,
