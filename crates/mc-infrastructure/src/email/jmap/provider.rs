@@ -1,4 +1,4 @@
-//! `JmapEmailProvider`: the read path of RFC 8621 behind [`EmailProvider`].
+//! `JmapEmailProvider`: RFC 8621 behind [`EmailProvider`]; the write path is in `write`, push in `push`.
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
@@ -19,22 +19,17 @@ use mc_domain::{
 use super::client::{JmapClient, MethodError};
 use super::mapper;
 use crate::email::body_only_message;
+use crate::persistence::DownloadMeter;
 
 /// What the background backfill downloads of each text part, as for IMAP.
 const TEXT_PART_CAP: u64 = 256 * 1024;
 
 pub struct JmapEmailProvider {
-    client: JmapClient,
-}
-
-fn not_implemented<T>(what: &str) -> Result<T, DomainError> {
-    Err(DomainError::NotSupported(format!(
-        "JMAP {what} is not implemented yet"
-    )))
+    pub(super) client: JmapClient,
 }
 
 /// A JMAP mailbox path is the server id, never split into segments.
-fn mailbox_id(path: &MailboxPath) -> &str {
+pub(super) fn mailbox_id(path: &MailboxPath) -> &str {
     &path.segments()[0]
 }
 
@@ -82,6 +77,11 @@ impl JmapEmailProvider {
         Ok(Self {
             client: JmapClient::new(session_url, username, gate)?,
         })
+    }
+
+    pub fn with_download_meter(mut self, meter: DownloadMeter) -> Self {
+        self.client = self.client.with_download_meter(meter);
+        self
     }
 
     /// Fetches the session: succeeds only when the server speaks JMAP and
@@ -466,52 +466,52 @@ impl EmailProvider for JmapEmailProvider {
     async fn set_flags_bulk(
         &self,
         _mailbox: &MailboxPath,
-        _ids: &[RemoteId],
-        _flags_to_add: &[Flag],
-        _flags_to_remove: &[Flag],
+        ids: &[RemoteId],
+        flags_to_add: &[Flag],
+        flags_to_remove: &[Flag],
     ) -> Result<(), DomainError> {
-        not_implemented("flag changes")
+        self.set_flags(ids, flags_to_add, flags_to_remove).await
     }
 
     async fn move_messages(
         &self,
-        _ids: &[RemoteId],
-        _from: &MailboxPath,
-        _to: &MailboxPath,
+        ids: &[RemoteId],
+        from: &MailboxPath,
+        to: &MailboxPath,
     ) -> Result<HashMap<RemoteId, Option<RemoteId>>, DomainError> {
-        not_implemented("move")
+        self.move_emails(ids, from, to).await
     }
 
     async fn delete_messages(
         &self,
-        _mailbox: &MailboxPath,
-        _ids: &[RemoteId],
-        _permanently: bool,
+        mailbox: &MailboxPath,
+        ids: &[RemoteId],
+        permanently: bool,
     ) -> Result<(), DomainError> {
-        not_implemented("delete")
+        self.delete_emails(mailbox, ids, permanently).await
     }
 
     async fn send_message(
         &self,
-        _message: &OutgoingMessage,
-        _sent: Option<&MailboxPath>,
+        message: &OutgoingMessage,
+        sent: Option<&MailboxPath>,
     ) -> Result<SendOutcome, DomainError> {
-        not_implemented("send")
+        self.submit(message, sent).await
     }
 
     async fn save_draft(
         &self,
-        _drafts: &MailboxPath,
-        _message: &OutgoingMessage,
-        _replacing: Option<&RemoteId>,
+        drafts: &MailboxPath,
+        message: &OutgoingMessage,
+        replacing: Option<&RemoteId>,
     ) -> Result<RemoteId, DomainError> {
-        not_implemented("drafts")
+        self.store_draft(drafts, message, replacing).await
     }
 
     fn watch_mailbox(
         &self,
-        _mailbox: &MailboxPath,
+        mailbox: &MailboxPath,
     ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + '_>> {
-        Box::pin(futures::stream::empty())
+        self.watch(mailbox)
     }
 }

@@ -123,13 +123,9 @@ async fn serve(handler: impl Fn(&str, &Value) -> Value + Send + Sync + 'static) 
             tokio::spawn(async move {
                 let (path, body) = read_request(&mut socket).await;
                 let reply = if path.starts_with("/.well-known/jmap") {
-                    json!({
-                        "primaryAccounts": {"urn:ietf:params:jmap:mail": "acc"},
-                        "capabilities": {"urn:ietf:params:jmap:core": {"maxObjectsInGet": 2}},
-                        // Advertised on a host nobody can reach: the client must stay on `base`.
-                        "apiUrl": "https://unreachable.invalid/jmap/api",
-                        "downloadUrl": format!("{base}/dl/{{accountId}}/{{blobId}}/{{name}}?accept={{type}}"),
-                    })
+                    session_json(&base)
+                } else if path.starts_with("/up/") {
+                    json!({"blobId": "blob1"})
                 } else {
                     answer(&*handler, &body)
                 };
@@ -144,6 +140,19 @@ async fn serve(handler: impl Fn(&str, &Value) -> Value + Send + Sync + 'static) 
         }
     });
     base
+}
+
+fn session_json(base: &str) -> Value {
+    json!({
+        "primaryAccounts": {"urn:ietf:params:jmap:mail": "acc"},
+        "capabilities": {"urn:ietf:params:jmap:core": {"maxObjectsInGet": 2, "maxObjectsInSet": 2}},
+        "state": "ss1",
+        // Advertised on a host nobody can reach: the client must stay on `base`.
+        "apiUrl": "https://unreachable.invalid/jmap/api",
+        "downloadUrl": format!("{base}/dl/{{accountId}}/{{blobId}}/{{name}}?accept={{type}}"),
+        "uploadUrl": "https://unreachable.invalid/up/{accountId}/",
+        "eventSourceUrl": "https://unreachable.invalid/es/?types={types}&closeafter={closeafter}&ping={ping}",
+    })
 }
 
 async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Value) {
@@ -387,12 +396,323 @@ async fn mailboxes_are_opaque_ids_with_a_readable_path() {
     assert_eq!(mailboxes[1].display_name, "Acme");
 }
 
+type Calls = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+/// A server that records every call and answers `/set` calls with `reply`.
+async fn recording(
+    reply: impl Fn(&str, &Value) -> Value + Send + Sync + 'static,
+) -> (String, Calls) {
+    let calls = Calls::default();
+    let seen = calls.clone();
+    let base = serve(move |name, args| {
+        seen.lock().unwrap().push((name.to_owned(), args.clone()));
+        reply(name, args)
+    })
+    .await;
+    (base, calls)
+}
+
+fn ids(list: &[&str]) -> Vec<RemoteId> {
+    list.iter().map(|id| RemoteId::new(*id)).collect()
+}
+
 #[tokio::test]
-async fn write_side_is_refused_for_now() {
-    let base = serve(|_, _| json!({})).await;
+async fn flags_become_keyword_patches_in_chunks_of_the_set_limit() {
+    let (base, calls) = recording(|_, _| json!({})).await;
+    provider(&base)
+        .set_flags_bulk(
+            &inbox(),
+            &ids(&["a", "b", "c"]),
+            &[Flag::Seen, Flag::Custom("$work".into())],
+            &[Flag::Flagged, Flag::Deleted],
+        )
+        .await
+        .unwrap();
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 2, "three ids at two per request");
+    let patch = json!({"keywords/$seen": true, "keywords/$work": true, "keywords/$flagged": null});
+    assert_eq!(calls[0].1["update"], json!({"a": patch, "b": patch}));
+    assert_eq!(calls[1].1["update"], json!({"c": patch}));
+}
+
+#[tokio::test]
+async fn refused_ids_are_named_after_every_chunk_was_tried() {
+    let (base, calls) = recording(|_, args| {
+        let refused = |id: &str| {
+            args["update"]
+                .get(id)
+                .map(|_| json!({id: {"type": "notFound"}}))
+        };
+        json!({"notUpdated": refused("a").or(refused("c")).unwrap()})
+    })
+    .await;
     let err = provider(&base)
-        .delete_messages(&inbox(), &[RemoteId::new("e1")], false)
+        .set_flags_bulk(&inbox(), &ids(&["a", "b", "c"]), &[Flag::Seen], &[])
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        err.contains("a: notFound") && err.contains("c: notFound"),
+        "{err}"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn move_swaps_the_mailbox_and_keeps_the_ids() {
+    let (base, calls) = recording(|_, _| json!({})).await;
+    let to = MailboxPath::new(vec!["mb2".into()], '/').unwrap();
+    let moved = provider(&base)
+        .move_messages(&ids(&["a"]), &inbox(), &to)
+        .await
+        .unwrap();
+
+    assert_eq!(moved[&RemoteId::new("a")], Some(RemoteId::new("a")));
+    assert_eq!(
+        calls.lock().unwrap()[0].1["update"],
+        json!({"a": {"mailboxIds/mb1": null, "mailboxIds/mb2": true}})
+    );
+}
+
+#[tokio::test]
+async fn delete_destroys_or_files_into_trash() {
+    let (base, calls) = recording(|name, _| match name {
+        "Mailbox/get" => json!({"list": [
+            {"id": "mb1", "role": "inbox"}, {"id": "mbt", "role": "trash"}]}),
+        _ => json!({}),
+    })
+    .await;
+    let p = provider(&base);
+
+    p.delete_messages(&inbox(), &ids(&["a"]), true)
+        .await
+        .unwrap();
+    p.delete_messages(&inbox(), &ids(&["b"]), false)
+        .await
+        .unwrap();
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls[0].1["destroy"], json!(["a"]));
+    assert_eq!(
+        calls.last().unwrap().1["update"],
+        json!({"b": {"mailboxIds/mb1": null, "mailboxIds/mbt": true}})
+    );
+}
+
+#[tokio::test]
+async fn soft_delete_without_a_trash_mailbox_is_an_error() {
+    let base = serve(|_, _| json!({"list": [{"id": "mb1", "role": "inbox"}]})).await;
+    let err = provider(&base)
+        .delete_messages(&inbox(), &ids(&["a"]), false)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("not implemented yet"), "{err}");
+    assert!(err.to_string().contains("no Trash"), "{err}");
+}
+
+fn outgoing() -> mc_domain::OutgoingMessage {
+    let address = |email: &str| mc_domain::Address {
+        name: None,
+        email: mc_domain::EmailAddress::new(email).unwrap(),
+    };
+    mc_domain::OutgoingMessage {
+        from: address("bob@x.org"),
+        to: vec![address("alice@x.org")],
+        cc: vec![],
+        bcc: vec![address("carol@x.org")],
+        subject: "Hi".into(),
+        body_text: Some("hello".into()),
+        body_html: None,
+        in_reply_to: None,
+        references: vec![],
+        attachments: vec![],
+        message_rfc_id: Some("<m1@x.org>".into()),
+        extra_headers: vec![],
+    }
+}
+
+fn mail_server() -> impl Fn(&str, &Value) -> Value {
+    |name, _| match name {
+        "Mailbox/get" => {
+            json!({"list": [{"id": "mbd", "role": "drafts"}, {"id": "mbs", "role": "sent"}]})
+        }
+        "Identity/get" => json!({"list": [{"id": "i1", "email": "Bob@x.org"}]}),
+        "Email/import" => json!({"created": {"d": {"id": "new1"}}}),
+        "Email/set" => json!({}),
+        "EmailSubmission/set" => json!({"created": {"s": {"id": "sub1"}}}),
+        other => panic!("unexpected {other}"),
+    }
+}
+
+#[tokio::test]
+async fn draft_is_created_with_draft_keyword_and_replaces_the_old_one() {
+    let (base, calls) = recording(mail_server()).await;
+    let drafts = MailboxPath::new(vec!["mbd".into()], '/').unwrap();
+    let id = provider(&base)
+        .save_draft(&drafts, &outgoing(), Some(&RemoteId::new("old")))
+        .await
+        .unwrap();
+
+    assert_eq!(id, RemoteId::new("new1"));
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls[0].1["emails"]["d"],
+        json!({"blobId": "blob1", "mailboxIds": {"mbd": true}, "keywords": {"$draft": true, "$seen": true}})
+    );
+    assert_eq!(calls[1].1["destroy"], json!(["old"]));
+}
+
+#[tokio::test]
+async fn send_submits_with_an_envelope_and_files_the_copy_in_sent() {
+    let (base, calls) = recording(mail_server()).await;
+    let sent = MailboxPath::new(vec!["mbs".into()], '/').unwrap();
+    let outcome = provider(&base)
+        .send_message(&outgoing(), Some(&sent))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.sent_copy, mc_domain::SentCopy::ServerFiled);
+    let calls = calls.lock().unwrap();
+    let submission = &calls
+        .iter()
+        .find(|(n, _)| n == "EmailSubmission/set")
+        .unwrap()
+        .1;
+    let create = &submission["create"]["s"];
+    assert_eq!(create["identityId"], "i1");
+    assert_eq!(create["emailId"], "#d");
+    assert_eq!(create["envelope"]["mailFrom"]["email"], "bob@x.org");
+    assert_eq!(
+        create["envelope"]["rcptTo"],
+        json!([{"email": "alice@x.org"}, {"email": "carol@x.org"}])
+    );
+    assert_eq!(
+        submission["onSuccessUpdateEmail"]["#s"],
+        json!({"keywords/$draft": null, "mailboxIds/mbd": null, "mailboxIds/mbs": true})
+    );
+}
+
+#[tokio::test]
+async fn send_without_a_matching_identity_fails() {
+    let base = serve(|name, _| match name {
+        "Identity/get" => json!({"list": [{"id": "i1", "email": "other@x.org"}]}),
+        _ => json!({"list": []}),
+    })
+    .await;
+    let err = provider(&base)
+        .send_message(&outgoing(), None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("bob@x.org"), "{err}");
+}
+
+#[test]
+fn event_parser_joins_split_chunks_and_crlf() {
+    let mut parser = super::push::EventParser::default();
+    assert!(parser.feed(b"event: state\r\nda").is_empty());
+    let events = parser.feed(b"ta: {\"a\":1}\r\n\r\n: ping\n\nevent: state\ndata: 2\n\n");
+    assert_eq!(events[0], ("state".into(), "{\"a\":1}".into()));
+    assert_eq!(events[2], ("state".into(), "2".into()));
+}
+
+/// Answers the session, then each event-source connection with the next of
+/// `streams`: `(status, body)`; the connection closes after the body.
+async fn serve_events(streams: Vec<(u16, String)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let session = session_json(&base).to_string();
+    let session = session.replace("https://unreachable.invalid/es/", &format!("{base}/es/"));
+    tokio::spawn(async move {
+        let mut streams = streams.into_iter();
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (path, _) = read_request(&mut socket).await;
+            let (status, kind, body) = if path.starts_with("/es/") {
+                let (status, body) = streams.next().unwrap_or((200, String::new()));
+                (status, "text/event-stream", body)
+            } else {
+                (200, "application/json", session.clone())
+            };
+            let head = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nConnection: close\r\n\r\n{body}"
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+        }
+    });
+    base
+}
+
+fn state_event(email: &str) -> String {
+    format!("event: state\ndata: {{\"changed\": {{\"acc\": {{\"Email\": \"{email}\"}}}}}}\n\n")
+}
+
+#[tokio::test]
+async fn state_events_notify_once_per_change_and_survive_reconnects() {
+    use futures::StreamExt;
+    let first = format!(
+        "{}{}{}",
+        state_event("e1"),
+        state_event("e1"),
+        state_event("e2")
+    );
+    let base = serve_events(vec![(200, first), (200, state_event("e3"))]).await;
+    let p = provider(&base);
+    let mut stream = p.watch_mailbox(&inbox());
+
+    // The third notification only comes after the 2 s reconnect.
+    for _ in 0..3 {
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+            .await
+            .expect("a notification")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            notification,
+            mc_domain::ProviderNotification::MailboxCountChanged { .. }
+        ));
+    }
+}
+
+/// Refuses the credential and, like a paused account, never lets the
+/// watcher connect again.
+#[derive(Default)]
+struct PausingGate {
+    failures: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl mc_domain::traits::login_gate::LoginGate for PausingGate {
+    async fn secret(&self) -> Result<LoginSecret, mc_domain::error::DomainError> {
+        Ok(LoginSecret::Password("pw".into()))
+    }
+    async fn login_failed(
+        &self,
+        _: &LoginSecret,
+        _: &mc_domain::error::DomainError,
+        _: bool,
+    ) -> bool {
+        self.failures
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        false
+    }
+    fn login_succeeded(&self) {}
+    async fn ready(&self) {
+        if self.failures.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_login_pauses_the_watcher() {
+    use futures::StreamExt;
+    let base = serve_events(vec![(401, String::new())]).await;
+    let gate = Arc::new(PausingGate::default());
+    let p = JmapEmailProvider::new(&base, "u".into(), gate.clone()).unwrap();
+    let mut stream = p.watch_mailbox(&inbox());
+
+    let next = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await;
+    assert!(next.is_err(), "nothing is emitted while paused");
+    assert_eq!(gate.failures.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

@@ -277,6 +277,12 @@ pub fn format_for_storage(msg: &OutgoingMessage) -> Result<Vec<u8>, DomainError>
     Ok(build_message(msg, true)?.formatted())
 }
 
+/// RFC 5322 bytes of `msg` as submitted: no Bcc header, so a server that
+/// delivers the blob as is does not leak the hidden recipients.
+pub fn format_for_wire(msg: &OutgoingMessage) -> Result<Vec<u8>, DomainError> {
+    Ok(build_message(msg, false)?.formatted())
+}
+
 /// MIME layout: mixed( related( alternative(text, html), inline images ), attachments ),
 /// each layer omitted when it would be empty.
 fn build_message(msg: &OutgoingMessage, keep_bcc: bool) -> Result<Message, DomainError> {

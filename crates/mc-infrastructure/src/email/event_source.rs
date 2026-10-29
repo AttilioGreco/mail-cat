@@ -13,10 +13,9 @@ use super::AnyProvider;
 
 /// [`AccountEventSource`] for whichever backend the account uses.
 ///
-/// IMAP watches multiple mailboxes concurrently with one IDLE session each;
-/// all notifications are funnelled through a shared mpsc channel and yielded
-/// from the returned stream. JMAP has no push yet, so its stream is empty and
-/// the periodic sync is all that runs.
+/// Mailboxes are watched concurrently, one IMAP IDLE session or JMAP event
+/// stream each; all notifications are funnelled through a shared mpsc channel
+/// and yielded from the returned stream.
 pub struct AnyAccountEventSource {
     provider: Arc<AnyProvider>,
 }
@@ -33,15 +32,12 @@ impl AccountEventSource for AnyAccountEventSource {
         mailboxes: &[MailboxPath],
     ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + 'static>>
     {
-        match *self.provider {
-            AnyProvider::Imap(_) => watch_mailboxes(Arc::clone(&self.provider), mailboxes.to_vec()),
-            AnyProvider::Jmap(_) => Box::pin(futures::stream::empty()),
-        }
+        watch_mailboxes(Arc::clone(&self.provider), mailboxes.to_vec())
     }
 }
 
 /// Free function that creates a `'static` notification stream for the given
-/// mailboxes. Each mailbox gets its own background task (IMAP IDLE session).
+/// mailboxes. Each mailbox gets its own background task (IMAP IDLE session, JMAP event stream).
 ///
 /// Separated from `AnyAccountEventSource::watch` so the `'static` lifetime
 /// can be proven without the compiler tying the return value to `&self`.
@@ -58,7 +54,7 @@ fn watch_mailboxes(
             let t = tx.clone();
             tokio::spawn(async move {
                 debug!(
-                    "[AccountEventSource] Spawning IMAP IDLE watcher for {}",
+                    "[AccountEventSource] Spawning watcher for {}",
                     mailbox.full_path()
                 );
                 loop {

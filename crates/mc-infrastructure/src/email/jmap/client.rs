@@ -5,14 +5,19 @@ use std::time::Duration;
 
 use reqwest::{RequestBuilder, StatusCode};
 use serde_json::{Value, json};
-use tokio::sync::OnceCell;
+use tokio::sync::RwLock;
 use url::Url;
 
 use mc_domain::error::DomainError;
 use mc_domain::traits::login_gate::{LoginGate, LoginSecret, login_with};
 
+use crate::persistence::DownloadMeter;
+
 const CORE: &str = "urn:ietf:params:jmap:core";
 const MAIL: &str = "urn:ietf:params:jmap:mail";
+const SUBMISSION: &str = "urn:ietf:params:jmap:submission";
+/// Outlives any push connection: a dead one is noticed by the missing pings.
+const STREAM_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// A server may advertise more, but a page this size keeps one reply bounded.
 const MAX_OBJECTS_CEILING: usize = 500;
@@ -34,8 +39,14 @@ pub(super) struct Session {
     pub account_id: String,
     /// Objects per `/get` or `/query` call the server accepts.
     pub max_objects: usize,
+    /// Objects per `/set` call.
+    pub max_set: usize,
+    /// Changes whenever the server's capabilities or accounts do.
+    state: String,
     api_url: Url,
     download_template: String,
+    upload_template: String,
+    event_template: String,
     origin: Url,
 }
 
@@ -44,7 +55,9 @@ pub(super) struct JmapClient {
     session_url: Url,
     username: String,
     gate: Arc<dyn LoginGate>,
-    session: OnceCell<Session>,
+    /// Dropped when the server reports a newer session state.
+    session: RwLock<Option<Arc<Session>>>,
+    meter: Option<DownloadMeter>,
 }
 
 /// `example.com` and `https://example.com` become the RFC 8620 §2.2
@@ -91,24 +104,45 @@ impl JmapClient {
             session_url: self::session_url(session_url)?,
             username,
             gate,
-            session: OnceCell::new(),
+            session: RwLock::new(None),
+            meter: None,
         })
+    }
+
+    pub fn with_download_meter(mut self, meter: DownloadMeter) -> Self {
+        self.meter = Some(meter);
+        self
+    }
+
+    pub async fn ready(&self) {
+        self.gate.ready().await;
+    }
+
+    async fn record(&self, bytes: usize) {
+        if let Some(meter) = &self.meter {
+            meter.record(bytes as u64).await;
+        }
     }
 
     /// Fetches the session object; also the login test, as nothing else
     /// answers 401 for a wrong password before any mail is touched.
-    pub async fn session(&self) -> Result<&Session, DomainError> {
-        self.session
-            .get_or_try_init(|| async {
-                let body: Value = self
-                    .send(|| self.http.get(self.session_url.clone()))
-                    .await?
-                    .json()
-                    .await
-                    .map_err(|e| DomainError::Provider(format!("JMAP session: {e}")))?;
-                self.parse_session(&body)
-            })
+    pub async fn session(&self) -> Result<Arc<Session>, DomainError> {
+        if let Some(session) = self.session.read().await.as_ref() {
+            return Ok(session.clone());
+        }
+        let mut cached = self.session.write().await;
+        if let Some(session) = cached.as_ref() {
+            return Ok(session.clone());
+        }
+        let body: Value = self
+            .send(|| self.http.get(self.session_url.clone()))
+            .await?
+            .json()
             .await
+            .map_err(|e| DomainError::Provider(format!("JMAP session: {e}")))?;
+        let session = Arc::new(self.parse_session(&body)?);
+        *cached = Some(session.clone());
+        Ok(session)
     }
 
     fn parse_session(&self, body: &Value) -> Result<Session, DomainError> {
@@ -121,15 +155,21 @@ impl JmapClient {
             .as_str()
             .ok_or_else(|| DomainError::Provider("JMAP session has no mail account".into()))?
             .to_owned();
-        let max_objects = body["capabilities"][CORE]["maxObjectsInGet"]
-            .as_u64()
-            .map_or(MAX_OBJECTS_CEILING, |n| n as usize)
-            .clamp(1, MAX_OBJECTS_CEILING);
+        let limit = |key: &str| {
+            body["capabilities"][CORE][key]
+                .as_u64()
+                .map_or(MAX_OBJECTS_CEILING, |n| n as usize)
+                .clamp(1, MAX_OBJECTS_CEILING)
+        };
         Ok(Session {
             account_id,
-            max_objects,
+            max_objects: limit("maxObjectsInGet"),
+            max_set: limit("maxObjectsInSet"),
+            state: body["state"].as_str().unwrap_or_default().to_owned(),
             api_url: on_origin(&self.session_url, text("apiUrl")?)?,
             download_template: text("downloadUrl")?.to_owned(),
+            upload_template: text("uploadUrl")?.to_owned(),
+            event_template: text("eventSourceUrl")?.to_owned(),
             origin: self.session_url.clone(),
         })
     }
@@ -141,6 +181,7 @@ impl JmapClient {
         calls: Vec<(&str, Value)>,
     ) -> Result<Vec<Result<Value, MethodError>>, DomainError> {
         let session = self.session().await?;
+        let names: Vec<&str> = calls.iter().map(|(name, _)| *name).collect();
         let method_calls: Vec<Value> = calls
             .into_iter()
             .enumerate()
@@ -150,12 +191,22 @@ impl JmapClient {
             })
             .collect();
         let count = method_calls.len();
-        let request = json!({"using": [CORE, MAIL], "methodCalls": method_calls});
-        let reply: Value = self
+        let mut using = vec![CORE, MAIL];
+        if names
+            .iter()
+            .any(|n| n.starts_with("EmailSubmission/") || n.starts_with("Identity/"))
+        {
+            using.push(SUBMISSION);
+        }
+        let request = json!({"using": using, "methodCalls": method_calls});
+        let bytes = self
             .send(|| self.http.post(session.api_url.clone()).json(&request))
             .await?
-            .json()
+            .bytes()
             .await
+            .map_err(|e| DomainError::ConnectionFailed(format!("JMAP response: {e}")))?;
+        self.record(bytes.len()).await;
+        let reply: Value = serde_json::from_slice(&bytes)
             .map_err(|e| DomainError::Provider(format!("JMAP response: {e}")))?;
 
         let mut results: Vec<Option<Result<Value, MethodError>>> =
@@ -169,6 +220,11 @@ impl JmapClient {
                 continue;
             };
             let args = response[1].clone();
+            // `EmailSubmission/set` is followed by the `Email/set` it implied,
+            // under the same call id: the call's own answer comes first.
+            if results[index].is_some() {
+                continue;
+            }
             results[index] = Some(if response[0] == "error" {
                 Err(MethodError {
                     kind: args["type"].as_str().unwrap_or("unknown").to_owned(),
@@ -177,6 +233,16 @@ impl JmapClient {
             } else {
                 Ok(args)
             });
+        }
+        let stale = reply["sessionState"]
+            .as_str()
+            .is_some_and(|state| state != session.state);
+        let unknown_method = results
+            .iter()
+            .flatten()
+            .any(|r| r.as_ref().is_err_and(|e| e.kind == "unknownMethod"));
+        if stale || unknown_method {
+            *self.session.write().await = None;
         }
         results
             .into_iter()
@@ -198,7 +264,53 @@ impl JmapClient {
             .bytes()
             .await
             .map_err(|e| DomainError::ConnectionFailed(format!("JMAP download: {e}")))?;
+        self.record(bytes.len()).await;
         Ok(bytes.to_vec())
+    }
+
+    /// Uploads a message and returns its blob id.
+    pub async fn upload(&self, data: Vec<u8>) -> Result<String, DomainError> {
+        let session = self.session().await?;
+        let expanded = session
+            .upload_template
+            .replace("{accountId}", &session.account_id);
+        let url = on_origin(&session.origin, &expanded)?;
+        let reply: Value = self
+            .send(|| {
+                self.http
+                    .post(url.clone())
+                    .header(reqwest::header::CONTENT_TYPE, "message/rfc822")
+                    .body(data.clone())
+            })
+            .await?
+            .json()
+            .await
+            .map_err(|e| DomainError::Provider(format!("JMAP upload: {e}")))?;
+        reply["blobId"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| DomainError::Provider("JMAP upload answered no blobId".into()))
+    }
+
+    /// Opens the push stream for mail and mailbox changes; the account id
+    /// its `state` events are keyed by comes along.
+    pub async fn event_stream(&self) -> Result<(reqwest::Response, String), DomainError> {
+        let session = self.session().await?;
+        let expanded = session
+            .event_template
+            .replace("{types}", "Email,Mailbox")
+            .replace("{closeafter}", "no")
+            .replace("{ping}", "60");
+        let url = on_origin(&session.origin, &expanded)?;
+        let response = self
+            .send(|| {
+                self.http
+                    .get(url.clone())
+                    .header(reqwest::header::ACCEPT, "text/event-stream")
+                    .timeout(STREAM_TIMEOUT)
+            })
+            .await?;
+        Ok((response, session.account_id.clone()))
     }
 
     /// Sends the request built by `build` with the account's credential,

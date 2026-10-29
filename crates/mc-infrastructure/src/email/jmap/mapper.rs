@@ -54,8 +54,6 @@ pub(super) fn flag_from_keyword(keyword: &str) -> Flag {
     }
 }
 
-/// Phase 2 (`Email/set` keyword patches) is its only caller.
-#[allow(dead_code)]
 pub(super) fn keyword_from_flag(flag: &Flag) -> Option<String> {
     match flag {
         Flag::Seen => Some("$seen".into()),

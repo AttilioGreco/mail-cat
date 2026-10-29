@@ -299,8 +299,12 @@ impl AppContext {
                 gate.restore(summary);
             }
 
-            let smtp_sender =
-                build_smtp_sender(account_config, &secrets, &imap_password, &gate).await;
+            // JMAP submits through the provider, never over SMTP.
+            let smtp_sender = if account_config.jmap_url.is_some() {
+                None
+            } else {
+                build_smtp_sender(account_config, &secrets, &imap_password, &gate).await
+            };
             let login_gate = gate.clone() as Arc<dyn LoginGate>;
             let provider = Arc::new(build_provider(
                 account_config,
@@ -1090,7 +1094,10 @@ fn build_provider(
 ) -> Result<AnyProvider, DomainError> {
     if let Some(session_url) = &account_config.jmap_url {
         let provider = JmapEmailProvider::new(session_url, account_config.username.clone(), gate)?;
-        return Ok(AnyProvider::Jmap(provider));
+        return Ok(AnyProvider::Jmap(match meter {
+            Some(meter) => provider.with_download_meter(meter),
+            None => provider,
+        }));
     }
     if account_config.imap_host.is_empty() {
         return Err(DomainError::Validation(format!(
