@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Wipe and rebuild the whole harness: a fresh Stalwart (volumes dropped) with
-# alice/bob, and a fresh isolated mail-cat-server on :50061 syncing alice.
+# alice/bob, and a fresh isolated mail-cat-server on :50061 syncing alice (IMAP) and bob (JMAP).
 #
 # Never touches the real mail-cat (127.0.0.1:50051, ~/.config/mail-cat,
 # ~/.local/share/mail-cat): the server gets its own config, data dir, HOME and
@@ -139,6 +139,16 @@ password      = "$ALICE_PW"
 host     = "localhost"
 port     = 19465
 security = "smtps"
+
+# bob syncs over JMAP (plain HTTP: the session URL is the bare origin, which
+# also exercises the /.well-known/jmap discovery).
+[[accounts]]
+name          = "bob"
+email         = "bob@itest.local"
+provider_type = "jmap"
+jmap_url      = "http://127.0.0.1:18080"
+username      = "bob@itest.local"
+password      = "$BOB_PW"
 EOF
 
 # The private bus has no service dirs, so nothing gets D-Bus-activated

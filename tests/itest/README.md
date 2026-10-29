@@ -43,7 +43,7 @@ Always pass `--server http://127.0.0.1:50061` to `mc` by hand.
 mail-cat always speaks TLS, so `reset.sh` makes a private CA in `.state/certs/`,
 installs a `localhost` certificate in Stalwart and starts the server with
 `SSL_CERT_FILE` pointing at the CA. Mailboxes: INBOX, Archive, Trash, Sent,
-Drafts, Junk (special-use) and Projects. Only alice is configured in mail-cat.
+Drafts, Junk (special-use) and Projects. alice is configured in mail-cat over IMAP, bob over JMAP (`jmap_sync` scenario).
 
 ## Tools
 

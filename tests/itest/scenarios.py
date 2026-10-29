@@ -9,6 +9,7 @@ Seed layout (seed.py defaults, tag = [itest-NNN] in the subject):
   INBOX 1 2 4 6 7 9 11 12 14 16 17 19 | Archive 3 8 13 18 | Projects 5 10 15 20
 """
 import imaplib
+import json
 import os
 import shutil
 import sqlite3
@@ -50,9 +51,13 @@ def table(out):
     return [dict(zip(rows[0], r)) for r in rows[1:]] if rows else []
 
 
+def account_id(name):
+    return next(a["id"] for a in json.loads(mc("--json", "accounts", "list")) if a["name"] == name)
+
+
 class World:
     def __init__(self):
-        self.account = table(mc("accounts", "list"))[0]["ID"]
+        self.account = account_id("alice")
         self.boxes = {r["Path"]: r for r in table(mc("mailboxes", "list", self.account))}
 
     def sync(self):
@@ -283,7 +288,62 @@ def backfill_text_only(w):
     w.assert_consistent()
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only]
+def jmap_sync(w):
+    """bob, a JMAP account, syncs from scratch and incrementally: mailbox list,
+    per-mailbox counts, read state, a body fetch, then flag and delete changes
+    made by another client arrive through Email/changes."""
+    bob = account_id("bob")
+
+    def snapshot():
+        boxes = {m["display_path"]: m for m in json.loads(mc("--json", "mailboxes", "list", bob))}
+        msgs = {}
+        for path, box in boxes.items():
+            for m in json.loads(mc("--json", "messages", "list", "-v", box["id"])):
+                msgs[imapctl.tag_of(m["subject"])] = (path, m)
+        return boxes, msgs
+
+    def sync_bob():
+        for box in snapshot()[0].values():
+            mc("sync", bob, "--mailbox", box["id"])
+
+    def check(boxes, msgs, expected):
+        for path, n in expected.items():
+            if int(boxes[path]["total_messages"]) != n:
+                raise Fail(f"{path}: mailbox total {boxes[path]['total_messages']}, expected {n}")
+        where = {tag: path for tag, (path, _) in msgs.items()}
+        want = {tag: path for path, tags in EXPECT.items() for tag in tags}
+        if where != want:
+            raise Fail(f"messages by mailbox: expected {want}, got {where}")
+
+    # seed.py's default layout over six messages; 3 and 6 are \Seen.
+    EXPECT = {"Inbox": [1, 2, 4, 6], "Archive": [3], "Projects": [5]}
+    run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
+    mc("sync", bob)
+    boxes, msgs = snapshot()
+    if not {"Inbox", "Archive", "Projects", "Sent", "Drafts", "Trash", "Junk"} <= set(boxes):
+        raise Fail(f"mailboxes: {sorted(boxes)}")
+    check(boxes, msgs, {"Inbox": 4, "Archive": 1, "Projects": 1})
+    read = sorted(tag for tag, (_, m) in msgs.items() if m["is_read"])
+    if read != [3, 6]:
+        raise Fail(f"read messages {read}, expected [3, 6]")
+    inbox = boxes["Inbox"]["id"]
+    out = mc("messages", "get", "--text", msgs[2][1]["id"], "--mailbox", inbox)
+    if "Body of message 2." not in out:
+        raise Fail(f"body of tag 2 not fetched:\n{out}")
+
+    # Another client: flags tag 2 read, deletes tag 1, delivers two more.
+    imapctl.main(["--user", "bob", "store", "INBOX", "tag:2", r"+\Seen"])
+    imapctl.main(["--user", "bob", "delete", "INBOX", "tag:1"])
+    run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "--start", "7", "-n", "2"])
+    EXPECT["Inbox"] = [2, 4, 6, 7, 8]
+    sync_bob()
+    boxes, msgs = snapshot()
+    check(boxes, msgs, {"Inbox": 5, "Archive": 1, "Projects": 1})
+    if not msgs[2][1]["is_read"]:
+        raise Fail("tag 2 was marked read on the server but not in mail-cat")
+
+
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync]
 
 
 def fresh_world():
