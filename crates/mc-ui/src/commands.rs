@@ -8,7 +8,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use mc_client::{
-    Account, AuthStatus, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit,
+    Account, AuthStatus, MailboxModel, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit,
     ConversationSummary, ImapAccountParams, MailCatClient, Mailbox, MailboxNotificationKind,
     MessageBody, MessageFlag, MessageSummary, OAuthLoginEvent, OAuthProvider, SearchHit,
     Suggestion, SyncPhase, SyncProgress, ThreadMessage,
@@ -125,6 +125,9 @@ pub struct AccountDto {
     pub email: String,
     /// "active" | "disabled" | "error" | "needs_reauth" | "credentials_rejected" | "unknown"
     pub status: String,
+    /// "folders" | "labels"
+    pub mailbox_model: String,
+    pub supports_tags: Option<bool>,
     pub auth: Option<AuthStatusDto>,
 }
 
@@ -201,11 +204,13 @@ pub struct MessageSummaryDto {
     pub is_read: bool,
     pub is_flagged: bool,
     pub has_attachments: bool,
+    pub tags: Vec<String>,
 }
 
 #[derive(Serialize)]
 pub struct MessageBodyDto {
     pub id: String,
+    pub tags: Vec<String>,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
     pub rfc_message_id: Option<String>,
@@ -231,6 +236,12 @@ fn account_to_dto(a: Account) -> AccountDto {
         name: a.name,
         email: a.email,
         status: a.status.as_str().to_string(),
+        mailbox_model: match a.mailbox_model {
+            MailboxModel::Folders => "folders",
+            MailboxModel::Labels => "labels",
+        }
+        .to_owned(),
+        supports_tags: a.supports_tags,
         auth: a.auth.map(auth_status_to_dto),
     }
 }
@@ -303,12 +314,14 @@ fn message_to_dto(m: MessageSummary) -> MessageSummaryDto {
         is_read: m.is_read,
         is_flagged: m.is_flagged,
         has_attachments: m.has_attachments,
+        tags: m.tags,
     }
 }
 
 fn body_to_dto(b: MessageBody) -> MessageBodyDto {
     MessageBodyDto {
         id: b.id,
+        tags: b.tags,
         html_body: b.html_body,
         text_body: b.text_body,
         rfc_message_id: b.rfc_message_id,
@@ -1067,6 +1080,65 @@ pub async fn move_messages(
         .move_messages(message_refs(messages), &to_mailbox_id)
         .await
         .map(|(ok, ko)| [ok, ko])
+        .map_err(|e| e.to_string())
+}
+
+/// Adds and removes mailbox labels. Removing a message's last label fails
+/// with a precondition error the UI shows inline.
+#[tauri::command]
+pub async fn change_labels(
+    message_ids: Vec<String>,
+    add_mailbox_ids: Vec<String>,
+    remove_mailbox_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<[u32; 2], String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .change_labels(message_ids, add_mailbox_ids, remove_mailbox_ids)
+        .await
+        .map(|(ok, ko)| [ok, ko])
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn archive_messages(
+    message_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<[u32; 2], String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .archive_messages(message_ids)
+        .await
+        .map(|(ok, ko)| [ok, ko])
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn modify_tags(
+    message_id: String,
+    add: Vec<String>,
+    remove: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .modify_tags(&message_id, add, remove)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_account_mailbox_model(
+    account_id: String,
+    labels: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let client = get_or_connect(&state).await?;
+    let model = if labels { MailboxModel::Labels } else { MailboxModel::Folders };
+    client
+        .set_account_mailbox_model(&account_id, model)
+        .await
         .map_err(|e| e.to_string())
 }
 
