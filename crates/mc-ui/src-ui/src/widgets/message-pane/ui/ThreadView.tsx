@@ -18,6 +18,7 @@ export function ThreadView() {
     selectedAccountId,
     selectedMailboxId,
     selectThread,
+    selectedThreadIds,
   } = useSessionStore();
 
   const { data: messages, isLoading, error } = useThread(selectedThreadMessageId);
@@ -112,9 +113,11 @@ export function ThreadView() {
   // action here applies to the whole conversation — the labels say so too.
   const thread = messages ?? [];
   const hasUnread = !!messages?.some((m) => !m.isRead);
+  // With several threads selected the list binds the delete keys, on all of them.
+  const multiSelected = selectedThreadIds.length > 1;
   useShortcuts({
-    deleteMessage: () => void deleteMessages(thread),
-    deletePermanently: () => void deleteMessages(thread, true),
+    deleteMessage: multiSelected ? undefined : () => void deleteMessages(thread),
+    deletePermanently: multiSelected ? undefined : () => void deleteMessages(thread, true),
     archiveMessage: () => void moveThreadTo('archive'),
     markSpam: () => void moveThreadTo('spam'),
     toggleRead: () => void markConversation(hasUnread),

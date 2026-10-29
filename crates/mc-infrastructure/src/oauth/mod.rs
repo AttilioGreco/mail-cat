@@ -191,7 +191,7 @@ mod tests {
         // Without these Google returns no refresh token and the account has to
         // re-authenticate every time the 1h access token dies.
         assert!(url.contains("access_type=offline"));
-        assert!(url.contains("prompt=consent"));
+        assert!(url.contains("prompt=consent+select_account"));
         assert!(url.contains("login_hint=me%40gmail.com"));
     }
 

@@ -1,11 +1,11 @@
 import { Paperclip } from 'lucide-react';
-import { cn, formatDate, truncate } from '@/shared/lib/utils';
+import { cn, formatDate } from '@/shared/lib/utils';
 import type { MessageEnvelope } from '../model/types';
 
 interface MessageRowProps {
   message: MessageEnvelope;
   isSelected: boolean;
-  onSelect: () => void;
+  onSelect: (e: React.MouseEvent) => void;
   onOpen?: () => void;
   style?: React.CSSProperties;
 }
@@ -14,10 +14,14 @@ export function MessageRow({ message, isSelected, onSelect, onOpen, style }: Mes
   return (
     <div
       style={style}
-      onClick={onSelect}
+      // mousedown, not click: WebKitGTK swallows the click of a Ctrl-click,
+      // which is how the list adds a row to a multi-selection.
+      onMouseDown={(e) => {
+        if (e.button === 0) onSelect(e);
+      }}
       onDoubleClick={onOpen}
       className={cn(
-        'flex cursor-pointer flex-col gap-0.5 border-b border-border-subtle px-4 py-3 transition-colors',
+        'flex cursor-pointer select-none flex-col gap-0.5 overflow-hidden border-b border-border-subtle px-4 py-3 transition-colors',
         isSelected
           ? 'bg-accent/10 border-l-2 border-l-accent'
           : 'hover:bg-surface-hover border-l-2 border-l-transparent',
@@ -53,16 +57,6 @@ export function MessageRow({ message, isSelected, onSelect, onOpen, style }: Mes
           <Paperclip size={11} className="shrink-0 text-muted" />
         )}
       </div>
-
-      {/* Row 3: recipient */}
-      <p className="truncate text-xs text-muted">
-        A: {message.toAddresses.length > 0 ? message.toAddresses.join(', ') : '—'}
-      </p>
-
-      {/* Row 4: preview */}
-      <p className="truncate text-xs text-muted">
-        {truncate(message.preview, 90)}
-      </p>
     </div>
   );
 }

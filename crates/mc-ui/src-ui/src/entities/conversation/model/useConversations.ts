@@ -50,8 +50,9 @@ export function useConversations(accountId: string | null, mailboxId: string | n
   });
 }
 
-export function useThread(messageId: string | null) {
-  return useQuery({
+/** Shared with `fetchQuery` callers that need a thread outside a component. */
+export function threadQuery(messageId: string) {
+  return {
     queryKey: ['thread', messageId],
     queryFn: async () => {
       const raw = await invoke<Record<string, unknown>[]>('get_thread', {
@@ -59,7 +60,13 @@ export function useThread(messageId: string | null) {
       });
       return raw.map(toThreadMessage);
     },
-    enabled: !!messageId,
     staleTime: 60_000,
+  };
+}
+
+export function useThread(messageId: string | null) {
+  return useQuery({
+    ...threadQuery(messageId ?? ''),
+    enabled: !!messageId,
   });
 }

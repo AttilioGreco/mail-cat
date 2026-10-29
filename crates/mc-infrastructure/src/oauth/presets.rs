@@ -14,7 +14,9 @@ pub struct ProviderPreset {
     /// `access_type=offline` to return a refresh token at all, and
     /// `prompt=consent` to return it again on re-auth (it only ships one on
     /// the *first* consent, so without this a re-login never repairs an
-    /// account that has no refresh token).
+    /// account that has no refresh token). `select_account` always shows the
+    /// account chooser: with several Google accounts signed in, `login_hint`
+    /// alone can still be skipped in favour of the browser's default one.
     pub auth_extra_params: &'static [(&'static str, &'static str)],
     pub imap_host: &'static str,
     pub imap_port: u16,
@@ -53,7 +55,7 @@ pub fn provider_preset(provider: OAuthProvider) -> ProviderPreset {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: "https://oauth2.googleapis.com/token",
             scopes: &["https://mail.google.com/"],
-            auth_extra_params: &[("access_type", "offline"), ("prompt", "consent")],
+            auth_extra_params: &[("access_type", "offline"), ("prompt", "consent select_account")],
             imap_host: "imap.gmail.com",
             imap_port: 993,
             smtp_host: "smtp.gmail.com",

@@ -4,18 +4,22 @@ import type { ConversationSummary } from '../model/types';
 interface Props {
   conversation: ConversationSummary;
   isSelected: boolean;
-  onClick: () => void;
+  onSelect: (e: React.MouseEvent | React.KeyboardEvent) => void;
 }
 
-export function ConversationRow({ conversation, isSelected, onClick }: Props) {
+export function ConversationRow({ conversation, isSelected, onSelect }: Props) {
   const isUnread = conversation.unreadCount > 0;
 
   return (
     <div
       role="button"
       tabIndex={0}
-      onClick={onClick}
-      onKeyDown={(e) => e.key === 'Enter' && onClick()}
+      // mousedown, not click: WebKitGTK swallows the click of a Ctrl-click,
+      // which is how the list adds a row to a multi-selection.
+      onMouseDown={(e) => {
+        if (e.button === 0) onSelect(e);
+      }}
+      onKeyDown={(e) => e.key === 'Enter' && onSelect(e)}
       className={cn(
         'flex flex-col gap-0.5 px-3 py-2.5 border-b border-border cursor-pointer select-none transition-colors',
         isSelected
