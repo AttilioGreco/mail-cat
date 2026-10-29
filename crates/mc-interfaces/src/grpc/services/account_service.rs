@@ -361,9 +361,21 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             .clone()
             .ok_or_else(|| Status::unavailable("sync service not configured"))?;
 
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        // A single-mailbox sync emits no progress events, so the stream's end
+        // (tx dropped when the task finishes) is the completion signal.
+        if let Some(path) = req.mailbox_path {
+            tokio::spawn(async move {
+                if let Err(e) = sync_trigger.trigger_mailbox_sync(&account_id, &path).await {
+                    let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                }
+            });
+            return Ok(Response::new(ReceiverStream::new(rx)));
+        }
+
         // Subscribe *before* triggering, or the first events race the subscription.
         let progress_rx = sync_trigger.subscribe_progress();
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         let forward_tx = tx.clone();
         tokio::spawn(forward_progress(

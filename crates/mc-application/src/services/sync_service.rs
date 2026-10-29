@@ -571,6 +571,17 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncTrigger for SyncSer
         self.start_sync(account_id).await
     }
 
+    async fn trigger_mailbox_sync(
+        &self,
+        account_id: &AccountId,
+        mailbox_path: &str,
+    ) -> Result<u32, ApplicationError> {
+        // sync_mailbox matches on full_path(), so a single segment holding the
+        // whole stored path matches whatever delimiter the server uses.
+        let path = MailboxPath::new(vec![mailbox_path.to_owned()], '/')?;
+        self.sync_mailbox(account_id, &path).await
+    }
+
     fn subscribe_progress(&self) -> broadcast::Receiver<SyncProgressEvent> {
         SyncService::subscribe_progress(self)
     }

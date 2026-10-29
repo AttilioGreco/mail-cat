@@ -799,7 +799,9 @@ impl AppContext {
         //
         // Subscribers on the bus (LiveProjector, DesktopNotifier, watch_mailbox
         // gRPC stream) react to domain events only — no parallel raw-event bus.
-        for (account_id, name, _gate) in &registered {
+        // Tests need syncs to happen only when they ask; push would race them.
+        let idle_enabled = std::env::var_os("MAIL_CAT_NO_IDLE").is_none();
+        for (account_id, name, _gate) in registered.iter().filter(|_| idle_enabled) {
             // Load local mailboxes once: used both to build path→MailboxId and
             // to get the server-correct INBOX MailboxPath (with the real delimiter).
             let local_mailboxes = match query_bus

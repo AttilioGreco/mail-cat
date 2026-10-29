@@ -25,6 +25,10 @@ struct Cli {
     )]
     server: String,
 
+    /// Print list/show results as JSON instead of tables
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -58,6 +62,9 @@ enum Command {
         /// Force full sync instead of incremental
         #[arg(long)]
         full: bool,
+        /// Sync only this mailbox (ID, path or display name)
+        #[arg(long)]
+        mailbox: Option<String>,
     },
 
     /// Watch a mailbox for real-time IMAP IDLE events
@@ -80,12 +87,16 @@ async fn main() -> Result<()> {
     })?;
 
     match cli.command {
-        Command::Accounts(cmd) => commands::accounts::run(cmd, client).await,
+        Command::Accounts(cmd) => commands::accounts::run(cmd, client, cli.json).await,
         Command::Contacts(cmd) => commands::contacts::run(cmd, client).await,
-        Command::Mailboxes(cmd) => commands::mailboxes::run(cmd, client).await,
-        Command::Messages(cmd) => commands::messages::run(cmd, client).await,
-        Command::Conversations(cmd) => commands::conversations::run(cmd, client).await,
-        Command::Sync { account_id, full } => commands::sync::run(account_id, full, client).await,
+        Command::Mailboxes(cmd) => commands::mailboxes::run(cmd, client, cli.json).await,
+        Command::Messages(cmd) => commands::messages::run(cmd, client, cli.json).await,
+        Command::Conversations(cmd) => commands::conversations::run(cmd, client, cli.json).await,
+        Command::Sync {
+            account_id,
+            full,
+            mailbox,
+        } => commands::sync::run(account_id, full, mailbox, client).await,
         Command::Watch { mailbox_id } => commands::watch::run(mailbox_id, client).await,
     }
 }

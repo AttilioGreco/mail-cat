@@ -272,6 +272,8 @@ message WatchSyncProgressRequest {
 message SyncAccountRequest {
   string account_id = 1;
   bool full_sync = 2;  // If true, sync all mailboxes; if false, incremental
+  // Sync only the mailbox with this path; the stream ends when it is done.
+  optional string mailbox_path = 3;
 }
 
 // Streaming progress event for sync operation.

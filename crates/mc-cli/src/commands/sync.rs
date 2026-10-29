@@ -1,17 +1,32 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
 use mc_client::{MailCatClient, SyncPhase};
 use tokio_stream::StreamExt;
 
-pub async fn run(account_id: String, full: bool, client: MailCatClient) -> Result<()> {
+pub async fn run(
+    account_id: String,
+    full: bool,
+    mailbox: Option<String>,
+    client: MailCatClient,
+) -> Result<()> {
+    let path = match &mailbox {
+        Some(wanted) => Some(resolve_mailbox(&client, &account_id, wanted).await?),
+        None => None,
+    };
     println!(
         "{} Syncing account {} ({})",
         "→".blue(),
         account_id.bold(),
-        if full { "full" } else { "incremental" }
+        match &path {
+            Some(path) => path.as_str(),
+            None if full => "full",
+            None => "incremental",
+        }
     );
 
-    let mut stream = client.sync_account(&account_id, full).await?;
+    let mut stream = client
+        .sync_account(&account_id, full, path.as_deref())
+        .await?;
 
     while let Some(event) = stream.next().await {
         let progress = event?;
@@ -45,4 +60,14 @@ pub async fn run(account_id: String, full: bool, client: MailCatClient) -> Resul
     }
 
     Ok(())
+}
+
+async fn resolve_mailbox(client: &MailCatClient, account_id: &str, wanted: &str) -> Result<String> {
+    client
+        .list_mailboxes(account_id)
+        .await?
+        .into_iter()
+        .find(|m| m.id == wanted || m.path == wanted || m.display_name == wanted)
+        .map(|m| m.path)
+        .with_context(|| format!("no mailbox matching {wanted:?} (id, path or display name)"))
 }

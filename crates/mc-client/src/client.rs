@@ -598,12 +598,14 @@ impl MailCatClient {
         &self,
         account_id: &str,
         full_sync: bool,
+        mailbox_path: Option<&str>,
     ) -> Result<impl Stream<Item = Result<SyncProgress>>> {
         let mut client = AccountServiceClient::new(self.channel.clone());
         let stream = client
             .sync_account(pb::SyncAccountRequest {
                 account_id: account_id.to_owned(),
                 full_sync,
+                mailbox_path: mailbox_path.map(str::to_owned),
             })
             .await?
             .into_inner();

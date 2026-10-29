@@ -444,7 +444,7 @@ pub async fn sync_now(account_id: String, state: State<'_, AppState>) -> Result<
     // the frontend through the watcher, so this task only has to drain it. The
     // stream borrows the client, so both move into the task.
     tokio::spawn(async move {
-        let stream = match client.sync_account(&account_id, false).await {
+        let stream = match client.sync_account(&account_id, false, None).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("sync_now failed for {account_id}: {e}");
