@@ -26,7 +26,7 @@ pub enum ConversationsCmd {
     RebuildIndex,
 }
 
-pub async fn run(cmd: ConversationsCmd, client: MailCatClient) -> Result<()> {
+pub async fn run(cmd: ConversationsCmd, client: MailCatClient, json: bool) -> Result<()> {
     match cmd {
         ConversationsCmd::List {
             account_id,
@@ -37,6 +37,9 @@ pub async fn run(cmd: ConversationsCmd, client: MailCatClient) -> Result<()> {
                 .list_conversations(&account_id, mailbox.as_deref(), 1, limit)
                 .await?;
 
+            if json {
+                return super::print_json(&convs);
+            }
             if convs.is_empty() {
                 println!("No conversations found for account {account_id}");
                 println!("(Tip: sync the account first with `mc sync <account_id>`)");
@@ -76,6 +79,9 @@ pub async fn run(cmd: ConversationsCmd, client: MailCatClient) -> Result<()> {
         ConversationsCmd::Thread { message_id } => {
             let messages = client.get_thread(&message_id).await?;
 
+            if json {
+                return super::print_json(&messages);
+            }
             if messages.is_empty() {
                 println!("No thread found for message {message_id}");
                 return Ok(());

@@ -13,9 +13,9 @@ pub enum MailboxesCmd {
     },
 }
 
-pub async fn run(cmd: MailboxesCmd, client: MailCatClient) -> Result<()> {
+pub async fn run(cmd: MailboxesCmd, client: MailCatClient, json: bool) -> Result<()> {
     match cmd {
-        MailboxesCmd::List { account_id } => list(account_id, client).await,
+        MailboxesCmd::List { account_id } => list(account_id, client, json).await,
     }
 }
 
@@ -33,8 +33,11 @@ struct MailboxRow {
     unread: String,
 }
 
-async fn list(account_id: String, client: MailCatClient) -> Result<()> {
+async fn list(account_id: String, client: MailCatClient, json: bool) -> Result<()> {
     let mailboxes = client.list_mailboxes(&account_id).await?;
+    if json {
+        return super::print_json(&mailboxes);
+    }
 
     if mailboxes.is_empty() {
         println!("{}", "No mailboxes found.".yellow());

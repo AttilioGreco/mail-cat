@@ -25,6 +25,14 @@ pub enum MessagesCmd {
         #[arg(long)]
         text: bool,
     },
+    /// Show a message's metadata: mailboxes with provider ids, Message-ID, flags
+    Show {
+        /// Message ID
+        message_id: String,
+        /// Mailbox ID the message is read from
+        #[arg(long)]
+        mailbox: String,
+    },
     /// Mark a message as read (set \Seen flag)
     MarkRead {
         /// Message ID
@@ -126,12 +134,16 @@ pub enum MessagesCmd {
     },
 }
 
-pub async fn run(cmd: MessagesCmd, client: MailCatClient) -> Result<()> {
+pub async fn run(cmd: MessagesCmd, client: MailCatClient, json: bool) -> Result<()> {
     match cmd {
         MessagesCmd::List {
             mailbox_id,
             verbose,
-        } => list(mailbox_id, verbose, client).await,
+        } => list(mailbox_id, verbose, json, client).await,
+        MessagesCmd::Show {
+            message_id,
+            mailbox,
+        } => show(message_id, mailbox, json, client).await,
         MessagesCmd::Get {
             message_id,
             mailbox,
@@ -195,9 +207,12 @@ struct MessageRow {
     read: String,
 }
 
-async fn list(mailbox_id: String, verbose: bool, client: MailCatClient) -> Result<()> {
+async fn list(mailbox_id: String, verbose: bool, json: bool, client: MailCatClient) -> Result<()> {
     // list_messages takes (account_id, mailbox_id) but mailbox_id is self-contained
     let messages = client.list_messages("", &mailbox_id).await?;
+    if json {
+        return super::print_json(&messages);
+    }
 
     if messages.is_empty() {
         println!("{}", "No messages found.".yellow());
@@ -274,6 +289,30 @@ async fn get(
     }
 
     println!("{}", "─".repeat(60).dimmed());
+    Ok(())
+}
+
+async fn show(
+    message_id: String,
+    mailbox: String,
+    json: bool,
+    client: MailCatClient,
+) -> Result<()> {
+    let m = client.get_message(&message_id, &mailbox).await?;
+    if json {
+        return super::print_json(&m);
+    }
+    println!("id:         {}", m.id);
+    println!("subject:    {}", m.subject);
+    println!("message-id: {}", m.rfc_message_id.as_deref().unwrap_or("-"));
+    println!("flags:      {}", m.flags.join(" "));
+    for x in &m.memberships {
+        println!(
+            "mailbox:    {} remote_id={}",
+            x.mailbox_id,
+            x.remote_id.as_deref().unwrap_or("?")
+        );
+    }
     Ok(())
 }
 

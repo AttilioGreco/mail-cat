@@ -16,7 +16,7 @@ pub enum MailboxNotificationKind {
     FlagsChanged,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Account {
     pub id: String,
     pub name: String,
@@ -27,7 +27,7 @@ pub struct Account {
 }
 
 /// An account's live auth state, as the server's auth gate sees it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AuthStatus {
     pub account_id: String,
     pub state: AuthState,
@@ -45,7 +45,7 @@ pub struct AuthStatus {
     pub smtp_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum AuthState {
     Active,
     Offline,
@@ -70,7 +70,7 @@ impl AuthState {
 }
 
 /// Health of an account, as the server sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum AccountStatus {
     Active,
     Disabled,
@@ -122,7 +122,7 @@ pub struct ImapAccountParams {
     pub password: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Mailbox {
     pub id: String,
     pub account_id: String,
@@ -136,7 +136,7 @@ pub struct Mailbox {
 }
 
 /// RFC 6154 special-use classification of a folder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum MailboxKind {
     Inbox,
     Sent,
@@ -164,7 +164,7 @@ impl MailboxKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MessageSummary {
     pub id: String,
     /// Every mailbox the message is in.
@@ -181,9 +181,21 @@ pub struct MessageSummary {
     pub has_attachments: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Membership {
+    pub mailbox_id: String,
+    pub remote_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MessageBody {
     pub id: String,
+    pub subject: String,
+    pub mailbox_ids: Vec<String>,
+    /// Provider ids per mailbox (IMAP UID, JMAP email id).
+    pub memberships: Vec<Membership>,
+    /// Wire names like `FLAG_SEEN`.
+    pub flags: Vec<String>,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
     pub rfc_message_id: Option<String>,
@@ -203,7 +215,7 @@ pub struct SyncProgress {
 }
 
 /// Flag that can be set/removed on a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum MessageFlag {
     Seen,
     Answered,
@@ -311,7 +323,7 @@ pub struct ContactHit {
 }
 
 /// A single message within a thread, with full envelope + body for thread view.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ThreadMessage {
     pub id: String,
     pub rfc_message_id: Option<String>,
@@ -330,7 +342,7 @@ pub struct ThreadMessage {
 }
 
 /// A conversation (thread) summary for the inbox list view.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ConversationSummary {
     pub thread_id: String,
     pub account_id: String,
@@ -362,7 +374,7 @@ pub enum SyncPhase {
 }
 
 /// OAuth2 provider for account login (Google/Microsoft).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum OAuthProvider {
     Google,
     Microsoft,

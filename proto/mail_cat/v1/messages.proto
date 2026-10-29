@@ -90,6 +90,13 @@ message MessageSummary {
   Timestamp received_at = 8;
 }
 
+// A message's copy in one mailbox; remote_id is the provider's id there
+// (IMAP UID, JMAP email id), unknown right after some moves.
+message MailboxMembership {
+  string mailbox_id = 1;
+  optional string remote_id = 2;
+}
+
 // Message detail (full view with body).
 message MessageDetail {
   string id = 1;
@@ -107,6 +114,7 @@ message MessageDetail {
   optional string raw_headers = 13;
   Timestamp received_at = 14;
   Timestamp internal_date = 15;
+  repeated MailboxMembership memberships = 16;
 }
 
 // === Requests/Responses ===

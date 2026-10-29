@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use colored::Colorize;
-use mc_client::MailCatClient;
 use mc_client::types::{OAuthLoginEvent, OAuthProvider};
+use mc_client::{ImapAccountParams, MailCatClient};
 use tabled::{Table, Tabled};
 use tokio_stream::StreamExt;
 
@@ -23,6 +23,33 @@ pub enum AccountsCmd {
         /// Display name for the account (defaults to the email)
         #[arg(long)]
         name: Option<String>,
+    },
+    /// Add an IMAP account with a password. The password is read from stdin
+    /// (--password-stdin) or $MAILCAT_PASSWORD and ends up in the server's keychain.
+    Add {
+        /// The account's email address
+        #[arg(long)]
+        email: String,
+        /// Display name for the account (defaults to the email)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        imap_host: String,
+        #[arg(long, default_value_t = 993)]
+        imap_port: u16,
+        /// Connect to IMAP without TLS
+        #[arg(long)]
+        no_tls: bool,
+        #[arg(long)]
+        smtp_host: Option<String>,
+        #[arg(long, requires = "smtp_host")]
+        smtp_port: Option<u16>,
+        /// Login name (defaults to the email)
+        #[arg(long)]
+        username: Option<String>,
+        /// Read the password from the first line of stdin
+        #[arg(long)]
+        password_stdin: bool,
     },
     /// Rename an existing account's display name
     Rename {
@@ -50,17 +77,63 @@ impl From<OauthProviderArg> for OAuthProvider {
     }
 }
 
-pub async fn run(cmd: AccountsCmd, client: MailCatClient) -> Result<()> {
+pub async fn run(cmd: AccountsCmd, client: MailCatClient, json: bool) -> Result<()> {
     match cmd {
-        AccountsCmd::List => list(client).await,
+        AccountsCmd::List => list(client, json).await,
         AccountsCmd::Status => status(client).await,
         AccountsCmd::AddOauth {
             provider,
             email,
             name,
         } => add_oauth(client, provider.into(), email, name).await,
+        AccountsCmd::Add {
+            email,
+            name,
+            imap_host,
+            imap_port,
+            no_tls,
+            smtp_host,
+            smtp_port,
+            username,
+            password_stdin,
+        } => {
+            let password = read_password(password_stdin)?;
+            let params = ImapAccountParams {
+                name: name.unwrap_or_else(|| email.clone()),
+                username: username.unwrap_or_else(|| email.clone()),
+                email,
+                imap_host,
+                imap_port,
+                smtp_host,
+                smtp_port,
+                use_tls: !no_tls,
+                password,
+            };
+            let account = client.add_imap_account(params).await?;
+            println!(
+                "{} account {} aggiunto (id {}). Riavvia il server per attivarlo.",
+                "✓".green(),
+                account.email,
+                account.id
+            );
+            Ok(())
+        }
         AccountsCmd::Rename { email, name } => rename(client, email, name).await,
     }
+}
+
+fn read_password(from_stdin: bool) -> Result<String> {
+    let password = if from_stdin {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        line.trim_end_matches(['\r', '\n']).to_owned()
+    } else {
+        std::env::var("MAILCAT_PASSWORD").unwrap_or_default()
+    };
+    if password.is_empty() {
+        bail!("no password: pass --password-stdin or set MAILCAT_PASSWORD");
+    }
+    Ok(password)
 }
 
 async fn rename(client: MailCatClient, email: String, name: String) -> Result<()> {
@@ -136,8 +209,11 @@ struct AccountRow {
     status: String,
 }
 
-async fn list(client: MailCatClient) -> Result<()> {
+async fn list(client: MailCatClient, json: bool) -> Result<()> {
     let accounts = client.list_accounts().await?;
+    if json {
+        return super::print_json(&accounts);
+    }
 
     if accounts.is_empty() {
         println!("{}", "No accounts found.".yellow());

@@ -13,6 +13,12 @@ just itest flags reappear # just some
 just itest-down           # stop the server, drop Stalwart and its volumes
 ```
 
+`MAIL_CAT_NO_IDLE=1 just itest-reset` starts the server without the INBOX
+IDLE watchers, so syncs happen only when a test runs `mc sync` (the
+`phone_moved_first` scenario needs IDLE and will fail in that mode).
+`mc` takes a global `--json` for list/show output, `mc sync ID --mailbox X` for
+a single mailbox and `mc accounts add ... --password-stdin`.
+
 ## Never touch the real mail-cat
 
 The user's server runs on `127.0.0.1:50051` with real accounts. The harness

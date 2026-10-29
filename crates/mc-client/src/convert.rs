@@ -116,6 +116,24 @@ pub fn message_summary_from_proto(m: pb::MessageSummary) -> MessageSummary {
 pub fn message_body_from_proto(m: pb::MessageDetail) -> MessageBody {
     MessageBody {
         id: m.id,
+        subject: m.envelope.unwrap_or_default().subject,
+        mailbox_ids: m.mailbox_ids,
+        memberships: m
+            .memberships
+            .into_iter()
+            .map(|x| Membership {
+                mailbox_id: x.mailbox_id,
+                remote_id: x.remote_id,
+            })
+            .collect(),
+        flags: m
+            .flags
+            .into_iter()
+            .map(|f| match pb::Flag::try_from(f) {
+                Ok(f) => f.as_str_name().to_owned(),
+                Err(_) => f.to_string(),
+            })
+            .collect(),
         html_body: m.body_html,
         text_body: m.body_text,
         rfc_message_id: m.message_rfc_id,

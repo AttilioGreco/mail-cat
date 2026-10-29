@@ -109,6 +109,14 @@ pub fn domain_message_to_detail(message: &Message) -> MessageDetail {
         raw_headers: None,
         received_at: Some(datetime_to_timestamp(&message.received_at)),
         internal_date: Some(datetime_to_timestamp(&message.internal_date)),
+        memberships: message
+            .memberships
+            .iter()
+            .map(|m| proto::MailboxMembership {
+                mailbox_id: m.mailbox_id.to_string(),
+                remote_id: m.remote_id.as_ref().map(ToString::to_string),
+            })
+            .collect(),
     }
 }
 
