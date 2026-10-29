@@ -7,7 +7,7 @@ use futures::Stream;
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
-use mc_domain::model::mailbox::Mailbox;
+use mc_domain::model::mailbox::{Mailbox, leaf_name};
 use mc_domain::traits::email_provider::ProviderNotification;
 use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::mailbox_path::MailboxPath;
@@ -256,12 +256,14 @@ impl ImapEmailProvider {
             let mailbox_type = mapper::classify_mailbox(imap_name, mb.attributes());
 
             // Create placeholder Mailbox - account_id and id will be set during sync
+            let display_path = path.full_path();
             let mailbox = Mailbox {
                 id: MailboxId::new(),
                 account_id: AccountId::new(),
-                display_path: path.full_path(),
+                // As discovery derives it, or every sync would see a rename.
+                display_name: leaf_name(&display_path, delimiter).to_owned(),
+                display_path,
                 path,
-                display_name: imap_name.to_string(),
                 mailbox_type,
                 flags: Vec::new(),
                 total_messages: 0,

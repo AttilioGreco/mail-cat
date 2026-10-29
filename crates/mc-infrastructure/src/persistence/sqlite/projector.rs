@@ -187,6 +187,8 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
         DomainEvent::MailboxRenamed {
             mailbox_id,
             new_path,
+            display_path,
+            display_name,
             ..
         } => {
             exec(
@@ -196,8 +198,8 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     mailbox_id.as_uuid(),
                     new_path.full_path(),
                     new_path.delimiter().to_string(),
-                    new_path.name(),
-                    new_path.full_path()
+                    display_name,
+                    display_path
                 ],
             )?;
         }

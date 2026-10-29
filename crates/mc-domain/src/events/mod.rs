@@ -158,11 +158,14 @@ pub enum DomainEvent {
         unread_messages: u32,
     },
 
-    /// A mailbox was renamed.
+    /// A mailbox was renamed or moved. The labels travel in the event because
+    /// a provider's path may be an opaque id they cannot be derived from.
     MailboxRenamed {
         mailbox_id: MailboxId,
         old_path: MailboxPath,
         new_path: MailboxPath,
+        display_path: String,
+        display_name: String,
     },
 
     /// A mailbox was deleted.

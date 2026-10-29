@@ -364,9 +364,9 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         let local_by_path: HashMap<&MailboxPath, &Mailbox> =
             local_mailboxes.iter().map(|m| (&m.path, m)).collect();
 
-        // 4. Discover new mailboxes, and correct the type of existing ones.
+        // 4. Discover new mailboxes; correct type and labels of existing ones.
         for remote in &remote_mailboxes {
-            match local_by_path.get(&remote.path) {
+            let mut mailbox = match local_by_path.get(&remote.path) {
                 None => {
                     info!(path = %remote.path, "Discovering new mailbox");
                     let (mailbox, event) = Mailbox::discover_as(
@@ -377,24 +377,38 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                     );
                     self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
                         .await?;
+                    mailbox
                 }
-                Some(local) if local.mailbox_type != remote.mailbox_type => {
-                    // The type was recorded once at discovery. Detection has since
-                    // improved (SPECIAL-USE, localized names), so mailboxes classified
-                    // by an older build stay wrong forever unless we correct them here
-                    // — which is what silently broke Archive and Trash targeting.
-                    info!(
-                        path = %remote.path,
-                        from = ?local.mailbox_type,
-                        to = ?remote.mailbox_type,
-                        "Reclassifying mailbox"
-                    );
-                    let mut mailbox = (*local).clone();
-                    let event = mailbox.reclassify(remote.mailbox_type);
-                    self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
-                        .await?;
-                }
-                Some(_) => {}
+                Some(local) => (*local).clone(),
+            };
+            if mailbox.mailbox_type != remote.mailbox_type {
+                // The type was recorded once at discovery. Detection has since
+                // improved (SPECIAL-USE, localized names), so mailboxes classified
+                // by an older build stay wrong forever unless we correct them here
+                // — which is what silently broke Archive and Trash targeting.
+                info!(
+                    path = %remote.path,
+                    from = ?mailbox.mailbox_type,
+                    to = ?remote.mailbox_type,
+                    "Reclassifying mailbox"
+                );
+                let event = mailbox.reclassify(remote.mailbox_type);
+                self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
+                    .await?;
+            }
+            // A server-side rename or re-parent keeps the id (JMAP), and a
+            // name holding the delimiter is not what discovery's leaf says.
+            if mailbox.display_path != remote.display_path
+                || mailbox.display_name != remote.display_name
+            {
+                info!(path = %remote.path, to = %remote.display_path, "Mailbox renamed on the server");
+                let event = mailbox.rename(
+                    remote.path.clone(),
+                    remote.display_path.clone(),
+                    remote.display_name.clone(),
+                );
+                self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
+                    .await?;
             }
         }
 

@@ -201,6 +201,8 @@ macro_rules! replay_conformance {
                         mailbox_id: archive,
                         old_path: MailboxPath::parse("Archive", '/').unwrap(),
                         new_path: MailboxPath::parse("Old/Archive", '/').unwrap(),
+                        display_path: "Old/Archive".into(),
+                        display_name: "Archive".into(),
                     },
                     e_root,
                     e_mid,

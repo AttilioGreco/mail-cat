@@ -149,16 +149,22 @@ impl Mailbox {
     }
 
     /// Rename the mailbox and produce the event.
-    pub fn rename(&mut self, new_path: MailboxPath) -> DomainEvent {
-        let old_path = self.path.clone();
-        self.display_name = new_path.name().to_string();
-        self.display_path = new_path.full_path();
-        self.path = new_path.clone();
+    pub fn rename(
+        &mut self,
+        new_path: MailboxPath,
+        display_path: String,
+        display_name: String,
+    ) -> DomainEvent {
+        let old_path = std::mem::replace(&mut self.path, new_path.clone());
+        self.display_path = display_path.clone();
+        self.display_name = display_name.clone();
 
         DomainEvent::MailboxRenamed {
             mailbox_id: self.id,
             old_path,
             new_path,
+            display_path,
+            display_name,
         }
     }
 
@@ -189,9 +195,14 @@ impl Mailbox {
             DomainEvent::MailboxTypeChanged { mailbox_type, .. } => {
                 self.mailbox_type = *mailbox_type;
             }
-            DomainEvent::MailboxRenamed { new_path, .. } => {
-                self.display_name = new_path.name().to_string();
-                self.display_path = new_path.full_path();
+            DomainEvent::MailboxRenamed {
+                new_path,
+                display_path,
+                display_name,
+                ..
+            } => {
+                self.display_name.clone_from(display_name);
+                self.display_path.clone_from(display_path);
                 self.path = new_path.clone();
             }
             DomainEvent::MailboxDeleted { .. } => {
@@ -273,7 +284,11 @@ mod tests {
             MailboxType::Custom,
         );
 
-        let event = mailbox.rename(MailboxPath::parse("Work-Archive", '/').unwrap());
+        let event = mailbox.rename(
+            MailboxPath::parse("Work-Archive", '/').unwrap(),
+            "Work-Archive".into(),
+            "Work-Archive".into(),
+        );
 
         assert_eq!(mailbox.display_name, "Work-Archive");
         assert_eq!(mailbox.path.full_path(), "Work-Archive");
@@ -301,6 +316,8 @@ mod tests {
                 mailbox_id: id,
                 old_path: MailboxPath::inbox(),
                 new_path: MailboxPath::parse("Primary", '/').unwrap(),
+                display_path: "Primary".into(),
+                display_name: "Primary".into(),
             },
         ];
 

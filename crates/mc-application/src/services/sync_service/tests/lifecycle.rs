@@ -163,6 +163,27 @@ async fn sync_discovers_new_mailboxes() {
 }
 
 #[tokio::test]
+async fn sync_follows_a_server_side_rename() {
+    let account_id = AccountId::new();
+    let path = MailboxPath::new(vec!["mb7".to_string()], '/').unwrap();
+    let (known, _) =
+        Mailbox::discover_as(account_id, path.clone(), "Fin".into(), MailboxType::Custom);
+    let (mut moved, _) =
+        Mailbox::discover_as(account_id, path, "Work/Fin/Ops".into(), MailboxType::Custom);
+    moved.display_name = "Fin/Ops".into();
+
+    let projector = Arc::new(MockProjector::new());
+    projector.mailboxes.lock().unwrap().push(known);
+    let provider = MockEmailProvider::new().with_mailboxes(vec![moved]);
+    let service = make_service(provider, Arc::new(MockEventStore::new()), projector.clone());
+    service.start_sync(&account_id).await.unwrap();
+
+    assert!(projector.projected_events().iter().any(|e| matches!(e,
+        DomainEvent::MailboxRenamed { display_path, display_name, .. }
+            if display_path == "Work/Fin/Ops" && display_name == "Fin/Ops")));
+}
+
+#[tokio::test]
 async fn sync_fetches_envelopes_and_emits_message_received() {
     let account_id = AccountId::new();
     let (inbox, _) = Mailbox::discover(
