@@ -58,6 +58,25 @@ impl MailCatClient {
         Ok(resp.accounts.into_iter().map(account_from_proto).collect())
     }
 
+    /// Switch how the account's mailboxes are presented; stored data is untouched.
+    pub async fn set_account_mailbox_model(
+        &self,
+        account_id: &str,
+        model: MailboxModel,
+    ) -> Result<()> {
+        let model = match model {
+            MailboxModel::Folders => pb::MailboxModel::Folders,
+            MailboxModel::Labels => pb::MailboxModel::Labels,
+        };
+        AccountServiceClient::new(self.channel.clone())
+            .set_account_mailbox_model(pb::SetAccountMailboxModelRequest {
+                account_id: account_id.to_owned(),
+                model: model as i32,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Add an IMAP/SMTP account with plain credentials. OAuth accounts go through
     /// [`start_oauth_login`](Self::start_oauth_login) instead — the AddAccount RPC
     /// carries no OAuth provider.
@@ -385,6 +404,57 @@ impl MailCatClient {
             ClientError::InvalidResponse("missing message in MoveMessageResponse".into())
         })?;
 
+        Ok(message_summary_from_proto(summary))
+    }
+
+    /// Add and remove mailboxes (labels) on messages without moving them.
+    pub async fn change_labels(
+        &self,
+        message_ids: Vec<String>,
+        add_mailbox_ids: Vec<String>,
+        remove_mailbox_ids: Vec<String>,
+    ) -> Result<(u32, u32)> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let resp = client
+            .change_labels(pb::ChangeLabelsRequest {
+                message_ids,
+                add_mailbox_ids,
+                remove_mailbox_ids,
+            })
+            .await?
+            .into_inner();
+        Ok((resp.succeeded, resp.failed))
+    }
+
+    /// Take messages out of the Inbox (see the `ArchiveMessages` RPC).
+    pub async fn archive_messages(&self, message_ids: Vec<String>) -> Result<(u32, u32)> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let resp = client
+            .archive_messages(pb::ArchiveMessagesRequest { message_ids })
+            .await?
+            .into_inner();
+        Ok((resp.succeeded, resp.failed))
+    }
+
+    /// Add and remove tags (keywords) on a message.
+    pub async fn modify_tags(
+        &self,
+        message_id: &str,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> Result<MessageSummary> {
+        let mut client = MessageServiceClient::new(self.channel.clone());
+        let resp = client
+            .modify_tags(pb::ModifyTagsRequest {
+                message_id: message_id.to_owned(),
+                add,
+                remove,
+            })
+            .await?
+            .into_inner();
+        let summary = resp.message.ok_or_else(|| {
+            ClientError::InvalidResponse("missing message in SetFlagsResponse".into())
+        })?;
         Ok(message_summary_from_proto(summary))
     }
 

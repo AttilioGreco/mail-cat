@@ -51,7 +51,28 @@ service AccountService {
   // Live auth state of every account: one status per account on connect,
   // then one per change, for as long as the stream stays open.
   rpc WatchAuthStatus(WatchAuthStatusRequest) returns (stream AccountAuthStatus);
+
+  // Switch between folder and label presentation. Only changes which
+  // operations a UI offers; stored data is untouched.
+  rpc SetAccountMailboxModel(SetAccountMailboxModelRequest) returns (SetAccountMailboxModelResponse);
 }
+
+// How an account's mailboxes are presented. Defaults by provider: IMAP is
+// FOLDERS, JMAP is LABELS.
+enum MailboxModel {
+  MAILBOX_MODEL_UNSPECIFIED = 0;
+  // A message sits in one mailbox; moving replaces it.
+  MAILBOX_MODEL_FOLDERS = 1;
+  // A message carries one or more mailboxes as labels (ChangeLabels).
+  MAILBOX_MODEL_LABELS = 2;
+}
+
+message SetAccountMailboxModelRequest {
+  string account_id = 1;
+  MailboxModel model = 2;
+}
+
+message SetAccountMailboxModelResponse {}
 
 // Provider type for email account.
 enum ProviderType {
@@ -180,6 +201,10 @@ message AccountSummary {
   Timestamp updated_at = 7;
   // Unset when the server runs no auth gate for the account.
   AccountAuthStatus auth = 8;
+  MailboxModel mailbox_model = 9;
+  // Whether the server accepts arbitrary message keywords (tags); unset until
+  // a sync found out. Hide the tag UI unless true.
+  optional bool supports_tags = 10;
 }
 
 // Account detail (full view).
@@ -192,6 +217,8 @@ message AccountDetail {
   AccountStatus status = 6;
   Timestamp created_at = 7;
   Timestamp updated_at = 8;
+  MailboxModel mailbox_model = 9;
+  optional bool supports_tags = 10;
 }
 
 // === Requests/Responses ===

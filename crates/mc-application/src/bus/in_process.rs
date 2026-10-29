@@ -142,6 +142,11 @@ where
                     .handle_update(account_id, name, connection_config)
                     .await
             }
+            Command::SetAccountMailboxModel { account_id, model } => {
+                self.account_handler
+                    .handle_set_mailbox_model(account_id, model)
+                    .await
+            }
             Command::RemoveAccount { account_id } => {
                 self.account_handler.handle_remove(account_id).await
             }
@@ -165,6 +170,21 @@ where
             } => {
                 self.message_handler
                     .handle_set_flags(message_id, flags_to_add, flags_to_remove)
+                    .await
+            }
+            Command::ChangeLabels {
+                message_ids,
+                add,
+                remove,
+            } => {
+                self.message_handler
+                    .handle_change_labels(message_ids, add, remove)
+                    .await
+            }
+            Command::ArchiveMessages { message_ids } => {
+                let accounts = self.accounts().await?;
+                self.message_handler
+                    .handle_archive(&accounts, message_ids)
                     .await
             }
             Command::MarkMailboxRead {

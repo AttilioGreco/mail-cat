@@ -183,3 +183,43 @@ fn oauth2_variant_carries_provider() {
         _ => panic!("expected OAuth2 variant"),
     }
 }
+
+#[test]
+fn mailbox_model_defaults_by_provider_and_changes_once() {
+    use crate::model::account::MailboxModel;
+    assert_eq!(
+        MailboxModel::default_for(ProviderType::Imap),
+        MailboxModel::Folders
+    );
+    assert_eq!(
+        MailboxModel::default_for(ProviderType::Jmap),
+        MailboxModel::Labels
+    );
+
+    let (mut account, added) = Account::create(
+        "n".into(),
+        EmailAddress::new("a@example.com").unwrap(),
+        ProviderType::Jmap,
+        ConnectionConfig {
+            incoming: IncomingServer::Jmap {
+                session_url: "https://x".into(),
+            },
+            auth: AuthConfig::Plain {
+                username: "u".into(),
+                password: String::new(),
+            },
+            smtp: None,
+        },
+        Identity {
+            display_name: "n".into(),
+            email: EmailAddress::new("a@example.com").unwrap(),
+            signature_html: None,
+            signature_text: None,
+        },
+    );
+    assert_eq!(account.mailbox_model, MailboxModel::Labels);
+    assert!(account.set_mailbox_model(MailboxModel::Labels).is_none());
+    let event = account.set_mailbox_model(MailboxModel::Folders).unwrap();
+    let rebuilt = Account::rehydrate(&[added, event]).unwrap();
+    assert_eq!(rebuilt.mailbox_model, MailboxModel::Folders);
+}

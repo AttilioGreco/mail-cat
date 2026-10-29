@@ -217,6 +217,23 @@ pub fn domain_account_summary_to_proto(summary: &mc_domain::AccountSummary) -> A
         created_at: Some(datetime_to_timestamp(&Utc::now())),
         updated_at: Some(datetime_to_timestamp(&Utc::now())),
         auth: None,
+        mailbox_model: domain_mailbox_model_to_proto(summary.mailbox_model),
+        supports_tags: summary.supports_tags,
+    }
+}
+
+pub fn domain_mailbox_model_to_proto(model: mc_domain::MailboxModel) -> i32 {
+    match model {
+        mc_domain::MailboxModel::Folders => proto::MailboxModel::Folders as i32,
+        mc_domain::MailboxModel::Labels => proto::MailboxModel::Labels as i32,
+    }
+}
+
+pub fn proto_mailbox_model_to_domain(model: i32) -> Result<mc_domain::MailboxModel, String> {
+    match proto::MailboxModel::try_from(model).ok() {
+        Some(proto::MailboxModel::Folders) => Ok(mc_domain::MailboxModel::Folders),
+        Some(proto::MailboxModel::Labels) => Ok(mc_domain::MailboxModel::Labels),
+        _ => Err(format!("invalid mailbox model: {model}")),
     }
 }
 
@@ -265,6 +282,8 @@ pub fn domain_account_summary_to_detail(summary: &mc_domain::AccountSummary) -> 
         status: domain_account_status_to_proto(&summary.status),
         created_at: Some(datetime_to_timestamp(&Utc::now())),
         updated_at: Some(datetime_to_timestamp(&Utc::now())),
+        mailbox_model: domain_mailbox_model_to_proto(summary.mailbox_model),
+        supports_tags: summary.supports_tags,
     }
 }
 
@@ -282,5 +301,7 @@ pub fn domain_account_to_detail(account: &Account) -> AccountDetail {
         status: domain_account_status_to_proto(&account.status),
         created_at: Some(datetime_to_timestamp(&account.created_at)),
         updated_at: Some(datetime_to_timestamp(&account.updated_at)),
+        mailbox_model: domain_mailbox_model_to_proto(account.mailbox_model),
+        supports_tags: None,
     }
 }

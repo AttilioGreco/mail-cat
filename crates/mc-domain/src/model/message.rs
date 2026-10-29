@@ -213,6 +213,27 @@ impl Message {
         ))
     }
 
+    /// Add and remove labels in one event. Only what changes is recorded;
+    /// `None` when nothing does, or when it would leave the message in no
+    /// mailbox (that is a delete, never a relabel).
+    pub fn relabel(&mut self, add: Vec<Membership>, remove: Vec<MailboxId>) -> Option<DomainEvent> {
+        let add: Vec<_> = add
+            .into_iter()
+            .filter(|a| self.membership(a.mailbox_id).is_none())
+            .collect();
+        let remove: Vec<_> = remove
+            .into_iter()
+            .filter(|r| self.membership(*r).is_some())
+            .collect();
+        if add.is_empty() && remove.is_empty() {
+            return None;
+        }
+        if self.memberships.len() + add.len() <= remove.len() {
+            return None;
+        }
+        Some(self.change_mailboxes(add, remove))
+    }
+
     /// Put the message in one more mailbox. `None` when it is already there.
     pub fn add_to(
         &mut self,

@@ -13,6 +13,8 @@ use super::JmapEmailProvider;
 use super::client::session_url;
 use super::mapper;
 
+mod labels;
+
 #[test]
 fn roles_map_to_mailbox_types() {
     let cases = [

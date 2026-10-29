@@ -28,6 +28,26 @@ pub fn domain_flag_to_proto(flag: &DomainFlag) -> i32 {
     }
 }
 
+/// The standard flags among `flags`; keywords travel as tags.
+pub fn domain_flags_to_proto(flags: &[DomainFlag]) -> Vec<i32> {
+    flags
+        .iter()
+        .filter(|f| !matches!(f, DomainFlag::Custom(_)))
+        .map(domain_flag_to_proto)
+        .collect()
+}
+
+/// The keywords among `flags`: what the proto enum cannot carry.
+pub fn domain_tags(flags: &[DomainFlag]) -> Vec<String> {
+    flags
+        .iter()
+        .filter_map(|f| match f {
+            DomainFlag::Custom(tag) => Some(tag.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Convert proto Flag to domain Flag.
 pub fn proto_flag_to_domain(flag: i32) -> Option<DomainFlag> {
     match ProtoFlag::try_from(flag).ok()? {

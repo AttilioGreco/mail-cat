@@ -313,7 +313,12 @@ impl<
         .map(drop)
     }
 
-    fn request_resync(&self, account_id: AccountId, from: &MailboxPath, to: Option<&MailboxPath>) {
+    pub(super) fn request_resync(
+        &self,
+        account_id: AccountId,
+        from: &MailboxPath,
+        to: Option<&MailboxPath>,
+    ) {
         let Some(resync) = &self.resync else {
             return;
         };

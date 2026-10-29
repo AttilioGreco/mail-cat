@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AccountStatus, ContactEmail, ContactId, DomainError, DomainEvent, Envelope,
-    EventEnvelope, Flag, MailboxId, MailboxType, Membership, MessageId, MessageKey,
+    EventEnvelope, Flag, MailboxId, MailboxModel, MailboxType, Membership, MessageId, MessageKey,
     ReadModelProjector, RemoteId,
 };
 
@@ -68,8 +68,8 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
         } => {
             exec(
                 tx,
-                "INSERT INTO accounts (id, name, email, provider_type, status) \
-                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                "INSERT INTO accounts (id, name, email, provider_type, mailbox_model, status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, email = excluded.email, \
                      provider_type = excluded.provider_type, status = excluded.status",
                 params![
@@ -77,8 +77,26 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     name,
                     email.as_str(),
                     json(provider_type)?,
+                    json(&MailboxModel::default_for(*provider_type))?,
                     json(&AccountStatus::Active)?
                 ],
+            )?;
+        }
+        DomainEvent::AccountMailboxModelChanged { account_id, model } => {
+            exec(
+                tx,
+                "UPDATE accounts SET mailbox_model = ?2 WHERE id = ?1",
+                params![account_id.as_uuid(), json(model)?],
+            )?;
+        }
+        DomainEvent::AccountTagsDetected {
+            account_id,
+            supported,
+        } => {
+            exec(
+                tx,
+                "UPDATE accounts SET supports_tags = ?2 WHERE id = ?1",
+                params![account_id.as_uuid(), supported],
             )?;
         }
         DomainEvent::AccountUpdated {

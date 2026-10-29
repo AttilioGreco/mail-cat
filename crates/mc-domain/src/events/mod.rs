@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::model::account::{AccountId, ConnectionConfig, ProviderType};
+use crate::model::account::{AccountId, ConnectionConfig, MailboxModel, ProviderType};
 use crate::model::attachment::Attachment;
 use crate::model::contact::{ContactEmail, ContactSource};
 use crate::model::mailbox::{MailboxId, MailboxType};
@@ -91,6 +91,20 @@ pub enum DomainEvent {
         account_id: AccountId,
         name: Option<String>,
         connection_config: Option<ConnectionConfig>,
+    },
+
+    /// The user switched how the account's mailboxes are presented.
+    AccountMailboxModelChanged {
+        account_id: AccountId,
+        model: MailboxModel,
+    },
+
+    /// Whether the server accepts arbitrary keywords (tags) on messages, as
+    /// learned from the provider during sync. Server-reported, so transient
+    /// like the sync lifecycle: projected, never appended.
+    AccountTagsDetected {
+        account_id: AccountId,
+        supported: bool,
     },
 
     /// An account was removed.
@@ -308,6 +322,8 @@ impl DomainEvent {
         match self {
             Self::AccountAdded { .. }
             | Self::AccountUpdated { .. }
+            | Self::AccountMailboxModelChanged { .. }
+            | Self::AccountTagsDetected { .. }
             | Self::AccountRemoved { .. }
             | Self::AccountSyncStarted { .. }
             | Self::AccountSyncCompleted { .. }
@@ -343,6 +359,8 @@ impl DomainEvent {
         match self {
             Self::AccountAdded { .. } => "AccountAdded",
             Self::AccountUpdated { .. } => "AccountUpdated",
+            Self::AccountMailboxModelChanged { .. } => "AccountMailboxModelChanged",
+            Self::AccountTagsDetected { .. } => "AccountTagsDetected",
             Self::AccountRemoved { .. } => "AccountRemoved",
             Self::AccountSyncStarted { .. } => "AccountSyncStarted",
             Self::AccountSyncCompleted { .. } => "AccountSyncCompleted",

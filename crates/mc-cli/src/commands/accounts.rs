@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use colored::Colorize;
 use mc_client::types::{OAuthLoginEvent, OAuthProvider};
-use mc_client::{ImapAccountParams, JmapAccountParams, MailCatClient};
+use mc_client::{ImapAccountParams, JmapAccountParams, MailCatClient, MailboxModel};
 use tabled::{Table, Tabled};
 use tokio_stream::StreamExt;
 
@@ -58,6 +58,13 @@ pub enum AccountsCmd {
         #[arg(long)]
         password_stdin: bool,
     },
+    /// Present an account's mailboxes as labels or as folders (data is not touched)
+    SetModel {
+        /// Account name, email or ID
+        account: String,
+        #[arg(value_enum)]
+        model: ModelArg,
+    },
     /// Rename an existing account's display name
     Rename {
         /// Email address of the account to rename
@@ -67,6 +74,12 @@ pub enum AccountsCmd {
         #[arg(long)]
         name: String,
     },
+}
+
+#[derive(Clone, clap::ValueEnum)]
+pub enum ModelArg {
+    Labels,
+    Folders,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -88,6 +101,7 @@ pub async fn run(cmd: AccountsCmd, client: MailCatClient, json: bool) -> Result<
     match cmd {
         AccountsCmd::List => list(client, json).await,
         AccountsCmd::Status => status(client).await,
+        AccountsCmd::SetModel { account, model } => set_model(client, account, model).await,
         AccountsCmd::AddOauth {
             provider,
             email,
@@ -158,6 +172,26 @@ fn read_password(from_stdin: bool) -> Result<String> {
         bail!("no password: pass --password-stdin or set MAILCAT_PASSWORD");
     }
     Ok(password)
+}
+
+async fn set_model(client: MailCatClient, wanted: String, model: ModelArg) -> Result<()> {
+    let account = client
+        .list_accounts()
+        .await?
+        .into_iter()
+        .find(|a| {
+            [&a.id, &a.name, &a.email]
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case(&wanted))
+        })
+        .with_context(|| format!("no account named {wanted:?} (see `mc accounts list`)"))?;
+    let model = match model {
+        ModelArg::Labels => MailboxModel::Labels,
+        ModelArg::Folders => MailboxModel::Folders,
+    };
+    client.set_account_mailbox_model(&account.id, model).await?;
+    println!("{} {} now uses {model:?}", "✓".green(), account.email);
+    Ok(())
 }
 
 async fn rename(client: MailCatClient, email: String, name: String) -> Result<()> {
@@ -231,6 +265,10 @@ struct AccountRow {
     email: String,
     #[tabled(rename = "Status")]
     status: String,
+    #[tabled(rename = "Model")]
+    model: String,
+    #[tabled(rename = "Tags")]
+    tags: String,
 }
 
 async fn list(client: MailCatClient, json: bool) -> Result<()> {
@@ -258,6 +296,13 @@ async fn list(client: MailCatClient, json: bool) -> Result<()> {
                 }
                 other => other.as_str().red().to_string(),
             },
+            model: format!("{:?}", a.mailbox_model).to_lowercase(),
+            tags: match a.supports_tags {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "?",
+            }
+            .into(),
         })
         .collect();
 

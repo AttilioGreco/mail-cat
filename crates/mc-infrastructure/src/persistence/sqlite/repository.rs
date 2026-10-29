@@ -405,7 +405,7 @@ fn summary_from_row(row: &Row) -> rusqlite::Result<MessageSummary> {
     message_from_row(row).map(summary_of)
 }
 
-const SELECT_ACCOUNT: &str = "SELECT id, name, email, provider_type, status, total_unread, status_error, status_since FROM accounts";
+const SELECT_ACCOUNT: &str = "SELECT id, name, email, provider_type, status, total_unread, status_error, status_since, mailbox_model, supports_tags FROM accounts";
 
 fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
     Ok(AccountSummary {
@@ -419,6 +419,8 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
         status_since: row
             .get::<_, Option<i64>>(7)?
             .map(DateTime::from_timestamp_nanos),
+        mailbox_model: json_col(row, 8)?,
+        supports_tags: row.get(9)?,
     })
 }
 

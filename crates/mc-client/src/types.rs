@@ -22,8 +22,19 @@ pub struct Account {
     pub name: String,
     pub email: String,
     pub status: AccountStatus,
+    pub mailbox_model: MailboxModel,
+    /// Whether the server accepts tags; `None` until a sync found out.
+    pub supports_tags: Option<bool>,
     /// Live auth state; `None` when the server runs no gate for the account.
     pub auth: Option<AuthStatus>,
+}
+
+/// How an account's mailboxes are presented: a tree of folders, or labels
+/// on messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum MailboxModel {
+    Folders,
+    Labels,
 }
 
 /// An account's live auth state, as the server's auth gate sees it.
@@ -192,6 +203,7 @@ pub struct MessageSummary {
     /// `\Flagged` — needed for a real star toggle, not just "add a star".
     pub is_flagged: bool,
     pub has_attachments: bool,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -209,6 +221,7 @@ pub struct MessageBody {
     pub memberships: Vec<Membership>,
     /// Wire names like `FLAG_SEEN`.
     pub flags: Vec<String>,
+    pub tags: Vec<String>,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
     pub rfc_message_id: Option<String>,

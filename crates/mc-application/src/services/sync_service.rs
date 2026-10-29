@@ -465,6 +465,15 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             mailboxes_synced += 1;
         }
 
+        if let Some(supported) = provider.supports_tags() {
+            let detected = DomainEvent::AccountTagsDetected {
+                account_id: *account_id,
+                supported,
+            };
+            self.project_transient(&account_id.to_string(), AggregateType::Account, detected)
+                .await?;
+        }
+
         // 7. Emit AccountSyncCompleted
         let sync_completed = DomainEvent::AccountSyncCompleted {
             account_id: *account_id,

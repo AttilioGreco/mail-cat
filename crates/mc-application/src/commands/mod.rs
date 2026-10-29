@@ -5,7 +5,7 @@
 
 use mc_domain::{
     AccountId, ConnectionConfig, ContactEmail, ContactId, ContactSource, EmailAddress, Flag,
-    Identity, MailboxId, MailboxPath, MessageId, ProviderType,
+    Identity, MailboxId, MailboxModel, MailboxPath, MessageId, ProviderType,
 };
 
 use crate::compose::{ComposeInput, ComposeMode, ComposeView};
@@ -29,6 +29,12 @@ pub enum Command {
         account_id: AccountId,
         name: Option<String>,
         connection_config: Option<ConnectionConfig>,
+    },
+
+    /// Switch how the account's mailboxes are presented. Stored data is untouched.
+    SetAccountMailboxModel {
+        account_id: AccountId,
+        model: MailboxModel,
     },
 
     /// Remove an account and all associated data.
@@ -89,6 +95,17 @@ pub enum Command {
         to_mailbox_id: MailboxId,
         to_mailbox_path: MailboxPath,
     },
+
+    /// Add and remove mailboxes (labels) on messages without moving them.
+    ChangeLabels {
+        message_ids: Vec<MessageId>,
+        add: Vec<MailboxId>,
+        remove: Vec<MailboxId>,
+    },
+
+    /// Take messages out of the Inbox; what that means depends on the
+    /// account's mailbox model (see `handle_archive`).
+    ArchiveMessages { message_ids: Vec<MessageId> },
 
     /// Compute the compose window's starting state (recipients, subject,
     /// quote, sender). A command, not a query, because forwarding and draft
@@ -183,6 +200,7 @@ pub enum CommandResult {
         account_id: AccountId,
     },
     AccountUpdated,
+    MailboxModelSet,
     AccountRemoved,
     SyncStarted,
     MessageBodyFetched,

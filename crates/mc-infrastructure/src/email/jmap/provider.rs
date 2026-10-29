@@ -482,6 +482,16 @@ impl EmailProvider for JmapEmailProvider {
         self.move_emails(ids, from, to).await
     }
 
+    async fn change_labels(
+        &self,
+        ids: &[RemoteId],
+        _in_mailbox: &MailboxPath,
+        add: &[MailboxPath],
+        remove: &[MailboxPath],
+    ) -> Result<(), DomainError> {
+        self.relabel_emails(ids, add, remove).await
+    }
+
     async fn delete_messages(
         &self,
         mailbox: &MailboxPath,

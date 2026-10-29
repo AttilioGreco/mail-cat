@@ -19,6 +19,7 @@ fn uid_of(message: &Message) -> Option<RemoteId> {
 mod delete;
 mod fetch_body;
 mod flags;
+mod labels;
 mod mocks;
 mod moves;
 mod send_compose;

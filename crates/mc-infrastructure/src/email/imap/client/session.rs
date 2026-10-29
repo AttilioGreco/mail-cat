@@ -227,6 +227,7 @@ impl ImapEmailProvider {
             meter: None,
             received: Arc::default(),
             caps: OnceLock::new(),
+            keywords: OnceLock::new(),
         }
     }
 
@@ -287,12 +288,17 @@ impl ImapEmailProvider {
 
     pub(super) async fn selected(&self, mailbox_name: &str) -> Result<PooledSession, DomainError> {
         let mut session = self.session().await?;
-        exchange(
+        let selected = exchange(
             COMMAND_TIMEOUT,
             "Mailbox select",
             session.select(mailbox_name),
         )
         .await?;
+        self.keywords.get_or_init(|| {
+            selected
+                .permanent_flags
+                .contains(&async_imap::types::Flag::MayCreate)
+        });
         Ok(session)
     }
 

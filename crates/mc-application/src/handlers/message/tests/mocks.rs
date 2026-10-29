@@ -156,6 +156,8 @@ pub(super) struct MockEmailProvider {
     pub(super) time_out: RwLock<bool>,
     /// Makes `move_messages` fail once this many messages moved.
     pub(super) refuse_after: RwLock<Option<usize>>,
+    /// (ids, added, removed) of each `change_labels` call.
+    pub(super) relabelled: RwLock<Vec<Relabel>>,
     /// Mailbox of each `set_flags_bulk` call.
     pub(super) flagged_in: RwLock<Vec<MailboxPath>>,
 }
@@ -173,6 +175,8 @@ impl MockEmailProvider {
         }
     }
 }
+
+pub(super) type Relabel = (Vec<RemoteId>, Vec<MailboxPath>, Vec<MailboxPath>);
 
 #[async_trait]
 impl EmailProvider for MockEmailProvider {
@@ -264,6 +268,19 @@ impl EmailProvider for MockEmailProvider {
             moved.insert(id.clone(), self.moved_uid.read().unwrap().clone());
         }
         Ok(moved)
+    }
+    async fn change_labels(
+        &self,
+        ids: &[RemoteId],
+        _in_mailbox: &MailboxPath,
+        add: &[MailboxPath],
+        remove: &[MailboxPath],
+    ) -> Result<(), DomainError> {
+        self.relabelled
+            .write()
+            .unwrap()
+            .push((ids.to_vec(), add.to_vec(), remove.to_vec()));
+        Ok(())
     }
     async fn delete_messages(
         &self,

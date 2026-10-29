@@ -186,6 +186,37 @@ impl JmapEmailProvider {
             .collect())
     }
 
+    /// One `mailboxIds/<id>` patch per email, so the server applies the whole
+    /// change or none of it. An email cannot be left in no mailbox: the server
+    /// refuses that as `invalidProperties`, said plainly here.
+    pub(super) async fn relabel_emails(
+        &self,
+        ids: &[RemoteId],
+        add: &[MailboxPath],
+        remove: &[MailboxPath],
+    ) -> Result<(), DomainError> {
+        let mut patch = Map::new();
+        for (paths, value) in [(remove, Value::Null), (add, json!(true))] {
+            for path in paths {
+                patch.insert(format!("mailboxIds/{}", mailbox_id(path)), value.clone());
+            }
+        }
+        if patch.is_empty() || ids.is_empty() {
+            return Ok(());
+        }
+        self.set_emails(ids, Some(&Value::Object(patch)))
+            .await
+            .map(drop)
+            .map_err(|e| match e {
+                DomainError::Provider(why) if why.contains("invalidProperties") => {
+                    DomainError::Provider(format!(
+                        "an email must stay in at least one mailbox ({why})"
+                    ))
+                }
+                e => e,
+            })
+    }
+
     pub(super) async fn delete_emails(
         &self,
         mailbox: &MailboxPath,

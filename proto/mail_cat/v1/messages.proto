@@ -27,6 +27,17 @@ service MessageService {
   // Mark every unread message in a mailbox as read (single provider round-trip).
   rpc MarkMailboxRead(MarkMailboxReadRequest) returns (MarkMailboxReadResponse);
 
+  // Add and remove mailboxes (labels) on messages without moving them. Refused
+  // when a message would be left in no mailbox.
+  rpc ChangeLabels(ChangeLabelsRequest) returns (BulkChangeResponse);
+
+  // Take messages out of the Inbox: a move to Archive on folder accounts, the
+  // removal of the Inbox label on label accounts.
+  rpc ArchiveMessages(ArchiveMessagesRequest) returns (BulkChangeResponse);
+
+  // Add and remove tags (keywords) on a message.
+  rpc ModifyTags(ModifyTagsRequest) returns (SetFlagsResponse);
+
   // Move message to another mailbox.
   rpc MoveMessage(MoveMessageRequest) returns (MoveMessageResponse);
 
@@ -88,6 +99,8 @@ message MessageSummary {
   uint64 size_bytes = 6;
   bool has_attachments = 7;
   Timestamp received_at = 8;
+  // Keywords other than the standard flags.
+  repeated string tags = 9;
 }
 
 // A message's copy in one mailbox; remote_id is the provider's id there
@@ -115,6 +128,7 @@ message MessageDetail {
   Timestamp received_at = 14;
   Timestamp internal_date = 15;
   repeated MailboxMembership memberships = 16;
+  repeated string tags = 17;
 }
 
 // === Requests/Responses ===
@@ -188,6 +202,22 @@ message SetFlagsRequest {
 
 message SetFlagsResponse {
   MessageSummary message = 1;
+}
+
+message ChangeLabelsRequest {
+  repeated string message_ids = 1;
+  repeated string add_mailbox_ids = 2;
+  repeated string remove_mailbox_ids = 3;
+}
+
+message ArchiveMessagesRequest {
+  repeated string message_ids = 1;
+}
+
+message ModifyTagsRequest {
+  string message_id = 1;
+  repeated string add = 2;
+  repeated string remove = 3;
 }
 
 message MarkMailboxReadRequest {

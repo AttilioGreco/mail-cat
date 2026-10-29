@@ -5,19 +5,20 @@ use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::{
     application_error_to_status, compose_view_to_proto, domain_message_to_detail,
-    domain_message_to_summary, paged_result_to_page_info, proto_compose_input_to_app,
+    domain_message_to_summary, domain_tags, paged_result_to_page_info, proto_compose_input_to_app,
     proto_compose_mode, proto_flags_to_domain, proto_to_domain_pagination,
 };
 use crate::grpc::proto::{
-    BulkChangeResponse, ComposeInput, ComposeView, CountsChangedEvent, DeleteMessageRequest,
-    DeleteMessageResponse, DeleteMessagesRequest, DiscardDraftRequest, DiscardDraftResponse,
-    FlagsChangedEvent, GetMessageRequest, GetMessageResponse, GetThreadRequest, GetThreadResponse,
-    ListConversationsRequest, ListConversationsResponse, ListMessagesRequest, ListMessagesResponse,
-    MailboxEvent, MarkMailboxReadRequest, MarkMailboxReadResponse, MessageExpungedEvent,
-    MessageRef, MoveMessageRequest, MoveMessageResponse, MoveMessagesRequest, NewMessageEvent,
-    PrepareComposeRequest, RebuildConversationIndexRequest, RebuildConversationIndexResponse,
-    SaveDraftResponse, SendComposeResponse, SetFlagsRequest, SetFlagsResponse, WatchMailboxRequest,
-    mailbox_event, message_service_server::MessageService,
+    ArchiveMessagesRequest, BulkChangeResponse, ChangeLabelsRequest, ComposeInput, ComposeView,
+    CountsChangedEvent, DeleteMessageRequest, DeleteMessageResponse, DeleteMessagesRequest,
+    DiscardDraftRequest, DiscardDraftResponse, FlagsChangedEvent, GetMessageRequest,
+    GetMessageResponse, GetThreadRequest, GetThreadResponse, ListConversationsRequest,
+    ListConversationsResponse, ListMessagesRequest, ListMessagesResponse, MailboxEvent,
+    MarkMailboxReadRequest, MarkMailboxReadResponse, MessageExpungedEvent, MessageRef,
+    ModifyTagsRequest, MoveMessageRequest, MoveMessageResponse, MoveMessagesRequest,
+    NewMessageEvent, PrepareComposeRequest, RebuildConversationIndexRequest,
+    RebuildConversationIndexResponse, SaveDraftResponse, SendComposeResponse, SetFlagsRequest,
+    SetFlagsResponse, WatchMailboxRequest, mailbox_event, message_service_server::MessageService,
 };
 use mc_application::{
     InProcessEventBus,
@@ -27,7 +28,7 @@ use mc_application::{
 };
 use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::Message;
-use mc_domain::{AccountId, DomainEvent, MailboxId, MessageId};
+use mc_domain::{AccountId, DomainEvent, Flag, MailboxId, MessageId};
 
 fn parse_mailbox_id(id: &str, field: &str) -> Result<MailboxId, Status> {
     uuid::Uuid::parse_str(id)
@@ -48,6 +49,36 @@ fn parse_message_refs(refs: &[MessageRef]) -> Result<Vec<(MessageId, MailboxId)>
             Ok((message_id, parse_mailbox_id(&r.mailbox_id, "mailbox_id")?))
         })
         .collect()
+}
+
+fn parse_message_ids(ids: &[String]) -> Result<Vec<MessageId>, Status> {
+    ids.iter()
+        .map(|id| {
+            uuid::Uuid::parse_str(id)
+                .map(MessageId::from_uuid)
+                .map_err(|e| Status::invalid_argument(format!("invalid message_id {id}: {e}")))
+        })
+        .collect()
+}
+
+fn parse_mailbox_ids(ids: &[String]) -> Result<Vec<MailboxId>, Status> {
+    ids.iter()
+        .map(|id| parse_mailbox_id(id, "mailbox_id"))
+        .collect()
+}
+
+/// A tag is an IMAP keyword and a JMAP keyword at once: an atom without the
+/// characters either grammar reserves, and not a `\` system flag.
+fn validate_tag(tag: &str) -> Result<(), Status> {
+    let valid = !tag.is_empty()
+        && tag.len() <= 255
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_graphic() && !"(){]%*\"\\".contains(c));
+    if valid {
+        return Ok(());
+    }
+    Err(Status::invalid_argument(format!("invalid tag {tag:?}")))
 }
 
 fn bulk_counts(result: mc_application::commands::CommandResult) -> Result<(u32, u32), Status> {
@@ -192,16 +223,13 @@ where
                         .map(|m| m.mailbox_id.to_string())
                         .collect(),
                     envelope: Some(envelope),
-                    flags: summary
-                        .flags
-                        .iter()
-                        .map(crate::grpc::mappers::domain_flag_to_proto)
-                        .collect(),
+                    flags: crate::grpc::mappers::domain_flags_to_proto(&summary.flags),
                     size_bytes: summary.size_bytes,
                     has_attachments: summary.has_attachments,
                     received_at: Some(crate::grpc::mappers::datetime_to_timestamp(
                         &summary.received_at,
                     )),
+                    tags: domain_tags(&summary.flags),
                 }
             })
             .collect();
@@ -451,6 +479,64 @@ where
 
         Ok(Response::new(MarkMailboxReadResponse {
             marked_count: count,
+        }))
+    }
+
+    async fn change_labels(
+        &self,
+        request: Request<ChangeLabelsRequest>,
+    ) -> Result<Response<BulkChangeResponse>, Status> {
+        let req = request.into_inner();
+        let result = self
+            .command_bus
+            .dispatch(Command::ChangeLabels {
+                message_ids: parse_message_ids(&req.message_ids)?,
+                add: parse_mailbox_ids(&req.add_mailbox_ids)?,
+                remove: parse_mailbox_ids(&req.remove_mailbox_ids)?,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        let (succeeded, failed) = bulk_counts(result)?;
+        Ok(Response::new(BulkChangeResponse { succeeded, failed }))
+    }
+
+    async fn archive_messages(
+        &self,
+        request: Request<ArchiveMessagesRequest>,
+    ) -> Result<Response<BulkChangeResponse>, Status> {
+        let req = request.into_inner();
+        let result = self
+            .command_bus
+            .dispatch(Command::ArchiveMessages {
+                message_ids: parse_message_ids(&req.message_ids)?,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        let (succeeded, failed) = bulk_counts(result)?;
+        Ok(Response::new(BulkChangeResponse { succeeded, failed }))
+    }
+
+    async fn modify_tags(
+        &self,
+        request: Request<ModifyTagsRequest>,
+    ) -> Result<Response<SetFlagsResponse>, Status> {
+        let req = request.into_inner();
+        for tag in req.add.iter().chain(&req.remove) {
+            validate_tag(tag)?;
+        }
+        let message_id = parse_message_ids(std::slice::from_ref(&req.message_id))?[0];
+        let tags = |names: Vec<String>| names.into_iter().map(Flag::Custom).collect();
+        self.command_bus
+            .dispatch(Command::SetMessageFlags {
+                message_id,
+                flags_to_add: tags(req.add),
+                flags_to_remove: tags(req.remove),
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        let updated = self.load_message(message_id).await?;
+        Ok(Response::new(SetFlagsResponse {
+            message: Some(domain_message_to_summary(&updated)),
         }))
     }
 

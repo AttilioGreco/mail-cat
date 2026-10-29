@@ -112,6 +112,30 @@ pub trait EmailProvider: Send + Sync {
         permanently: bool,
     ) -> Result<(), DomainError>;
 
+    /// Add `add` to and remove `remove` from the mailboxes the emails are in,
+    /// in one atomic change per email (`in_mailbox` is one they are all in).
+    /// An email keeps its `RemoteId` in the mailboxes it is added to, and must
+    /// stay in at least one. Only providers whose mailboxes are labels (JMAP)
+    /// support it; plain IMAP mailboxes are folders, moved with
+    /// [`Self::move_messages`].
+    async fn change_labels(
+        &self,
+        _ids: &[RemoteId],
+        _in_mailbox: &MailboxPath,
+        _add: &[MailboxPath],
+        _remove: &[MailboxPath],
+    ) -> Result<(), DomainError> {
+        Err(DomainError::NotSupported(
+            "this account's mailboxes are folders, not labels".into(),
+        ))
+    }
+
+    /// Whether the server takes arbitrary keywords (tags) on messages, when
+    /// known: IMAP learns it from PERMANENTFLAGS on the first SELECT.
+    fn supports_tags(&self) -> Option<bool> {
+        Some(true)
+    }
+
     /// Send a message via the provider's send mechanism (SMTP, API, etc.).
     /// `sent` is the account's Sent mailbox, if known: the provider files the
     /// sent copy there when the server does not do it by itself, and reports

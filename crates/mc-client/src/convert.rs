@@ -21,6 +21,11 @@ pub fn account_from_proto(a: pb::AccountSummary) -> Account {
         name: a.name,
         email: a.email.map(|e| e.email).unwrap_or_default(),
         status,
+        mailbox_model: match pb::MailboxModel::try_from(a.mailbox_model) {
+            Ok(pb::MailboxModel::Labels) => MailboxModel::Labels,
+            _ => MailboxModel::Folders,
+        },
+        supports_tags: a.supports_tags,
         auth: a.auth.map(auth_status_from_proto),
     }
 }
@@ -65,6 +70,8 @@ pub fn account_detail_from_proto(a: pb::AccountDetail) -> Account {
         created_at: a.created_at,
         updated_at: a.updated_at,
         auth: None,
+        mailbox_model: a.mailbox_model,
+        supports_tags: a.supports_tags,
     })
 }
 
@@ -111,6 +118,7 @@ pub fn message_summary_from_proto(m: pb::MessageSummary) -> MessageSummary {
         is_read: m.flags.contains(&(pb::Flag::Seen as i32)),
         is_flagged: m.flags.contains(&(pb::Flag::Flagged as i32)),
         has_attachments: m.has_attachments,
+        tags: m.tags,
     }
 }
 
@@ -135,6 +143,7 @@ pub fn message_body_from_proto(m: pb::MessageDetail) -> MessageBody {
                 Err(_) => f.to_string(),
             })
             .collect(),
+        tags: m.tags,
         html_body: m.body_html,
         text_body: m.body_text,
         rfc_message_id: m.message_rfc_id,

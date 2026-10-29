@@ -623,6 +623,7 @@ fn require_membership(
     })
 }
 
+mod labels;
 mod outgoing;
 mod relocate;
 

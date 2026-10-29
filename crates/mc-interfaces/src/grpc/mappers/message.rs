@@ -1,6 +1,6 @@
 use super::{
-    datetime_to_timestamp, domain_address_to_proto, domain_flag_to_proto, proto_email_to_domain,
-    proto_flag_to_domain, timestamp_to_datetime,
+    datetime_to_timestamp, domain_address_to_proto, domain_flags_to_proto, domain_tags,
+    proto_email_to_domain, proto_flag_to_domain, timestamp_to_datetime,
 };
 use crate::grpc::proto::{self, AttachmentInfo, MessageDetail, MessageEnvelope, MessageSummary};
 use mc_application::compose::{ComposeInput, ComposeMode, ComposeView};
@@ -76,10 +76,11 @@ pub fn domain_message_to_summary(message: &Message) -> MessageSummary {
             .map(|m| m.mailbox_id.to_string())
             .collect(),
         envelope: Some(domain_envelope_to_proto(&message.envelope)),
-        flags: message.flags.iter().map(domain_flag_to_proto).collect(),
+        flags: domain_flags_to_proto(&message.flags),
         size_bytes: message.size_bytes,
         has_attachments: message.has_attachments,
         received_at: Some(datetime_to_timestamp(&message.received_at)),
+        tags: domain_tags(&message.flags),
     }
 }
 
@@ -97,7 +98,7 @@ pub fn domain_message_to_detail(message: &Message) -> MessageDetail {
         in_reply_to: message.in_reply_to.clone(),
         references: message.references.clone(),
         envelope: Some(domain_envelope_to_proto(&message.envelope)),
-        flags: message.flags.iter().map(domain_flag_to_proto).collect(),
+        flags: domain_flags_to_proto(&message.flags),
         size_bytes: message.size_bytes,
         attachments: message
             .attachments
@@ -117,6 +118,7 @@ pub fn domain_message_to_detail(message: &Message) -> MessageDetail {
                 remote_id: m.remote_id.as_ref().map(ToString::to_string),
             })
             .collect(),
+        tags: domain_tags(&message.flags),
     }
 }
 

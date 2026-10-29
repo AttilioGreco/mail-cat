@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
 use crate::events::DomainEvent;
-use crate::model::account::{AccountId, AccountStatus, ProviderType};
+use crate::model::account::{AccountId, AccountStatus, MailboxModel, ProviderType};
 use crate::model::contact::{Contact, ContactEmail, ContactSource};
 use crate::model::mailbox::{Mailbox, MailboxId};
 use crate::model::message::{Membership, Message};
@@ -50,6 +50,10 @@ pub struct AccountSummary {
     pub name: String,
     pub email: EmailAddress,
     pub provider_type: ProviderType,
+    pub mailbox_model: MailboxModel,
+    /// Whether the server accepts arbitrary message keywords (tags); `None`
+    /// until a sync has found out. The tag UI is hidden unless `Some(true)`.
+    pub supports_tags: Option<bool>,
     pub status: AccountStatus,
     pub total_unread: u32,
     /// Why the account is in `status`, for the states that need the user.

@@ -5,7 +5,7 @@ use tonic::{Request, Response, Status};
 use crate::grpc::mappers::{
     application_error_to_status, auth_status_to_proto, domain_account_summary_to_detail,
     domain_account_summary_to_proto, proto_connection_to_domain, proto_email_to_domain,
-    proto_oauth_provider_to_domain, proto_provider_type_to_domain,
+    proto_mailbox_model_to_domain, proto_oauth_provider_to_domain, proto_provider_type_to_domain,
 };
 use crate::grpc::proto::{
     self, AddAccountRequest, AddAccountResponse, GetAccountRequest, GetAccountResponse,
@@ -227,6 +227,23 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             accounts: summaries,
             page_info: None, // Not paginated yet
         }))
+    }
+
+    async fn set_account_mailbox_model(
+        &self,
+        request: Request<proto::SetAccountMailboxModelRequest>,
+    ) -> Result<Response<proto::SetAccountMailboxModelResponse>, Status> {
+        let req = request.into_inner();
+        let account_id = AccountId::from_uuid(
+            uuid::Uuid::parse_str(&req.account_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
+        );
+        let model = proto_mailbox_model_to_domain(req.model).map_err(Status::invalid_argument)?;
+        self.command_bus
+            .dispatch(Command::SetAccountMailboxModel { account_id, model })
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(proto::SetAccountMailboxModelResponse {}))
     }
 
     async fn update_account(

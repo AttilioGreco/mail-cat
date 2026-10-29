@@ -173,13 +173,8 @@ pub fn flag_to_imap(flag: &Flag) -> String {
         Flag::Deleted => "\\Deleted".to_string(),
         Flag::Draft => "\\Draft".to_string(),
         Flag::Recent => "\\Recent".to_string(),
-        Flag::Custom(s) => {
-            if s.starts_with('\\') {
-                s.clone()
-            } else {
-                format!("\\{}", s)
-            }
-        }
+        // A keyword, sent as it is: a backslash would make it a system flag.
+        Flag::Custom(s) => s.clone(),
     }
 }
 
@@ -294,10 +289,7 @@ mod tests {
         assert_eq!(flag_to_imap(&Flag::Deleted), "\\Deleted");
         assert_eq!(flag_to_imap(&Flag::Draft), "\\Draft");
         assert_eq!(flag_to_imap(&Flag::Recent), "\\Recent");
-        assert_eq!(
-            flag_to_imap(&Flag::Custom("Custom".to_string())),
-            "\\Custom"
-        );
+        assert_eq!(flag_to_imap(&Flag::Custom("$Work".to_string())), "$Work");
         assert_eq!(
             flag_to_imap(&Flag::Custom("\\MyFlag".to_string())),
             "\\MyFlag"

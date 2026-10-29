@@ -93,6 +93,9 @@ pub struct ImapEmailProvider {
     received: Arc<AtomicU64>,
     /// Learned on the first login, or by [`known_caps`] before a move or delete.
     caps: OnceLock<ServerCaps>,
+    /// Whether SELECT's PERMANENTFLAGS lists `\*` (any keyword may be set).
+    /// Learned from the first mailbox selected; servers answer the same for all.
+    keywords: OnceLock<bool>,
 }
 
 impl ImapEmailProvider {
@@ -211,6 +214,10 @@ impl EmailProvider for ImapEmailProvider {
 
     /// One session, one `UID STORE` over the whole set per chunk, with the
     /// same range compression and chunking as `set_flags_bulk`.
+    fn supports_tags(&self) -> Option<bool> {
+        self.keywords.get().copied()
+    }
+
     async fn delete_messages(
         &self,
         mailbox: &MailboxPath,

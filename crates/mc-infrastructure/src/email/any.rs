@@ -110,6 +110,20 @@ impl EmailProvider for AnyProvider {
         delegate!(self, p => p.move_messages(ids, from, to).await)
     }
 
+    async fn change_labels(
+        &self,
+        ids: &[RemoteId],
+        in_mailbox: &MailboxPath,
+        add: &[MailboxPath],
+        remove: &[MailboxPath],
+    ) -> Result<(), DomainError> {
+        delegate!(self, p => p.change_labels(ids, in_mailbox, add, remove).await)
+    }
+
+    fn supports_tags(&self) -> Option<bool> {
+        delegate!(self, p => p.supports_tags())
+    }
+
     async fn delete_messages(
         &self,
         mailbox: &MailboxPath,

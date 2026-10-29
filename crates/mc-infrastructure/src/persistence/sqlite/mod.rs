@@ -36,6 +36,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         name          TEXT NOT NULL,
         email         TEXT NOT NULL,
         provider_type TEXT NOT NULL,
+        mailbox_model TEXT NOT NULL,
+        supports_tags INTEGER,
         status        TEXT NOT NULL,
         total_unread  INTEGER NOT NULL DEFAULT 0
     );

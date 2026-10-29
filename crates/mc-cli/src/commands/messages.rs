@@ -99,6 +99,33 @@ pub enum MessagesCmd {
         /// Target mailbox ID
         to_mailbox_id: String,
     },
+    /// Add and remove mailboxes (labels) on messages, without moving them
+    Labels {
+        /// Message IDs
+        #[arg(required = true)]
+        message_ids: Vec<String>,
+        /// Mailbox IDs to add
+        #[arg(long)]
+        add: Vec<String>,
+        /// Mailbox IDs to remove
+        #[arg(long)]
+        remove: Vec<String>,
+    },
+    /// Add and remove tags (keywords) on a message
+    Tag {
+        /// Message ID
+        message_id: String,
+        #[arg(long)]
+        add: Vec<String>,
+        #[arg(long)]
+        remove: Vec<String>,
+    },
+    /// Take messages out of the Inbox (move to Archive, or drop the Inbox label)
+    Archive {
+        /// Message IDs
+        #[arg(required = true)]
+        message_ids: Vec<String>,
+    },
     /// Search messages by full-text query
     Search {
         /// Search query (supports from:, to:, sbj: prefixes)
@@ -197,6 +224,32 @@ pub async fn run(cmd: MessagesCmd, client: MailCatClient, json: bool) -> Result<
             mailbox,
             to_mailbox_id,
         } => move_msg(message_id, mailbox, to_mailbox_id, client).await,
+        MessagesCmd::Labels {
+            message_ids,
+            add,
+            remove,
+        } => {
+            let (ok, failed) = client.change_labels(message_ids, add, remove).await?;
+            println!(
+                "{} labels changed on {ok} message(s), {failed} skipped",
+                "✓".green()
+            );
+            Ok(())
+        }
+        MessagesCmd::Tag {
+            message_id,
+            add,
+            remove,
+        } => {
+            let m = client.modify_tags(&message_id, add, remove).await?;
+            println!("{} tags: {}", "✓".green(), m.tags.join(" "));
+            Ok(())
+        }
+        MessagesCmd::Archive { message_ids } => {
+            let (ok, failed) = client.archive_messages(message_ids).await?;
+            println!("{} archived {ok} message(s), {failed} skipped", "✓".green());
+            Ok(())
+        }
         MessagesCmd::Search {
             query,
             account_id,
@@ -350,6 +403,7 @@ async fn show(
     println!("subject:    {}", m.subject);
     println!("message-id: {}", m.rfc_message_id.as_deref().unwrap_or("-"));
     println!("flags:      {}", m.flags.join(" "));
+    println!("tags:       {}", m.tags.join(" "));
     for x in &m.memberships {
         println!(
             "mailbox:    {} remote_id={}",

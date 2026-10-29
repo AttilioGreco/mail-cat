@@ -58,6 +58,27 @@ impl std::fmt::Display for ProviderType {
     }
 }
 
+/// How an account's mailboxes are presented and which operations the UI
+/// offers. Never changes stored data: `message_mailboxes` is M:N either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MailboxModel {
+    /// A message sits in one folder; moving replaces it.
+    Folders,
+    /// A message carries one or more mailboxes as labels.
+    Labels,
+}
+
+impl MailboxModel {
+    /// ponytail: Gmail-over-IMAP stays `Folders` until phase 4 brings
+    /// X-GM-LABELS `change_labels`; a Gmail variant would key on it here.
+    pub fn default_for(provider: ProviderType) -> Self {
+        match provider {
+            ProviderType::Imap => Self::Folders,
+            ProviderType::Jmap => Self::Labels,
+        }
+    }
+}
+
 /// Account status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountStatus {
@@ -158,6 +179,7 @@ pub struct Account {
     pub name: String,
     pub email: EmailAddress,
     pub provider_type: ProviderType,
+    pub mailbox_model: MailboxModel,
     pub connection_config: ConnectionConfig,
     pub identity: Identity,
     pub status: AccountStatus,
@@ -189,6 +211,7 @@ impl Account {
             name,
             email,
             provider_type,
+            mailbox_model: MailboxModel::default_for(provider_type),
             connection_config,
             identity,
             status: AccountStatus::Active,
@@ -218,6 +241,18 @@ impl Account {
             name,
             connection_config,
         }
+    }
+
+    /// `None` when the account already uses `model`.
+    pub fn set_mailbox_model(&mut self, model: MailboxModel) -> Option<DomainEvent> {
+        (self.mailbox_model != model).then(|| {
+            self.mailbox_model = model;
+            self.updated_at = Utc::now();
+            DomainEvent::AccountMailboxModelChanged {
+                account_id: self.id,
+                model,
+            }
+        })
     }
 
     /// Mark the account as removed and produce the event.
@@ -258,6 +293,9 @@ impl Account {
                 }
                 self.updated_at = Utc::now();
             }
+            DomainEvent::AccountMailboxModelChanged { model, .. } => {
+                self.mailbox_model = *model;
+            }
             DomainEvent::AccountRemoved { .. } => {
                 self.status = AccountStatus::Disabled;
             }
@@ -272,7 +310,8 @@ impl Account {
             }
             DomainEvent::AccountSyncStarted { .. }
             | DomainEvent::AccountSyncCompleted { .. }
-            | DomainEvent::AccountSyncFailed { .. } => {
+            | DomainEvent::AccountSyncFailed { .. }
+            | DomainEvent::AccountTagsDetected { .. } => {
                 // Sync events don't mutate aggregate state.
                 // They're tracked for audit/projection purposes.
             }
@@ -302,6 +341,7 @@ impl Account {
             name: name.clone(),
             email: email.clone(),
             provider_type: *provider_type,
+            mailbox_model: MailboxModel::default_for(*provider_type),
             connection_config: ConnectionConfig {
                 incoming: IncomingServer::Imap {
                     host: String::new(),
