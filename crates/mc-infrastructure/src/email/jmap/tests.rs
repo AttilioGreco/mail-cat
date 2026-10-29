@@ -252,6 +252,61 @@ async fn first_sync_pages_newest_first_and_stays_on_the_session_origin() {
 }
 
 #[tokio::test]
+async fn find_by_message_id_scans_and_ignores_brackets_and_empty_ids() {
+    // Paged two at a time, so the scan must walk past the first page.
+    let base = serve(|name, args| match name {
+        "Email/query" => {
+            let all = ["e1", "e2", "e3"];
+            let from = args["position"].as_u64().unwrap() as usize;
+            json!({"ids": all[from..all.len().min(from + 2)]})
+        }
+        "Email/get" => {
+            let message_id = |id: &str| if id == "e2" { "b@x" } else { "a@x" };
+            let list: Vec<Value> = args["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| json!({"id": id, "messageId": [message_id(id.as_str().unwrap())]}))
+                .collect();
+            json!({"list": list})
+        }
+        other => panic!("unexpected {other}"),
+    })
+    .await;
+    let p = provider(&base);
+
+    let found = p.find_by_message_id(&inbox(), "<a@x>").await.unwrap();
+    let found: Vec<&str> = found.iter().map(RemoteId::as_str).collect();
+    assert_eq!(found, ["e1", "e3"]);
+    // Empty ids never query (the panic arm above) nor match everything.
+    for empty in ["", "<>", " "] {
+        assert!(
+            p.find_by_message_id(&inbox(), empty)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_arguments_rescans_like_cannot_calculate_changes() {
+    let snapshot = snapshot_server("s9");
+    let base = serve(move |name, args| match name {
+        "Email/changes" => json!({"error": "invalidArguments"}),
+        _ => snapshot(name, args),
+    })
+    .await;
+
+    let changes = provider(&base)
+        .mailbox_changes(&inbox(), Some(&SyncCursor::new("bad")))
+        .await
+        .unwrap();
+
+    assert_eq!(changes.reset, Some(Reset::Rescan));
+}
+
+#[tokio::test]
 async fn cannot_calculate_changes_rescans() {
     let snapshot = snapshot_server("s9");
     let base = serve(move |name, args| match name {

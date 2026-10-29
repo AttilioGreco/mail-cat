@@ -126,6 +126,10 @@ fn rfc_ids(list: &Value) -> Vec<String> {
         .collect()
 }
 
+pub(super) fn message_ids(email: &Value) -> Vec<String> {
+    rfc_ids(&email["messageId"])
+}
+
 pub(super) fn date(value: &Value) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value.as_str()?)
         .ok()

@@ -223,7 +223,10 @@ impl JmapEmailProvider {
             let mut reply = self.client.call(calls).await?.into_iter();
             let page = match reply.next().unwrap() {
                 Ok(page) => page,
-                Err(MethodError { kind, .. }) if kind == "cannotCalculateChanges" => {
+                // Stalwart answers a malformed or unknown state with invalidArguments.
+                Err(MethodError { kind, .. })
+                    if kind == "cannotCalculateChanges" || kind == "invalidArguments" =>
+                {
                     return Ok(None);
                 }
                 Err(e) => return Err(e.into()),
@@ -394,24 +397,55 @@ impl EmailProvider for JmapEmailProvider {
         mailbox: &MailboxPath,
         rfc_id: &str,
     ) -> Result<Vec<RemoteId>, DomainError> {
-        let mut reply = self
-            .client
-            .call(vec![(
-                "Email/query",
-                json!({
-                    "filter": {"operator": "AND", "conditions": [
-                        {"inMailbox": mailbox_id(mailbox)},
-                        {"header": ["Message-ID", rfc_id]},
-                    ]},
-                    "sort": [{"property": "receivedAt", "isAscending": true}],
-                }),
-            )])
-            .await?;
-        let reply = reply.remove(0)?;
-        Ok(ids_of(&reply, "ids")
-            .into_iter()
-            .map(RemoteId::from)
-            .collect())
+        let wanted = rfc_id.trim_matches(|c: char| c == '<' || c == '>' || c.is_whitespace());
+        if wanted.is_empty() {
+            return Ok(vec![]);
+        }
+        // The server-side `header` filter matches nothing on Stalwart, so the
+        // mailbox is scanned for the id instead.
+        // ponytail: O(mailbox) per lookup; use the filter again if servers get it right.
+        let limit = self.max_objects().await?;
+        let mut found = Vec::new();
+        for position in (0..).step_by(limit) {
+            let mut page = self
+                .client
+                .call(vec![
+                    (
+                        "Email/query",
+                        json!({
+                            "filter": {"inMailbox": mailbox_id(mailbox)},
+                            "sort": [{"property": "receivedAt", "isAscending": true}],
+                            "position": position,
+                            "limit": limit,
+                        }),
+                    ),
+                    (
+                        "Email/get",
+                        json!({
+                            "#ids": {"resultOf": "c0", "name": "Email/query", "path": "/ids"},
+                            "properties": ["id", "messageId"],
+                        }),
+                    ),
+                ])
+                .await?
+                .into_iter();
+            let queried = ids_of(&page.next().unwrap()?, "ids").len();
+            let emails = page.next().unwrap()?;
+            found.extend(
+                list_of(&emails)
+                    .iter()
+                    .filter(|e| {
+                        mapper::message_ids(e)
+                            .iter()
+                            .any(|id| id.trim_matches(['<', '>']) == wanted)
+                    })
+                    .filter_map(|e| e["id"].as_str().map(RemoteId::new)),
+            );
+            if queried < limit {
+                break;
+            }
+        }
+        Ok(found)
     }
 
     async fn fetch_raw_message(
