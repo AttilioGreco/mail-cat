@@ -14,10 +14,12 @@ interface MessageSummaryDto {
   is_read: boolean;
   is_flagged: boolean;
   has_attachments: boolean;
+  tags: string[];
 }
 
 interface MessageBodyDto {
   id: string;
+  tags: string[];
   html_body: string | null;
   text_body: string | null;
   rfc_message_id: string | null;
@@ -29,6 +31,8 @@ async function fetchEnvelopes(accountId: string, mailboxId: string): Promise<Mes
   const dtos = await invoke<MessageSummaryDto[]>('list_messages', { accountId, mailboxId });
   return dtos.map((d) => ({
     uid: d.id,
+    mailboxIds: d.mailbox_ids,
+    tags: d.tags,
     subject: d.subject,
     fromName: d.from_name ?? d.from_email,
     fromEmail: d.from_email,
@@ -45,6 +49,7 @@ async function fetchBody(messageId: string, mailboxId: string): Promise<MessageB
   const dto = await invoke<MessageBodyDto>('get_message', { messageId, mailboxId });
   return {
     uid: dto.id,
+    tags: dto.tags,
     htmlBody: dto.html_body,
     textBody: dto.text_body,
     rfcMessageId: dto.rfc_message_id,

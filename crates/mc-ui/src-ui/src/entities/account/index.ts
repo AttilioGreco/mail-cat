@@ -5,6 +5,7 @@ export type {
   AccountAuth,
   AccountStats,
   AccountStatus,
+  MailboxModel,
   AuthState,
   OAuthProviderId,
 } from './model/types';

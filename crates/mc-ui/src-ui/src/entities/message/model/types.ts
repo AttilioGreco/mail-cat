@@ -1,5 +1,8 @@
 export interface MessageEnvelope {
   uid: string; // server UUID
+  /** Every mailbox (label) the message is in. */
+  mailboxIds: string[];
+  tags: string[];
   subject: string;
   fromName: string;
   fromEmail: string;
@@ -13,6 +16,7 @@ export interface MessageEnvelope {
 
 export interface MessageBody {
   uid: string;
+  tags: string[];
   htmlBody: string | null;
   textBody: string | null;
   rfcMessageId: string | null;

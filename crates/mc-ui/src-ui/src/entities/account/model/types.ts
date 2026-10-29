@@ -34,11 +34,17 @@ export interface AccountAuth {
   smtpError: string | null;
 }
 
+/** How an account's mailboxes are presented: a folder tree, or labels on messages. */
+export type MailboxModel = 'folders' | 'labels';
+
 export interface Account {
   id: string;
   name: string;
   email: string;
   status: AccountStatus;
+  mailboxModel: MailboxModel;
+  /** null until a sync found out whether the server accepts tags. */
+  supportsTags: boolean | null;
   /** null when the server runs no auth gate for the account. */
   auth: AccountAuth | null;
 }

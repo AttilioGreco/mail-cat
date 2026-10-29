@@ -39,6 +39,16 @@ export function useSetAccountPassword() {
   });
 }
 
+/** Presentation only: the server stores nothing differently. */
+export function useSetMailboxModel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ accountId, labels }: { accountId: string; labels: boolean }) =>
+      invoke('set_account_mailbox_model', { accountId, labels }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['accounts'] }),
+  });
+}
+
 export function useSyncNow() {
   return useMutation({
     mutationFn: (accountId: string) => invoke('sync_now', { accountId }),

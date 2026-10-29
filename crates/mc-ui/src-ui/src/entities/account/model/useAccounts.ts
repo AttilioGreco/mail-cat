@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { Account, AccountAuth, AccountStats, AccountStatus, AuthState, OAuthProviderId } from './types';
+import type { Account, AccountAuth, AccountStats, AccountStatus, AuthState, MailboxModel, OAuthProviderId } from './types';
 
 interface AuthStatusDto {
   account_id: string;
@@ -21,6 +21,8 @@ interface AccountDto {
   name: string;
   email: string;
   status: AccountStatus;
+  mailbox_model: MailboxModel;
+  supports_tags: boolean | null;
   auth: AuthStatusDto | null;
 }
 
@@ -44,6 +46,8 @@ async function fetchAccounts(): Promise<Account[]> {
     name: d.name,
     email: d.email,
     status: d.status,
+    mailboxModel: d.mailbox_model,
+    supportsTags: d.supports_tags,
     auth: d.auth && authFromDto(d.auth),
   }));
 }

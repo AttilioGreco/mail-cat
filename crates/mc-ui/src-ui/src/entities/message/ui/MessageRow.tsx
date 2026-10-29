@@ -1,5 +1,6 @@
 import { Paperclip } from 'lucide-react';
 import { cn, formatDate } from '@/shared/lib/utils';
+import { LabelChip } from '@/shared/ui/label-chip';
 import type { MessageEnvelope } from '../model/types';
 
 interface MessageRowProps {
@@ -7,10 +8,12 @@ interface MessageRowProps {
   isSelected: boolean;
   onSelect: (e: React.MouseEvent) => void;
   onOpen?: () => void;
+  /** Label display names; shown only on Labels accounts. */
+  labels?: string[];
   style?: React.CSSProperties;
 }
 
-export function MessageRow({ message, isSelected, onSelect, onOpen, style }: MessageRowProps) {
+export function MessageRow({ message, isSelected, onSelect, onOpen, labels, style }: MessageRowProps) {
   return (
     <div
       style={style}
@@ -57,6 +60,13 @@ export function MessageRow({ message, isSelected, onSelect, onOpen, style }: Mes
           <Paperclip size={11} className="shrink-0 text-muted" />
         )}
       </div>
+
+      {(labels?.length || message.tags.length) ? (
+        <div className="flex gap-1 overflow-hidden pt-0.5">
+          {labels?.map((l) => <LabelChip key={l} name={l} />)}
+          {message.tags.map((t) => <LabelChip key={`tag:${t}`} name={t} tag />)}
+        </div>
+      ) : null}
     </div>
   );
 }

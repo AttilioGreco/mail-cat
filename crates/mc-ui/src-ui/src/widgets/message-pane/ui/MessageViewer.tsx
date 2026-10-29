@@ -6,7 +6,7 @@ import {
 import { cn, formatDate } from '@/shared/lib/utils';
 import { useMessageBody, type MessageEnvelope } from '@/entities/message';
 import {
-  useSetFlags, useDeleteMessage, useMoveMessage, useToggleStar, useSelectNeighbour,
+  useSetFlags, useDeleteMessage, useMoveMessage, useArchiveMessages, useToggleStar, useSelectNeighbour,
 } from '@/features/message-actions';
 import { useMailboxes } from '@/entities/mailbox';
 import { useKeymap, type ShortcutBinding } from '@/features/keyboard-shortcuts';
@@ -14,6 +14,7 @@ import { formatForDisplay } from '@tanstack/react-hotkeys';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useComposeStore, type ComposeMode } from '@/features/compose-message';
 import { useShortcuts } from '@/features/keyboard-shortcuts';
+import { MessageLabels } from '@/features/manage-labels';
 import { EmailContent } from './EmailContent';
 
 interface MessageViewerProps {
@@ -27,6 +28,7 @@ export function MessageViewer({ envelope, mailboxId }: MessageViewerProps) {
   const setFlags = useSetFlags();
   const deleteMsg = useDeleteMessage();
   const moveMsg = useMoveMessage();
+  const archive = useArchiveMessages();
   const toggleStar = useToggleStar();
   const selectNeighbour = useSelectNeighbour();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -57,9 +59,6 @@ export function MessageViewer({ envelope, mailboxId }: MessageViewerProps) {
   const open = (mode: ComposeMode) =>
     openCompose({ mode, messageId: envelope.uid, accountId: selectedAccountId });
 
-  /** Gmail has no \\Archive; its All Mail doubles as the archive target. */
-  const archiveMailbox =
-    mailboxes.find((m) => m.kind === 'archive') ?? mailboxes.find((m) => m.kind === 'all');
   const spamMailbox = mailboxes.find((m) => m.kind === 'spam');
 
   const moveTo = (toMailboxId: string) => {
@@ -130,13 +129,14 @@ export function MessageViewer({ envelope, mailboxId }: MessageViewerProps) {
           label={envelope.isRead ? 'Segna come non letto' : 'Segna come letto'}
           onClick={handleToggleRead}
         />
-        {archiveMailbox && (
-          <ToolbarButton
-            icon={<Archive size={15} />}
-            label="Archivia"
-            onClick={() => moveTo(archiveMailbox.id)}
-          />
-        )}
+        <ToolbarButton
+          icon={<Archive size={15} />}
+          label="Archivia"
+          onClick={() => {
+            selectNeighbour(envelope.uid);
+            archive.mutate([envelope.uid]);
+          }}
+        />
         <ToolbarButton
           icon={<Trash2 size={15} />}
           label="Sposta nel cestino"
@@ -218,6 +218,15 @@ export function MessageViewer({ envelope, mailboxId }: MessageViewerProps) {
             </div>
           </div>
         </div>
+        {selectedAccountId && (
+          <MessageLabels
+            accountId={selectedAccountId}
+            messageId={envelope.uid}
+            mailboxIds={envelope.mailboxIds}
+            tags={envelope.tags}
+            viewedId={selectedMailboxId}
+          />
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-5">

@@ -73,6 +73,7 @@ export function Sidebar() {
         {selectedAccountId ? (
           <FolderTree
             accountId={selectedAccountId}
+            labels={accounts.find((a) => a.id === selectedAccountId)?.mailboxModel === 'labels'}
             selectedMailboxId={selectedMailboxId}
             onSelect={handleSelectMailbox}
           />
@@ -259,10 +260,13 @@ function AccountAvatar({ email }: { email: string }) {
 
 function FolderTree({
   accountId,
+  labels,
   selectedMailboxId,
   onSelect,
 }: {
   accountId: string;
+  /** Labels account: custom mailboxes are listed apart, as labels. */
+  labels: boolean;
   selectedMailboxId: string | null;
   onSelect: (mailboxId: string) => void;
 }) {
@@ -300,17 +304,28 @@ function FolderTree({
     );
   }
 
+  const system = labels ? mailboxes.filter((m) => m.kind !== 'custom') : mailboxes;
+  const custom = labels ? mailboxes.filter((m) => m.kind === 'custom') : [];
+  const item = (mailbox: Mailbox) => (
+    <FolderItem
+      key={mailbox.id}
+      mailbox={mailbox}
+      asLabel={labels}
+      isSelected={selectedMailboxId === mailbox.id}
+      onSelect={() => onSelect(mailbox.id)}
+      onContextMenu={(x, y) => setMenu({ mailbox, x, y })}
+    />
+  );
+
   return (
-    <nav className="flex flex-col gap-0.5">
-      {mailboxes.map((mailbox) => (
-        <FolderItem
-          key={mailbox.id}
-          mailbox={mailbox}
-          isSelected={selectedMailboxId === mailbox.id}
-          onSelect={() => onSelect(mailbox.id)}
-          onContextMenu={(x, y) => setMenu({ mailbox, x, y })}
-        />
-      ))}
+    <nav className="flex min-h-0 flex-col gap-0.5 overflow-y-auto">
+      {system.map(item)}
+      {custom.length > 0 && (
+        <>
+          <h2 className="px-2.5 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-muted">Etichette</h2>
+          {custom.map(item)}
+        </>
+      )}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
           <button

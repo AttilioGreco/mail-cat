@@ -6,6 +6,7 @@ import {
   Archive,
   AlertOctagon,
   Folder,
+  Tag,
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/shared/lib/utils';
@@ -29,11 +30,12 @@ const NAME_ICONS: Record<string, LucideIcon> = {
   Spam: AlertOctagon,
 };
 
-function renderIcon(mailbox: Mailbox) {
+function renderIcon(mailbox: Mailbox, asLabel: boolean) {
   for (const [attr, Icon] of ATTR_ICONS) {
     if (mailbox.attributes.includes(attr)) return <Icon size={15} className="shrink-0" />;
   }
-  const Icon = NAME_ICONS[mailbox.name] ?? NAME_ICONS[mailbox.displayPath] ?? Folder;
+  const Icon =
+    NAME_ICONS[mailbox.name] ?? NAME_ICONS[mailbox.displayPath] ?? (asLabel && mailbox.kind === 'custom' ? Tag : Folder);
   return <Icon size={15} className="shrink-0" />;
 }
 
@@ -41,10 +43,12 @@ interface FolderItemProps {
   mailbox: Mailbox;
   isSelected: boolean;
   onSelect: () => void;
+  /** Labels account: a custom mailbox is shown as a label. */
+  asLabel?: boolean;
   onContextMenu?: (x: number, y: number) => void;
 }
 
-export function FolderItem({ mailbox, isSelected, onSelect, onContextMenu }: FolderItemProps) {
+export function FolderItem({ mailbox, isSelected, onSelect, asLabel = false, onContextMenu }: FolderItemProps) {
   return (
     <button
       onClick={onSelect}
@@ -60,7 +64,7 @@ export function FolderItem({ mailbox, isSelected, onSelect, onContextMenu }: Fol
           : 'text-muted-foreground hover:bg-surface-hover hover:text-foreground',
       )}
     >
-      {renderIcon(mailbox)}
+      {renderIcon(mailbox, asLabel)}
       <span className="flex-1 truncate text-left">{mailbox.name}</span>
       {mailbox.unreadMessages > 0 && (
         <span

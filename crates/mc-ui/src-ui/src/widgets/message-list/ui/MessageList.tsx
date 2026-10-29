@@ -4,7 +4,8 @@ import { RefreshCw, Inbox, MailOpen, MessageSquare, List as ListIcon, Trash2, X 
 import { toast } from 'sonner';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useMessages, MessageRow, type MessageEnvelope } from '@/entities/message';
-import { useMailboxes, type Mailbox } from '@/entities/mailbox';
+import { useAccounts } from '@/entities/account';
+import { useMailboxes, labelNames, type Mailbox } from '@/entities/mailbox';
 import { useConversations, ConversationRow, type ConversationSummary } from '@/entities/conversation';
 import { useMailboxWatcher } from '@/features/watch-mailbox';
 import { SearchBar, SearchResults, useSearchStore } from '@/features/search-messages';
@@ -17,6 +18,7 @@ import {
   useToggleStar,
   useDeleteMessage,
   useMoveMessage,
+  useArchiveMessages,
   useMarkMailboxRead,
   useSelectNeighbour,
   useDeleteMessages,
@@ -24,6 +26,8 @@ import {
 } from '@/features/message-actions';
 
 const MESSAGE_ROW_HEIGHT = 76;
+/** Room for the chip line under the subject. */
+const LABEL_ROW_EXTRA = 20;
 const CONV_ROW_HEIGHT = 64;
 
 export function MessageList() {
@@ -40,6 +44,8 @@ export function MessageList() {
   const requestSearchFocus = useSearchStore((s) => s.requestFocus);
 
   const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
+  const { data: accounts = [] } = useAccounts();
+  const showLabels = accounts.find((a) => a.id === selectedAccountId)?.mailboxModel === 'labels';
   const selectedMailbox = mailboxes.find((m) => m.id === selectedMailboxId) ?? null;
   const openCompose = useComposeStore((s) => s.openCompose);
   // Apple Mail: opening a draft resumes editing it rather than reading it.
@@ -80,6 +86,7 @@ export function MessageList() {
   const toggleStar = useToggleStar();
   const deleteMessage = useDeleteMessage();
   const moveMessage = useMoveMessage();
+  const archiveMessages = useArchiveMessages();
   const markFolderRead = useMarkMailboxRead();
   const selectNeighbour = useSelectNeighbour();
   const deleteMany = useDeleteMessages();
@@ -207,10 +214,6 @@ export function MessageList() {
     if (target) selectMailbox(target.id);
   };
 
-  /** The folder an "archive" lands in: Gmail has no \\Archive, its All Mail doubles as one. */
-  const archiveMailbox =
-    mailboxes.find((m) => m.kind === 'archive') ?? mailboxes.find((m) => m.kind === 'all');
-
   useHotkey('Enter', () => {
     if (selectedMessageId) openDraft?.(selectedMessageId);
   }, { enabled: !!openDraft && !conversationMode });
@@ -268,9 +271,9 @@ export function MessageList() {
       moveMessage.mutate({ messageId: selected.uid, fromMailboxId: selectedMailboxId, toMailboxId: spam.id });
     },
     archiveMessage: conversationMode ? undefined : () => {
-      if (!selected || !archiveMailbox || !selectedMailboxId) return;
+      if (!selected) return;
       selectNeighbour(selected.uid, messages);
-      moveMessage.mutate({ messageId: selected.uid, fromMailboxId: selectedMailboxId, toMailboxId: archiveMailbox.id });
+      archiveMessages.mutate([selected.uid]);
     },
   });
 
@@ -382,8 +385,8 @@ export function MessageList() {
               style={{ height: '100%', width: '100%' }}
               rowComponent={MsgRow}
               rowCount={messages.length}
-              rowHeight={MESSAGE_ROW_HEIGHT}
-              rowProps={{ messages, selectedMessageId, selectedMessageIds, clickRow, openDraft }}
+              rowHeight={showLabels ? MESSAGE_ROW_HEIGHT + LABEL_ROW_EXTRA : MESSAGE_ROW_HEIGHT}
+              rowProps={{ messages, selectedMessageId, selectedMessageIds, clickRow, openDraft, mailboxes: showLabels ? mailboxes : null, viewedId: selectedMailboxId }}
             />
           </div>
         )
@@ -422,9 +425,12 @@ interface MsgRowData {
   selectedMessageIds: string[];
   clickRow: (id: string, e: React.MouseEvent | React.KeyboardEvent) => void;
   openDraft?: (id: string) => void;
+  /** Set on Labels accounts only. */
+  mailboxes: Mailbox[] | null;
+  viewedId: string | null;
 }
 
-function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds, clickRow, openDraft }: RowComponentProps<MsgRowData>) {
+function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds, clickRow, openDraft, mailboxes, viewedId }: RowComponentProps<MsgRowData>) {
   const message = messages[index];
   return (
     <MessageRow
@@ -432,6 +438,7 @@ function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds,
       isSelected={selectedMessageId === message.uid || selectedMessageIds.includes(message.uid)}
       onSelect={(e) => clickRow(message.uid, e)}
       onOpen={openDraft && (() => openDraft(message.uid))}
+      labels={mailboxes ? labelNames(mailboxes, message.mailboxIds, viewedId) : undefined}
       style={style}
     />
   );
