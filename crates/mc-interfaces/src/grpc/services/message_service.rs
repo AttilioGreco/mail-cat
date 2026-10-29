@@ -70,7 +70,13 @@ fn parse_mailbox_ids(ids: &[String]) -> Result<Vec<MailboxId>, Status> {
 /// A tag is an IMAP keyword and a JMAP keyword at once: an atom without the
 /// characters either grammar reserves, and not a `\` system flag.
 fn validate_tag(tag: &str) -> Result<(), Status> {
+    // JMAP maps these keywords onto \Seen, \Flagged, \Draft and \Answered, so as
+    // tags they would silently change message state behind the flag path.
+    let reserved = ["$seen", "$flagged", "$draft", "$answered"]
+        .iter()
+        .any(|k| tag.eq_ignore_ascii_case(k));
     let valid = !tag.is_empty()
+        && !reserved
         && tag.len() <= 255
         && tag
             .chars()
