@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use colored::Colorize;
 use mc_client::types::{OAuthLoginEvent, OAuthProvider};
-use mc_client::{ImapAccountParams, MailCatClient};
+use mc_client::{ImapAccountParams, JmapAccountParams, MailCatClient};
 use tabled::{Table, Tabled};
 use tokio_stream::StreamExt;
 
@@ -24,7 +24,7 @@ pub enum AccountsCmd {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Add an IMAP account with a password. The password is read from stdin
+    /// Add an IMAP (--imap-host) or JMAP (--jmap-url) account with a password. The password is read from stdin
     /// (--password-stdin) or $MAILCAT_PASSWORD and ends up in the server's keychain.
     Add {
         /// The account's email address
@@ -33,8 +33,15 @@ pub enum AccountsCmd {
         /// Display name for the account (defaults to the email)
         #[arg(long)]
         name: Option<String>,
+        #[arg(
+            long,
+            required_unless_present = "jmap_url",
+            conflicts_with = "jmap_url"
+        )]
+        imap_host: Option<String>,
+        /// JMAP session URL, or just the server's domain
         #[arg(long)]
-        imap_host: String,
+        jmap_url: Option<String>,
         #[arg(long, default_value_t = 993)]
         imap_port: u16,
         /// Connect to IMAP without TLS
@@ -90,6 +97,7 @@ pub async fn run(cmd: AccountsCmd, client: MailCatClient, json: bool) -> Result<
             email,
             name,
             imap_host,
+            jmap_url,
             imap_port,
             no_tls,
             smtp_host,
@@ -98,18 +106,34 @@ pub async fn run(cmd: AccountsCmd, client: MailCatClient, json: bool) -> Result<
             password_stdin,
         } => {
             let password = read_password(password_stdin)?;
-            let params = ImapAccountParams {
-                name: name.unwrap_or_else(|| email.clone()),
-                username: username.unwrap_or_else(|| email.clone()),
-                email,
-                imap_host,
-                imap_port,
-                smtp_host,
-                smtp_port,
-                use_tls: !no_tls,
-                password,
+            let name = name.unwrap_or_else(|| email.clone());
+            let username = username.unwrap_or_else(|| email.clone());
+            let account = match (imap_host, jmap_url) {
+                (_, Some(jmap_url)) => {
+                    let params = JmapAccountParams {
+                        name,
+                        email,
+                        jmap_url,
+                        username,
+                        password,
+                    };
+                    client.add_jmap_account(params).await?
+                }
+                (imap_host, None) => {
+                    let params = ImapAccountParams {
+                        name,
+                        email,
+                        username,
+                        imap_host: imap_host.unwrap_or_default(),
+                        imap_port,
+                        smtp_host,
+                        smtp_port,
+                        use_tls: !no_tls,
+                        password,
+                    };
+                    client.add_imap_account(params).await?
+                }
             };
-            let account = client.add_imap_account(params).await?;
             println!(
                 "{} account {} aggiunto (id {}). Riavvia il server per attivarlo.",
                 "✓".green(),

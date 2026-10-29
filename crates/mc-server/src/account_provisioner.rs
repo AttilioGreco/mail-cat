@@ -31,9 +31,6 @@ impl ConfigAccountProvisioner {
 #[async_trait]
 impl AccountProvisioner for ConfigAccountProvisioner {
     async fn provision(&self, params: ProvisionParams) -> Result<(), ApplicationError> {
-        if !matches!(params.incoming, IncomingServer::Imap { .. }) {
-            return Err(ApplicationError::Internal("JMAP not supported yet".into()));
-        }
         // Keychain first: a crash between the two steps leaves an unused secret
         // (harmless), where the reverse order would leave an account that cannot
         // authenticate.
@@ -78,18 +75,9 @@ impl AccountProvisioner for ConfigAccountProvisioner {
     }
 }
 
-/// Append an `[[accounts]]` table for a password-authenticated IMAP account.
-/// Fails for any other incoming server: config.toml only describes IMAP.
+/// Append an `[[accounts]]` table for a password-authenticated account.
 /// Format-preserving, and a no-op when the email is already declared.
 fn append_account(config_path: &Path, params: &ProvisionParams) -> anyhow::Result<()> {
-    let IncomingServer::Imap {
-        host,
-        port,
-        use_tls,
-    } = &params.incoming
-    else {
-        anyhow::bail!("JMAP not supported yet");
-    };
     let mut doc = load_document(config_path)?;
 
     if doc.get("accounts").is_none() {
@@ -111,10 +99,22 @@ fn append_account(config_path: &Path, params: &ProvisionParams) -> anyhow::Resul
     let mut table = Table::new();
     table["name"] = value(&params.name);
     table["email"] = value(&params.email);
-    table["provider_type"] = value("imap");
-    table["imap_host"] = value(host);
-    table["imap_port"] = value(*port as i64);
-    table["use_tls"] = value(*use_tls);
+    match &params.incoming {
+        IncomingServer::Imap {
+            host,
+            port,
+            use_tls,
+        } => {
+            table["provider_type"] = value("imap");
+            table["imap_host"] = value(host);
+            table["imap_port"] = value(*port as i64);
+            table["use_tls"] = value(*use_tls);
+        }
+        IncomingServer::Jmap { session_url } => {
+            table["provider_type"] = value("jmap");
+            table["jmap_url"] = value(session_url);
+        }
+    }
     table["username"] = value(&params.username);
 
     if let Some(config) = &params.smtp {
@@ -208,6 +208,25 @@ mod tests {
         assert_eq!(parsed.accounts[0].email, "me@example.com");
         assert_eq!(parsed.accounts[0].imap_port, 993);
         assert_eq!(parsed.accounts[0].smtp.as_ref().unwrap().port, 587);
+    }
+
+    #[test]
+    fn appends_a_jmap_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut jmap = params("me@example.com");
+        jmap.incoming = IncomingServer::Jmap {
+            session_url: "https://mail.example.com/.well-known/jmap".into(),
+        };
+
+        append_account(&path, &jmap).unwrap();
+
+        let parsed: crate::config::ServerConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            parsed.accounts[0].jmap_url.as_deref(),
+            Some("https://mail.example.com/.well-known/jmap")
+        );
     }
 
     #[test]

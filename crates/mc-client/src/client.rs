@@ -62,30 +62,67 @@ impl MailCatClient {
     /// [`start_oauth_login`](Self::start_oauth_login) instead — the AddAccount RPC
     /// carries no OAuth provider.
     pub async fn add_imap_account(&self, params: ImapAccountParams) -> Result<Account> {
+        let incoming = pb::incoming_server::Kind::Imap(pb::ImapServer {
+            host: params.imap_host,
+            port: u32::from(params.imap_port),
+            use_tls: params.use_tls,
+        });
+        let smtp = params
+            .smtp_host
+            .zip(params.smtp_port)
+            .map(|(host, port)| pb::SmtpServer {
+                host,
+                port: u32::from(port),
+            });
+        self.add_password_account(
+            pb::ProviderType::Imap,
+            (params.name, params.email),
+            incoming,
+            smtp,
+            (params.username, params.password),
+        )
+        .await
+    }
+
+    /// Add a JMAP account with plain credentials; `jmap_url` is the session
+    /// URL or just the server's domain.
+    pub async fn add_jmap_account(&self, params: JmapAccountParams) -> Result<Account> {
+        let incoming = pb::incoming_server::Kind::Jmap(pb::JmapServer {
+            session_url: params.jmap_url,
+        });
+        self.add_password_account(
+            pb::ProviderType::Jmap,
+            (params.name, params.email),
+            incoming,
+            None,
+            (params.username, params.password),
+        )
+        .await
+    }
+
+    async fn add_password_account(
+        &self,
+        provider_type: pb::ProviderType,
+        (name, email): (String, String),
+        incoming: pb::incoming_server::Kind,
+        smtp: Option<pb::SmtpServer>,
+        (username, password): (String, String),
+    ) -> Result<Account> {
         let mut client = AccountServiceClient::new(self.channel.clone());
         let resp = client
             .add_account(pb::AddAccountRequest {
-                name: params.name,
-                email: params.email,
-                provider_type: pb::ProviderType::Imap as i32,
+                name,
+                email,
+                provider_type: provider_type as i32,
                 connection_config: Some(pb::ConnectionConfig {
                     incoming: Some(pb::IncomingServer {
-                        kind: Some(pb::incoming_server::Kind::Imap(pb::ImapServer {
-                            host: params.imap_host,
-                            port: u32::from(params.imap_port),
-                            use_tls: params.use_tls,
-                        })),
+                        kind: Some(incoming),
                     }),
-                    smtp: params.smtp_host.zip(params.smtp_port).map(|(host, port)| {
-                        pb::SmtpServer {
-                            host,
-                            port: u32::from(port),
-                        }
-                    }),
+                    smtp,
                     auth: Some(pb::AuthConfig {
                         auth_type: Some(pb::auth_config::AuthType::Plain(pb::PlainAuth {
-                            username: params.username,
-                            password: params.password,
+                            username,
+                            password,
                         })),
                     }),
                 }),

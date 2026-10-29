@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 keyring = { workspace = true }
 oauth2 = { workspace = true }
 url = { workspace = true }
+reqwest = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }

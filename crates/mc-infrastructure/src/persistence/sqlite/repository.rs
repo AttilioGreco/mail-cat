@@ -428,11 +428,20 @@ const SELECT_MAILBOX: &str = "SELECT id, account_id, path, delimiter, display_pa
 fn mailbox_from_row(row: &Row) -> rusqlite::Result<Mailbox> {
     let path: String = row.get(2)?;
     let delimiter = row.get::<_, String>(3)?.chars().next().unwrap_or('/');
+    let display_path: String = row.get(4)?;
+    // An opaque id (JMAP) is one segment even if it holds the delimiter; only
+    // an IMAP name, whose display path is the path itself, is a hierarchy.
+    let path = if display_path == path {
+        MailboxPath::parse(&path, delimiter)
+    } else {
+        MailboxPath::new(vec![path], delimiter)
+    }
+    .map_err(|e| conversion_err(2, Type::Text, e))?;
     Ok(Mailbox {
         id: MailboxId::from_uuid(row.get(0)?),
         account_id: AccountId::from_uuid(row.get(1)?),
-        path: MailboxPath::parse(&path, delimiter).map_err(|e| conversion_err(2, Type::Text, e))?,
-        display_path: row.get(4)?,
+        path,
+        display_path,
         display_name: row.get(5)?,
         mailbox_type: json_col(row, 6)?,
         flags: json_col(row, 7)?,

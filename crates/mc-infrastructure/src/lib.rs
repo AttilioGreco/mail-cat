@@ -10,7 +10,9 @@ pub mod search;
 pub mod secret;
 
 // Re-exports for ergonomics
-pub use email::{ImapAccountEventSource, ImapEmailProvider, SmtpSender};
+pub use email::{
+    AnyAccountEventSource, AnyProvider, ImapEmailProvider, JmapEmailProvider, SmtpSender,
+};
 pub use persistence::{DownloadMeter, SqliteDb, SqliteEventStore, SqliteRepository};
 pub use provider_registry::InMemoryProviderRegistry;
 pub use search::TantivySearchIndex;

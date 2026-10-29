@@ -22,8 +22,9 @@ use mc_domain::{
     ProviderNotification, ProviderRegistry,
 };
 use mc_infrastructure::{
-    DownloadMeter, ImapAccountEventSource, ImapEmailProvider, InMemoryProviderRegistry, SqliteDb,
-    SqliteEventStore, SqliteRepository, TantivySearchIndex, email::smtp::SmtpSender,
+    AnyAccountEventSource, AnyProvider, DownloadMeter, ImapEmailProvider, InMemoryProviderRegistry,
+    JmapEmailProvider, SqliteDb, SqliteEventStore, SqliteRepository, TantivySearchIndex,
+    email::smtp::SmtpSender,
 };
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl,
@@ -39,7 +40,7 @@ const SYNC_PERIOD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const SYNC_RETRY_FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
 
 // Type aliases for concrete implementations
-type ProviderRegistryImpl = InMemoryProviderRegistry<ImapEmailProvider>;
+type ProviderRegistryImpl = InMemoryProviderRegistry<AnyProvider>;
 type CommandBusImpl = InProcessCommandBus<
     SqliteRepository,     // AW
     SqliteRepository,     // CW
@@ -301,17 +302,12 @@ impl AppContext {
             let smtp_sender =
                 build_smtp_sender(account_config, &secrets, &imap_password, &gate).await;
             let login_gate = gate.clone() as Arc<dyn LoginGate>;
-            let provider = Arc::new(
-                ImapEmailProvider::new(
-                    account_config.imap_host.clone(),
-                    account_config.imap_port,
-                    account_config.username.clone(),
-                    login_gate,
-                    account_config.use_tls,
-                    smtp_sender,
-                )
-                .with_download_meter(DownloadMeter::new(db.clone(), &account_config.email)),
-            );
+            let provider = Arc::new(build_provider(
+                account_config,
+                login_gate,
+                smtp_sender,
+                Some(DownloadMeter::new(db.clone(), &account_config.email)),
+            )?);
             provider_registry.register_provider(account_id, provider);
             tracing::info!(
                 "Registered provider for '{}' ({})",
@@ -323,24 +319,12 @@ impl AppContext {
             // user may have fixed it meanwhile (e.g. a password in config.toml).
             if gate.status().state.is_paused() {
                 let gate = gate.clone();
-                let (host, port, username, use_tls) = (
-                    account_config.imap_host.clone(),
-                    account_config.imap_port,
-                    account_config.username.clone(),
-                    account_config.use_tls,
-                );
+                let account_config = account_config.clone();
                 tokio::spawn(async move {
                     gate.retry_after_restart(|secret| async move {
-                        ImapEmailProvider::new(
-                            host,
-                            port,
-                            username,
-                            Arc::new(secret),
-                            use_tls,
-                            None,
-                        )
-                        .verify_login()
-                        .await
+                        build_provider(&account_config, Arc::new(secret), None, None)?
+                            .verify_login()
+                            .await
                     })
                     .await;
                 });
@@ -830,7 +814,7 @@ impl AppContext {
                 .collect();
 
             if let Ok(provider) = provider_registry.get_provider(account_id) {
-                let event_source = ImapAccountEventSource::new(provider);
+                let event_source = AnyAccountEventSource::new(provider);
                 let mut stream = event_source.watch(std::slice::from_ref(&inbox_path));
 
                 let sync = Arc::clone(&sync_service);
@@ -1044,10 +1028,15 @@ async fn create_account(
         password: None,
     });
     let connection_config = ConnectionConfig {
-        incoming: IncomingServer::Imap {
-            host: account_config.imap_host.clone(),
-            port: account_config.imap_port,
-            use_tls: account_config.use_tls,
+        incoming: match &account_config.jmap_url {
+            Some(session_url) => IncomingServer::Jmap {
+                session_url: session_url.clone(),
+            },
+            None => IncomingServer::Imap {
+                host: account_config.imap_host.clone(),
+                port: account_config.imap_port,
+                use_tls: account_config.use_tls,
+            },
         },
         auth: AuthConfig::Plain {
             username: account_config.username.clone(),
@@ -1092,6 +1081,37 @@ fn smtp_security(security: crate::config::SmtpSecurityConfig) -> SmtpSecurity {
 /// token, or the IMAP password) unless it has an SMTP password of its own.
 /// Either way a refused SMTP login only shows up as the status's SMTP error:
 /// IMAP alone decides whether the account's credential works.
+/// The backend `account_config` declares.
+fn build_provider(
+    account_config: &AccountConfig,
+    gate: Arc<dyn LoginGate>,
+    smtp_sender: Option<SmtpSender>,
+    meter: Option<DownloadMeter>,
+) -> Result<AnyProvider, DomainError> {
+    if let Some(session_url) = &account_config.jmap_url {
+        let provider = JmapEmailProvider::new(session_url, account_config.username.clone(), gate)?;
+        return Ok(AnyProvider::Jmap(provider));
+    }
+    if account_config.imap_host.is_empty() {
+        return Err(DomainError::Validation(format!(
+            "{}: neither imap_host nor jmap_url is set",
+            account_config.email
+        )));
+    }
+    let provider = ImapEmailProvider::new(
+        account_config.imap_host.clone(),
+        account_config.imap_port,
+        account_config.username.clone(),
+        gate,
+        account_config.use_tls,
+        smtp_sender,
+    );
+    Ok(AnyProvider::Imap(match meter {
+        Some(meter) => provider.with_download_meter(meter),
+        None => provider,
+    }))
+}
+
 async fn build_smtp_sender(
     account_config: &AccountConfig,
     secrets: &AccountSecrets,

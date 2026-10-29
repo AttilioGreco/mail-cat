@@ -9,48 +9,44 @@ use mc_domain::traits::account_event_source::AccountEventSource;
 use mc_domain::traits::email_provider::{EmailProvider, ProviderNotification};
 use mc_domain::value_objects::mailbox_path::MailboxPath;
 
-use super::ImapEmailProvider;
+use super::AnyProvider;
 
-/// IMAP implementation of [`AccountEventSource`].
+/// [`AccountEventSource`] for whichever backend the account uses.
 ///
-/// Watches multiple mailboxes concurrently using IMAP IDLE sessions.
-/// One background task is spawned per mailbox; all notifications are
-/// funnelled through a shared mpsc channel and yielded from the returned
-/// stream.
-///
-/// Reconnection on transient IMAP errors is handled by
-/// [`ImapEmailProvider::watch_mailbox`] internally (it loops on errors).
-/// An additional outer reconnect loop here protects against the stream
-/// ending unexpectedly.
-pub struct ImapAccountEventSource {
-    provider: Arc<ImapEmailProvider>,
+/// IMAP watches multiple mailboxes concurrently with one IDLE session each;
+/// all notifications are funnelled through a shared mpsc channel and yielded
+/// from the returned stream. JMAP has no push yet, so its stream is empty and
+/// the periodic sync is all that runs.
+pub struct AnyAccountEventSource {
+    provider: Arc<AnyProvider>,
 }
 
-impl ImapAccountEventSource {
-    pub fn new(provider: Arc<ImapEmailProvider>) -> Self {
+impl AnyAccountEventSource {
+    pub fn new(provider: Arc<AnyProvider>) -> Self {
         Self { provider }
     }
 }
 
-impl AccountEventSource for ImapAccountEventSource {
+impl AccountEventSource for AnyAccountEventSource {
     fn watch(
         &self,
         mailboxes: &[MailboxPath],
     ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + 'static>>
     {
-        // Clone all owned data before passing to the static stream factory,
-        // ensuring the returned stream has no lifetime dependency on &self.
-        watch_mailboxes(Arc::clone(&self.provider), mailboxes.to_vec())
+        match *self.provider {
+            AnyProvider::Imap(_) => watch_mailboxes(Arc::clone(&self.provider), mailboxes.to_vec()),
+            AnyProvider::Jmap(_) => Box::pin(futures::stream::empty()),
+        }
     }
 }
 
 /// Free function that creates a `'static` notification stream for the given
 /// mailboxes. Each mailbox gets its own background task (IMAP IDLE session).
 ///
-/// Separated from `ImapAccountEventSource::watch` so the `'static` lifetime
+/// Separated from `AnyAccountEventSource::watch` so the `'static` lifetime
 /// can be proven without the compiler tying the return value to `&self`.
 fn watch_mailboxes(
-    provider: Arc<ImapEmailProvider>,
+    provider: Arc<AnyProvider>,
     mailboxes: Vec<MailboxPath>,
 ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + 'static>> {
     Box::pin(async_stream::stream! {

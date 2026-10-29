@@ -89,9 +89,6 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
 
         let provider_type =
             proto_provider_type_to_domain(req.provider_type).map_err(Status::invalid_argument)?;
-        if provider_type == mc_domain::ProviderType::Jmap {
-            return Err(Status::unimplemented("JMAP not supported yet"));
-        }
 
         let connection_config = proto_connection_to_domain(
             &req.connection_config

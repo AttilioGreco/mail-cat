@@ -22,6 +22,7 @@ use mc_domain::value_objects::mailbox_path::MailboxPath;
 use mc_domain::value_objects::remote_id::RemoteId;
 use mc_domain::value_objects::sync_cursor::SyncCursor;
 
+use crate::email::body_only_message;
 use crate::email::smtp::SmtpSender;
 use crate::persistence::DownloadMeter;
 
@@ -138,36 +139,7 @@ impl EmailProvider for ImapEmailProvider {
             .await?
             .ok_or_else(|| DomainError::Provider("Message not found".into()))?;
 
-        // Produce a minimal Message with only body fields populated.
-        // SyncService::fetch_message_body only reads body_text / body_html / attachments.
-        let now = chrono::Utc::now();
-        let empty_envelope = mc_domain::Envelope {
-            from: vec![],
-            to: vec![],
-            cc: vec![],
-            bcc: vec![],
-            reply_to: vec![],
-            subject: String::new(),
-            date: now,
-        };
-        let (msg, _event) = Message::receive(
-            mc_domain::AccountId::new(),
-            mc_domain::MailboxId::new(),
-            id.clone(),
-            None,
-            None,
-            vec![],
-            empty_envelope,
-            vec![],
-            0,
-            false,
-            now,
-        );
-        Ok(Message {
-            body_text,
-            body_html,
-            ..msg
-        })
+        Ok(body_only_message(id, body_text, body_html))
     }
 
     async fn fetch_bodies_bulk(

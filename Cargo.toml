@@ -58,6 +58,10 @@ tokio-native-tls = "0.3"
 oauth2 = { version = "4", features = ["reqwest"] }
 url = "2"
 
+# JMAP: raw RFC 8620/8621 requests over reqwest (already in the tree via oauth2).
+# Pinned to the version oauth2 resolves to, so no second HTTP stack is built.
+reqwest = { version = "=0.11.27", default-features = false, features = ["json", "rustls-tls"] }
+
 # Storage
 rusqlite = { version = "0.40", features = ["bundled", "uuid"] }
 zstd = "0.13"

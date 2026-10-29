@@ -71,9 +71,16 @@ pub struct AccountConfig {
     pub email: String,
     pub provider_type: ProviderTypeConfig,
     // ── IMAP ─────────────────────────────────────────────────────────────────
+    #[serde(default)]
     pub imap_host: String,
+    #[serde(default)]
     pub imap_port: u16,
+    #[serde(default)]
     pub use_tls: bool,
+    /// JMAP session URL, or just the domain (`/.well-known/jmap` is tried).
+    /// Only for `provider_type = "jmap"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jmap_url: Option<String>,
     pub username: String,
     /// Plaintext password. Present only transiently: on startup the daemon
     /// moves it into the OS keychain and rewrites the file without it (see
@@ -110,12 +117,14 @@ impl AccountConfig {
 #[serde(rename_all = "lowercase")]
 pub enum ProviderTypeConfig {
     Imap,
+    Jmap,
 }
 
 impl From<ProviderTypeConfig> for mc_domain::ProviderType {
     fn from(config: ProviderTypeConfig) -> Self {
         match config {
             ProviderTypeConfig::Imap => Self::Imap,
+            ProviderTypeConfig::Jmap => Self::Jmap,
         }
     }
 }
@@ -273,6 +282,7 @@ security = "start_tls"
                 imap_host: "imap.example.com".into(),
                 imap_port: 993,
                 use_tls: true,
+                jmap_url: None,
                 username: "test@example.com".into(),
                 password: Some("secret".into()),
                 smtp: Some(SmtpAccountConfig {

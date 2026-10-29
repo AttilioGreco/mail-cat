@@ -122,6 +122,16 @@ pub struct ImapAccountParams {
     pub password: String,
 }
 
+/// Server and credentials for a password-authenticated JMAP account.
+#[derive(Debug, Clone)]
+pub struct JmapAccountParams {
+    pub name: String,
+    pub email: String,
+    pub jmap_url: String,
+    pub username: String,
+    pub password: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Mailbox {
     pub id: String,
