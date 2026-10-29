@@ -180,6 +180,19 @@ impl JmapClient {
         &self,
         calls: Vec<(&str, Value)>,
     ) -> Result<Vec<Result<Value, MethodError>>, DomainError> {
+        self.call_all(calls)
+            .await?
+            .into_iter()
+            .map(|r| r.into_iter().next().ok_or_else(missing_reply))
+            .collect()
+    }
+
+    /// Like `call`, but every response of each call: `EmailSubmission/set`
+    /// is followed by the `Email/set` it implied, under the same call id.
+    pub async fn call_all(
+        &self,
+        calls: Vec<(&str, Value)>,
+    ) -> Result<Vec<Vec<Result<Value, MethodError>>>, DomainError> {
         let session = self.session().await?;
         let names: Vec<&str> = calls.iter().map(|(name, _)| *name).collect();
         let method_calls: Vec<Value> = calls
@@ -209,8 +222,8 @@ impl JmapClient {
         let reply: Value = serde_json::from_slice(&bytes)
             .map_err(|e| DomainError::Provider(format!("JMAP response: {e}")))?;
 
-        let mut results: Vec<Option<Result<Value, MethodError>>> =
-            std::iter::repeat_with(|| None).take(count).collect();
+        let mut results: Vec<Vec<Result<Value, MethodError>>> =
+            std::iter::repeat_with(Vec::new).take(count).collect();
         for response in reply["methodResponses"].as_array().into_iter().flatten() {
             let Some(index) = response[2]
                 .as_str()
@@ -220,12 +233,7 @@ impl JmapClient {
                 continue;
             };
             let args = response[1].clone();
-            // `EmailSubmission/set` is followed by the `Email/set` it implied,
-            // under the same call id: the call's own answer comes first.
-            if results[index].is_some() {
-                continue;
-            }
-            results[index] = Some(if response[0] == "error" {
+            results[index].push(if response[0] == "error" {
                 Err(MethodError {
                     kind: args["type"].as_str().unwrap_or("unknown").to_owned(),
                     description: args["description"].as_str().unwrap_or_default().to_owned(),
@@ -244,10 +252,10 @@ impl JmapClient {
         if stale || unknown_method {
             *self.session.write().await = None;
         }
-        results
-            .into_iter()
-            .map(|r| r.ok_or_else(|| DomainError::Provider("JMAP reply misses a call".into())))
-            .collect()
+        if results.iter().any(Vec::is_empty) {
+            return Err(missing_reply());
+        }
+        Ok(results)
     }
 
     pub async fn download(&self, blob_id: &str) -> Result<Vec<u8>, DomainError> {
@@ -336,6 +344,10 @@ impl JmapClient {
         })
         .await
     }
+}
+
+fn missing_reply() -> DomainError {
+    DomainError::Provider("JMAP reply misses a call".into())
 }
 
 fn transport_error(e: reqwest::Error) -> DomainError {

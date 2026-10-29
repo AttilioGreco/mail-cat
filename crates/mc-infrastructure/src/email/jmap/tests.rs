@@ -199,6 +199,10 @@ fn answer(handler: &(impl Fn(&str, &Value) -> Value + ?Sized), request: &Value) 
             Some(kind) => json!(["error", {"type": kind}, id]),
             None => json!([name, result, id]),
         });
+        // A server-run follow-up (`onSuccess*`) answers under the same call id.
+        if let Some(extra) = result.get("implicit") {
+            responses.push(json!(["Email/set", extra, id]));
+        }
         results.push(result);
     }
     json!({"methodResponses": responses})
@@ -442,7 +446,7 @@ async fn refused_ids_are_named_after_every_chunk_was_tried() {
         let refused = |id: &str| {
             args["update"]
                 .get(id)
-                .map(|_| json!({id: {"type": "notFound"}}))
+                .map(|_| json!({id: {"type": "forbidden"}}))
         };
         json!({"notUpdated": refused("a").or(refused("c")).unwrap()})
     })
@@ -454,7 +458,7 @@ async fn refused_ids_are_named_after_every_chunk_was_tried() {
         .to_string();
 
     assert!(
-        err.contains("a: notFound") && err.contains("c: notFound"),
+        err.contains("a: forbidden") && err.contains("c: forbidden"),
         "{err}"
     );
     assert_eq!(calls.lock().unwrap().len(), 2);
@@ -481,6 +485,7 @@ async fn delete_destroys_or_files_into_trash() {
     let (base, calls) = recording(|name, _| match name {
         "Mailbox/get" => json!({"list": [
             {"id": "mb1", "role": "inbox"}, {"id": "mbt", "role": "trash"}]}),
+        "Email/get" => json!({"list": [{"id": "a", "mailboxIds": {"mb1": true}}]}),
         _ => json!({}),
     })
     .await;
@@ -494,11 +499,46 @@ async fn delete_destroys_or_files_into_trash() {
         .unwrap();
 
     let calls = calls.lock().unwrap();
-    assert_eq!(calls[0].1["destroy"], json!(["a"]));
+    assert_eq!(calls[1].1["destroy"], json!(["a"]));
     assert_eq!(
         calls.last().unwrap().1["update"],
         json!({"b": {"mailboxIds/mb1": null, "mailboxIds/mbt": true}})
     );
+}
+
+#[tokio::test]
+async fn delete_only_unfiles_an_email_that_sits_in_other_mailboxes() {
+    let (base, calls) = recording(|name, _| match name {
+        "Email/get" => json!({"list": [
+            {"id": "a", "mailboxIds": {"mb1": true, "mb9": true}},
+            {"id": "b", "mailboxIds": {"mb1": true}}]}),
+        _ => json!({}),
+    })
+    .await;
+    provider(&base)
+        .delete_messages(&inbox(), &ids(&["a", "b"]), true)
+        .await
+        .unwrap();
+
+    let set = &calls.lock().unwrap()[1].1;
+    assert_eq!(set["update"], json!({"a": {"mailboxIds/mb1": null}}));
+    assert_eq!(set["destroy"], json!(["b"]));
+}
+
+#[tokio::test]
+async fn vanished_ids_are_no_error_but_move_reports_them() {
+    let (base, _) = recording(|name, args| match name {
+        "Email/get" => json!({"list": [], "notFound": ["a"]}),
+        _ => json!({"notUpdated": {"a": {"type": "notFound"}}, "update": args["update"]}),
+    })
+    .await;
+    let p = provider(&base);
+    p.delete_messages(&inbox(), &ids(&["a"]), true)
+        .await
+        .unwrap();
+    let to = MailboxPath::new(vec!["mb2".into()], '/').unwrap();
+    let moved = p.move_messages(&ids(&["a"]), &inbox(), &to).await.unwrap();
+    assert_eq!(moved[&RemoteId::new("a")], None);
 }
 
 #[tokio::test]
@@ -590,6 +630,48 @@ async fn send_submits_with_an_envelope_and_files_the_copy_in_sent() {
     assert_eq!(
         submission["onSuccessUpdateEmail"]["#s"],
         json!({"keywords/$draft": null, "mailboxIds/mbd": null, "mailboxIds/mbs": true})
+    );
+}
+
+#[tokio::test]
+async fn a_failed_followup_leaves_no_draft_and_no_claim_of_a_sent_copy() {
+    let (base, calls) = recording(|name, args| match name {
+        "EmailSubmission/set" => json!({
+            "created": {"s": {"id": "sub1"}},
+            "implicit": {"notUpdated": {"new1": {"type": "invalidProperties"}}},
+        }),
+        _ => mail_server()(name, args),
+    })
+    .await;
+    let sent = MailboxPath::new(vec!["mbs".into()], '/').unwrap();
+    let outcome = provider(&base)
+        .send_message(&outgoing(), Some(&sent))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.sent_copy, mc_domain::SentCopy::NotStored);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.last().unwrap().1["destroy"], json!(["new1"]));
+}
+
+#[tokio::test]
+async fn a_refused_submission_destroys_the_imported_draft() {
+    let (base, calls) = recording(|name, args| match name {
+        "EmailSubmission/set" => {
+            json!({"notCreated": {"s": {"type": "forbiddenFrom"}}})
+        }
+        _ => mail_server()(name, args),
+    })
+    .await;
+    let err = provider(&base)
+        .send_message(&outgoing(), None)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("forbiddenFrom"), "{err}");
+    assert_eq!(
+        calls.lock().unwrap().last().unwrap().1["destroy"],
+        json!(["new1"])
     );
 }
 

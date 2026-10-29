@@ -12,12 +12,25 @@ use super::mapper;
 use super::provider::{JmapEmailProvider, mailbox_id};
 use crate::email::smtp::{format_for_storage, format_for_wire};
 
-/// `"id: type (description)"` for each entry of a `not*` map in a `/set` reply.
+/// Ids a `not*` map reports as gone: like IMAP, acting on them is no error.
+fn missing(reply: &Value, key: &str) -> Vec<String> {
+    reply[key]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, error)| error["type"] == "notFound")
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// `"id: type (description)"` for each refusal in a `not*` map of a `/set`
+/// reply, vanished ids excepted.
 fn refusals(reply: &Value, key: &str) -> Vec<String> {
     reply[key]
         .as_object()
         .into_iter()
         .flatten()
+        .filter(|(_, error)| error["type"] != "notFound")
         .map(|(id, error)| {
             let kind = error["type"].as_str().unwrap_or("unknown");
             match error["description"].as_str() {
@@ -43,8 +56,13 @@ fn created_id(reply: &Value, creation_id: &str) -> Result<String, DomainError> {
 impl JmapEmailProvider {
     /// Applies `patch` to every id, or destroys them when there is none, in
     /// server-sized requests. Every chunk is tried; the ids refused are named.
-    async fn set_emails(&self, ids: &[RemoteId], patch: Option<&Value>) -> Result<(), DomainError> {
-        let mut refused = Vec::new();
+    /// Returns the ids the server no longer has.
+    async fn set_emails(
+        &self,
+        ids: &[RemoteId],
+        patch: Option<&Value>,
+    ) -> Result<Vec<String>, DomainError> {
+        let (mut refused, mut gone) = (Vec::new(), Vec::new());
         for chunk in ids.chunks(self.client.session().await?.max_set) {
             let args = match patch {
                 Some(patch) => {
@@ -59,6 +77,59 @@ impl JmapEmailProvider {
             let reply = self
                 .client
                 .call(vec![("Email/set", args)])
+                .await?
+                .remove(0)?;
+            for key in ["notUpdated", "notDestroyed"] {
+                refused.extend(refusals(&reply, key));
+                gone.extend(missing(&reply, key));
+            }
+        }
+        if refused.is_empty() {
+            return Ok(gone);
+        }
+        Err(DomainError::Provider(format!(
+            "JMAP refused: {}",
+            refused.join(", ")
+        )))
+    }
+
+    /// Removes the emails from `from` only: destroyed when that was their
+    /// last mailbox, like IMAP's per-mailbox expunge.
+    async fn expunge(&self, from: &str, ids: &[RemoteId]) -> Result<(), DomainError> {
+        let session = self.client.session().await?;
+        let mut refused = Vec::new();
+        for chunk in ids.chunks(session.max_set.min(session.max_objects)) {
+            let known = self
+                .client
+                .call(vec![(
+                    "Email/get",
+                    json!({"ids": chunk.iter().map(RemoteId::as_str).collect::<Vec<_>>(), "properties": ["mailboxIds"]}),
+                )])
+                .await?
+                .remove(0)?;
+            let (mut update, mut destroy) = (Map::new(), Vec::new());
+            for email in known["list"].as_array().into_iter().flatten() {
+                let Some(id) = email["id"].as_str() else {
+                    continue;
+                };
+                let elsewhere = email["mailboxIds"]
+                    .as_object()
+                    .is_some_and(|boxes| boxes.keys().any(|b| b != from));
+                if elsewhere {
+                    update.insert(id.to_owned(), json!({format!("mailboxIds/{from}"): null}));
+                } else {
+                    destroy.push(id);
+                }
+            }
+            if update.is_empty() && destroy.is_empty() {
+                continue;
+            }
+            let reply = self
+                .client
+                .call(vec![(
+                    "Email/set",
+                    json!({"update": update, "destroy": destroy}),
+                )])
                 .await?
                 .remove(0)?;
             refused.extend(refusals(&reply, "notUpdated"));
@@ -88,7 +159,9 @@ impl JmapEmailProvider {
         if patch.is_empty() || ids.is_empty() {
             return Ok(());
         }
-        self.set_emails(ids, Some(&Value::Object(patch))).await
+        self.set_emails(ids, Some(&Value::Object(patch)))
+            .await
+            .map(drop)
     }
 
     pub(super) async fn move_emails(
@@ -98,14 +171,18 @@ impl JmapEmailProvider {
         to: &MailboxPath,
     ) -> Result<HashMap<RemoteId, Option<RemoteId>>, DomainError> {
         let (from, to) = (mailbox_id(from), mailbox_id(to));
+        let mut gone = Vec::new();
         if from != to && !ids.is_empty() {
             let patch =
                 json!({format!("mailboxIds/{from}"): null, format!("mailboxIds/{to}"): true});
-            self.set_emails(ids, Some(&patch)).await?;
+            gone = self.set_emails(ids, Some(&patch)).await?;
         }
         Ok(ids
             .iter()
-            .map(|id| (id.clone(), Some(id.clone())))
+            .map(|id| {
+                let kept = !gone.iter().any(|g| g == id.as_str());
+                (id.clone(), kept.then(|| id.clone()))
+            })
             .collect())
     }
 
@@ -116,13 +193,13 @@ impl JmapEmailProvider {
         permanently: bool,
     ) -> Result<(), DomainError> {
         if permanently {
-            return self.set_emails(ids, None).await;
+            return self.expunge(mailbox_id(mailbox), ids).await;
         }
         let trash = self.role_mailbox("trash").await?.ok_or_else(|| {
             DomainError::NotSupported("this JMAP account has no Trash mailbox".into())
         })?;
         if trash == mailbox_id(mailbox) {
-            return self.set_emails(ids, None).await;
+            return self.expunge(&trash, ids).await;
         }
         let trash = MailboxPath::new(vec![trash], '/')?;
         self.move_emails(ids, mailbox, &trash).await.map(drop)
@@ -195,7 +272,7 @@ impl JmapEmailProvider {
         }
         let mut reply = self
             .client
-            .call(vec![
+            .call_all(vec![
                 (
                     "Email/import",
                     json!({"emails": {"d": draft_object(&blob, &drafts)}}),
@@ -204,23 +281,54 @@ impl JmapEmailProvider {
             ])
             .await?
             .into_iter();
-        created_id(&reply.next().unwrap()?, "d")?;
-        let submitted = reply.next().unwrap()?;
-        if submitted["created"]["s"].is_null() {
-            return Err(DomainError::Provider(format!(
-                "JMAP refused to send: {}",
-                refusals(&submitted, "notCreated").join(", ")
-            )));
+        let draft = created_id(&reply.next().unwrap().remove(0)?, "d")?;
+        let mut answers = reply.next().unwrap().into_iter();
+        let submitted = match answers.next().unwrap() {
+            Ok(v) if !v["created"]["s"].is_null() => v,
+            refused => {
+                self.discard_draft(&draft).await;
+                return Err(match refused {
+                    Ok(v) => DomainError::Provider(format!(
+                        "JMAP refused to send: {}",
+                        refusals(&v, "notCreated").join(", ")
+                    )),
+                    Err(e) => e.into(),
+                });
+            }
+        };
+        // The follow-up `Email/set` can fail on its own: the mail went out
+        // but the draft was neither filed nor destroyed.
+        let followup_failed = match answers.next() {
+            Some(Ok(v)) => {
+                !(refusals(&v, "notUpdated").is_empty() && refusals(&v, "notDestroyed").is_empty())
+            }
+            Some(Err(_)) => true,
+            None => false,
+        };
+        if followup_failed {
+            warn!(submission = %submitted["created"]["s"]["id"], "mail sent, but filing or removing the draft failed");
+            self.discard_draft(&draft).await;
         }
         // Not `Stored`: the submission moves the copy, whose id is the one
         // the Sent sync will find.
         Ok(SendOutcome {
-            sent_copy: if sent.is_some() {
+            sent_copy: if sent.is_some() && !followup_failed {
                 SentCopy::ServerFiled
             } else {
                 SentCopy::NotStored
             },
         })
+    }
+
+    async fn discard_draft(&self, id: &str) {
+        let reply = self
+            .client
+            .call(vec![("Email/set", json!({"destroy": [id]}))])
+            .await
+            .and_then(|mut r| Ok(r.remove(0)?));
+        if let Err(e) = reply {
+            warn!(%e, id, "could not remove the leftover draft");
+        }
     }
 
     /// The identity the server lets `address` send as.
