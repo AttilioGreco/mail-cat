@@ -59,12 +59,22 @@ pub enum MailboxType {
     Custom,
 }
 
+pub fn leaf_name(display_path: &str, delimiter: char) -> &str {
+    display_path
+        .rsplit(delimiter)
+        .next()
+        .unwrap_or(display_path)
+}
+
 /// Mailbox aggregate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mailbox {
     pub id: MailboxId,
     pub account_id: AccountId,
+    /// Opaque provider identifier; never shown to people or parsed.
     pub path: MailboxPath,
+    /// Human-readable hierarchy (sidebar tree, sorting, CLI); equals `path` for IMAP.
+    pub display_path: String,
     pub display_name: String,
     pub mailbox_type: MailboxType,
     pub flags: Vec<Flag>,
@@ -79,13 +89,25 @@ impl Mailbox {
         path: MailboxPath,
         mailbox_type: MailboxType,
     ) -> (Self, DomainEvent) {
+        let display_path = path.full_path();
+        Self::discover_as(account_id, path, display_path, mailbox_type)
+    }
+
+    /// Like [`Self::discover`] for providers whose path is an opaque id.
+    pub fn discover_as(
+        account_id: AccountId,
+        path: MailboxPath,
+        display_path: String,
+        mailbox_type: MailboxType,
+    ) -> (Self, DomainEvent) {
         let id = MailboxId::new();
-        let display_name = path.name().to_string();
+        let display_name = leaf_name(&display_path, path.delimiter()).to_string();
 
         let event = DomainEvent::MailboxDiscovered {
             mailbox_id: id,
             account_id,
             path: path.clone(),
+            display_path: display_path.clone(),
             mailbox_type,
         };
 
@@ -93,6 +115,7 @@ impl Mailbox {
             id,
             account_id,
             path,
+            display_path,
             display_name,
             mailbox_type,
             flags: Vec::new(),
@@ -129,6 +152,7 @@ impl Mailbox {
     pub fn rename(&mut self, new_path: MailboxPath) -> DomainEvent {
         let old_path = self.path.clone();
         self.display_name = new_path.name().to_string();
+        self.display_path = new_path.full_path();
         self.path = new_path.clone();
 
         DomainEvent::MailboxRenamed {
@@ -167,6 +191,7 @@ impl Mailbox {
             }
             DomainEvent::MailboxRenamed { new_path, .. } => {
                 self.display_name = new_path.name().to_string();
+                self.display_path = new_path.full_path();
                 self.path = new_path.clone();
             }
             DomainEvent::MailboxDeleted { .. } => {
@@ -186,18 +211,19 @@ impl Mailbox {
             mailbox_id,
             account_id,
             path,
+            display_path,
             mailbox_type,
         } = first
         else {
             return None;
         };
 
-        let display_name = path.name().to_string();
         let mut mailbox = Self {
             id: *mailbox_id,
             account_id: *account_id,
             path: path.clone(),
-            display_name,
+            display_path: display_path.clone(),
+            display_name: leaf_name(display_path, path.delimiter()).to_string(),
             mailbox_type: *mailbox_type,
             flags: Vec::new(),
             total_messages: 0,
@@ -263,6 +289,7 @@ mod tests {
                 mailbox_id: id,
                 account_id,
                 path: MailboxPath::inbox(),
+                display_path: MailboxPath::inbox().full_path(),
                 mailbox_type: MailboxType::Inbox,
             },
             DomainEvent::MailboxCountsUpdated {

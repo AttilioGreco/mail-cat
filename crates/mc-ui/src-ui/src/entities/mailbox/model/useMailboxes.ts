@@ -7,6 +7,7 @@ async function fetchMailboxes(accountId: string): Promise<Mailbox[]> {
     id: string;
     account_id: string;
     path: string;
+    display_path: string;
     display_name: string;
     mailbox_type: MailboxKind;
     total_messages: number;
@@ -17,6 +18,7 @@ async function fetchMailboxes(accountId: string): Promise<Mailbox[]> {
     id: d.id,
     accountId: d.account_id,
     path: d.path,
+    displayPath: d.display_path,
     name: d.display_name,
     kind: d.mailbox_type,
     totalMessages: d.total_messages,

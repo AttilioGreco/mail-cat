@@ -259,6 +259,7 @@ impl ImapEmailProvider {
             let mailbox = Mailbox {
                 id: MailboxId::new(),
                 account_id: AccountId::new(),
+                display_path: path.full_path(),
                 path,
                 display_name: imap_name.to_string(),
                 mailbox_type,

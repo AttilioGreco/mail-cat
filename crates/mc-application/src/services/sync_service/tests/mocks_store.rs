@@ -131,6 +131,7 @@ impl ReadModelProjector for MockProjector {
             mailbox_id,
             account_id,
             path,
+            display_path,
             mailbox_type,
         } = &envelope.payload
         {
@@ -138,6 +139,7 @@ impl ReadModelProjector for MockProjector {
                 id: *mailbox_id,
                 account_id: *account_id,
                 path: path.clone(),
+                display_path: display_path.clone(),
                 display_name: path.name().to_string(),
                 mailbox_type: *mailbox_type,
                 flags: Vec::new(),

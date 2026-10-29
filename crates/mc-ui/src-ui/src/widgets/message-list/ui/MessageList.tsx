@@ -308,7 +308,7 @@ export function MessageList() {
       ) : hasContent && !isSearching && (
         <div className="flex items-center justify-between border-b border-border px-3 py-1.5 gap-2">
           <span className="text-sm font-semibold text-foreground truncate">
-            {selectedMailbox?.name ?? selectedMailbox?.path ?? (conversationMode ? 'Conversations' : 'Messages')}
+            {selectedMailbox?.name ?? selectedMailbox?.displayPath ?? (conversationMode ? 'Conversations' : 'Messages')}
           </span>
           <div className="flex items-center gap-1 shrink-0">
             {/* Conversation / Message toggle */}

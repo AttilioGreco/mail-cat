@@ -208,6 +208,7 @@ macro_rules! read_repository_conformance {
                 mailbox_id,
                 account_id,
                 path: MailboxPath::parse(path, '/').unwrap(),
+                display_path: MailboxPath::parse(path, '/').unwrap().full_path(),
                 mailbox_type: MailboxType::Custom,
             }
         }

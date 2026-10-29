@@ -136,6 +136,7 @@ pub enum DomainEvent {
         mailbox_id: MailboxId,
         account_id: AccountId,
         path: MailboxPath,
+        display_path: String,
         mailbox_type: MailboxType,
     },
 

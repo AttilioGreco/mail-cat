@@ -33,7 +33,7 @@ function renderIcon(mailbox: Mailbox) {
   for (const [attr, Icon] of ATTR_ICONS) {
     if (mailbox.attributes.includes(attr)) return <Icon size={15} className="shrink-0" />;
   }
-  const Icon = NAME_ICONS[mailbox.name] ?? NAME_ICONS[mailbox.path] ?? Folder;
+  const Icon = NAME_ICONS[mailbox.name] ?? NAME_ICONS[mailbox.displayPath] ?? Folder;
   return <Icon size={15} className="shrink-0" />;
 }
 

@@ -422,7 +422,7 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
     })
 }
 
-const SELECT_MAILBOX: &str = "SELECT id, account_id, path, delimiter, display_name, \
+const SELECT_MAILBOX: &str = "SELECT id, account_id, path, delimiter, display_path, display_name, \
      mailbox_type, flags, total_messages, unread_messages FROM mailboxes";
 
 fn mailbox_from_row(row: &Row) -> rusqlite::Result<Mailbox> {
@@ -432,11 +432,12 @@ fn mailbox_from_row(row: &Row) -> rusqlite::Result<Mailbox> {
         id: MailboxId::from_uuid(row.get(0)?),
         account_id: AccountId::from_uuid(row.get(1)?),
         path: MailboxPath::parse(&path, delimiter).map_err(|e| conversion_err(2, Type::Text, e))?,
-        display_name: row.get(4)?,
-        mailbox_type: json_col(row, 5)?,
-        flags: json_col(row, 6)?,
-        total_messages: row.get(7)?,
-        unread_messages: row.get(8)?,
+        display_path: row.get(4)?,
+        display_name: row.get(5)?,
+        mailbox_type: json_col(row, 6)?,
+        flags: json_col(row, 7)?,
+        total_messages: row.get(8)?,
+        unread_messages: row.get(9)?,
     })
 }
 

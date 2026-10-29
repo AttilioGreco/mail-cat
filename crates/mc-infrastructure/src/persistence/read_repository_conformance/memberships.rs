@@ -223,6 +223,7 @@ macro_rules! memberships_conformance {
                         mailbox_id: sent,
                         account_id: account,
                         path: MailboxPath::parse("Sent", '/').unwrap(),
+                        display_path: MailboxPath::parse("Sent", '/').unwrap().full_path(),
                         mailbox_type: MailboxType::Sent,
                     },
                     discovered(account, archive, "Archive"),

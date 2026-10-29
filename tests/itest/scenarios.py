@@ -177,9 +177,8 @@ def move_delete(w):
 def phone_moved_first(w):
     """Another client moves M INBOX→Archive; mail-cat, not yet reconciled,
     moves its stale INBOX row to Archive too. One copy, in Archive, both sides.
-    (mc-cli can't sync a single mailbox, so the Archive-only sync step is
-    skipped: the stale INBOX row survives because IDLE's partial sync doesn't
-    reconcile.)"""
+    (IDLE's partial sync doesn't reconcile, so the stale INBOX row survives
+    until a full sync.)"""
     stale = w.mc_id("INBOX", 7)
     seen = idle_syncs()
     imapctl.main(["move", "INBOX", "tag:7", "Archive"])

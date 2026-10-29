@@ -24,7 +24,7 @@ struct MailboxRow {
     #[tabled(rename = "ID")]
     id: String,
     #[tabled(rename = "Path")]
-    path: String,
+    display_path: String,
     #[tabled(rename = "Display Name")]
     display_name: String,
     #[tabled(rename = "Total")]
@@ -48,7 +48,7 @@ async fn list(account_id: String, client: MailCatClient, json: bool) -> Result<(
         .into_iter()
         .map(|m| MailboxRow {
             id: m.id,
-            path: m.path,
+            display_path: m.display_path,
             display_name: m.display_name,
             total: m.total_messages,
             unread: if m.unread_messages > 0 {

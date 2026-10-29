@@ -65,6 +65,7 @@ impl Mail {
             mail.project(DomainEvent::MailboxDiscovered {
                 mailbox_id: id,
                 account_id: mail.account,
+                display_path: path.full_path(),
                 path,
                 mailbox_type,
             })

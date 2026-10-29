@@ -70,7 +70,7 @@ pub enum MessagesCmd {
         /// Account name, email or ID
         #[arg(long)]
         account: String,
-        /// Mailbox path or ID; defaults to All Mail where the account has one
+        /// Mailbox ID, path or display path; defaults to All Mail where the account has one
         /// (Gmail), else every mailbox but Trash
         #[arg(long)]
         mailbox: Option<String>,
@@ -420,7 +420,11 @@ async fn delete_matching(
     let mailboxes: Vec<_> = match &mailbox {
         Some(wanted) => all
             .into_iter()
-            .filter(|m| &m.id == wanted || m.path.eq_ignore_ascii_case(wanted))
+            .filter(|m| {
+                &m.id == wanted
+                    || m.path.eq_ignore_ascii_case(wanted)
+                    || m.display_path.eq_ignore_ascii_case(wanted)
+            })
             .collect(),
         None if all.iter().any(|m| m.mailbox_type == MailboxKind::All) => all
             .into_iter()
@@ -455,7 +459,7 @@ async fn delete_matching(
 
     if !matches.is_empty() {
         let rows = matches.iter().map(|(m, mb)| MatchRow {
-            mailbox: mb.path.clone(),
+            mailbox: mb.display_path.clone(),
             date: m.date.format("%Y-%m-%d %H:%M").to_string(),
             from: m.from_email.clone(),
             subject: m.subject.chars().take(100).collect(),

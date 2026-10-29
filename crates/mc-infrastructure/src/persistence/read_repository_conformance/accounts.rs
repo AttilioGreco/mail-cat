@@ -79,6 +79,7 @@ macro_rules! accounts_conformance {
                     mailbox_id,
                     account_id,
                     path: MailboxPath::inbox(),
+                    display_path: MailboxPath::inbox().full_path(),
                     mailbox_type: MailboxType::Inbox,
                 },
             ))

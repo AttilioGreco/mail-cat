@@ -46,6 +46,7 @@ fn fake_mailbox(account_id: AccountId, mailbox_id: MailboxId) -> Mailbox {
         id: mailbox_id,
         account_id,
         path: MailboxPath::inbox(),
+        display_path: MailboxPath::inbox().full_path(),
         display_name: "INBOX".to_string(),
         mailbox_type: MailboxType::Inbox,
         flags: vec![],

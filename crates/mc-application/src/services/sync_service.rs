@@ -369,8 +369,12 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             match local_by_path.get(&remote.path) {
                 None => {
                     info!(path = %remote.path, "Discovering new mailbox");
-                    let (mailbox, event) =
-                        Mailbox::discover(*account_id, remote.path.clone(), remote.mailbox_type);
+                    let (mailbox, event) = Mailbox::discover_as(
+                        *account_id,
+                        remote.path.clone(),
+                        remote.display_path.clone(),
+                        remote.mailbox_type,
+                    );
                     self.append_and_project(&mailbox.id.to_string(), AggregateType::Mailbox, event)
                         .await?;
                 }
@@ -430,7 +434,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                     },
                     processed: mailboxes_synced,
                     total: total_mailboxes,
-                    message: format!("Syncing {}...", remote.path),
+                    message: format!("Syncing {}...", remote.display_path),
                 },
             );
 

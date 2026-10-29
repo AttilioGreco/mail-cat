@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         );
         let mailboxes = client.list_mailboxes(&account.id).await?;
         for mb in &mailboxes {
-            let is_inbox = mb.path.to_uppercase() == "INBOX";
+            let is_inbox = mb.mailbox_type == mc_client::MailboxKind::Inbox;
             println!(
                 "  {:<35} {:>5} msgs  {:>3} unread  [{}]{}",
                 mb.path,

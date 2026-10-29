@@ -819,7 +819,7 @@ impl AppContext {
             // Fall back to MailboxPath::inbox() only if INBOX hasn't been synced yet.
             let inbox_path = local_mailboxes
                 .iter()
-                .find(|mb| mb.path.full_path().to_uppercase() == "INBOX")
+                .find(|mb| mb.mailbox_type == mc_domain::MailboxType::Inbox)
                 .map(|mb| mb.path.clone())
                 .unwrap_or_else(MailboxPath::inbox);
 

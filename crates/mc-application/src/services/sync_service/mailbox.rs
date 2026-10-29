@@ -123,7 +123,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         keys: &HashMap<RemoteId, MessageKey>,
         mut progress: Option<&mut Vec<SyncProgressEvent>>,
     ) -> Result<Option<u32>, ApplicationError> {
-        let label = format!("Fetching messages in {}", local.path);
+        let label = format!("Fetching messages in {}", local.display_path);
         let mut new_count = 0;
         for (index, batch) in added.chunks(ENVELOPE_BATCH).enumerate() {
             // Only a full sync (the one reporting progress) is cancellable.

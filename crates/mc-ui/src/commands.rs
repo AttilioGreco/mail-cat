@@ -180,6 +180,7 @@ pub struct MailboxDto {
     pub id: String,
     pub account_id: String,
     pub path: String,
+    pub display_path: String,
     pub display_name: String,
     /// "inbox" | "sent" | "drafts" | "trash" | "spam" | "archive" | "all" | "custom"
     pub mailbox_type: String,
@@ -281,6 +282,7 @@ fn mailbox_to_dto(m: Mailbox) -> MailboxDto {
         id: m.id,
         account_id: m.account_id,
         path: m.path,
+        display_path: m.display_path,
         display_name: m.display_name,
         mailbox_type: m.mailbox_type.as_str().to_string(),
         total_messages: m.total_messages,

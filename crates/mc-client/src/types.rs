@@ -126,7 +126,10 @@ pub struct ImapAccountParams {
 pub struct Mailbox {
     pub id: String,
     pub account_id: String,
+    /// Opaque provider id; match on it, never display it.
     pub path: String,
+    /// Human-readable hierarchy.
+    pub display_path: String,
     pub display_name: String,
     /// Special-use classification. Folder names are localized, so this is the
     /// only reliable way to find "the Sent folder".

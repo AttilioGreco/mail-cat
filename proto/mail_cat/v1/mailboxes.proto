@@ -41,12 +41,13 @@ enum MailboxType {
 message MailboxSummary {
   string id = 1;
   string account_id = 2;
-  string path = 3;          // e.g., "INBOX", "Sent", "Work/Projects"
+  string path = 3;          // opaque provider id (IMAP: the mailbox name); never parse or display
   string display_name = 4;
   MailboxType mailbox_type = 5;
   uint32 total_messages = 6;
   uint32 unread_messages = 7;
   repeated Flag flags = 8;
+  string display_path = 9;  // human-readable hierarchy, e.g. "Work/Projects"
 }
 
 // === Requests/Responses ===

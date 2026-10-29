@@ -219,6 +219,7 @@ macro_rules! bodies_conformance {
                     mailbox_id: id,
                     account_id: account,
                     path: MailboxPath::parse(path, '/').unwrap(),
+                    display_path: MailboxPath::parse(path, '/').unwrap().full_path(),
                     mailbox_type,
                 };
                 (id, event)

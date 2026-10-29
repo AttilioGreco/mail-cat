@@ -13,7 +13,9 @@ export type MailboxKind =
 export interface Mailbox {
   id: string;
   accountId: string;
+  /** Opaque provider id; never display or parse. */
   path: string;
+  displayPath: string;
   name: string;
   kind: MailboxKind;
   totalMessages: number;

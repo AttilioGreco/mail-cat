@@ -44,6 +44,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         account_id      BLOB NOT NULL,
         path            TEXT NOT NULL,
         delimiter       TEXT NOT NULL,
+        display_path    TEXT NOT NULL,
         display_name    TEXT NOT NULL,
         mailbox_type    TEXT NOT NULL,
         flags           TEXT NOT NULL,

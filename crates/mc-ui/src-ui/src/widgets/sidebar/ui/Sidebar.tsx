@@ -271,7 +271,7 @@ function FolderTree({
   const [menu, setMenu] = useState<{ mailbox: Mailbox; x: number; y: number } | null>(null);
 
   // Keep INBOX watched permanently so unread badges update even when viewing another folder.
-  const inbox = mailboxes.find((m) => m.path.toUpperCase() === 'INBOX') ?? null;
+  const inbox = mailboxes.find((m) => m.kind === 'inbox') ?? null;
   useInboxWatcher(accountId, inbox);
 
   // Same for the folder: restore the persisted one, else default to INBOX.

@@ -139,22 +139,25 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             mailbox_id,
             account_id,
             path,
+            display_path,
             mailbox_type,
         } => {
             // Counts are transient (never in the log), so a replay must keep them.
             exec(
                 tx,
-                "INSERT INTO mailboxes (id, account_id, path, delimiter, display_name, mailbox_type, flags) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '[]') \
+                "INSERT INTO mailboxes (id, account_id, path, delimiter, display_path, display_name, mailbox_type, flags) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]') \
                  ON CONFLICT(id) DO UPDATE SET account_id = excluded.account_id, path = excluded.path, \
-                     delimiter = excluded.delimiter, display_name = excluded.display_name, \
+                     delimiter = excluded.delimiter, display_path = excluded.display_path, \
+                     display_name = excluded.display_name, \
                      mailbox_type = excluded.mailbox_type",
                 params![
                     mailbox_id.as_uuid(),
                     account_id.as_uuid(),
                     path.full_path(),
                     path.delimiter().to_string(),
-                    path.name(),
+                    display_path,
+                    mc_domain::model::mailbox::leaf_name(display_path, path.delimiter()),
                     json(mailbox_type)?
                 ],
             )?;
@@ -188,12 +191,13 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
         } => {
             exec(
                 tx,
-                "UPDATE mailboxes SET path = ?2, delimiter = ?3, display_name = ?4 WHERE id = ?1",
+                "UPDATE mailboxes SET path = ?2, delimiter = ?3, display_name = ?4, display_path = ?5 WHERE id = ?1",
                 params![
                     mailbox_id.as_uuid(),
                     new_path.full_path(),
                     new_path.delimiter().to_string(),
-                    new_path.name()
+                    new_path.name(),
+                    new_path.full_path()
                 ],
             )?;
         }

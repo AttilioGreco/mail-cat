@@ -323,6 +323,7 @@ async fn sent_message_syncing_back_is_one_message_counted_once() {
             mailbox_id: sent,
             account_id: account,
             path: MailboxPath::parse("Sent", '/').unwrap(),
+            display_path: MailboxPath::parse("Sent", '/').unwrap().full_path(),
             mailbox_type: MailboxType::Sent,
         },
         DomainEvent::MessageSent {
@@ -404,6 +405,7 @@ async fn sent_placeholder_arriving_after_its_server_copy_is_not_shown() {
         mailbox_id: sent,
         account_id: account,
         path: MailboxPath::parse("Sent", '/').unwrap(),
+        display_path: MailboxPath::parse("Sent", '/').unwrap().full_path(),
         mailbox_type: MailboxType::Sent,
     };
 
@@ -469,6 +471,7 @@ async fn mailbox_paths_round_trip() {
         mailbox_id: mailbox,
         account_id: account,
         path: path.clone(),
+        display_path: path.clone().full_path(),
         mailbox_type: MailboxType::Custom,
     };
     repo.project(&at_position(1, discovered)).await.unwrap();

@@ -23,6 +23,7 @@ pub fn domain_mailbox_to_proto(mailbox: &DomainMailbox) -> MailboxSummary {
         id: mailbox.id.to_string(),
         account_id: mailbox.account_id.to_string(),
         path: mailbox.path.full_path(),
+        display_path: mailbox.display_path.clone(),
         display_name: mailbox.display_name.clone(),
         mailbox_type: domain_mailbox_type_to_proto(&mailbox.mailbox_type),
         total_messages: mailbox.total_messages,

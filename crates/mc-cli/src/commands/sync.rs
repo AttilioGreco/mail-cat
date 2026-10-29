@@ -67,7 +67,12 @@ async fn resolve_mailbox(client: &MailCatClient, account_id: &str, wanted: &str)
         .list_mailboxes(account_id)
         .await?
         .into_iter()
-        .find(|m| m.id == wanted || m.path == wanted || m.display_name == wanted)
+        .find(|m| {
+            m.id == wanted
+                || m.path == wanted
+                || m.display_path == wanted
+                || m.display_name == wanted
+        })
         .map(|m| m.path)
-        .with_context(|| format!("no mailbox matching {wanted:?} (id, path or display name)"))
+        .with_context(|| format!("no mailbox matching {wanted:?} (id, path, display path or name)"))
 }

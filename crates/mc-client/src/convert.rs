@@ -87,6 +87,7 @@ pub fn mailbox_from_proto(m: pb::MailboxSummary) -> Mailbox {
         id: m.id,
         account_id: m.account_id,
         path: m.path,
+        display_path: m.display_path,
         display_name: m.display_name,
         total_messages: m.total_messages,
         unread_messages: m.unread_messages,
