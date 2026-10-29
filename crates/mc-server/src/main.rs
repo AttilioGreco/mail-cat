@@ -35,6 +35,9 @@ const RUSTC: &str = env!("BUILD_RUSTC");
 /// Largest gRPC message the message service accepts or sends (attachments).
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
+/// How long in-flight calls get to finish once a stop is asked.
+const STREAM_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn main() -> anyhow::Result<()> {
     // A personal mail server is I/O bound: two workers keep up with IMAP and
     // gRPC, while the default (one per core) costs a stack and a malloc arena
@@ -75,7 +78,7 @@ async fn run() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("🚀 Starting mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE}) [{RUSTC}]");
+    tracing::info!("Starting mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE}) [{RUSTC}]");
     tracing::info!("Config:  {}", config_path);
     tracing::info!("gRPC:    {}", config.grpc_addr);
     tracing::info!("DB:      {}", config.db_path);
@@ -128,17 +131,18 @@ async fn run() -> anyhow::Result<()> {
     // if another process (e.g. a previous server instance) already holds the port.
     if let Err(e) = std::net::TcpListener::bind(addr) {
         if e.kind() == std::io::ErrorKind::AddrInUse {
-            tracing::error!("⚠ Port {addr} is already in use by another process, shutting down.");
+            tracing::error!("Port {addr} is already in use by another process, shutting down.");
             return Ok(());
         }
         return Err(e).context("failed to bind gRPC address");
     }
 
-    tracing::info!("✨ All components initialized successfully");
-    tracing::info!("📡 Starting gRPC server on {}...", addr);
+    tracing::info!("All components initialized successfully");
+    tracing::info!("Starting gRPC server on {}...", addr);
 
     // Create gRPC server with all services
-    Server::builder()
+    let stopping = shutdown.clone();
+    let server = Server::builder()
         .add_service(AccountServiceServer::new(app_ctx.account_service))
         .add_service(ContactServiceServer::new(app_ctx.contact_service))
         .add_service(MailboxServiceServer::new(app_ctx.mailbox_service))
@@ -149,11 +153,22 @@ async fn run() -> anyhow::Result<()> {
                 .max_encoding_message_size(MAX_MESSAGE_BYTES),
         )
         .add_service(SearchServiceServer::new(app_ctx.search_service))
-        .serve_with_shutdown(addr, shutdown_signal())
-        .await
-        .context("gRPC server error")?;
+        .serve_with_shutdown(addr, async move {
+            shutdown_signal().await;
+            stopping.cancel();
+        });
+    // Graceful stop waits for every open call, and the UI's watch streams
+    // (sync progress, mailboxes, auth) never end on their own: without a cap
+    // systemd kills us after its 90 s timeout.
+    tokio::select! {
+        served = server => served.context("gRPC server error")?,
+        () = async {
+            shutdown.cancelled().await;
+            tokio::time::sleep(STREAM_GRACE).await;
+        } => tracing::info!("open watch streams cut after {STREAM_GRACE:?}"),
+    }
 
-    tracing::info!("🛑 gRPC server stopped, cancelling background tasks...");
+    tracing::info!("gRPC server stopped, cancelling background tasks...");
     shutdown.cancel();
 
     // Give spawned tasks a brief window to react to the cancellation token
@@ -161,7 +176,7 @@ async fn run() -> anyhow::Result<()> {
     // process alive indefinitely.
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
-    tracing::info!("👋 Server shut down gracefully");
+    tracing::info!("Server shut down gracefully");
     // Force-exit is safe: every SQLite write is its own committed transaction
     // (WAL), so nothing buffered is lost; an uncommitted one rolls back on open.
     std::process::exit(0);
@@ -178,10 +193,10 @@ async fn shutdown_signal() {
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
             result.expect("failed to install CTRL+C signal handler");
-            tracing::info!("🛑 Received SIGINT, stopping server...");
+            tracing::info!("Received SIGINT, stopping server...");
         }
         _ = sigterm.recv() => {
-            tracing::info!("🛑 Received SIGTERM, stopping server...");
+            tracing::info!("Received SIGTERM, stopping server...");
         }
     }
 }

@@ -55,7 +55,10 @@ pub fn provider_preset(provider: OAuthProvider) -> ProviderPreset {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: "https://oauth2.googleapis.com/token",
             scopes: &["https://mail.google.com/"],
-            auth_extra_params: &[("access_type", "offline"), ("prompt", "consent select_account")],
+            auth_extra_params: &[
+                ("access_type", "offline"),
+                ("prompt", "consent select_account"),
+            ],
             imap_host: "imap.gmail.com",
             imap_port: 993,
             smtp_host: "smtp.gmail.com",
