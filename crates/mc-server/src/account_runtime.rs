@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use mc_application::{
-    AccountLifecycle, AccountProvisioner, ApplicationError, AuthGate, AuthGates, Command,
+    AccountLifecycle, AccountProvisioner, ApplicationError, AuthGate, AuthGates, Backoff, Command,
     CommandBus, CommandResult, Credential,
 };
 use mc_domain::model::account::{IncomingServer, SmtpConnectionConfig, SmtpSecurity};
@@ -101,10 +101,14 @@ impl AccountRuntime {
     /// the database has none yet. Idempotent. On failure nothing is left behind.
     pub async fn start(&self, account_config: &AccountConfig) -> anyhow::Result<AccountId> {
         let _starting = self.starting.lock().await;
-        self.start_locked(account_config).await
+        self.start_locked(account_config, None).await
     }
 
-    async fn start_locked(&self, account_config: &AccountConfig) -> anyhow::Result<AccountId> {
+    async fn start_locked(
+        &self,
+        account_config: &AccountConfig,
+        backoff: Option<Backoff>,
+    ) -> anyhow::Result<AccountId> {
         let deps = &self.deps;
         let existing = deps
             .repository
@@ -137,6 +141,9 @@ impl AccountRuntime {
         );
         if let Some(summary) = &existing {
             gate.restore(summary);
+        }
+        if let Some(backoff) = backoff {
+            gate.inherit(backoff);
         }
 
         // JMAP submits through the provider, never over SMTP.
@@ -215,8 +222,14 @@ impl AccountRuntime {
             .ok_or_else(|| ApplicationError::NotFound("Account", account_id.to_string()))?;
         let internal = |e: anyhow::Error| ApplicationError::Internal(format!("{e:#}"));
         let account_config = self.declared(account.email.as_str()).map_err(internal)?;
+        // A throttled account must not log in again the moment it is restarted.
+        let backoff = self
+            .deps
+            .auth_gates
+            .get(&account_id)
+            .and_then(|gate| gate.backoff());
         self.stop(&account_id).await;
-        self.start_locked(&account_config)
+        self.start_locked(&account_config, backoff)
             .await
             .map(|_| ())
             .map_err(internal)

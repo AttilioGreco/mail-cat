@@ -139,6 +139,19 @@ struct Tracked {
     task_error: Option<String>,
 }
 
+/// What an offline or throttled gate has accumulated, so a successor gate
+/// keeps waiting instead of logging in at once.
+#[derive(Debug, Clone)]
+pub struct Backoff {
+    next_retry: DateTime<Utc>,
+    since: DateTime<Utc>,
+    reason: Option<String>,
+    last_error: Option<String>,
+    offline_rounds: u32,
+    throttle_rounds: u32,
+    last_throttled: Option<DateTime<Utc>>,
+}
+
 pub struct AuthGate {
     account_id: AccountId,
     email: String,
@@ -190,6 +203,39 @@ impl AuthGate {
     /// Shows clients that a background task of the account gave up.
     pub fn task_failed(&self, reason: String) {
         self.tracked.send_modify(|t| t.task_error = Some(reason));
+        let _ = self.changes.send(self.account_id);
+    }
+
+    /// The backoff in progress; `None` unless the gate is offline or throttled.
+    pub fn backoff(&self) -> Option<Backoff> {
+        let t = self.tracked.borrow();
+        let AuthState::Offline { next_retry } = t.state else {
+            return None;
+        };
+        Some(Backoff {
+            next_retry,
+            since: t.since,
+            reason: t.reason.clone(),
+            last_error: t.last_error.clone(),
+            offline_rounds: t.offline_rounds,
+            throttle_rounds: t.throttle_rounds,
+            last_throttled: t.last_throttled,
+        })
+    }
+
+    /// Continues the backoff of the gate this one replaces.
+    pub fn inherit(&self, backoff: Backoff) {
+        self.tracked.send_modify(|t| {
+            t.state = AuthState::Offline {
+                next_retry: backoff.next_retry,
+            };
+            t.since = backoff.since;
+            t.reason = backoff.reason;
+            t.last_error = backoff.last_error;
+            t.offline_rounds = backoff.offline_rounds;
+            t.throttle_rounds = backoff.throttle_rounds;
+            t.last_throttled = backoff.last_throttled;
+        });
         let _ = self.changes.send(self.account_id);
     }
 

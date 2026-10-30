@@ -402,6 +402,32 @@ async fn restart_brings_the_account_back_with_fresh_tasks_and_keeps_its_data() {
 }
 
 #[tokio::test]
+async fn restart_keeps_the_throttle_backoff() {
+    let f = fixture(ACCOUNT_TOML).await;
+    let runtime = &f.ctx.account_runtime;
+    let id = runtime.start_declared("hot@example.com").await.unwrap();
+    let old_gate = runtime.deps.auth_gates.get(&id).unwrap();
+    let busy = DomainError::Throttled("Too many simultaneous connections.".into());
+    old_gate
+        .login_failed(&mc_domain::LoginSecret::Password("pw".into()), &busy, false)
+        .await;
+    let before = old_gate.status();
+    assert!(matches!(
+        before.state,
+        mc_application::AuthState::Offline { .. }
+    ));
+
+    runtime.restart(id).await.unwrap();
+
+    let gate = runtime.deps.auth_gates.get(&id).unwrap();
+    assert!(!Arc::ptr_eq(&gate, &old_gate));
+    let after = gate.status();
+    assert_eq!(after.state, before.state, "same next_retry");
+    assert_eq!(after.reason, before.reason);
+    assert_eq!(after.since, before.since);
+}
+
+#[tokio::test]
 async fn restart_of_an_unknown_or_undeclared_account_changes_nothing() {
     let f = fixture(ACCOUNT_TOML).await;
     let runtime = &f.ctx.account_runtime;
