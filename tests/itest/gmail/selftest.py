@@ -98,7 +98,10 @@ assert refused(bad.trash, "mine") and not bad.sent
 assert compare.label_name(box("All", "[Gmail]/All Mail")) is None
 assert compare.label_name(box("Inbox", "INBOX")) == "INBOX"
 assert compare.label_name(box("Custom", "[Gmail]/Starred", "Starred")) == "STARRED"
-assert compare.label_name(box("Custom", "[Google Mail]/Important")) == "IMPORTANT"
+assert compare.label_name(box("Important", "[Gmail]/Importanti")) == "IMPORTANT"
+assert compare.label_name(box("Custom", "[Gmail]/Speciali")) == "STARRED"
+assert compare.label_name(box("Custom", "[Gmail]", "[Gmail]")) == "[Gmail]"
+assert compare.diff_labels({"1": {"SPAM", "mc-itest"}, "2": {"INBOX", "mc-itest"}}, {"1": {"SPAM"}, "2": {"INBOX", "mc-itest"}}) == []
 assert compare.label_name(box("Custom", "Clienti/Caf&AOk-", "Clienti/Café")) == "Clienti/Café"
 assert compare.norm_message_id(" <a@b> ") == "a@b"
 assert not api.keep_label("UNREAD") and not api.keep_label("CATEGORY_PROMOTIONS") and api.keep_label("INBOX")
