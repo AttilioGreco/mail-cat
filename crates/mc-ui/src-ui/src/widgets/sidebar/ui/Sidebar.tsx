@@ -347,7 +347,7 @@ function FolderTree({
   );
 
   return (
-    <nav className="flex min-h-0 flex-col gap-0.5 overflow-y-auto">
+    <nav className="flex h-full min-h-0 flex-col gap-0.5 overflow-y-auto">
       {system.map(item)}
       {other.length > 0 && (
         <>
