@@ -151,3 +151,48 @@ async fn change_labels(&self, ids: &[RemoteId], in_mailbox: &MailboxPath,
   destinations.
 - `Email/query` snapshot vs `Email/changes` from state `""` for the first sync on big
   mailboxes; measure on Stalwart first.
+
+## Phase 4 design: Gmail over IMAP as labels
+
+Account stays `ProviderType::Imap`. Data folder is wiped (memberships change meaning).
+
+1. **Detection.** `CAPABILITY X-GM-EXT-1` (already `ServerCaps.gmail`) and a LIST that carries
+   `\All`. Without `\All` (hidden from IMAP in Gmail settings) the account is plain IMAP.
+   Default model: `EmailProvider::preferred_mailbox_model()` (`Labels` once detected). Each
+   full sync appends `AccountMailboxModelChanged` only if the account's event stream holds
+   none, so an explicit choice made after the first sync is never overridden (a choice
+   of the already-current `Folders` before the first sync writes no event and is lost).
+2. **Sync shape.** Real IMAP mailboxes synced: All Mail, Spam, Trash (All Mail excludes the
+   last two). Every other LIST entry (INBOX, Sent, Drafts, Important, Starred, user labels)
+   is a *view*: discovered and shown, never synced, never selected. New trait method
+   `backed_by(path) -> Option<MailboxPath>` (view -> All Mail, else `None`): `run_sync` skips
+   views, `sync_mailbox` redirects them to All Mail (IDLE on INBOX, resyncs after label ops).
+3. **Memberships.** A view membership carries the *All Mail UID* as its `remote_id` (the
+   handlers' "same RemoteId in every mailbox" rule, as for JMAP). The provider resolves a
+   view to All Mail in `selected()`, so every call that names a view (flags, bodies,
+   find_by_message_id, ...) addresses All Mail. Trash/Spam rows keep their own UID.
+   `MailboxChanges.labels: HashMap<RemoteId, Vec<MailboxPath>>` lists the views of each
+   added/changed All Mail message; `sync_one` reconciles that message's view memberships
+   (`MessageMailboxesChanged`, only views backed by this mailbox) and removes them with the
+   All Mail membership when the message leaves All Mail.
+   Label name -> path: the LIST name equals the label as `X-GM-LABELS` spells it (modified
+   UTF-7, `/` hierarchy), except system labels (`\Inbox \Sent \Draft \Important \Starred`)
+   which map by role / `\Flagged`. Display names are UTF-7-decoded. Unknown labels are dropped.
+4. **Delta.** All Mail cursor `gm1:{validity}:{uid_next}:{modseq}`. First sync (or
+   UIDVALIDITY change, or no HIGHESTMODSEQ): `FETCH (FLAGS X-GM-LABELS X-GM-MSGID)` of
+   everything. Later: `UID SEARCH UNDELETED` (what is still there; CONDSTORE reports no
+   expunges, Gmail has no QRESYNC) plus `FETCH 1:* (...) (CHANGEDSINCE modseq)` (flags and
+   labels of what changed, added messages included). New `Existing::Listed{present, changed}`;
+   reconcile treats an absent known id as gone, a changed one as flags + labels.
+5. **Operations** (Gmail mode only; plain IMAP untouched).
+   - `change_labels`: `UID STORE .. +/-X-GM-LABELS (..)` on All Mail; `\Inbox` for the Inbox
+     view (archive = `-X-GM-LABELS (\Inbox)`); custom names quoted. Refused for Trash/Spam
+     rows (their UID is not an All Mail UID) and for All Mail/Trash/Spam as a label.
+   - `move_messages` (Folders model, delete, archive): view/All Mail -> view = label add/remove,
+     identity id map; -> Trash/Spam or out of them = real `UID MOVE`/`COPY`, new ids kept only
+     when the destination is a real mailbox, else `None` (handler looks them up by Message-ID).
+   - permanent delete of an All Mail row: MOVE to Trash, then `\Deleted` + `UID EXPUNGE` there
+     (flagging in All Mail is not a documented hard delete).
+   - Tags: unchanged (PERMANENTFLAGS), STORE on All Mail.
+   - IDLE on a view: a pure FETCH becomes `MailboxCountChanged` (UIDs of the view are not ours).
+6. **Subscriptions** (LSUB) are not consulted; future work, orthogonal.
