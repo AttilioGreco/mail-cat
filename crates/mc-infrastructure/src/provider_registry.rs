@@ -74,6 +74,7 @@ mod tests {
                 reset: None,
                 added: vec![],
                 keys: Default::default(),
+                labels: Default::default(),
                 existing: Existing::Snapshot(vec![]),
                 counts: MailboxCounts {
                     total: 0,

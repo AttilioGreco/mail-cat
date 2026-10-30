@@ -19,7 +19,7 @@ fn ids(ids: &[u32]) -> Vec<RemoteId> {
 fn snapshot(changes: MailboxChanges) -> Vec<(RemoteId, Vec<Flag>)> {
     match changes.existing {
         Existing::Snapshot(entries) => entries,
-        Existing::Delta { .. } => panic!("IMAP lists everything"),
+        Existing::Delta { .. } | Existing::Listed { .. } => panic!("IMAP lists everything"),
     }
 }
 

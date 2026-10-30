@@ -120,6 +120,14 @@ impl EmailProvider for AnyProvider {
         delegate!(self, p => p.change_labels(ids, in_mailbox, add, remove).await)
     }
 
+    fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
+        delegate!(self, p => p.backed_by(mailbox))
+    }
+
+    fn preferred_mailbox_model(&self) -> Option<mc_domain::MailboxModel> {
+        delegate!(self, p => p.preferred_mailbox_model())
+    }
+
     fn supports_tags(&self) -> Option<bool> {
         delegate!(self, p => p.supports_tags())
     }

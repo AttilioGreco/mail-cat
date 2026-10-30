@@ -96,6 +96,7 @@ fn changes_from(
         reset,
         added,
         keys: HashMap::new(),
+        labels: HashMap::new(),
         existing: Existing::Snapshot(snapshot),
         counts,
     }
@@ -119,10 +120,19 @@ impl ImapEmailProvider {
         // STATUS, not SELECT's numbers: SELECT's "unseen" is the first unseen
         // sequence number (RFC 3501), not a count.
         let mut session = self.session().await?;
+        let gmail_all = self
+            .layout_on(&mut session)
+            .await?
+            .is_some_and(|l| l.is_all_mail(&name));
+        let items = if gmail_all {
+            "(MESSAGES UNSEEN UIDVALIDITY HIGHESTMODSEQ)"
+        } else {
+            "(MESSAGES UNSEEN UIDVALIDITY)"
+        };
         let status = exchange(
             COMMAND_TIMEOUT,
             "Mailbox STATUS",
-            session.status(&name, "(MESSAGES UNSEEN UIDVALIDITY)"),
+            session.status(&name, items),
         )
         .await?;
         self.release(session);
@@ -132,6 +142,12 @@ impl ImapEmailProvider {
             unread: status.unseen.unwrap_or(0),
         };
 
+        if gmail_all {
+            let modseq = status.highest_modseq.unwrap_or(0);
+            return self
+                .all_mail_changes(&name, since, uid_validity, modseq, counts)
+                .await;
+        }
         let mut session = self.selected(&name).await?;
         let fetches = uid_flags(&mut session, self.has_gmail_ext()).await?;
         self.release(session);

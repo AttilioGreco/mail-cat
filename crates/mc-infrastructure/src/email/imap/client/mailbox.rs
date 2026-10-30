@@ -3,6 +3,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use async_imap::types::NameAttribute;
 use futures::Stream;
 use tracing::{debug, info, warn};
 
@@ -15,7 +16,7 @@ use mc_domain::value_objects::remote_id::RemoteId;
 
 use super::super::mapper::{self, flag_to_imap, mailbox_path_to_string};
 use super::commands::{exchange, store, uids_of};
-use super::{COMMAND_TIMEOUT, IDLE_REISSUE, ImapEmailProvider};
+use super::{COMMAND_TIMEOUT, IDLE_REISSUE, ImapEmailProvider, ImapSession};
 
 impl ImapEmailProvider {
     pub(super) fn watch_stream(
@@ -55,6 +56,15 @@ impl ImapEmailProvider {
                         let _ = exchange(COMMAND_TIMEOUT, "LOGOUT", session.logout()).await;
                         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                         continue;
+                    }
+                };
+                // A Gmail view's UIDs are not the ones its messages are stored
+                // under, so a flag change in it is left to the sync of All Mail.
+                let view = match self.layout_on(&mut session).await {
+                    Ok(layout) => layout.is_some_and(|l| l.is_view(&mailbox_name)),
+                    Err(e) => {
+                        warn!("[watch] LIST for '{}' failed: {}", mailbox_name, e);
+                        false
                     }
                 };
                 // Remember the next expected UID so we can detect new arrivals after IDLE.
@@ -114,7 +124,7 @@ impl ImapEmailProvider {
                 let has_expunge = raw_upper.contains("EXPUNGE");
                 let has_exists  = raw_upper.contains("EXISTS");
 
-                if has_flags && !has_exists && !has_expunge {
+                if has_flags && !has_exists && !has_expunge && !view {
                     // Pure flag change (e.g. marking read in another client).
                     // Parse the sequence number from "* N FETCH ..." to resolve UID + flags.
                     let seq_num: Option<u32> = raw_upper
@@ -220,44 +230,50 @@ impl ImapEmailProvider {
     }
 }
 
-impl ImapEmailProvider {
-    pub(super) async fn list_all_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
-        use futures::stream::StreamExt;
-        use mc_domain::model::account::AccountId;
-        use mc_domain::model::mailbox::MailboxId;
+/// One LIST entry, with what the Gmail layout needs besides the mailbox.
+pub(super) struct Listed {
+    pub(super) mailbox: Mailbox,
+    /// The name as the server spells it (modified UTF-7), which commands and
+    /// X-GM-LABELS use.
+    pub(super) name: String,
+    /// Gmail's Starred, marked `\Flagged` in LIST.
+    pub(super) starred: bool,
+}
 
-        debug!("Listing mailboxes");
-        let mut session = self.session().await?;
+pub(super) async fn list_on(session: &mut ImapSession) -> Result<Vec<Listed>, DomainError> {
+    use futures::stream::StreamExt;
+    use mc_domain::model::account::AccountId;
+    use mc_domain::model::mailbox::MailboxId;
 
-        let mailbox_list: Vec<Result<_, _>> = exchange(COMMAND_TIMEOUT, "List mailboxes", async {
-            Ok(session
-                .list(None, Some("*"))
-                .await?
-                .collect::<Vec<_>>()
-                .await)
-        })
-        .await?;
-        self.release(session);
+    debug!("Listing mailboxes");
+    let mailbox_list: Vec<Result<_, _>> = exchange(COMMAND_TIMEOUT, "List mailboxes", async {
+        Ok(session
+            .list(None, Some("*"))
+            .await?
+            .collect::<Vec<_>>()
+            .await)
+    })
+    .await?;
 
-        // Convert IMAP mailbox names to Mailbox objects
-        let mut mailboxes = Vec::new();
-        for result in mailbox_list {
-            let mb =
-                result.map_err(|e| DomainError::Provider(format!("Mailbox name error: {}", e)))?;
+    let mut listed = Vec::new();
+    for result in mailbox_list {
+        let mb = result.map_err(|e| DomainError::Provider(format!("Mailbox name error: {}", e)))?;
 
-            let imap_name = mb.name();
-            let delimiter_str = mb.delimiter().unwrap_or("/");
-            let delimiter = delimiter_str.chars().next().unwrap_or('/');
+        let imap_name = mb.name();
+        let delimiter_str = mb.delimiter().unwrap_or("/");
+        let delimiter = delimiter_str.chars().next().unwrap_or('/');
 
-            // Parse mailbox path
-            let path = mapper::parse_mailbox_path(imap_name, delimiter)?;
+        let path = mapper::parse_mailbox_path(imap_name, delimiter)?;
 
-            // Classify from SPECIAL-USE attributes when the server sends them.
-            let mailbox_type = mapper::classify_mailbox(imap_name, mb.attributes());
+        // Classify from SPECIAL-USE attributes when the server sends them.
+        let mailbox_type = mapper::classify_mailbox(imap_name, mb.attributes());
 
-            // Create placeholder Mailbox - account_id and id will be set during sync
-            let display_path = path.full_path();
-            let mailbox = Mailbox {
+        // Create placeholder Mailbox - account_id and id will be set during sync
+        let display_path = mapper::decode_utf7(&path.full_path()).into_owned();
+        listed.push(Listed {
+            name: imap_name.to_owned(),
+            starred: mb.attributes().contains(&NameAttribute::Flagged),
+            mailbox: Mailbox {
                 id: MailboxId::new(),
                 account_id: AccountId::new(),
                 // As discovery derives it, or every sync would see a rename.
@@ -268,13 +284,22 @@ impl ImapEmailProvider {
                 flags: Vec::new(),
                 total_messages: 0,
                 unread_messages: 0,
-            };
+            },
+        });
+    }
+    info!("Listed {} mailboxes", listed.len());
+    Ok(listed)
+}
 
-            mailboxes.push(mailbox);
+impl ImapEmailProvider {
+    pub(super) async fn list_all_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
+        let mut session = self.session().await?;
+        let listed = list_on(&mut session).await?;
+        self.release(session);
+        if self.has_gmail_ext() {
+            self.learn_layout(&listed);
         }
-
-        info!("Listed {} mailboxes", mailboxes.len());
-        Ok(mailboxes)
+        Ok(listed.into_iter().map(|l| l.mailbox).collect())
     }
 
     pub(super) async fn change_flags_bulk(

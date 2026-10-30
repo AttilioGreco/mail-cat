@@ -228,6 +228,7 @@ impl ImapEmailProvider {
             received: Arc::default(),
             caps: OnceLock::new(),
             keywords: OnceLock::new(),
+            layout: Mutex::default(),
         }
     }
 
@@ -288,12 +289,12 @@ impl ImapEmailProvider {
 
     pub(super) async fn selected(&self, mailbox_name: &str) -> Result<PooledSession, DomainError> {
         let mut session = self.session().await?;
-        let selected = exchange(
-            COMMAND_TIMEOUT,
-            "Mailbox select",
-            session.select(mailbox_name),
-        )
-        .await?;
+        let layout = self.layout_on(&mut session).await?;
+        // A Gmail view has no ids of its own: its messages are All Mail's.
+        let name = layout
+            .as_ref()
+            .map_or(mailbox_name, |l| l.backing(mailbox_name));
+        let selected = exchange(COMMAND_TIMEOUT, "Mailbox select", session.select(name)).await?;
         self.keywords.get_or_init(|| {
             selected
                 .permanent_flags

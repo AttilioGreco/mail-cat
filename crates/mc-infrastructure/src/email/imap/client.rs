@@ -10,6 +10,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
+use mc_domain::model::account::MailboxModel;
 use mc_domain::model::mailbox::Mailbox;
 use mc_domain::model::message::{Message, OutgoingMessage};
 use mc_domain::traits::email_provider::{
@@ -96,6 +97,9 @@ pub struct ImapEmailProvider {
     /// Whether SELECT's PERMANENTFLAGS lists `\*` (any keyword may be set).
     /// Learned from the first mailbox selected; servers answer the same for all.
     keywords: OnceLock<bool>,
+    /// Gmail's real mailboxes and views, from the latest LIST (`None`: not
+    /// listed yet; `Some(None)`: not Gmail-shaped). See [`gmail`].
+    layout: Mutex<Option<Option<Arc<gmail::Layout>>>>,
 }
 
 impl ImapEmailProvider {
@@ -218,6 +222,24 @@ impl EmailProvider for ImapEmailProvider {
         self.keywords.get().copied()
     }
 
+    fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
+        self.layout()?.backed_by(mailbox)
+    }
+
+    fn preferred_mailbox_model(&self) -> Option<MailboxModel> {
+        self.layout().map(|_| MailboxModel::Labels)
+    }
+
+    async fn change_labels(
+        &self,
+        ids: &[RemoteId],
+        in_mailbox: &MailboxPath,
+        add: &[MailboxPath],
+        remove: &[MailboxPath],
+    ) -> Result<(), DomainError> {
+        self.relabel(ids, in_mailbox, add, remove).await
+    }
+
     async fn delete_messages(
         &self,
         mailbox: &MailboxPath,
@@ -242,6 +264,15 @@ impl EmailProvider for ImapEmailProvider {
         // whatever the selection was, so sort here rather than trusting it.
         let mut uids = uids_of(ids)?;
         uids.sort_unstable();
+        if permanently
+            && let Some(layout) = self
+                .layout()
+                .filter(|l| l.holds_all_mail_ids(&mailbox_name))
+        {
+            Self::expunge_via_trash(&mut session, &layout, caps, &uids).await?;
+            self.release(session);
+            return Ok(());
+        }
         for chunk in uids.chunks(Self::FETCH_BATCH_SIZE) {
             timed(
                 COMMAND_TIMEOUT,
@@ -284,14 +315,29 @@ impl EmailProvider for ImapEmailProvider {
             .iter()
             .map(|&uid| (RemoteId::from(uid), None))
             .collect();
+        let layout = self.layout();
+        let by_labels = layout
+            .as_ref()
+            .filter(|l| l.holds_all_mail_ids(&from_name) && l.holds_all_mail_ids(&to_name));
+        // A view's own UIDs are not All Mail's: a copy into one has no usable id.
+        let id_kept = layout.as_ref().is_none_or(|l| !l.is_view(&to_name));
         for chunk in uids.chunks(Self::FETCH_BATCH_SIZE) {
+            if let Some(layout) = by_labels {
+                Self::move_by_labels(&mut session, layout, chunk, &from_name, &to_name).await?;
+                moved.extend(
+                    chunk
+                        .iter()
+                        .map(|&uid| (RemoteId::from(uid), Some(RemoteId::from(uid)))),
+                );
+                continue;
+            }
             let pairs = timed(
                 COMMAND_TIMEOUT,
                 "Move",
                 move_uids(&mut session, caps, chunk, &to_name),
             )
             .await?;
-            for (old, new) in pairs {
+            for (old, new) in pairs.into_iter().filter(|_| id_kept) {
                 moved.insert(RemoteId::from(old), Some(RemoteId::from(new)));
             }
         }
@@ -390,12 +436,12 @@ impl ImapEmailProvider {
         };
         let uid = match query {
             Some(query) => {
-                exchange(
-                    COMMAND_TIMEOUT,
-                    "Mailbox select",
-                    session.select(&mailbox_name),
-                )
-                .await?;
+                // A Gmail view's ids are All Mail's.
+                let layout = self.layout_on(&mut session).await?;
+                let name = layout
+                    .as_ref()
+                    .map_or(mailbox_name.as_str(), |l| l.backing(&mailbox_name));
+                exchange(COMMAND_TIMEOUT, "Mailbox select", session.select(name)).await?;
                 exchange(COMMAND_TIMEOUT, "UID SEARCH", session.uid_search(query))
                     .await?
                     .into_iter()
@@ -433,6 +479,7 @@ pub use self::session::asks_the_user_to_act;
 mod changes;
 mod commands;
 mod fetch;
+mod gmail;
 mod mailbox;
 mod session;
 

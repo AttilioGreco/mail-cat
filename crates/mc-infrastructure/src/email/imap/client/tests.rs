@@ -3,11 +3,19 @@ use super::*;
 mod commands;
 mod fetch_and_connect;
 
-type FakeSession = async_imap::Session<tokio_util::compat::Compat<tokio::io::DuplexStream>>;
+pub(super) type FakeSession =
+    async_imap::Session<tokio_util::compat::Compat<tokio::io::DuplexStream>>;
 
 /// A logged-in session against an in-memory server that answers each
 /// command with `reply(command)` (`$T` = its tag) and records the commands.
 async fn scripted(reply: fn(&str) -> &'static str) -> (FakeSession, Arc<Mutex<Vec<String>>>) {
+    serving(move |command| reply(command).to_owned()).await
+}
+
+/// Like [`scripted`], for a server with state: `reply` may remember commands.
+pub(super) async fn serving(
+    mut reply: impl FnMut(&str) -> String + Send + 'static,
+) -> (FakeSession, Arc<Mutex<Vec<String>>>) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -22,7 +30,7 @@ async fn scripted(reply: fn(&str) -> &'static str) -> (FakeSession, Arc<Mutex<Ve
             let (tag, command) = line.split_once(' ').unwrap();
             seen.lock().unwrap().push(command.to_owned());
             let answer = if command.starts_with("LOGIN") {
-                "$T OK logged in\r\n"
+                "$T OK logged in\r\n".to_owned()
             } else {
                 reply(command)
             };
@@ -39,7 +47,7 @@ async fn scripted(reply: fn(&str) -> &'static str) -> (FakeSession, Arc<Mutex<Ve
     (session, commands)
 }
 
-fn uid_commands(commands: &Mutex<Vec<String>>) -> Vec<String> {
+pub(super) fn uid_commands(commands: &Mutex<Vec<String>>) -> Vec<String> {
     commands
         .lock()
         .unwrap()

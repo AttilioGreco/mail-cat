@@ -305,6 +305,7 @@ fn changes(
         reset,
         added: added.into_iter().map(RemoteId::from).collect(),
         keys,
+        labels: HashMap::new(),
         existing,
         counts,
     }

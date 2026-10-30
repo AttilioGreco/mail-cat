@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use async_imap::types::NameAttribute;
 use mailparse::{MailParseError, parse_mail};
 
@@ -15,6 +17,65 @@ pub fn mailparse_err(e: MailParseError) -> DomainError {
 pub fn parse_mailbox_path(name: &str, delimiter: char) -> Result<MailboxPath, DomainError> {
     let segments: Vec<String> = name.split(delimiter).map(|s| s.to_string()).collect();
     MailboxPath::new(segments, delimiter)
+}
+
+/// A mailbox name as people read it: IMAP sends non-ASCII names in modified
+/// UTF-7 (RFC 3501 5.1.3), `&` opening a base64 run of UTF-16 that `-` closes.
+/// Anything malformed stays as the server sent it.
+pub fn decode_utf7(name: &str) -> Cow<'_, str> {
+    if !name.contains('&') {
+        return Cow::Borrowed(name);
+    }
+    let mut out = String::with_capacity(name.len());
+    let mut rest = name;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 1..];
+        let Some(end) = tail.find('-') else {
+            // Unterminated: the rest is not ours to decode.
+            rest = &rest[start..];
+            break;
+        };
+        match &tail[..end] {
+            "" => out.push('&'),
+            run => match decode_utf7_run(run) {
+                Some(text) => out.push_str(&text),
+                None => out.push_str(&rest[start..start + end + 2]),
+            },
+        }
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+/// The base64 (alphabet with `,` for `/`) of UTF-16BE inside one `&…-` run.
+fn decode_utf7_run(run: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(run.len() * 3 / 4);
+    let (mut bits, mut width) = (0u32, 0u32);
+    for c in run.bytes() {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b',' => 63,
+            _ => return None,
+        };
+        bits = bits << 6 | u32::from(value);
+        width += 6;
+        if width >= 8 {
+            width -= 8;
+            bytes.push((bits >> width) as u8);
+            bits &= (1 << width) - 1;
+        }
+    }
+    if bytes.len() % 2 != 0 || bits != 0 {
+        return None;
+    }
+    char::decode_utf16(bytes.chunks(2).map(|p| u16::from_be_bytes([p[0], p[1]])))
+        .collect::<Result<String, _>>()
+        .ok()
 }
 
 /// Convert MailboxPath to IMAP mailbox name string.
@@ -209,6 +270,18 @@ pub fn visible_flags(mut flags: Vec<Flag>) -> Option<Vec<Flag>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf7_names_decode_and_malformed_ones_stay() {
+        assert_eq!(decode_utf7("INBOX"), "INBOX");
+        assert_eq!(decode_utf7("Caf&AOk-"), "Café");
+        assert_eq!(decode_utf7("A &- B"), "A & B");
+        assert_eq!(decode_utf7("Lavoro/&AOA-&AOg-"), "Lavoro/àè");
+        assert_eq!(decode_utf7("&ZeVnLIqe-"), "日本語");
+        assert_eq!(decode_utf7("Mail &2D3eAA-"), "Mail \u{1F600}");
+        assert_eq!(decode_utf7("bad &!!-"), "bad &!!-");
+        assert_eq!(decode_utf7("open &AOk"), "open &AOk");
+    }
 
     #[test]
     fn deleted_messages_are_gone_and_recent_is_dropped() {
