@@ -170,6 +170,7 @@ pub enum MailboxKind {
     Archive,
     /// Gmail's "All Mail" (RFC 6154 `\All`) — doubles as its archive target.
     All,
+    Important,
     Custom,
 }
 
@@ -183,6 +184,7 @@ impl MailboxKind {
             Self::Spam => "spam",
             Self::Archive => "archive",
             Self::All => "all",
+            Self::Important => "important",
             Self::Custom => "custom",
         }
     }

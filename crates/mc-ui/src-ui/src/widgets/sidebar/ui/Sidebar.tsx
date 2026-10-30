@@ -304,8 +304,9 @@ function FolderTree({
     );
   }
 
-  const system = labels ? mailboxes.filter((m) => m.kind !== 'custom') : mailboxes;
-  const custom = labels ? mailboxes.filter((m) => m.kind === 'custom') : [];
+  const isLabel = (m: Mailbox) => m.kind === 'custom' || m.kind === 'important';
+  const system = labels ? mailboxes.filter((m) => !isLabel(m)) : mailboxes;
+  const custom = labels ? mailboxes.filter(isLabel) : [];
   const item = (mailbox: Mailbox) => (
     <FolderItem
       key={mailbox.id}

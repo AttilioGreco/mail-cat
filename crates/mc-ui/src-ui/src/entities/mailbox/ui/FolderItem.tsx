@@ -35,7 +35,7 @@ function renderIcon(mailbox: Mailbox, asLabel: boolean) {
     if (mailbox.attributes.includes(attr)) return <Icon size={15} className="shrink-0" />;
   }
   const Icon =
-    NAME_ICONS[mailbox.name] ?? NAME_ICONS[mailbox.displayPath] ?? (asLabel && mailbox.kind === 'custom' ? Tag : Folder);
+    NAME_ICONS[mailbox.name] ?? NAME_ICONS[mailbox.displayPath] ?? (asLabel && (mailbox.kind === 'custom' || mailbox.kind === 'important') ? Tag : Folder);
   return <Icon size={15} className="shrink-0" />;
 }
 

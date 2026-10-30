@@ -35,6 +35,8 @@ enum MailboxType {
   // RFC 6154 \All — a virtual folder holding every message (Gmail's "All Mail").
   // Gmail exposes no \Archive, so this doubles as its archive target.
   MAILBOX_TYPE_ALL = 8;
+  // Gmail's \Important: a label like any other, but told apart so clients can name it.
+  MAILBOX_TYPE_IMPORTANT = 9;
 }
 
 // Mailbox summary.

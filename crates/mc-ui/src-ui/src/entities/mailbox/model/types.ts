@@ -8,6 +8,7 @@ export type MailboxKind =
   | 'spam'
   | 'archive'
   | 'all'
+  | 'important'
   | 'custom';
 
 export interface Mailbox {
