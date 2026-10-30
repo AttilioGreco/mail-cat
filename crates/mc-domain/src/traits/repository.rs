@@ -252,7 +252,7 @@ pub struct BackfillEntry {
 #[async_trait]
 pub trait BodyBackfillQueue: Send + Sync {
     /// Pending entries for an account, up to `limit`: INBOX first, then other
-    /// folders, then All Mail and Important (copies of the rest), newest first
+    /// folders, then All Mail, Important and Starred (copies of the rest), newest first
     /// within each. Trash and Spam are never queued: they load when opened.
     async fn list_pending_backfill(
         &self,

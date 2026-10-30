@@ -8,15 +8,10 @@ fn entry(name: &str, kind: MailboxType) -> Entry<'_> {
         name,
         delimiter: '/',
         kind,
-        starred: false,
     }
 }
 
 fn gmail_layout() -> Layout {
-    let starred = Entry {
-        starred: true,
-        ..entry("[Gmail]/Starred", MailboxType::Custom)
-    };
     Layout::from_list([
         entry("INBOX", MailboxType::Inbox),
         entry("[Gmail]", MailboxType::Custom),
@@ -26,7 +21,7 @@ fn gmail_layout() -> Layout {
         entry("[Gmail]/Important", MailboxType::Important),
         entry("[Gmail]/Spam", MailboxType::Spam),
         entry("[Gmail]/Trash", MailboxType::Trash),
-        starred,
+        entry("[Gmail]/Starred", MailboxType::Starred),
         entry("Work", MailboxType::Custom),
         entry("Clienti/Caf&AOk-", MailboxType::Custom),
         entry("Say \"hi\"", MailboxType::Custom),
@@ -619,7 +614,6 @@ async fn listed_names_with_escapes_and_utf7_match_their_labels() {
         name: &l.name,
         delimiter: '/',
         kind: l.mailbox.mailbox_type,
-        starred: l.starred,
     }))
     .unwrap();
     let wire = labels(&[

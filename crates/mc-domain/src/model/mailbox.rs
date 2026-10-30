@@ -56,6 +56,8 @@ pub enum MailboxType {
     All,
     /// Gmail's `\Important` label: copies of messages also in INBOX or `\All`.
     Important,
+    /// `\Flagged` special-use: messages the user starred (Gmail's Starred).
+    Starred,
     Custom,
 }
 

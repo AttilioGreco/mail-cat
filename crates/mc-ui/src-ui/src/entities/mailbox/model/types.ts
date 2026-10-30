@@ -9,6 +9,7 @@ export type MailboxKind =
   | 'archive'
   | 'all'
   | 'important'
+  | 'starred'
   | 'custom';
 
 export interface Mailbox {

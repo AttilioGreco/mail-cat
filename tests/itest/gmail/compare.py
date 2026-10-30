@@ -1,8 +1,8 @@
 """Pure helpers to compare mail-cat's view of the Gmail mailbox with the API's."""
 
 SYSTEM_BY_KIND = {"Inbox": "INBOX", "Sent": "SENT", "Drafts": "DRAFT", "Trash": "TRASH", "Spam": "SPAM",
-                  "Important": "IMPORTANT"}
-SYSTEM_IDS = set(SYSTEM_BY_KIND.values()) | {"STARRED"}
+                  "Important": "IMPORTANT", "Starred": "STARRED"}
+SYSTEM_IDS = set(SYSTEM_BY_KIND.values())
 
 
 def label_name(mailbox):
@@ -13,11 +13,6 @@ def label_name(mailbox):
         return None
     if kind in SYSTEM_BY_KIND:
         return SYSTEM_BY_KIND[kind]
-    # Names are localised ("[Gmail]/Speciali"); the only plain mailbox Gmail
-    # keeps under [Gmail] is Starred (the product has no flag for it).
-    parent, _, leaf = mailbox["path"].partition("/")
-    if parent in ("[Gmail]", "[Google Mail]") and leaf:
-        return "STARRED"
     return mailbox["display_path"]
 
 

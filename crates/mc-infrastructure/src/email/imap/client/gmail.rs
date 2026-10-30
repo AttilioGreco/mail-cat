@@ -38,7 +38,6 @@ pub(super) struct Entry<'a> {
     pub(super) name: &'a str,
     pub(super) delimiter: char,
     pub(super) kind: MailboxType,
-    pub(super) starred: bool,
 }
 
 /// Which mailboxes of a Gmail account are real and which are views.
@@ -74,22 +73,22 @@ impl Layout {
             fingerprint: 0,
         };
         for e in &entries {
-            let label = match (e.kind, e.starred) {
-                (MailboxType::All, _) => continue,
-                (MailboxType::Trash, _) => {
+            let label = match e.kind {
+                MailboxType::All => continue,
+                MailboxType::Trash => {
                     layout.trash = Some(e.name.to_owned());
                     layout.outside.insert(e.name.to_owned());
                     continue;
                 }
-                (MailboxType::Spam, _) => {
+                MailboxType::Spam => {
                     layout.outside.insert(e.name.to_owned());
                     continue;
                 }
-                (MailboxType::Inbox, _) => "\\Inbox",
-                (MailboxType::Sent, _) => "\\Sent",
-                (MailboxType::Drafts, _) => "\\Draft",
-                (MailboxType::Important, _) => "\\Important",
-                (_, true) => "\\Starred",
+                MailboxType::Inbox => "\\Inbox",
+                MailboxType::Sent => "\\Sent",
+                MailboxType::Drafts => "\\Draft",
+                MailboxType::Important => "\\Important",
+                MailboxType::Starred => "\\Starred",
                 _ => e.name,
             };
             let Ok(path) = parse_mailbox_path(e.name, e.delimiter) else {
@@ -389,7 +388,6 @@ impl ImapEmailProvider {
             name: &l.name,
             delimiter: l.mailbox.path.delimiter(),
             kind: l.mailbox.mailbox_type,
-            starred: l.starred,
         }));
         *self.layout.lock().expect("layout lock poisoned") = Some(layout.map(Arc::new));
     }

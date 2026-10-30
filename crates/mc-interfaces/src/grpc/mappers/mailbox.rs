@@ -13,6 +13,7 @@ pub fn domain_mailbox_type_to_proto(mailbox_type: &DomainMailboxType) -> i32 {
         DomainMailboxType::Archive => ProtoMailboxType::Archive as i32,
         DomainMailboxType::All => ProtoMailboxType::All as i32,
         DomainMailboxType::Important => ProtoMailboxType::Important as i32,
+        DomainMailboxType::Starred => ProtoMailboxType::Starred as i32,
         DomainMailboxType::Custom => ProtoMailboxType::Custom as i32,
     }
 }

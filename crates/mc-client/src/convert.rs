@@ -87,6 +87,7 @@ pub fn mailbox_from_proto(m: pb::MailboxSummary) -> Mailbox {
         Ok(pb::MailboxType::Archive) => MailboxKind::Archive,
         Ok(pb::MailboxType::All) => MailboxKind::All,
         Ok(pb::MailboxType::Important) => MailboxKind::Important,
+        Ok(pb::MailboxType::Starred) => MailboxKind::Starred,
         _ => MailboxKind::Custom,
     };
 

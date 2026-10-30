@@ -134,6 +134,7 @@ fn special_use(name: &str, attributes: &[NameAttribute<'_>]) -> Option<MailboxTy
             NameAttribute::Junk => MailboxType::Spam,
             NameAttribute::Archive => MailboxType::Archive,
             NameAttribute::All => MailboxType::All,
+            NameAttribute::Flagged => MailboxType::Starred,
             // Gmail's own attribute, not RFC 6154.
             NameAttribute::Extension(name) if name.eq_ignore_ascii_case("\\Important") => {
                 MailboxType::Important
@@ -429,6 +430,19 @@ mod tests {
             assert_eq!(infer_mailbox_type(name, delimiter), kind, "{name}");
         }
         assert_eq!(infer_mailbox_type("INBOX/Sent", '/'), MailboxType::Sent);
+    }
+
+    #[test]
+    fn flagged_special_use_is_starred() {
+        let flagged = [NameAttribute::Flagged];
+        assert_eq!(
+            classify_gmail_mailbox("[Gmail]/Speciali", &flagged),
+            MailboxType::Starred
+        );
+        assert_eq!(
+            classify_mailbox("Starred", '/', &flagged),
+            MailboxType::Starred
+        );
     }
 
     #[test]

@@ -237,8 +237,8 @@ pub(super) struct Listed {
     /// The name as the server spells it (modified UTF-7), which commands and
     /// X-GM-LABELS use.
     pub(super) name: String,
-    /// Gmail's Starred, marked `\Flagged` in LIST.
-    pub(super) starred: bool,
+    /// A container with no messages of its own (`\Noselect`).
+    pub(super) no_select: bool,
 }
 
 pub(super) async fn list_on<T>(
@@ -283,7 +283,7 @@ where
         let display_path = mapper::decode_utf7(&path.full_path()).into_owned();
         listed.push(Listed {
             name: imap_name.to_owned(),
-            starred: mb.attributes().contains(&NameAttribute::Flagged),
+            no_select: mb.attributes().contains(&NameAttribute::NoSelect),
             mailbox: Mailbox {
                 id: MailboxId::new(),
                 account_id: AccountId::new(),
@@ -338,10 +338,24 @@ where
     (!names.is_empty()).then_some(names)
 }
 
+/// Gmail web shows "Sent Mail" and friends at the top level; the prefix is an
+/// IMAP artefact. Only `display_path` changes: `path` stays the IMAP name.
+fn strip_gmail_prefix(display_path: &mut String) {
+    for prefix in ["[Gmail]/", "[Google Mail]/"] {
+        if let Some(rest) = display_path.strip_prefix(prefix) {
+            *display_path = rest.to_owned();
+            return;
+        }
+    }
+}
+
 /// Whether the user sees and syncs `listed`, given what `LSUB` returned.
 pub(super) fn is_subscribed(listed: &Listed, lsub: Option<&HashSet<String>>, gmail: bool) -> bool {
     match listed.mailbox.mailbox_type {
         t if t.is_mandatory() => true,
+        // Gmail's "[Gmail]" parent holds no mail and Gmail web has no such entry.
+        // Unsubscribed rather than dropped: "Gestisci cartelle" still lists it.
+        _ if gmail && listed.no_select => false,
         // Gmail's Trash and Spam are large and rarely wanted: opt in.
         MailboxType::Trash | MailboxType::Spam if gmail => false,
         _ => lsub.is_none_or(|names| names.contains(&listed.name)),
@@ -374,6 +388,9 @@ impl ImapEmailProvider {
         let gmail = self.layout().is_some();
         for l in &mut listed {
             l.mailbox.subscribed = is_subscribed(l, lsub.as_ref(), gmail);
+            if gmail {
+                strip_gmail_prefix(&mut l.mailbox.display_path);
+            }
         }
         Ok(listed.into_iter().map(|l| l.mailbox).collect())
     }
@@ -449,5 +466,25 @@ impl ImapEmailProvider {
 
         info!("Bulk flags updated successfully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_gmail_prefix;
+
+    #[test]
+    fn gmail_prefix_goes_but_labels_stay() {
+        for (given, shown) in [
+            ("[Gmail]/Posta inviata", "Posta inviata"),
+            ("[Google Mail]/Sent Mail", "Sent Mail"),
+            ("[Gmail]", "[Gmail]"),
+            ("INBOX", "INBOX"),
+            ("Clienti/[Gmail]/x", "Clienti/[Gmail]/x"),
+        ] {
+            let mut path = given.to_owned();
+            strip_gmail_prefix(&mut path);
+            assert_eq!(path, shown);
+        }
     }
 }

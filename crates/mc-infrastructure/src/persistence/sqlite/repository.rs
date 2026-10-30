@@ -806,7 +806,8 @@ impl BodyBackfillQueue for SqliteRepository {
                         "SELECT m.id, mm.mailbox_id, mm.remote_id, m.rfc_message_id, \
                          m.size_bytes, m.from_email {BACKFILLABLE} \
                          ORDER BY CASE b.mailbox_type WHEN '\"Inbox\"' THEN 0 \
-                             WHEN '\"All\"' THEN 2 WHEN '\"Important\"' THEN 2 ELSE 1 END, \
+                             WHEN '\"All\"' THEN 2 WHEN '\"Important\"' THEN 2 \
+                             WHEN '\"Starred\"' THEN 2 ELSE 1 END, \
                              m.received_at DESC LIMIT ?2"
                     ),
                     params![account, limit],

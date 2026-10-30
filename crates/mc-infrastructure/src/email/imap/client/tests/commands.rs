@@ -323,7 +323,7 @@ fn initial_subscription_rules() {
 
     let listed = |name: &str, kind| Listed {
         name: name.to_owned(),
-        starred: false,
+        no_select: false,
         mailbox: Mailbox::discover(
             AccountId::new(),
             mc_domain::MailboxPath::parse(name, '/').unwrap(),
@@ -397,4 +397,11 @@ fn initial_subscription_rules() {
         some,
         true
     ));
+    // The \Noselect "[Gmail]" container is hidden on Gmail only.
+    let container = Listed {
+        no_select: true,
+        ..listed("[Gmail]", MailboxType::Custom)
+    };
+    assert!(!is_subscribed(&container, None, true));
+    assert!(is_subscribed(&container, None, false));
 }

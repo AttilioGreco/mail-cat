@@ -6,6 +6,7 @@ import {
   Archive,
   AlertOctagon,
   Folder,
+  Star,
   Tag,
   type LucideIcon,
 } from 'lucide-react';
@@ -34,6 +35,7 @@ function renderIcon(mailbox: Mailbox, asLabel: boolean) {
   for (const [attr, Icon] of ATTR_ICONS) {
     if (mailbox.attributes.includes(attr)) return <Icon size={15} className="shrink-0" />;
   }
+  if (mailbox.kind === 'starred') return <Star size={15} className="shrink-0" />;
   const Icon =
     NAME_ICONS[mailbox.name] ?? NAME_ICONS[mailbox.displayPath] ?? (asLabel && (mailbox.kind === 'custom' || mailbox.kind === 'important') ? Tag : Folder);
   return <Icon size={15} className="shrink-0" />;

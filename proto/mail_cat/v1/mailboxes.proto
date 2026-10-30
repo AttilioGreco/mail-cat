@@ -41,6 +41,8 @@ enum MailboxType {
   MAILBOX_TYPE_ALL = 8;
   // Gmail's \Important: a label like any other, but told apart so clients can name it.
   MAILBOX_TYPE_IMPORTANT = 9;
+  // RFC 6154 \Flagged — the starred messages (Gmail's Starred).
+  MAILBOX_TYPE_STARRED = 10;
 }
 
 // Mailbox summary.
