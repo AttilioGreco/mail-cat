@@ -223,6 +223,23 @@ impl MailCatClient {
         Ok(resp.mailboxes.into_iter().map(mailbox_from_proto).collect())
     }
 
+    /// Subscribe or unsubscribe a mailbox. `Some` is a warning: the server could
+    /// not be told, so the choice holds here only.
+    pub async fn set_mailbox_subscribed(
+        &self,
+        mailbox_id: &str,
+        subscribed: bool,
+    ) -> Result<Option<String>> {
+        let resp = MailboxServiceClient::new(self.channel.clone())
+            .set_mailbox_subscribed(pb::SetMailboxSubscribedRequest {
+                mailbox_id: mailbox_id.to_owned(),
+                subscribed,
+            })
+            .await?
+            .into_inner();
+        Ok((!resp.warning.is_empty()).then_some(resp.warning))
+    }
+
     // ── Messages ──────────────────────────────────────────────────────────────
 
     pub async fn list_messages(

@@ -157,6 +157,9 @@ pub struct Mailbox {
     pub mailbox_type: MailboxKind,
     pub total_messages: u32,
     pub unread_messages: u32,
+    /// Shown in the sidebar and synced; unsubscribed ones only appear in the
+    /// folder management dialog.
+    pub subscribed: bool,
 }
 
 /// RFC 6154 special-use classification of a folder.

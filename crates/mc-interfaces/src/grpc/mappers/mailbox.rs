@@ -29,5 +29,6 @@ pub fn domain_mailbox_to_proto(mailbox: &DomainMailbox) -> MailboxSummary {
         total_messages: mailbox.total_messages,
         unread_messages: mailbox.unread_messages,
         flags: mailbox.flags.iter().map(domain_flag_to_proto).collect(),
+        subscribed: mailbox.subscribed,
     }
 }

@@ -926,7 +926,8 @@ impl AppContext {
                 )) as Arc<dyn mc_application::AccountProvisioner>,
             );
 
-        let mailbox_service = MailboxServiceImpl::new(query_bus.clone());
+        let mailbox_service = MailboxServiceImpl::new(query_bus.clone())
+            .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>);
 
         let message_service =
             MessageServiceImpl::new(command_bus.clone(), query_bus.clone(), event_bus.clone());

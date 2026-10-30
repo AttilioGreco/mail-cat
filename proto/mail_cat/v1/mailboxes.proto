@@ -20,6 +20,10 @@ service MailboxService {
 
   // Delete a mailbox.
   rpc DeleteMailbox(DeleteMailboxRequest) returns (DeleteMailboxResponse);
+
+  // Subscribe or unsubscribe a mailbox. Unsubscribed mailboxes are neither
+  // shown nor synced and hold no local messages.
+  rpc SetMailboxSubscribed(SetMailboxSubscribedRequest) returns (SetMailboxSubscribedResponse);
 }
 
 // Mailbox type classification.
@@ -50,6 +54,7 @@ message MailboxSummary {
   uint32 unread_messages = 7;
   repeated Flag flags = 8;
   string display_path = 9;  // human-readable hierarchy, e.g. "Work/Projects"
+  bool subscribed = 10;     // shown in the sidebar and synced
 }
 
 // === Requests/Responses ===
@@ -94,4 +99,14 @@ message DeleteMailboxRequest {
 
 message DeleteMailboxResponse {
   bool success = 1;
+}
+
+message SetMailboxSubscribedRequest {
+  string mailbox_id = 1;
+  bool subscribed = 2;
+}
+
+message SetMailboxSubscribedResponse {
+  // Set when the server could not be told: the choice then applies locally only.
+  string warning = 1;
 }

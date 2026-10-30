@@ -52,6 +52,8 @@ fn fake_mailbox(account_id: AccountId, mailbox_id: MailboxId) -> Mailbox {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
+        subscribed: true,
+        subscription_explicit: false,
     }
 }
 

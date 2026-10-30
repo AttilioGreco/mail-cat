@@ -99,6 +99,7 @@ pub fn mailbox_from_proto(m: pb::MailboxSummary) -> Mailbox {
         display_name: m.display_name,
         total_messages: m.total_messages,
         unread_messages: m.unread_messages,
+        subscribed: m.subscribed,
     }
 }
 

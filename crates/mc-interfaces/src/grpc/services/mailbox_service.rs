@@ -5,19 +5,30 @@ use crate::grpc::mappers::{application_error_to_status, domain_mailbox_to_proto}
 use crate::grpc::proto::{
     CreateMailboxRequest, CreateMailboxResponse, DeleteMailboxRequest, DeleteMailboxResponse,
     GetMailboxRequest, GetMailboxResponse, ListMailboxesRequest, ListMailboxesResponse,
-    RenameMailboxRequest, RenameMailboxResponse, mailbox_service_server::MailboxService,
+    RenameMailboxRequest, RenameMailboxResponse, SetMailboxSubscribedRequest,
+    SetMailboxSubscribedResponse, mailbox_service_server::MailboxService,
 };
-use mc_application::{bus::QueryBus, queries::Query};
+use mc_application::{SyncTrigger, bus::QueryBus, queries::Query};
 use mc_domain::MailboxId;
 
 /// Mailbox service implementation with QueryBus integration.
 pub struct MailboxServiceImpl<Q: QueryBus + 'static> {
     query_bus: Arc<Q>,
+    sync_trigger: Option<Arc<dyn SyncTrigger>>,
 }
 
 impl<Q: QueryBus + 'static> MailboxServiceImpl<Q> {
     pub fn new(query_bus: Arc<Q>) -> Self {
-        Self { query_bus }
+        Self {
+            query_bus,
+            sync_trigger: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_sync_trigger(mut self, trigger: Arc<dyn SyncTrigger>) -> Self {
+        self.sync_trigger = Some(trigger);
+        self
     }
 }
 
@@ -102,5 +113,28 @@ impl<Q: QueryBus + 'static> MailboxService for MailboxServiceImpl<Q> {
     ) -> Result<Response<DeleteMailboxResponse>, Status> {
         // TODO: Implement when DeleteMailbox command is added
         Err(Status::unimplemented("delete_mailbox not yet implemented"))
+    }
+
+    async fn set_mailbox_subscribed(
+        &self,
+        request: Request<SetMailboxSubscribedRequest>,
+    ) -> Result<Response<SetMailboxSubscribedResponse>, Status> {
+        let req = request.into_inner();
+        let mailbox_id = MailboxId::from_uuid(
+            uuid::Uuid::parse_str(&req.mailbox_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
+        );
+        let trigger = self
+            .sync_trigger
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("sync service not configured"))?;
+        let warning = trigger
+            .set_mailbox_subscribed(&mailbox_id, req.subscribed)
+            .await
+            .map_err(application_error_to_status)?;
+
+        Ok(Response::new(SetMailboxSubscribedResponse {
+            warning: warning.unwrap_or_default(),
+        }))
     }
 }
