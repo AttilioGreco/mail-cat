@@ -53,6 +53,10 @@ pub(super) struct MockEmailProvider {
     pub(super) preferred_model: Option<mc_domain::MailboxModel>,
     /// The mailboxes `mailbox_changes` was asked about, in order.
     pub(super) changes_paths: Mutex<Vec<String>>,
+    /// `set_subscribed` calls: (full path, subscribed).
+    pub(super) subscriptions: Mutex<Vec<(String, bool)>>,
+    /// Makes `set_subscribed` fail.
+    pub(super) subscription_error: Option<fn() -> DomainError>,
 }
 
 pub(super) fn provider_error() -> DomainError {
@@ -86,6 +90,8 @@ impl MockEmailProvider {
             views: HashMap::new(),
             preferred_model: None,
             changes_paths: Mutex::default(),
+            subscriptions: Mutex::default(),
+            subscription_error: None,
         }
     }
 
@@ -137,6 +143,21 @@ impl EmailProvider for MockEmailProvider {
     /// validity is void.
     fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
         self.views.get(&mailbox.full_path()).cloned()
+    }
+
+    async fn set_subscribed(
+        &self,
+        mailbox: &MailboxPath,
+        subscribed: bool,
+    ) -> Result<(), DomainError> {
+        if let Some(error) = self.subscription_error {
+            return Err(error());
+        }
+        self.subscriptions
+            .lock()
+            .unwrap()
+            .push((mailbox.full_path(), subscribed));
+        Ok(())
     }
 
     fn preferred_mailbox_model(&self) -> Option<mc_domain::MailboxModel> {

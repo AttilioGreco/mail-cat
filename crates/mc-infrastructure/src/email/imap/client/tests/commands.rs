@@ -256,3 +256,128 @@ fn envelope_fetch_asks_for_the_message_id_only_on_gmail() {
         "(ENVELOPE FLAGS INTERNALDATE BODY.PEEK[HEADER])"
     );
 }
+
+#[tokio::test]
+async fn subscribing_names_the_mailbox_as_the_server_spelled_it() {
+    use super::super::mailbox::set_subscribed_on;
+    let (mut session, commands) = scripted(server_reply).await;
+
+    set_subscribed_on(&mut session, "Clienti/Caf&AOk-", true)
+        .await
+        .unwrap();
+    set_subscribed_on(&mut session, "Say \"hi\"", false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        uid_commands(&commands),
+        [
+            "SUBSCRIBE \"Clienti/Caf&AOk-\"",
+            "UNSUBSCRIBE \"Say \\\"hi\\\"\""
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_refused_subscription_is_an_error() {
+    use super::super::mailbox::set_subscribed_on;
+    let (mut session, _) = scripted(|_| "$T NO [CANNOT] not now\r\n").await;
+
+    assert!(set_subscribed_on(&mut session, "Work", true).await.is_err());
+}
+
+#[tokio::test]
+async fn lsub_lists_the_subscribed_names_and_nothing_means_everything() {
+    use super::super::mailbox::lsub_names;
+    let (mut session, commands) = scripted(
+        |_| "* LSUB (\\HasNoChildren) \"/\" \"Work\"\r\n* LSUB () \"/\" INBOX\r\n$T OK Done\r\n",
+    )
+    .await;
+    let names = lsub_names(&mut session).await.unwrap();
+    assert_eq!(uid_commands(&commands), ["LSUB \"\" \"*\""]);
+    assert!(names.contains("Work") && names.contains("INBOX") && names.len() == 2);
+
+    let (mut session, _) = scripted(|_| "$T OK Done\r\n").await;
+    assert!(
+        lsub_names(&mut session).await.is_none(),
+        "empty: no subscriptions were ever made"
+    );
+
+    let (mut session, _) = scripted(|_| "$T BAD unknown command\r\n").await;
+    assert!(lsub_names(&mut session).await.is_none(), "unsupported");
+}
+
+#[test]
+fn initial_subscription_rules() {
+    use super::super::mailbox::{Listed, is_subscribed};
+    use mc_domain::{AccountId, Mailbox, MailboxType};
+    use std::collections::HashSet;
+
+    let listed = |name: &str, kind| Listed {
+        name: name.to_owned(),
+        starred: false,
+        mailbox: Mailbox::discover(
+            AccountId::new(),
+            mc_domain::MailboxPath::parse(name, '/').unwrap(),
+            kind,
+        )
+        .0,
+    };
+    let lsub: HashSet<String> = ["Work".to_owned()].into();
+    let some = Some(&lsub);
+
+    // Generic IMAP: LSUB decides, except the Inbox; no LSUB means all subscribed.
+    assert!(is_subscribed(
+        &listed("Work", MailboxType::Custom),
+        some,
+        false
+    ));
+    assert!(!is_subscribed(
+        &listed("Other", MailboxType::Custom),
+        some,
+        false
+    ));
+    assert!(!is_subscribed(
+        &listed("Sent", MailboxType::Sent),
+        some,
+        false
+    ));
+    assert!(is_subscribed(
+        &listed("INBOX", MailboxType::Inbox),
+        some,
+        false
+    ));
+    assert!(is_subscribed(
+        &listed("Other", MailboxType::Custom),
+        None,
+        false
+    ));
+    assert!(is_subscribed(
+        &listed("Trash", MailboxType::Trash),
+        None,
+        false
+    ));
+
+    // Gmail layout: Spam and Trash are off whatever LSUB says; views follow it.
+    let everything: HashSet<String> = ["Trash".to_owned(), "Spam".to_owned()].into();
+    assert!(!is_subscribed(
+        &listed("Trash", MailboxType::Trash),
+        Some(&everything),
+        true
+    ));
+    assert!(!is_subscribed(
+        &listed("Spam", MailboxType::Spam),
+        None,
+        true
+    ));
+    assert!(is_subscribed(
+        &listed("Work", MailboxType::Custom),
+        None,
+        true
+    ));
+    assert!(!is_subscribed(
+        &listed("Other", MailboxType::Custom),
+        some,
+        true
+    ));
+}

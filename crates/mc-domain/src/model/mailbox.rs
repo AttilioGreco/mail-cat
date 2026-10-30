@@ -80,6 +80,12 @@ pub struct Mailbox {
     pub flags: Vec<Flag>,
     pub total_messages: u32,
     pub unread_messages: u32,
+    /// Shown in the sidebar and synced. Unsubscribed mailboxes hold no local
+    /// messages.
+    pub subscribed: bool,
+    /// The user chose `subscribed`: discovery no longer overrides it with the
+    /// server's.
+    pub subscription_explicit: bool,
 }
 
 impl Mailbox {
@@ -121,6 +127,8 @@ impl Mailbox {
             flags: Vec::new(),
             total_messages: 0,
             unread_messages: 0,
+            subscribed: true,
+            subscription_explicit: false,
         };
 
         (mailbox, event)
@@ -145,6 +153,19 @@ impl Mailbox {
         DomainEvent::MailboxTypeChanged {
             mailbox_id: self.id,
             mailbox_type,
+        }
+    }
+
+    /// Record a subscription change and produce the event. `explicit` marks
+    /// the user's own choice, which later discovery leaves alone.
+    pub fn set_subscribed(&mut self, subscribed: bool, explicit: bool) -> DomainEvent {
+        self.subscribed = subscribed;
+        self.subscription_explicit |= explicit;
+
+        DomainEvent::MailboxSubscriptionChanged {
+            mailbox_id: self.id,
+            subscribed,
+            explicit,
         }
     }
 
@@ -195,6 +216,14 @@ impl Mailbox {
             DomainEvent::MailboxTypeChanged { mailbox_type, .. } => {
                 self.mailbox_type = *mailbox_type;
             }
+            DomainEvent::MailboxSubscriptionChanged {
+                subscribed,
+                explicit,
+                ..
+            } => {
+                self.subscribed = *subscribed;
+                self.subscription_explicit |= *explicit;
+            }
             DomainEvent::MailboxRenamed {
                 new_path,
                 display_path,
@@ -239,6 +268,8 @@ impl Mailbox {
             flags: Vec::new(),
             total_messages: 0,
             unread_messages: 0,
+            subscribed: true,
+            subscription_explicit: false,
         };
 
         for event in &events[1..] {
@@ -326,6 +357,27 @@ mod tests {
         assert_eq!(mailbox.unread_messages, 5);
         assert_eq!(mailbox.display_name, "Primary");
         assert_eq!(mailbox.path.full_path(), "Primary");
+    }
+
+    #[test]
+    fn rehydrate_keeps_the_subscription_and_who_chose_it() {
+        let (mut mailbox, discovered) = Mailbox::discover(
+            AccountId::new(),
+            MailboxPath::parse("Work", '/').unwrap(),
+            MailboxType::Custom,
+        );
+        assert!(mailbox.subscribed && !mailbox.subscription_explicit);
+        let by_server = mailbox.set_subscribed(false, false);
+        let by_user = mailbox.set_subscribed(true, true);
+        let server_again = mailbox.set_subscribed(false, false);
+
+        let rebuilt = Mailbox::rehydrate(&[discovered, by_server, by_user, server_again]).unwrap();
+
+        assert!(!rebuilt.subscribed);
+        assert!(
+            rebuilt.subscription_explicit,
+            "a later server change is not a user's choice"
+        );
     }
 
     #[test]

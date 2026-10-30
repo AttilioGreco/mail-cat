@@ -202,6 +202,25 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 params![mailbox_id.as_uuid(), total_messages, unread_messages],
             )?;
         }
+        DomainEvent::MailboxSubscriptionChanged {
+            mailbox_id,
+            subscribed,
+            explicit,
+        } => {
+            exec(
+                tx,
+                "UPDATE mailboxes SET subscribed = ?2, subscription_explicit = subscription_explicit OR ?3 \
+                 WHERE id = ?1",
+                params![mailbox_id.as_uuid(), subscribed, explicit],
+            )?;
+            // The messages left through their own events. A cursor kept past
+            // the change would resume a sync that no longer has its base.
+            exec(
+                tx,
+                "DELETE FROM sync_cursors WHERE collection = ?1",
+                [mailbox_id.to_string()],
+            )?;
+        }
         DomainEvent::MailboxRenamed {
             mailbox_id,
             new_path,

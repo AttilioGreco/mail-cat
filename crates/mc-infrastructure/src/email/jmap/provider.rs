@@ -12,8 +12,8 @@ use mc_domain::error::DomainError;
 use mc_domain::traits::login_gate::LoginGate;
 use mc_domain::{
     AccountId, EmailProvider, Existing, Flag, Mailbox, MailboxChanges, MailboxCounts, MailboxId,
-    MailboxPath, Message, MessageBodyResult, MessageEnvelopeSummary, MessageKey, OutgoingMessage,
-    ProviderNotification, RemoteId, Reset, SendOutcome, SyncCursor,
+    MailboxPath, MailboxType, Message, MessageBodyResult, MessageEnvelopeSummary, MessageKey,
+    OutgoingMessage, ProviderNotification, RemoteId, Reset, SendOutcome, SyncCursor,
 };
 
 use super::client::{JmapClient, MethodError};
@@ -319,7 +319,7 @@ impl EmailProvider for JmapEmailProvider {
             .call(vec![(
                 "Mailbox/get",
                 json!({"ids": null, "properties":
-                    ["id", "name", "parentId", "role", "totalEmails", "unreadEmails"]}),
+                    ["id", "name", "parentId", "role", "totalEmails", "unreadEmails", "isSubscribed"]}),
             )])
             .await?;
         let reply = reply.remove(0)?;
@@ -331,16 +331,21 @@ impl EmailProvider for JmapEmailProvider {
             .map(|(id, m)| {
                 let display_path = paths[id].clone();
                 let count = |key: &str| m[key].as_u64().unwrap_or(0) as u32;
+                let mailbox_type = mapper::mailbox_type(m["role"].as_str());
                 Ok(Mailbox {
                     id: MailboxId::new(),
                     account_id: AccountId::new(),
                     path: MailboxPath::new(vec![id.to_owned()], '/')?,
                     display_name: m["name"].as_str().unwrap_or(id).to_owned(),
                     display_path,
-                    mailbox_type: mapper::mailbox_type(m["role"].as_str()),
+                    mailbox_type,
                     flags: vec![],
                     total_messages: count("totalEmails"),
                     unread_messages: count("unreadEmails"),
+                    // A server without the property has no subscriptions.
+                    subscribed: mailbox_type == MailboxType::Inbox
+                        || m["isSubscribed"].as_bool().unwrap_or(true),
+                    subscription_explicit: false,
                 })
             })
             .collect()
@@ -491,6 +496,14 @@ impl EmailProvider for JmapEmailProvider {
         remove: &[MailboxPath],
     ) -> Result<(), DomainError> {
         self.relabel_emails(ids, add, remove).await
+    }
+
+    async fn set_subscribed(
+        &self,
+        mailbox: &MailboxPath,
+        subscribed: bool,
+    ) -> Result<(), DomainError> {
+        self.subscribe(mailbox_id(mailbox), subscribed).await
     }
 
     async fn delete_messages(

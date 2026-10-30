@@ -144,6 +144,29 @@ impl JmapEmailProvider {
         )))
     }
 
+    pub(super) async fn subscribe(
+        &self,
+        mailbox: &str,
+        subscribed: bool,
+    ) -> Result<(), DomainError> {
+        let reply = self
+            .client
+            .call(vec![(
+                "Mailbox/set",
+                json!({"update": {mailbox: {"isSubscribed": subscribed}}}),
+            )])
+            .await?
+            .remove(0)?;
+        let refused = refusals(&reply, "notUpdated");
+        if refused.is_empty() {
+            return Ok(());
+        }
+        Err(DomainError::Provider(format!(
+            "JMAP refused: {}",
+            refused.join(", ")
+        )))
+    }
+
     pub(super) async fn set_flags(
         &self,
         ids: &[RemoteId],

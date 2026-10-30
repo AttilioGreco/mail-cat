@@ -427,7 +427,8 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
 }
 
 const SELECT_MAILBOX: &str = "SELECT id, account_id, path, delimiter, display_path, display_name, \
-     mailbox_type, flags, total_messages, unread_messages FROM mailboxes";
+     mailbox_type, flags, total_messages, unread_messages, subscribed, subscription_explicit \
+     FROM mailboxes";
 
 fn mailbox_from_row(row: &Row) -> rusqlite::Result<Mailbox> {
     let path: String = row.get(2)?;
@@ -452,6 +453,8 @@ fn mailbox_from_row(row: &Row) -> rusqlite::Result<Mailbox> {
         flags: json_col(row, 7)?,
         total_messages: row.get(8)?,
         unread_messages: row.get(9)?,
+        subscribed: row.get(10)?,
+        subscription_explicit: row.get(11)?,
     })
 }
 

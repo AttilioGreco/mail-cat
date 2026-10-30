@@ -23,7 +23,11 @@ use crate::error::ApplicationError;
 /// mailbox leaves its memberships, and the message goes with its last one.
 /// So do the `views` it was in, which exist only through that mailbox.
 /// Built from the read model's view: the stream is appended as-is.
-fn left_mailbox(summary: &MessageSummary, mailbox_id: MailboxId, views: &[Mailbox]) -> DomainEvent {
+pub(super) fn left_mailbox(
+    summary: &MessageSummary,
+    mailbox_id: MailboxId,
+    views: &[Mailbox],
+) -> DomainEvent {
     let removed: Vec<MailboxId> = std::iter::once(mailbox_id)
         .chain(
             views
@@ -68,6 +72,9 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         local: &Mailbox,
         progress: Option<&mut Vec<SyncProgressEvent>>,
     ) -> Result<Option<(u32, u32)>, ApplicationError> {
+        if !self.is_subscribed(local).await? {
+            return Ok(None);
+        }
         let collection = local.id.to_string();
         let since = self
             .projector
@@ -162,7 +169,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
 
     /// The mailboxes that are only views over `local` (Gmail labels over All
     /// Mail): they have no sync of their own.
-    async fn views_of(
+    pub(super) async fn views_of(
         &self,
         provider: &Arc<PR::Provider>,
         local: &Mailbox,
@@ -270,6 +277,9 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         for (index, batch) in added.chunks(ENVELOPE_BATCH).enumerate() {
             // Only a full sync (the one reporting progress) is cancellable.
             if progress.is_some() && self.is_cancelled() {
+                return Ok(None);
+            }
+            if !self.is_subscribed(local).await? {
                 return Ok(None);
             }
             if let Some(progress) = progress.as_deref_mut() {

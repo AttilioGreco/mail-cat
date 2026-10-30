@@ -222,6 +222,14 @@ impl EmailProvider for ImapEmailProvider {
         self.keywords.get().copied()
     }
 
+    async fn set_subscribed(
+        &self,
+        mailbox: &MailboxPath,
+        subscribed: bool,
+    ) -> Result<(), DomainError> {
+        self.subscribe(mailbox, subscribed).await
+    }
+
     fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
         self.layout()?.backed_by(mailbox)
     }

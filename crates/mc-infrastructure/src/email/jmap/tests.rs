@@ -14,6 +14,7 @@ use super::client::session_url;
 use super::mapper;
 
 mod labels;
+mod subscription;
 
 #[test]
 fn roles_map_to_mailbox_types() {

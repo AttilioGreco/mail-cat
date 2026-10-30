@@ -145,7 +145,31 @@ impl ReadModelProjector for MockProjector {
                 flags: Vec::new(),
                 total_messages: 0,
                 unread_messages: 0,
+                subscribed: true,
+                subscription_explicit: false,
             });
+        }
+
+        if let DomainEvent::MailboxSubscriptionChanged {
+            mailbox_id,
+            subscribed,
+            explicit,
+        } = &envelope.payload
+        {
+            if let Some(m) = self
+                .mailboxes
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|m| m.id == *mailbox_id)
+            {
+                m.subscribed = *subscribed;
+                m.subscription_explicit |= *explicit;
+            }
+            self.cursors
+                .lock()
+                .unwrap()
+                .retain(|(_, collection), _| *collection != mailbox_id.to_string());
         }
 
         let mut stored = self.stored.lock().unwrap();

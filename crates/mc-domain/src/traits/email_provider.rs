@@ -131,6 +131,19 @@ pub trait EmailProvider: Send + Sync {
         ))
     }
 
+    /// Tell the server the user (un)subscribed `mailbox`, which other clients
+    /// of the account share. Best effort: the caller keeps the local choice
+    /// when this fails.
+    async fn set_subscribed(
+        &self,
+        _mailbox: &MailboxPath,
+        _subscribed: bool,
+    ) -> Result<(), DomainError> {
+        Err(DomainError::NotSupported(
+            "this server keeps no subscriptions".into(),
+        ))
+    }
+
     /// The mailbox whose sync carries `mailbox`'s messages, when `mailbox` is
     /// only a view over it (a Gmail label over All Mail). Views are never
     /// synced themselves, and their memberships hold the backing mailbox's ids.

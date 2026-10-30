@@ -120,6 +120,14 @@ impl EmailProvider for AnyProvider {
         delegate!(self, p => p.change_labels(ids, in_mailbox, add, remove).await)
     }
 
+    async fn set_subscribed(
+        &self,
+        mailbox: &MailboxPath,
+        subscribed: bool,
+    ) -> Result<(), DomainError> {
+        delegate!(self, p => p.set_subscribed(mailbox, subscribed).await)
+    }
+
     fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
         delegate!(self, p => p.backed_by(mailbox))
     }

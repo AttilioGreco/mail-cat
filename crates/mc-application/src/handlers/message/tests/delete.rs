@@ -38,6 +38,8 @@ async fn handle_delete_moves_to_trash_when_trash_exists() {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
+        subscribed: true,
+        subscription_explicit: false,
     };
 
     let es = Arc::new(MockEventStore::with_message(&msg));
@@ -55,6 +57,38 @@ async fn handle_delete_moves_to_trash_when_trash_exists() {
 
     assert!(matches!(result, CommandResult::MessageDeleted));
     assert_eq!(bus.last_event_name().unwrap(), "MessageMailboxesChanged");
+}
+
+/// Trash is not synced when unsubscribed (Gmail's default): the server still
+/// files the message there, but locally it just leaves, with no wait for a
+/// destination id (even when the server reports one), no failure and nothing for a sync to re-ingest.
+#[tokio::test]
+async fn deleting_into_an_unsubscribed_trash_just_removes_the_message_here() {
+    let msg = make_test_message();
+    let (msg_id, mbx_id) = (msg.id, mailbox_of(&msg));
+    let trash = mc_domain::Mailbox {
+        subscribed: false,
+        ..test_mailbox(msg.account_id, "Trash", MailboxType::Trash)
+    };
+    let provider = Arc::new(MockEmailProvider::moving_to(900));
+    let es = Arc::new(MockEventStore::with_message(&msg));
+    let registry = Arc::new(MockProviderRegistry::new(provider.clone()));
+    let bus = Arc::new(MockEventBus::new());
+    let read_repo = Arc::new(MockMessageReadRepo::with_mailboxes(vec![
+        inbox_of(&msg),
+        trash,
+    ]));
+    let handler = MessageCommandHandler::new(es, registry, read_repo, bus.clone());
+
+    let result = handler.handle_delete(msg_id, mbx_id, false).await.unwrap();
+
+    assert!(matches!(result, CommandResult::MessageDeleted));
+    assert_eq!(bus.last_event_name().unwrap(), "MessageDeleted");
+    assert_eq!(
+        provider.moved.read().unwrap().len(),
+        1,
+        "the server still filed it in Trash"
+    );
 }
 
 /// The bulk path must survive ids it cannot resolve: a search index that is
@@ -75,6 +109,8 @@ async fn handle_delete_many_counts_partial_success() {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
+        subscribed: true,
+        subscription_explicit: false,
     };
     let trash = mc_domain::Mailbox {
         id: MailboxId::new(),
@@ -86,6 +122,8 @@ async fn handle_delete_many_counts_partial_success() {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
+        subscribed: true,
+        subscription_explicit: false,
     };
 
     let es = Arc::new(MockEventStore::with_message(&msg));
@@ -138,6 +176,8 @@ async fn handle_delete_permanent_expunges_even_with_trash() {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
+        subscribed: true,
+        subscription_explicit: false,
     };
 
     let es = Arc::new(MockEventStore::with_message(&msg));

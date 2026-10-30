@@ -110,6 +110,8 @@ fn test_mailbox(account_id: AccountId, name: &str, kind: MailboxType) -> mc_doma
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
+        subscribed: true,
+        subscription_explicit: false,
     }
 }
 
@@ -260,6 +262,8 @@ fn uidless_in_archive() -> (Message, mc_domain::Mailbox, Arc<MockEventStore>) {
         flags: vec![],
         total_messages: 0,
         unread_messages: 0,
+        subscribed: true,
+        subscription_explicit: false,
     };
     let es = Arc::new(MockEventStore::with_message(&msg));
     es.events

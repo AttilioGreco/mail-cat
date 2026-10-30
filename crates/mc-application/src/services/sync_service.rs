@@ -11,6 +11,7 @@ mod events;
 mod ingest;
 mod mailbox;
 mod pending;
+mod subscription;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -384,6 +385,8 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                 }
                 Some(local) => (*local).clone(),
             };
+            self.follow_server_subscription(&provider, &mut mailbox, remote)
+                .await?;
             if mailbox.mailbox_type != remote.mailbox_type {
                 // The type was recorded once at discovery. Detection has since
                 // improved (SPECIAL-USE, localized names), so mailboxes classified
@@ -431,9 +434,11 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
 
         // 6. For each remote mailbox: sync envelopes
         // Views over another mailbox come with its sync.
+        // Nor do the ones the user left out.
         let synced: Vec<&Mailbox> = remote_mailboxes
             .iter()
             .filter(|m| provider.backed_by(&m.path).is_none())
+            .filter(|m| local_by_path.get(&m.path).is_some_and(|l| l.subscribed))
             .collect();
         let total_mailboxes = synced.len() as u32;
         for remote in synced {
@@ -620,6 +625,14 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncTrigger for SyncSer
         // whole stored path matches whatever delimiter the server uses.
         let path = MailboxPath::new(vec![mailbox_path.to_owned()], '/')?;
         self.sync_mailbox(account_id, &path).await
+    }
+
+    async fn set_mailbox_subscribed(
+        &self,
+        mailbox_id: &MailboxId,
+        subscribed: bool,
+    ) -> Result<Option<String>, ApplicationError> {
+        SyncService::set_mailbox_subscribed(self, mailbox_id, subscribed).await
     }
 
     fn subscribe_progress(&self) -> broadcast::Receiver<SyncProgressEvent> {

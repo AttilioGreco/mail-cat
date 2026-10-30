@@ -51,7 +51,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         mailbox_type    TEXT NOT NULL,
         flags           TEXT NOT NULL,
         total_messages  INTEGER NOT NULL DEFAULT 0,
-        unread_messages INTEGER NOT NULL DEFAULT 0
+        unread_messages INTEGER NOT NULL DEFAULT 0,
+        subscribed      INTEGER NOT NULL DEFAULT 1,
+        subscription_explicit INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX mailboxes_account ON mailboxes(account_id);
     CREATE TABLE messages (

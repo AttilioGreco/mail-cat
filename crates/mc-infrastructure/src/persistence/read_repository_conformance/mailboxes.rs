@@ -29,6 +29,74 @@ macro_rules! mailboxes_conformance {
         }
 
         #[tokio::test]
+        async fn subscription_changes_are_projected_and_drop_the_cursor() {
+            let (_guard, _es, repo) = $make;
+            let (account_id, mailbox_id) = (AccountId::new(), MailboxId::new());
+            let discovered = DomainEvent::MailboxDiscovered {
+                mailbox_id,
+                account_id,
+                path: MailboxPath::parse("Work", '/').unwrap(),
+                display_path: "Work".into(),
+                mailbox_type: MailboxType::Custom,
+            };
+            repo.project(&make_event_envelope(
+                1,
+                &mailbox_id.to_string(),
+                AggregateType::Mailbox,
+                1,
+                discovered,
+            ))
+            .await
+            .unwrap();
+            let work = MailboxReadRepository::get_mailbox(&repo, &mailbox_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(work.subscribed && !work.subscription_explicit);
+            let collection = mailbox_id.to_string();
+            mc_domain::SyncCursorStore::put_cursor(
+                &repo,
+                &account_id,
+                &collection,
+                &mc_domain::SyncCursor::new("c"),
+            )
+            .await
+            .unwrap();
+
+            for (seq, subscribed, explicit) in [(2, false, true), (3, true, false)] {
+                repo.project(&make_event_envelope(
+                    seq,
+                    &mailbox_id.to_string(),
+                    AggregateType::Mailbox,
+                    seq,
+                    DomainEvent::MailboxSubscriptionChanged {
+                        mailbox_id,
+                        subscribed,
+                        explicit,
+                    },
+                ))
+                .await
+                .unwrap();
+            }
+
+            let work = MailboxReadRepository::get_mailbox(&repo, &mailbox_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(work.subscribed, "the last change wins");
+            assert!(
+                work.subscription_explicit,
+                "an explicit choice stays marked"
+            );
+            assert!(
+                mc_domain::SyncCursorStore::get_cursor(&repo, &account_id, &collection)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
         async fn project_mailbox_lifecycle() {
             let (_guard, _es, repo) = $make;
             let account_id = AccountId::new();

@@ -172,6 +172,14 @@ pub enum DomainEvent {
         unread_messages: u32,
     },
 
+    /// A mailbox was subscribed or unsubscribed: by the user (`explicit`) or
+    /// because the server says so for a mailbox the user has not decided on.
+    MailboxSubscriptionChanged {
+        mailbox_id: MailboxId,
+        subscribed: bool,
+        explicit: bool,
+    },
+
     /// A mailbox was renamed or moved. The labels travel in the event because
     /// a provider's path may be an opaque id they cannot be derived from.
     MailboxRenamed {
@@ -335,6 +343,7 @@ impl DomainEvent {
             Self::MailboxDiscovered { .. }
             | Self::MailboxTypeChanged { .. }
             | Self::MailboxCountsUpdated { .. }
+            | Self::MailboxSubscriptionChanged { .. }
             | Self::MailboxRenamed { .. }
             | Self::MailboxDeleted { .. } => AggregateType::Mailbox,
 
@@ -371,6 +380,7 @@ impl DomainEvent {
             Self::MailboxDiscovered { .. } => "MailboxDiscovered",
             Self::MailboxTypeChanged { .. } => "MailboxTypeChanged",
             Self::MailboxCountsUpdated { .. } => "MailboxCountsUpdated",
+            Self::MailboxSubscriptionChanged { .. } => "MailboxSubscriptionChanged",
             Self::MailboxRenamed { .. } => "MailboxRenamed",
             Self::MailboxDeleted { .. } => "MailboxDeleted",
             Self::MessageReceived { .. } => "MessageReceived",

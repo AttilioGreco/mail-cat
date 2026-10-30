@@ -1,5 +1,6 @@
 //! Mailbox listing, flag changes and IDLE watching.
 
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -8,7 +9,7 @@ use futures::Stream;
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;
-use mc_domain::model::mailbox::{Mailbox, leaf_name};
+use mc_domain::model::mailbox::{Mailbox, MailboxType, leaf_name};
 use mc_domain::traits::email_provider::ProviderNotification;
 use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::mailbox_path::MailboxPath;
@@ -294,6 +295,8 @@ where
                 flags: Vec::new(),
                 total_messages: 0,
                 unread_messages: 0,
+                subscribed: true,
+                subscription_explicit: false,
             },
         });
     }
@@ -301,15 +304,86 @@ where
     Ok(listed)
 }
 
+/// The names `LSUB` lists, as `LIST` spells them. `None` when the server has
+/// no usable answer (unsupported, refused, or an empty list): no subscription
+/// was ever made there, so nothing can be told unsubscribed.
+pub(super) async fn lsub_names<T>(session: &mut async_imap::Session<T>) -> Option<HashSet<String>>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    use futures::stream::StreamExt;
+
+    let reply = exchange(COMMAND_TIMEOUT, "LSUB", async {
+        Ok(session
+            .lsub(None, Some("*"))
+            .await?
+            .collect::<Vec<_>>()
+            .await)
+    })
+    .await;
+    let names: HashSet<String> = match reply {
+        Ok(reply) => reply
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|n| mapper::unescape_quoted(n.name()))
+            .collect(),
+        Err(e) => {
+            warn!("LSUB failed, treating every mailbox as subscribed: {e}");
+            return None;
+        }
+    };
+    (!names.is_empty()).then_some(names)
+}
+
+/// Whether the user sees and syncs `listed`, given what `LSUB` returned.
+pub(super) fn is_subscribed(listed: &Listed, lsub: Option<&HashSet<String>>, gmail: bool) -> bool {
+    match listed.mailbox.mailbox_type {
+        MailboxType::Inbox => true,
+        // Gmail's Trash and Spam are large and rarely wanted: opt in.
+        MailboxType::Trash | MailboxType::Spam if gmail => false,
+        _ => lsub.is_none_or(|names| names.contains(&listed.name)),
+    }
+}
+
+pub(super) async fn set_subscribed_on<T>(
+    session: &mut async_imap::Session<T>,
+    name: &str,
+    subscribed: bool,
+) -> Result<(), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    if subscribed {
+        return exchange(COMMAND_TIMEOUT, "SUBSCRIBE", session.subscribe(name)).await;
+    }
+    exchange(COMMAND_TIMEOUT, "UNSUBSCRIBE", session.unsubscribe(name)).await
+}
+
 impl ImapEmailProvider {
     pub(super) async fn list_all_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
         let mut session = self.session().await?;
-        let listed = list_on(&mut session, self.has_gmail_ext()).await?;
+        let mut listed = list_on(&mut session, self.has_gmail_ext()).await?;
+        let lsub = lsub_names(&mut session).await;
         self.release(session);
         if self.has_gmail_ext() {
             self.learn_layout(&listed);
         }
+        let gmail = self.layout().is_some();
+        for l in &mut listed {
+            l.mailbox.subscribed = is_subscribed(l, lsub.as_ref(), gmail);
+        }
         Ok(listed.into_iter().map(|l| l.mailbox).collect())
+    }
+
+    pub(super) async fn subscribe(
+        &self,
+        mailbox: &MailboxPath,
+        subscribed: bool,
+    ) -> Result<(), DomainError> {
+        let mut session = self.session().await?;
+        set_subscribed_on(&mut session, &mailbox_path_to_string(mailbox), subscribed).await?;
+        self.release(session);
+        Ok(())
     }
 
     pub(super) async fn change_flags_bulk(

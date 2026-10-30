@@ -211,6 +211,20 @@ impl<
             Ok(provider) => provider,
             Err(e) => return (0, Some(e.into())),
         };
+        // An unsubscribed destination is never synced: the message simply
+        // leaves here, as if expunged, instead of becoming a row of a mailbox
+        // nobody keeps up to date.
+        let kept_here = match dest {
+            Some((to_id, _)) => self
+                .message_read_repo
+                .get_mailbox(&to_id)
+                .await
+                .ok()
+                .flatten()
+                .is_none_or(|to| to.subscribed),
+            None => false,
+        };
+        let recorded_dest = dest.filter(|_| kept_here);
         let mut done = 0;
         let mut out_of_step = false;
         for chunk in members.chunks(SERVER_CHUNK) {
@@ -238,7 +252,7 @@ impl<
                         &provider,
                         message_id,
                         from.id,
-                        dest,
+                        recorded_dest,
                         new_ids.get(id).cloned().flatten(),
                     )
                     .await
