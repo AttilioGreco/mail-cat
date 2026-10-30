@@ -9,7 +9,7 @@ import {
 interface AddAccountDialogProps {
   open: boolean;
   onClose: () => void;
-  /** Called once an account was added, so the caller can prompt for a restart. */
+  /** Called once an account was added and is already running. */
   onAdded: () => void;
 }
 
@@ -146,7 +146,7 @@ function OAuthForm({ onAdded }: { onAdded: () => void }) {
 
       {succeeded && (
         <Notice icon={<CheckCircle2 size={14} className="text-accent" />}>
-          Account {event?.email} aggiunto. Riavvia il server per attivarlo.
+          Account {event?.email} aggiunto e attivo.
         </Notice>
       )}
 

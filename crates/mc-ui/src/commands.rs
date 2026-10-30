@@ -404,8 +404,8 @@ pub struct ImapAccountInput {
     pub smtp_port: Option<u16>,
 }
 
-/// Add an IMAP account. The server records it in its config and keychain, but
-/// only starts syncing it after a restart — see `restart_server`.
+/// Add an IMAP account. The server records it in its config and keychain and
+/// starts syncing it right away.
 #[tauri::command]
 pub async fn add_imap_account(
     params: ImapAccountInput,
@@ -730,10 +730,8 @@ async fn pump_oauth_events(
     }
 }
 
-/// Restart the mail-cat server so newly added (or removed) accounts take effect.
-///
-/// Accounts are declared in the server's config file and turned into providers
-/// at boot, so add/remove only becomes real after a restart.
+/// Restart the mail-cat server. Adding an account no longer needs it; removing
+/// one still does, and so does a rejected OAuth client.
 // ponytail: assumes the packaged systemd --user unit (see packaging/systemd).
 // If the server is started some other way, surface the error and let the user
 // restart it by hand.

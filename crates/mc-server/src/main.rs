@@ -11,6 +11,7 @@ use tonic::transport::Server;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod account_provisioner;
+mod account_runtime;
 mod config;
 mod notifications;
 mod oauth_login;
@@ -100,10 +101,11 @@ async fn run() -> anyhow::Result<()> {
 
     // Migrate any plaintext passwords in the config file into the keychain.
     //
-    // Startup-only by design: providers resolve their credentials once during
-    // wiring, so a password migrated while the daemon runs would not be picked
-    // up until a restart anyway. The inotify watcher that used to do this live
-    // bought nothing and could spin a core at 100%, so it was removed.
+    // Startup-only by design: it only serves hand-edited config.toml entries.
+    // Accounts added at runtime (AddAccount, OAuth login) store their secrets in
+    // the keychain themselves and are started live. The inotify watcher that
+    // used to do this live bought nothing and could spin a core at 100%, so it
+    // was removed.
     secret_ingest::ingest_plaintext_secrets(Path::new(&config_path), secret_store.as_ref())
         .context("failed to migrate plaintext secrets into the system keychain")?;
 

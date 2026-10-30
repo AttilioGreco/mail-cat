@@ -56,10 +56,9 @@ export function useSyncNow() {
 }
 
 /**
- * Restart the server so an added or removed account takes effect.
- *
- * Accounts are declared in the server's config file and turned into IMAP
- * providers at boot, so add/remove is only half-done until it restarts.
+ * Restart the server. Adding an account no longer needs it; removing one does
+ * until the server can stop accounts on its own, and so does an OAuth client
+ * the server rejected.
  */
 export function useRestartServer() {
   const queryClient = useQueryClient();

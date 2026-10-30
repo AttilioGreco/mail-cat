@@ -39,3 +39,12 @@ pub trait AccountProvisioner: Send + Sync {
     /// Replace the keychain password of an already-declared account.
     async fn set_password(&self, email: &str, password: &str) -> Result<(), ApplicationError>;
 }
+
+/// Port: start the live side of an account that is already declared in the
+/// server's configuration (gate, provider, sync, watchers). Without it an
+/// account added while the server runs would only come alive at the next boot.
+#[async_trait]
+pub trait AccountActivator: Send + Sync {
+    /// Idempotent: activating a running account is a no-op.
+    async fn activate(&self, email: &str) -> Result<(), ApplicationError>;
+}

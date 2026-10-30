@@ -21,6 +21,7 @@ HOST, PORT = "localhost", 19993
 USERS = {
     "alice": ("alice@itest.local", "alice-itest-horse-battery"),
     "bob": ("bob@itest.local", "bob-itest-horse-battery"),
+    "carol": ("carol@itest.local", "carol-itest-horse-battery"),  # created by hot_add only
 }
 # Stalwart provisions "Deleted Items", "Sent Items"...: renamed to the common
 # names (special-use kept), the missing ones created. Projects is the custom one.

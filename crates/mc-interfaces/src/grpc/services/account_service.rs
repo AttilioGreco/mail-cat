@@ -14,8 +14,8 @@ use crate::grpc::proto::{
     account_service_server::AccountService,
 };
 use mc_application::{
-    AccountProvisioner, AuthGates, OAuthLoginProgress, OAuthLoginTrigger, ProvisionParams,
-    SyncProgressEvent as AppSyncProgressEvent, SyncState, SyncTrigger,
+    AccountActivator, AccountProvisioner, AuthGates, OAuthLoginProgress, OAuthLoginTrigger,
+    ProvisionParams, SyncProgressEvent as AppSyncProgressEvent, SyncState, SyncTrigger,
     bus::{CommandBus, QueryBus},
     commands::{Command, CommandResult},
     queries::Query,
@@ -29,6 +29,7 @@ pub struct AccountServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
     sync_trigger: Option<Arc<dyn SyncTrigger>>,
     oauth_trigger: Option<Arc<dyn OAuthLoginTrigger>>,
     provisioner: Option<Arc<dyn AccountProvisioner>>,
+    activator: Option<Arc<dyn AccountActivator>>,
     auth_gates: Option<Arc<AuthGates>>,
 }
 
@@ -40,6 +41,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
             sync_trigger: None,
             oauth_trigger: None,
             provisioner: None,
+            activator: None,
             auth_gates: None,
         }
     }
@@ -56,6 +58,11 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
 
     pub fn with_provisioner(mut self, provisioner: Arc<dyn AccountProvisioner>) -> Self {
         self.provisioner = Some(provisioner);
+        self
+    }
+
+    pub fn with_activator(mut self, activator: Arc<dyn AccountActivator>) -> Self {
+        self.activator = Some(activator);
         self
     }
 
@@ -86,6 +93,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         let email = proto_email_to_domain(&email_addr)
             .map_err(Status::invalid_argument)?
             .email;
+        let email_str = email.as_str().to_owned();
 
         let provider_type =
             proto_provider_type_to_domain(req.provider_type).map_err(Status::invalid_argument)?;
@@ -153,6 +161,16 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
             CommandResult::AccountAdded { account_id } => account_id,
             _ => return Err(Status::internal("unexpected command result")),
         };
+
+        // The aggregate exists and config.toml declares the account: bring it up
+        // now. A failure is reported; the account stays declared and the next
+        // boot retries it.
+        if let Some(activator) = &self.activator {
+            activator
+                .activate(&email_str)
+                .await
+                .map_err(application_error_to_status)?;
+        }
 
         // Query the newly created account
         let query = Query::GetAccount { account_id };

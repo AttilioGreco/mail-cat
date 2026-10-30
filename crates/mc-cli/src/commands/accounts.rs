@@ -149,7 +149,7 @@ pub async fn run(cmd: AccountsCmd, client: MailCatClient, json: bool) -> Result<
                 }
             };
             println!(
-                "{} account {} aggiunto (id {}). Riavvia il server per attivarlo.",
+                "{} account {} aggiunto (id {}) e attivo.",
                 "✓".green(),
                 account.email,
                 account.id
@@ -240,11 +240,7 @@ async fn add_oauth(
                 }
             }
             OAuthLoginEvent::Succeeded { email } => {
-                println!(
-                    "{} account {} aggiunto a config.toml. Riavvia mail-cat-server per attivarlo.",
-                    "✓".green(),
-                    email
-                );
+                println!("{} account {} aggiunto e attivo.", "✓".green(), email);
                 return Ok(());
             }
             OAuthLoginEvent::Failed { message } => {

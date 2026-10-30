@@ -684,7 +684,53 @@ def subscriptions_bulk(w):
         raise Fail("Sent lost its subscription")
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk]
+def hot_add(w):
+    """An account added to the running server syncs, and gets push, without a restart."""
+    stalwart = HERE / "stalwart-cli"
+    domain = json.loads(run([str(stalwart), "query", "Domain", "--json"]).splitlines()[0])["id"]
+    run([str(stalwart), "create", "Account/User", "--json", json.dumps({
+        "name": "carol", "domainId": domain,
+        "credentials": {"0": {"@type": "Password", "secret": imapctl.USERS["carol"][1]}}})])
+
+    def deliver(n):
+        msg = EmailMessage()
+        msg["Subject"], msg["From"], msg["To"] = f"Hot [itest-95{n}]", "dan@example.org", "carol@itest.local"
+        msg["Message-ID"] = f"<hot95{n}@example.org>"
+        msg.set_content("hello\n")
+        m = imapctl.connect("carol")
+        imapctl.check(m.append("INBOX", "", imaplib.Time2Internaldate(time.time()), msg.as_bytes()))
+        m.logout()
+
+    for n in range(3):
+        deliver(n)
+    pid = (HERE / ".state" / "server.pid").read_text()
+    log = HERE / ".state" / "server.log"
+
+    def watchers():
+        return log.read_text(errors="replace").count("IDLE active for 'INBOX'")
+
+    watching = watchers()  # alice's
+
+    p = subprocess.run(MC + ["accounts", "add", "--email", "carol@itest.local", "--name", "carol",
+                             "--imap-host", "localhost", "--imap-port", "19993", "--password-stdin"],
+                       input=imapctl.USERS["carol"][1] + "\n", capture_output=True, text=True, env=ENV)
+    if p.returncode or "Riavvia" in p.stdout:
+        raise Fail(f"mc accounts add failed or still asks for a restart:\n{p.stdout}{p.stderr}")
+
+    def inbox_total():
+        carol = account_id("carol")
+        boxes = {r["Path"]: r for r in table(mc("mailboxes", "list", carol))}
+        return int(boxes["INBOX"]["Total"]) if "INBOX" in boxes else 0
+
+    wait(lambda: inbox_total() == 3, "carol's three messages synced without a restart", timeout=60)
+    wait(lambda: watchers() > watching, "carol's INBOX watcher running", timeout=30)
+    deliver(3)
+    wait(lambda: inbox_total() == 4, "a message delivered after the add arrives by push", timeout=30)
+    if (HERE / ".state" / "server.pid").read_text() != pid:
+        raise Fail("the server was restarted")
+
+
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk, hot_add]
 SCENARIOS += gmail_scenarios.make(sys.modules[__name__])
 
 

@@ -47,7 +47,7 @@ export function AccountsSection({ accountActions }: { accountActions?: (account:
       {restartNeeded && (
         <div className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface p-3">
           <p className="text-xs text-foreground">
-            Le modifiche agli account diventano attive al riavvio del server.
+            La rimozione di un account e la password SMTP diventano attive al riavvio del server.
             {restartServer.isError && (
               <span className="mt-1 block text-destructive">{String(restartServer.error)}</span>
             )}
@@ -101,10 +101,7 @@ export function AccountsSection({ accountActions }: { accountActions?: (account:
       <AddAccountDialog
         open={addOpen}
         onClose={() => setAddOpen(false)}
-        onAdded={() => {
-          setAddOpen(false);
-          setRestartNeeded(true);
-        }}
+        onAdded={() => setAddOpen(false)}
       />
     </section>
   );

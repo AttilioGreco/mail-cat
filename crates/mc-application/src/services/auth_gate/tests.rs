@@ -608,3 +608,39 @@ async fn a_password_account_flagged_needs_reauth_by_older_builds_asks_for_the_pa
     assert_eq!(gate.status().state, AuthState::Active);
     assert_eq!(h.event_names(), ["AccountReauthenticated"]);
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_refresh_timer_follows_accounts_added_and_removed_after_it_started() {
+    let h = Harness::new(fresh);
+    let refreshes = h.refreshes.clone();
+    let gates = Arc::new(h.gates);
+    let token = CancellationToken::new();
+    gates.spawn_refresh_timer(token.clone());
+    tokio::time::sleep(Duration::from_secs(1)).await; // first tick: nothing to do
+
+    let oauth = |gates: &AuthGates| {
+        gates.add(
+            AccountId::new(),
+            EMAIL,
+            Credential::OAuth {
+                provider: OAuthProvider::Google,
+                tokens: tokens("old", TimeDelta::minutes(1)),
+            },
+        )
+    };
+    let kept = oauth(&gates);
+    let removed = oauth(&gates);
+    assert!(gates.get(&removed.account_id()).is_some());
+    assert!(gates.remove(&removed.account_id()).is_some());
+    assert!(gates.get(&removed.account_id()).is_none());
+    assert!(gates.by_email(EMAIL).is_some());
+    assert_eq!(gates.statuses().len(), 1);
+
+    tokio::time::sleep(TIMER_PERIOD).await;
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        kept.secret().await.unwrap(),
+        LoginSecret::OAuthToken("new".into())
+    );
+    token.cancel();
+}

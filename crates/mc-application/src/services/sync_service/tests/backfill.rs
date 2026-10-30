@@ -49,7 +49,7 @@ async fn backfill_waits_while_the_account_needs_the_user() {
     let refresh: crate::RefreshFn =
         Arc::new(|_, _| Box::pin(async { Err(DomainError::Provider("unused".into())) }));
     let keychain: Arc<dyn mc_domain::SecretStore> = Arc::new(NoKeychain);
-    let mut gates = AuthGates::new(refresh, keychain, tokio::sync::mpsc::unbounded_channel().0);
+    let gates = AuthGates::new(refresh, keychain, tokio::sync::mpsc::unbounded_channel().0);
     let account_id = AccountId::new();
     let gate = gates.add(
         account_id,

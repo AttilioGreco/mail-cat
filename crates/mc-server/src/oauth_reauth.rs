@@ -1,29 +1,28 @@
 //! Wraps the raw OAuth login flow with the bookkeeping a *running* server needs.
 //!
 //! [`OAuthChallengeManager`] stops at "tokens are in the keychain and the account
-//! is in config.toml". That is enough for a brand-new account (which needs a
-//! restart to be picked up anyway), but not for re-authentication: every login
-//! takes its token from the account's live [`AuthGate`], and a paused gate never
-//! re-reads the keychain. So a successful re-login has to be handed to the gate
-//! or the account stays paused until a restart.
+//! is in config.toml". A brand-new account then has to be started in the
+//! running server, and a re-authentication has to reach the account's live
+//! [`AuthGate`]: every login takes its token from the gate, and a paused gate
+//! never re-reads the keychain.
 //!
 //! Doing it here makes every entry point — notification, UI button — behave the
 //! same.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use mc_application::{AuthGate, AuthGates, OAuthLoginProgress, OAuthLoginTrigger};
 use mc_domain::{AccountId, OAuthProvider, SecretStore};
 use tokio::sync::mpsc;
 
+use crate::account_runtime::AccountRuntime;
 use crate::oauth_login::OAuthChallengeManager;
 
 pub struct ReauthTrigger {
     inner: Arc<OAuthChallengeManager>,
     gates: Arc<AuthGates>,
-    /// Display names of the OAuth accounts, which the login flow asks for.
-    names: HashMap<AccountId, String>,
+    /// Knows the display names the login flow asks for, and starts new accounts.
+    runtime: Arc<AccountRuntime>,
     secret_store: Arc<dyn SecretStore>,
 }
 
@@ -31,13 +30,13 @@ impl ReauthTrigger {
     pub fn new(
         inner: Arc<OAuthChallengeManager>,
         gates: Arc<AuthGates>,
-        names: HashMap<AccountId, String>,
+        runtime: Arc<AccountRuntime>,
         secret_store: Arc<dyn SecretStore>,
     ) -> Self {
         Self {
             inner,
             gates,
-            names,
+            runtime,
             secret_store,
         }
     }
@@ -54,17 +53,27 @@ impl OAuthLoginTrigger for ReauthTrigger {
         let (tx, rx) = mpsc::channel(2);
 
         let gates = self.gates.clone();
+        let runtime = self.runtime.clone();
         let secret_store = self.secret_store.clone();
 
         tokio::spawn(async move {
             while let Some(event) = inner_rx.recv().await {
                 // Reconcile *before* forwarding Succeeded, so a client that
                 // refetches accounts on that event already sees "active".
-                // No gate for the address: a brand-new account, nothing live yet.
-                if let OAuthLoginProgress::Succeeded { email } = &event
-                    && let Some(gate) = gates.by_email(email)
-                {
-                    apply_fresh_tokens(gate, secret_store.as_ref()).await;
+                if let OAuthLoginProgress::Succeeded { email } = &event {
+                    match gates.by_email(email) {
+                        Some(gate) => apply_fresh_tokens(&gate, secret_store.as_ref()).await,
+                        // No gate for the address: a brand-new account, start it.
+                        None => {
+                            if let Err(e) = runtime.start_declared(email).await {
+                                let message = format!(
+                                    "login ok, but the account could not be started: {e:#}"
+                                );
+                                let _ = tx.send(OAuthLoginProgress::Failed { message }).await;
+                                break;
+                            }
+                        }
+                    }
                 }
                 if tx.send(event).await.is_err() {
                     break; // caller dropped the stream
@@ -78,7 +87,7 @@ impl OAuthLoginTrigger for ReauthTrigger {
     fn start_reauth(&self, account_id: AccountId) -> mpsc::Receiver<OAuthLoginProgress> {
         let target = self.gates.get(&account_id).and_then(|gate| {
             Some((
-                self.names.get(&account_id)?.clone(),
+                self.runtime.name(&account_id)?,
                 gate.email().to_owned(),
                 gate.oauth_provider()?,
             ))
@@ -125,6 +134,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use mc_application::{AuthState, Credential};
     use mc_domain::{AccountSecrets, DomainError, LoginGate, LoginSecret, OAuthSecrets};
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -151,7 +161,7 @@ mod tests {
         let refresh: mc_application::RefreshFn = Arc::new(|_, _| {
             Box::pin(async { Err(DomainError::AuthenticationFailed("invalid_grant".into())) })
         });
-        let mut gates = AuthGates::new(refresh, store.clone(), mpsc::unbounded_channel().0);
+        let gates = AuthGates::new(refresh, store.clone(), mpsc::unbounded_channel().0);
         let stale = OAuthSecrets {
             access_token: "stale".into(),
             refresh_token: "dead".into(),

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -617,7 +617,8 @@ impl LoginGate for AuthGate {
 
 /// Every account's gate, plus what they share.
 pub struct AuthGates {
-    gates: HashMap<AccountId, Arc<AuthGate>>,
+    /// Accounts come and go while the server runs.
+    gates: RwLock<HashMap<AccountId, Arc<AuthGate>>>,
     refresh: RefreshFn,
     secret_store: Arc<dyn SecretStore>,
     events: mpsc::UnboundedSender<(AccountId, DomainEvent)>,
@@ -633,7 +634,7 @@ impl AuthGates {
         events: mpsc::UnboundedSender<(AccountId, DomainEvent)>,
     ) -> Self {
         Self {
-            gates: HashMap::new(),
+            gates: RwLock::default(),
             refresh,
             secret_store,
             events,
@@ -641,12 +642,7 @@ impl AuthGates {
         }
     }
 
-    pub fn add(
-        &mut self,
-        account_id: AccountId,
-        email: &str,
-        credential: Credential,
-    ) -> Arc<AuthGate> {
+    pub fn add(&self, account_id: AccountId, email: &str, credential: Credential) -> Arc<AuthGate> {
         let gate = Arc::new(AuthGate {
             account_id,
             email: email.to_owned(),
@@ -667,20 +663,34 @@ impl AuthGates {
             events: self.events.clone(),
             changes: self.changes.clone(),
         });
-        self.gates.insert(account_id, gate.clone());
+        self.gates.write().unwrap().insert(account_id, gate.clone());
         gate
     }
 
-    pub fn get(&self, account_id: &AccountId) -> Option<&Arc<AuthGate>> {
-        self.gates.get(account_id)
+    pub fn remove(&self, account_id: &AccountId) -> Option<Arc<AuthGate>> {
+        self.gates.write().unwrap().remove(account_id)
     }
 
-    pub fn by_email(&self, email: &str) -> Option<&Arc<AuthGate>> {
-        self.gates.values().find(|g| g.email == email)
+    pub fn get(&self, account_id: &AccountId) -> Option<Arc<AuthGate>> {
+        self.gates.read().unwrap().get(account_id).cloned()
+    }
+
+    pub fn by_email(&self, email: &str) -> Option<Arc<AuthGate>> {
+        self.gates
+            .read()
+            .unwrap()
+            .values()
+            .find(|g| g.email == email)
+            .cloned()
     }
 
     pub fn statuses(&self) -> Vec<AuthStatus> {
-        self.gates.values().map(|g| g.status()).collect()
+        self.gates
+            .read()
+            .unwrap()
+            .values()
+            .map(|g| g.status())
+            .collect()
     }
 
     /// The id of every account whose status changed; read the status itself
@@ -700,7 +710,9 @@ impl AuthGates {
                     _ = shutdown.cancelled() => break,
                     _ = interval.tick() => {}
                 }
-                for gate in gates.gates.values() {
+                // Snapshot per tick: the lock must not be held across a refresh.
+                let live: Vec<_> = gates.gates.read().unwrap().values().cloned().collect();
+                for gate in live {
                     if gate.oauth_provider().is_some() && !gate.tracked.borrow().state.is_paused() {
                         let _ = gate.valid_secret(TIMER_REFRESH_MARGIN).await;
                     }
