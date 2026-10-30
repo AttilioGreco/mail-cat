@@ -208,12 +208,19 @@ not listed in the sidebar, not downloaded, no local messages. The choice is prop
 server (other clients share it). This replaces §4's "No Trash/Spam special-casing" and item 7 above.
 
 1. **Initial value** (`list_mailboxes` reports it; discovery stores it in `MailboxDiscovered`).
-   - Generic IMAP: from `LSUB`. If `LSUB` is empty or fails, every mailbox is subscribed. Inbox is
-     always subscribed and cannot be unsubscribed; Sent/Drafts/Trash/Spam/All/Archive follow `LSUB`.
+   - Mandatory mailboxes: Inbox, Sent, Drafts, Archive and All (`MailboxType::is_mandatory`) hold the
+     user's own mail (a sent message is a row in Sent that no sync creates), so they are subscribed on
+     every account whatever `LSUB`/`isSubscribed` say, and `SetMailboxSubscribed` refuses to
+     unsubscribe them (`PreconditionFailed` naming the mailbox and its role; the CLI shows it, the
+     dialog disables the checkbox). On Gmail the label views of those roles count too. Trash, Spam,
+     Important and custom folders/labels stay optional.
+   - Generic IMAP: from `LSUB`. If `LSUB` is empty or fails, every mailbox is subscribed. A `\Noselect`
+     entry of `LSUB` (a parent listed only for its subscribed child) is ignored: the parent is
+     subscribed only if listed on its own. Trash/Spam/custom follow `LSUB`.
    - Gmail (X-GM-EXT-1 layout): Spam and Trash are unsubscribed whatever `LSUB` says. Label *views*
      follow `LSUB`; an unsubscribed view is hidden from the sidebar but message chips still show its
      name (the data is untouched, and a view has no sync to stop).
-   - JMAP: `Mailbox.isSubscribed`; the Inbox role is forced on.
+   - JMAP: `Mailbox.isSubscribed`; the mandatory roles are forced on.
    - A user's choice is `MailboxSubscriptionChanged { explicit: true }` and sets
      `subscription_explicit`; later discovery never overrides it. A server-side change to a mailbox
      without an explicit choice is recorded as `explicit: false`. A rename keeps the mailbox id (JMAP)
@@ -221,7 +228,14 @@ server (other clients share it). This replaces §4's "No Trash/Spam special-casi
 2. **Sync gating.** `run_sync` and `sync_mailbox` (IDLE, resync requests) skip unsubscribed real
    mailboxes; `sync_one` re-reads the flag so a pass that began before an unsubscribe stops there.
    IDLE watches only Inbox, always subscribed. Backfill needs no gate: it works on stored messages,
-   and unsubscribing deletes them. Unsubscribing a real mailbox appends, per message, the existing
+   and unsubscribing deletes them. The RPC only appends `MailboxSubscriptionChanged` (the sidebar hides the
+   mailbox at once; the projection also zeroes its `total/unread_messages`), queues the mailbox and
+   returns. `serve_subscription_jobs` (one task, spawned by the server) then takes the account lock and
+   drops the local messages in batches of 500, publishing progress on the sync-progress channel
+   (`Removing X...`, `Completed` at the end) and stopping if the mailbox is subscribed again; a
+   subscribe job runs the first sync the same way. Jobs read the flag when they run, so toggles
+   collapse. A job lost to a restart is redone: discovery (`follow_server_subscription`) drops what an
+   unsubscribed real mailbox still holds on every sync pass. The drop appends, per message, the existing
    `MessageMailboxesChanged` (message also elsewhere) or `MessageDeleted` (only here, with the Gmail
    views that depend on it), so the search index follows; the projector drops its cursor. Subscribing
    drops the cursor too and asks for a resync of the mailbox, so it starts from a fresh snapshot.
@@ -230,7 +244,10 @@ server (other clients share it). This replaces §4's "No Trash/Spam special-casi
    by id. With no local destination mailbox row to sync, the message simply leaves the local store;
    nothing waits for the destination, and the lookup by Message-ID after the move is only a
    best effort for the new remote id, so a miss is not a failure and nothing is re-ingested because
-   the destination is never synced.
+   the destination is never synced. This holds only for Trash/Spam-role destinations. Moving a
+   message into, or adding the label of, any other unsubscribed *real* mailbox is refused with
+   `PreconditionFailed` (the message would be in no visible mailbox). Adding an unsubscribed Gmail
+   *view* is allowed: it is only a label on All Mail.
 4. **Propagation.** `EmailProvider::set_subscribed(path, bool)`, default `NotSupported`. IMAP:
    `SUBSCRIBE`/`UNSUBSCRIBE` with the stored (modified UTF-7) name, quoted by the client, and `LSUB`
    at list time. JMAP: `Mailbox/set` patch `isSubscribed`. Gmail: same IMAP commands, best effort.
@@ -243,7 +260,7 @@ server (other clients share it). This replaces §4's "No Trash/Spam special-casi
    sidebar and the move/label pickers filter client-side (subscribed real mailboxes plus labels).
    CLI: `mc mailboxes subscribe|unsubscribe <account> <mailbox>`, `list` shows the column.
 6. **UI.** Settings -> account -> "Gestisci cartelle": the label-tree builder over all mailboxes with
-   checkboxes (Inbox disabled) and a refresh button that triggers a sync (re-list from the server).
-7. **Tests.** Unit for the initial-value rules, gating, exclusive-message removal, failed
+   checkboxes (mandatory mailboxes disabled; enabled again right after the RPC, which is fast) and a refresh button that triggers a sync (re-list from the server).
+7. **Tests.** Unit for the initial-value rules (mandatory roles, `\Noselect`), the refusals, gating, exclusive-message removal, failed
    propagation; IMAP command text; JMAP patch against the mock; itest `subscriptions_imap` (alice)
    and `subscriptions_jmap` (bob).
