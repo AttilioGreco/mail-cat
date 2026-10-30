@@ -11,6 +11,7 @@ import { useSettingsStore } from '@/features/manage-settings';
 import { useOAuthLogin, useRestartServer } from '@/features/manage-accounts';
 import { useSearchStore } from '@/features/search-messages';
 import { useMarkMailboxRead } from '@/features/message-actions';
+import { LabelTree } from './LabelTree';
 
 export function Sidebar() {
   const { selectedAccountId, selectedMailboxId, selectAccount, selectMailbox } = useSessionStore();
@@ -324,7 +325,13 @@ function FolderTree({
       {custom.length > 0 && (
         <>
           <h2 className="px-2.5 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-muted">Etichette</h2>
-          {custom.map(item)}
+          <LabelTree
+            accountId={accountId}
+            labels={custom}
+            selectedMailboxId={selectedMailboxId}
+            onSelect={onSelect}
+            onContextMenu={(mailbox, x, y) => setMenu({ mailbox, x, y })}
+          />
         </>
       )}
       {menu && (
