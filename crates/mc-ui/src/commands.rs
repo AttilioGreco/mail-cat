@@ -8,10 +8,10 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use mc_client::{
-    Account, AuthStatus, MailboxModel, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit,
-    ConversationSummary, ImapAccountParams, MailCatClient, Mailbox, MailboxNotificationKind,
-    MessageBody, MessageFlag, MessageSummary, OAuthLoginEvent, OAuthProvider, SearchHit,
-    Suggestion, SyncPhase, SyncProgress, ThreadMessage,
+    Account, AuthStatus, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit,
+    ConversationSummary, ImapAccountParams, MailCatClient, Mailbox, MailboxModel,
+    MailboxNotificationKind, MessageBody, MessageFlag, MessageSummary, OAuthLoginEvent,
+    OAuthProvider, SearchHit, Suggestion, SyncPhase, SyncProgress, ThreadMessage,
 };
 
 /// Tauri managed state — single shared client instance.
@@ -1135,7 +1135,11 @@ pub async fn set_account_mailbox_model(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let client = get_or_connect(&state).await?;
-    let model = if labels { MailboxModel::Labels } else { MailboxModel::Folders };
+    let model = if labels {
+        MailboxModel::Labels
+    } else {
+        MailboxModel::Folders
+    };
     client
         .set_account_mailbox_model(&account_id, model)
         .await
