@@ -200,3 +200,50 @@ Account stays `ProviderType::Imap`. Data folder is wiped (memberships change mea
    `X-GM-LABELS` fetch whose ids are the folder's own, not All Mail's. LIST names arrive as
    quoted strings, so `\"` and `\\` are unescaped before use.
 7. **Subscriptions** (LSUB) are not consulted; future work, orthogonal.
+
+## Subscriptions
+
+One flag per mailbox, `Mailbox.subscribed`: shown in the sidebar *and* synced. Not subscribed means
+not listed in the sidebar, not downloaded, no local messages. The choice is propagated to the
+server (other clients share it). This replaces §4's "No Trash/Spam special-casing" and item 7 above.
+
+1. **Initial value** (`list_mailboxes` reports it; discovery stores it in `MailboxDiscovered`).
+   - Generic IMAP: from `LSUB`. If `LSUB` is empty or fails, every mailbox is subscribed. Inbox is
+     always subscribed and cannot be unsubscribed; Sent/Drafts/Trash/Spam/All/Archive follow `LSUB`.
+   - Gmail (X-GM-EXT-1 layout): Spam and Trash are unsubscribed whatever `LSUB` says. Label *views*
+     follow `LSUB`; an unsubscribed view is hidden from the sidebar but message chips still show its
+     name (the data is untouched, and a view has no sync to stop).
+   - JMAP: `Mailbox.isSubscribed`; the Inbox role is forced on.
+   - A user's choice is `MailboxSubscriptionChanged { explicit: true }` and sets
+     `subscription_explicit`; later discovery never overrides it. A server-side change to a mailbox
+     without an explicit choice is recorded as `explicit: false`. A rename keeps the mailbox id (JMAP)
+     or is a new path (IMAP, no choice carried over: the server's own `LSUB` is then the source).
+2. **Sync gating.** `run_sync` and `sync_mailbox` (IDLE, resync requests) skip unsubscribed real
+   mailboxes; `sync_one` re-reads the flag so a pass that began before an unsubscribe stops there.
+   IDLE watches only Inbox, always subscribed. Backfill needs no gate: it works on stored messages,
+   and unsubscribing deletes them. Unsubscribing a real mailbox appends, per message, the existing
+   `MessageMailboxesChanged` (message also elsewhere) or `MessageDeleted` (only here, with the Gmail
+   views that depend on it), so the search index follows; the projector drops its cursor. Subscribing
+   drops the cursor too and asks for a resync of the mailbox, so it starts from a fresh snapshot.
+3. **Moves into an unsubscribed destination** (delete -> Trash with Trash unsubscribed). The handlers
+   already record a move as the message leaving the source and the destination membership being added
+   by id. With no local destination mailbox row to sync, the message simply leaves the local store;
+   nothing waits for the destination, and the lookup by Message-ID after the move is only a
+   best effort for the new remote id, so a miss is not a failure and nothing is re-ingested because
+   the destination is never synced.
+4. **Propagation.** `EmailProvider::set_subscribed(path, bool)`, default `NotSupported`. IMAP:
+   `SUBSCRIBE`/`UNSUBSCRIBE` with the stored (modified UTF-7) name, quoted by the client, and `LSUB`
+   at list time. JMAP: `Mailbox/set` patch `isSubscribed`. Gmail: same IMAP commands, best effort.
+   The local change is applied first and always; a provider failure is returned as a warning
+   (`CommandResult::MailboxSubscriptionSet { warning }`, gRPC `warning`), never an error. The next list
+   reconciles server -> local only where `subscription_explicit` is false.
+5. **Domain/API.** `Mailbox.subscribed`, `subscription_explicit`; event `MailboxSubscriptionChanged`
+   projected to `mailboxes.subscribed/subscription_explicit`. Proto: `MailboxSummary.subscribed`,
+   rpc `MailboxService.SetMailboxSubscribed`. `ListMailboxes` returns every mailbox with the flag; the
+   sidebar and the move/label pickers filter client-side (subscribed real mailboxes plus labels).
+   CLI: `mc mailboxes subscribe|unsubscribe <account> <mailbox>`, `list` shows the column.
+6. **UI.** Settings -> account -> "Gestisci cartelle": the label-tree builder over all mailboxes with
+   checkboxes (Inbox disabled) and a refresh button that triggers a sync (re-list from the server).
+7. **Tests.** Unit for the initial-value rules, gating, exclusive-message removal, failed
+   propagation; IMAP command text; JMAP patch against the mock; itest `subscriptions_imap` (alice)
+   and `subscriptions_jmap` (bob).
