@@ -22,6 +22,9 @@ pub trait SearchIndex: Send + Sync {
     /// Remove a message from the index.
     async fn remove_message(&self, message_id: &MessageId) -> Result<(), DomainError>;
 
+    /// Remove every message of an account from the index.
+    async fn remove_account(&self, account_id: &AccountId) -> Result<(), DomainError>;
+
     /// Full-text search across indexed messages, best match first.
     async fn search(
         &self,
@@ -50,6 +53,9 @@ impl<T: SearchIndex + ?Sized> SearchIndex for std::sync::Arc<T> {
     }
     async fn remove_message(&self, message_id: &MessageId) -> Result<(), DomainError> {
         (**self).remove_message(message_id).await
+    }
+    async fn remove_account(&self, account_id: &AccountId) -> Result<(), DomainError> {
+        (**self).remove_account(account_id).await
     }
     async fn search(
         &self,

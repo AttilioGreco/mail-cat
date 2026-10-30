@@ -36,3 +36,4 @@ zbus = "5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rusqlite = { workspace = true }

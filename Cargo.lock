@@ -3279,6 +3279,7 @@ dependencies = [
  "mc-interfaces",
  "mc-shared",
  "notify-rust",
+ "rusqlite",
  "serde",
  "tempfile",
  "tokio",

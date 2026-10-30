@@ -21,7 +21,7 @@ use futures::StreamExt;
 use tracing::{debug, info};
 
 use mc_domain::{
-    DomainEvent, EventEnvelope, EventStore, MessageReadRepository, ProjectionCheckpoint,
+    AccountId, DomainEvent, EventEnvelope, EventStore, MessageReadRepository, ProjectionCheckpoint,
     SearchIndex,
 };
 
@@ -101,6 +101,12 @@ where
     /// querying, so no explicit flush is needed here.
     pub async fn apply_live(&self, envelope: &EventEnvelope) -> Result<(), ApplicationError> {
         self.project(envelope).await
+    }
+
+    /// Drops the account's documents and commits.
+    pub async fn remove_account(&self, account_id: &AccountId) -> Result<(), ApplicationError> {
+        self.search_index.remove_account(account_id).await?;
+        Ok(())
     }
 
     /// Forget the checkpoint so the next `catch_up` re-indexes the whole log —
@@ -190,6 +196,9 @@ mod tests {
         }
         async fn remove_message(&self, id: &MessageId) -> Result<(), DomainError> {
             self.docs.lock().unwrap().remove(&id.to_string());
+            Ok(())
+        }
+        async fn remove_account(&self, _id: &AccountId) -> Result<(), DomainError> {
             Ok(())
         }
         async fn search(

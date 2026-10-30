@@ -31,11 +31,18 @@ interface SyncState {
   byAccount: Record<string, SyncProgressPayload>;
   lastBodyBatch: Record<string, BodyBatch>;
   record: (event: SyncProgressPayload) => void;
+  /** An account was removed: nothing of it should linger. */
+  forget: (accountId: string) => void;
 }
 
 export const useSyncStore = create<SyncState>((set) => ({
   byAccount: {},
   lastBodyBatch: {},
+  forget: (accountId) =>
+    set((s) => ({
+      byAccount: Object.fromEntries(Object.entries(s.byAccount).filter(([id]) => id !== accountId)),
+      lastBodyBatch: Object.fromEntries(Object.entries(s.lastBodyBatch).filter(([id]) => id !== accountId)),
+    })),
   record: (event) =>
     set((s) => {
       const prev = s.byAccount[event.account_id];

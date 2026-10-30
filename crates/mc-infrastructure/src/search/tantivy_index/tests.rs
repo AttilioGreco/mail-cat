@@ -309,3 +309,32 @@ fn an_index_with_another_schema_is_recreated() {
     drop(index);
     assert!(!TantivySearchIndex::new(dir.path()).unwrap().was_recreated());
 }
+
+#[tokio::test]
+async fn remove_account_drops_only_that_accounts_documents() {
+    let temp_dir = TempDir::new().unwrap();
+    let index = TantivySearchIndex::new(temp_dir.path()).unwrap();
+    let gone = create_test_message(
+        "01234567-89ab-cdef-0123-456789abcdef",
+        "Invoice",
+        "a@x.org",
+        "pay",
+    );
+    let kept = create_test_message(
+        "11234567-89ab-cdef-0123-456789abcdef",
+        "Invoice",
+        "b@x.org",
+        "pay",
+    );
+    index.index_message(&gone).await.unwrap();
+    index.index_message(&kept).await.unwrap();
+
+    index.remove_account(&gone.account_id).await.unwrap();
+
+    let results = index
+        .search("invoice", None, None, &Pagination::default())
+        .await
+        .unwrap();
+    assert_eq!(results.hits.len(), 1);
+    assert_eq!(results.hits[0].message_id, kept.id);
+}

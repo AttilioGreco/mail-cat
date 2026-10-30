@@ -35,7 +35,7 @@ const ZSTD_LEVEL: i32 = 3;
 #[derive(Clone)]
 pub struct SqliteRepository {
     pub(super) db: Arc<SqliteDb>,
-    events: Arc<SqliteEventStore>,
+    pub(super) events: Arc<SqliteEventStore>,
 }
 
 impl SqliteRepository {

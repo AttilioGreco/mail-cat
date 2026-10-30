@@ -169,3 +169,158 @@ async fn a_failed_start_leaves_nothing_behind() {
     );
     assert!(runtime.running.lock().unwrap().is_empty());
 }
+
+/// Rows of the account in the event log and the read model.
+async fn rows_of(f: &Fixture, id: AccountId) -> (i64, i64, i64) {
+    f.ctx
+        .account_runtime
+        .deps
+        .db
+        .read(move |c| {
+            let count = |sql: &str, p: &dyn rusqlite::ToSql| {
+                c.query_row(sql, [p], |r| r.get::<_, i64>(0)).unwrap()
+            };
+            Ok((
+                count(
+                    "SELECT count(*) FROM events WHERE account_id = ?1",
+                    &id.to_string(),
+                ),
+                count("SELECT count(*) FROM accounts WHERE id = ?1", id.as_uuid()),
+                count(
+                    "SELECT count(*) FROM mailboxes WHERE account_id = ?1",
+                    id.as_uuid(),
+                ),
+            ))
+        })
+        .await
+        .unwrap()
+}
+
+async fn give_it_a_mailbox(f: &Fixture, id: AccountId) {
+    let deps = &f.ctx.account_runtime.deps;
+    let mailbox_id = mc_domain::MailboxId::new();
+    let event = mc_domain::DomainEvent::MailboxDiscovered {
+        mailbox_id,
+        account_id: id,
+        path: mc_domain::MailboxPath::inbox(),
+        display_path: "INBOX".into(),
+        mailbox_type: mc_domain::MailboxType::Inbox,
+    };
+    use mc_domain::{EventStore, ReadModelProjector};
+    deps.event_store
+        .append(
+            &mailbox_id.to_string(),
+            mc_domain::AggregateType::Mailbox,
+            0,
+            vec![event],
+        )
+        .await
+        .unwrap();
+    let envelope = deps
+        .event_store
+        .load_events(&mailbox_id.to_string(), 0)
+        .await
+        .unwrap()
+        .remove(0);
+    deps.repository.project(&envelope).await.unwrap();
+}
+
+fn declared_in(f: &Fixture, email: &str) -> bool {
+    let path = &f.ctx.account_runtime.deps.config_path;
+    ServerConfig::load_or_default(path)
+        .accounts
+        .iter()
+        .any(|a| a.email == email)
+}
+
+#[tokio::test]
+async fn remove_stops_the_account_deletes_its_data_and_a_re_add_starts_clean() {
+    let f = fixture(ACCOUNT_TOML).await;
+    let runtime = &f.ctx.account_runtime;
+    let id = runtime.start_declared("hot@example.com").await.unwrap();
+    give_it_a_mailbox(&f, id).await;
+    let stop = runtime.running.lock().unwrap()[&id].stop.clone();
+    let rows = rows_of(&f, id).await;
+    assert!(rows.0 > 1 && rows.2 == 1, "{rows:?}");
+
+    runtime.remove(id).await.unwrap();
+
+    assert!(stop.is_cancelled());
+    assert!(!runtime.is_running(&id));
+    assert!(f.ctx.provider_registry.get_provider(&id).is_err());
+    assert!(runtime.deps.auth_gates.get(&id).is_none());
+    assert_eq!(rows_of(&f, id).await, (0, 0, 0));
+    assert_eq!(
+        account_count(&f).await,
+        0,
+        "removing the last account works"
+    );
+    assert!(!declared_in(&f, "hot@example.com"));
+    assert!(
+        runtime
+            .deps
+            .repository
+            .pending_removals()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        runtime.remove(id).await,
+        Err(ApplicationError::NotFound(..))
+    ));
+
+    let fresh = runtime.start(&hot_account()).await.unwrap();
+    assert_ne!(fresh, id, "a new aggregate, not the old one back");
+    assert!(runtime.is_running(&fresh));
+    assert_eq!(account_count(&f).await, 1);
+    assert_eq!(rows_of(&f, id).await, (0, 0, 0));
+    assert_eq!(rows_of(&f, fresh).await.2, 0, "no mailboxes carried over");
+}
+
+#[tokio::test]
+async fn a_removal_the_server_died_in_is_finished_at_the_next_boot() {
+    let f = fixture(ACCOUNT_TOML).await;
+    let runtime = &f.ctx.account_runtime;
+    let id = runtime.start_declared("hot@example.com").await.unwrap();
+    give_it_a_mailbox(&f, id).await;
+    // The crash: removal recorded, config entry and data still there.
+    runtime.stop(&id);
+    runtime
+        .deps
+        .command_bus
+        .dispatch(Command::RemoveAccount { account_id: id })
+        .await
+        .unwrap();
+    assert!(declared_in(&f, "hot@example.com"));
+
+    assert_eq!(runtime.recover_removals().await.unwrap(), 1);
+
+    assert_eq!(rows_of(&f, id).await, (0, 0, 0));
+    assert!(!declared_in(&f, "hot@example.com"));
+    assert_eq!(runtime.recover_removals().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_leftover_removal_does_not_touch_an_account_re_added_under_the_same_address() {
+    let f = fixture(ACCOUNT_TOML).await;
+    let runtime = &f.ctx.account_runtime;
+    let old = runtime.start_declared("hot@example.com").await.unwrap();
+    runtime.stop(&old);
+    runtime
+        .deps
+        .command_bus
+        .dispatch(Command::RemoveAccount { account_id: old })
+        .await
+        .unwrap();
+    let new = runtime.start(&hot_account()).await.unwrap();
+
+    runtime.recover_removals().await.unwrap();
+
+    assert_eq!(rows_of(&f, old).await.0, 0);
+    assert!(rows_of(&f, new).await.0 > 0);
+    assert!(
+        declared_in(&f, "hot@example.com"),
+        "the new account stays declared"
+    );
+}

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Plus, RefreshCw, Trash2, AlertCircle, KeyRound, CheckCircle2, RotateCw } from 'lucide-react';
+import { Plus, RefreshCw, Trash2, AlertCircle, KeyRound, CheckCircle2 } from 'lucide-react';
 import {
   useAccounts,
   useAccountStats,
@@ -14,7 +14,6 @@ import {
 } from '@/entities/account';
 import {
   useRemoveAccount,
-  useRestartServer,
   useSetAccountPassword,
   useSetMailboxModel,
   useSyncNow,
@@ -24,8 +23,6 @@ import { AddAccountDialog } from './AddAccountDialog';
 export function AccountsSection({ accountActions }: { accountActions?: (account: Account) => ReactNode }) {
   const { data: accounts = [], isLoading, error } = useAccounts();
   const [addOpen, setAddOpen] = useState(false);
-  const [restartNeeded, setRestartNeeded] = useState(false);
-  const restartServer = useRestartServer();
 
   return (
     <section className="space-y-4">
@@ -43,29 +40,6 @@ export function AccountsSection({ accountActions }: { accountActions?: (account:
           Aggiungi account
         </button>
       </header>
-
-      {restartNeeded && (
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface p-3">
-          <p className="text-xs text-foreground">
-            La rimozione di un account e la password SMTP diventano attive al riavvio del server.
-            {restartServer.isError && (
-              <span className="mt-1 block text-destructive">{String(restartServer.error)}</span>
-            )}
-            {restartServer.isSuccess && (
-              <span className="mt-1 block text-muted">Server riavviato.</span>
-            )}
-          </p>
-          <button
-            type="button"
-            disabled={restartServer.isPending}
-            onClick={() => restartServer.mutate(undefined, { onSuccess: () => setRestartNeeded(false) })}
-            className="flex shrink-0 items-center gap-1.5 rounded border border-border bg-background px-2.5 py-1.5 text-xs text-foreground hover:bg-surface-hover disabled:opacity-50"
-          >
-            <RotateCw size={12} className={restartServer.isPending ? 'animate-spin' : undefined} />
-            Riavvia server
-          </button>
-        </div>
-      )}
 
       {isLoading && (
         <p className="flex items-center gap-2 text-xs text-muted">
@@ -89,12 +63,7 @@ export function AccountsSection({ accountActions }: { accountActions?: (account:
 
       <div className="space-y-3">
         {accounts.map((account) => (
-          <AccountCard
-            key={account.id}
-            account={account}
-            actions={accountActions?.(account)}
-            onRestartNeeded={() => setRestartNeeded(true)}
-          />
+          <AccountCard key={account.id} account={account} actions={accountActions?.(account)} />
         ))}
       </div>
 
@@ -110,12 +79,10 @@ export function AccountsSection({ accountActions }: { accountActions?: (account:
 function AccountCard({
   account,
   actions,
-  onRestartNeeded,
 }: {
   account: Account;
   /** Buttons other features add next to the built-in ones. */
   actions?: ReactNode;
-  onRestartNeeded: () => void;
 }) {
   const { data: stats } = useAccountStats(account.id);
   const progress = useSyncStore((s) => s.byAccount[account.id]);
@@ -214,10 +181,7 @@ function AccountCard({
       {editingPassword && (
         <PasswordForm
           accountId={account.id}
-          onDone={() => {
-            setEditingPassword(false);
-            onRestartNeeded();
-          }}
+          onDone={() => setEditingPassword(false)}
           onCancel={() => setEditingPassword(false)}
         />
       )}
@@ -225,8 +189,9 @@ function AccountCard({
       {confirming && (
         <div className="mt-3 rounded border border-destructive/40 bg-background p-3">
           <p className="text-xs text-foreground">
-            Rimuovere <strong>{account.email}</strong>? Vengono cancellati la configurazione sul
-            server e le credenziali dal keychain.
+            Rimuovere <strong>{account.email}</strong>? Vengono cancellati tutti i dati locali
+            dell'account (messaggi, indice di ricerca, configurazione e password nel keychain).
+            La casella sul server di posta non viene toccata.
           </p>
           {removeAccount.isError && (
             <p className="mt-1 text-xs text-destructive">{String(removeAccount.error)}</p>
@@ -237,10 +202,7 @@ function AccountCard({
               disabled={removeAccount.isPending}
               onClick={() =>
                 removeAccount.mutate(account.id, {
-                  onSuccess: () => {
-                    setConfirming(false);
-                    onRestartNeeded();
-                  },
+                  onSuccess: () => setConfirming(false),
                 })
               }
               className="rounded bg-destructive px-2.5 py-1.5 text-xs font-medium text-white disabled:opacity-50"

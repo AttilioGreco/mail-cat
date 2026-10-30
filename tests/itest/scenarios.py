@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from collections import Counter
 from email.message import EmailMessage
 
@@ -684,25 +685,45 @@ def subscriptions_bulk(w):
         raise Fail("Sent lost its subscription")
 
 
-def hot_add(w):
-    """An account added to the running server syncs, and gets push, without a restart."""
+def create_carol():
+    """carol@itest.local on the Stalwart, in no mail-cat yet."""
     stalwart = HERE / "stalwart-cli"
     domain = json.loads(run([str(stalwart), "query", "Domain", "--json"]).splitlines()[0])["id"]
     run([str(stalwart), "create", "Account/User", "--json", json.dumps({
         "name": "carol", "domainId": domain,
         "credentials": {"0": {"@type": "Password", "secret": imapctl.USERS["carol"][1]}}})])
 
-    def deliver(n):
-        msg = EmailMessage()
-        msg["Subject"], msg["From"], msg["To"] = f"Hot [itest-95{n}]", "dan@example.org", "carol@itest.local"
-        msg["Message-ID"] = f"<hot95{n}@example.org>"
-        msg.set_content("hello\n")
-        m = imapctl.connect("carol")
-        imapctl.check(m.append("INBOX", "", imaplib.Time2Internaldate(time.time()), msg.as_bytes()))
-        m.logout()
 
+def deliver_to_carol(n):
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = f"Hot [itest-95{n}]", "dan@example.org", "carol@itest.local"
+    msg["Message-ID"] = f"<hot95{n}@example.org>"
+    msg.set_content("hello\n")
+    m = imapctl.connect("carol")
+    imapctl.check(m.append("INBOX", "", imaplib.Time2Internaldate(time.time()), msg.as_bytes()))
+    m.logout()
+
+
+def add_carol():
+    """`mc accounts add` against the running server; fails if it still asks for a restart."""
+    p = subprocess.run(MC + ["accounts", "add", "--email", "carol@itest.local", "--name", "carol",
+                             "--imap-host", "localhost", "--imap-port", "19993", "--password-stdin"],
+                       input=imapctl.USERS["carol"][1] + "\n", capture_output=True, text=True, env=ENV)
+    if p.returncode or "Riavvia" in p.stdout:
+        raise Fail(f"mc accounts add failed or still asks for a restart:\n{p.stdout}{p.stderr}")
+
+
+def carol_inbox_total():
+    carol = account_id("carol")
+    boxes = {r["Path"]: r for r in table(mc("mailboxes", "list", carol))}
+    return int(boxes["INBOX"]["Total"]) if "INBOX" in boxes else 0
+
+
+def hot_add(w):
+    """An account added to the running server syncs, and gets push, without a restart."""
+    create_carol()
     for n in range(3):
-        deliver(n)
+        deliver_to_carol(n)
     pid = (HERE / ".state" / "server.pid").read_text()
     log = HERE / ".state" / "server.log"
 
@@ -711,26 +732,98 @@ def hot_add(w):
 
     watching = watchers()  # alice's
 
-    p = subprocess.run(MC + ["accounts", "add", "--email", "carol@itest.local", "--name", "carol",
-                             "--imap-host", "localhost", "--imap-port", "19993", "--password-stdin"],
-                       input=imapctl.USERS["carol"][1] + "\n", capture_output=True, text=True, env=ENV)
-    if p.returncode or "Riavvia" in p.stdout:
-        raise Fail(f"mc accounts add failed or still asks for a restart:\n{p.stdout}{p.stderr}")
-
-    def inbox_total():
-        carol = account_id("carol")
-        boxes = {r["Path"]: r for r in table(mc("mailboxes", "list", carol))}
-        return int(boxes["INBOX"]["Total"]) if "INBOX" in boxes else 0
-
-    wait(lambda: inbox_total() == 3, "carol's three messages synced without a restart", timeout=60)
+    add_carol()
+    wait(lambda: carol_inbox_total() == 3, "carol's three messages synced without a restart", timeout=60)
     wait(lambda: watchers() > watching, "carol's INBOX watcher running", timeout=30)
-    deliver(3)
-    wait(lambda: inbox_total() == 4, "a message delivered after the add arrives by push", timeout=30)
+    deliver_to_carol(3)
+    wait(lambda: carol_inbox_total() == 4, "a message delivered after the add arrives by push", timeout=30)
     if (HERE / ".state" / "server.pid").read_text() != pid:
         raise Fail("the server was restarted")
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk, hot_add]
+def rows_of_account(account, email):
+    """Rows holding anything of one account, per table, straight from the database."""
+    blob = uuid.UUID(account).bytes
+    counts = {t: db(f"SELECT count(*) FROM {t} WHERE account_id = ?", (blob,))[0]
+              for t in ("mailboxes", "messages", "conversations", "thread_links", "sync_cursors", "sent_counted")}
+    counts["accounts"] = db("SELECT count(*) FROM accounts WHERE id = ?", (blob,))[0]
+    counts["events"] = db("SELECT count(*) FROM events WHERE account_id = ?", (account,))[0]
+    counts["downloads"] = db("SELECT count(*) FROM downloads WHERE account_email = ?", (email,))[0]
+    return counts
+
+
+def remove_account(w):
+    """Removing an account from the running server stops it and deletes all of its
+    data (rows, events, search documents) while another account and the contacts
+    stay; adding it again starts from scratch."""
+    create_carol()
+    for n in range(3):
+        deliver_to_carol(n)
+    pid = (HERE / ".state" / "server.pid").read_text()
+    log = HERE / ".state" / "server.log"
+    add_carol()
+    wait(lambda: carol_inbox_total() == 3, "carol synced", timeout=60)
+    carol = account_id("carol")
+    wait(lambda: "Started INBOX IDLE for 'carol'" in log.read_text(errors="replace"), "carol's watcher running", timeout=30)
+    # The index is committed once the sync's catch-up has run.
+    wait(lambda: "itest-950" in mc("messages", "search", "Hot", "--account-id", carol),
+         "carol's messages searchable", timeout=30)
+    if not any(rows_of_account(carol, "carol@itest.local").values()):
+        raise Fail("carol has no data to remove")
+    alice_before = rows_of_account(w.account, "alice@itest.local")
+    contacts_before = db("SELECT count(*) FROM contacts WHERE primary_email = 'dan@example.org'")[0]
+    if not contacts_before:
+        raise Fail("carol's sender was not added to the contacts")
+
+    if "ALL its data" not in subprocess.run(MC + ["accounts", "remove", "carol"], input="no\n",
+                                            capture_output=True, text=True, env=ENV).stdout:
+        raise Fail("`accounts remove` did not warn that the data is deleted")
+    if carol not in mc("accounts", "list"):
+        raise Fail("an unconfirmed remove removed the account")
+    mc("accounts", "remove", "carol@itest.local", "--yes")
+
+    if "carol@itest.local" in mc("accounts", "list"):
+        raise Fail("carol is still listed")
+    gone = {t: n for t, n in rows_of_account(carol, "carol@itest.local").items() if n}
+    if gone:
+        raise Fail(f"rows of carol left behind: {gone}")
+    if "itest-95" in mc("messages", "search", "Hot"):
+        raise Fail("carol's messages are still searchable")
+    if "carol@itest.local" in (HERE / ".state" / "config.toml").read_text():
+        raise Fail("carol is still declared in config.toml")
+    if rows_of_account(w.account, "alice@itest.local") != alice_before:
+        raise Fail("alice's data changed")
+    if db("SELECT count(*) FROM contacts WHERE primary_email = 'dan@example.org'")[0] != contacts_before:
+        raise Fail("the contacts changed")
+    w.assert_consistent()
+
+    # Nothing of carol runs any more: the INBOX session is closed and mail
+    # delivered now is neither pushed nor synced.
+    wait(lambda: "INBOX IDLE stopped for 'carol'" in log.read_text(errors="replace"), "carol's watcher stopped")
+    before = log.read_text(errors="replace")
+    deliver_to_carol(3)
+    time.sleep(8)
+    after = log.read_text(errors="replace")[len(before):]
+    if "NewData" in after:  # alice is quiet: only a carol session still open could see it
+        raise Fail("carol's IDLE session was still open after the removal")
+    if "carol" in after or "Partial sync" in after:
+        raise Fail(f"carol was synced after it was removed:\n{after}")
+    if (HERE / ".state" / "server.pid").read_text() != pid:
+        raise Fail("the server was restarted")
+
+    # Again: a fresh aggregate that syncs everything, the delivered extra too.
+    add_carol()
+    new = account_id("carol")
+    if new == carol:
+        raise Fail("the re-added account reused the removed id")
+    wait(lambda: carol_inbox_total() == 4, "carol's messages are back after re-adding it", timeout=60)
+    # No address: the re-added account downloads under the same one.
+    came_back = {t: n for t, n in rows_of_account(carol, "").items() if n}
+    if came_back:
+        raise Fail(f"the removed account's rows came back: {came_back}")
+
+
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk, hot_add, remove_account]
 SCENARIOS += gmail_scenarios.make(sys.modules[__name__])
 
 

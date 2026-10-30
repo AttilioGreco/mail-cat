@@ -14,7 +14,7 @@ use crate::grpc::proto::{
     account_service_server::AccountService,
 };
 use mc_application::{
-    AccountActivator, AccountProvisioner, AuthGates, OAuthLoginProgress, OAuthLoginTrigger,
+    AccountLifecycle, AccountProvisioner, AuthGates, OAuthLoginProgress, OAuthLoginTrigger,
     ProvisionParams, SyncProgressEvent as AppSyncProgressEvent, SyncState, SyncTrigger,
     bus::{CommandBus, QueryBus},
     commands::{Command, CommandResult},
@@ -29,7 +29,7 @@ pub struct AccountServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
     sync_trigger: Option<Arc<dyn SyncTrigger>>,
     oauth_trigger: Option<Arc<dyn OAuthLoginTrigger>>,
     provisioner: Option<Arc<dyn AccountProvisioner>>,
-    activator: Option<Arc<dyn AccountActivator>>,
+    lifecycle: Option<Arc<dyn AccountLifecycle>>,
     auth_gates: Option<Arc<AuthGates>>,
 }
 
@@ -41,7 +41,7 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
             sync_trigger: None,
             oauth_trigger: None,
             provisioner: None,
-            activator: None,
+            lifecycle: None,
             auth_gates: None,
         }
     }
@@ -61,8 +61,8 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountServiceImpl<C, Q> {
         self
     }
 
-    pub fn with_activator(mut self, activator: Arc<dyn AccountActivator>) -> Self {
-        self.activator = Some(activator);
+    pub fn with_lifecycle(mut self, lifecycle: Arc<dyn AccountLifecycle>) -> Self {
+        self.lifecycle = Some(lifecycle);
         self
     }
 
@@ -165,8 +165,8 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         // The aggregate exists and config.toml declares the account: bring it up
         // now. A failure is reported; the account stays declared and the next
         // boot retries it.
-        if let Some(activator) = &self.activator {
-            activator
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle
                 .activate(&email_str)
                 .await
                 .map_err(application_error_to_status)?;
@@ -321,30 +321,12 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
                 .map_err(|e| Status::invalid_argument(e.to_string()))?,
         );
 
-        // Resolve the email before removing: the provisioner keys config.toml and
-        // the keychain by address, and the read model won't have it afterwards.
-        let email = self
-            .query_bus
-            .dispatch(Query::GetAccount { account_id })
-            .await
-            .map_err(application_error_to_status)?
-            .into_account()
-            .map_err(|e| Status::internal(e.to_string()))?
-            .map(|a| a.email.as_str().to_string());
-
-        self.command_bus
-            .dispatch(Command::RemoveAccount { account_id })
+        self.lifecycle
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("account lifecycle not configured"))?
+            .remove(account_id)
             .await
             .map_err(application_error_to_status)?;
-
-        // Without this the account reappears on the next restart, recreated from
-        // config.toml — which is how "removed" accounts came back.
-        if let (Some(provisioner), Some(email)) = (&self.provisioner, email) {
-            provisioner
-                .deprovision(&email)
-                .await
-                .map_err(application_error_to_status)?;
-        }
 
         Ok(Response::new(RemoveAccountResponse { success: true }))
     }

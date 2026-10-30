@@ -11,8 +11,8 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use mc_application::{
-    AccountActivator, ApplicationError, AuthGate, AuthGates, AuthState, Command, CommandBus,
-    CommandResult, Credential,
+    AccountLifecycle, AccountProvisioner, ApplicationError, AuthGate, AuthGates, AuthState,
+    Command, CommandBus, CommandResult, Credential,
 };
 use mc_domain::model::account::{IncomingServer, SmtpConnectionConfig, SmtpSecurity};
 use mc_domain::{
@@ -41,6 +41,7 @@ pub struct RuntimeDeps {
     pub config_path: String,
     pub db: Arc<SqliteDb>,
     pub secret_store: Arc<dyn SecretStore>,
+    pub provisioner: Arc<dyn AccountProvisioner>,
     pub auth_gates: Arc<AuthGates>,
     pub registry: Arc<ProviderRegistryImpl>,
     pub repository: Arc<SqliteRepository>,
@@ -62,7 +63,8 @@ struct Running {
 
 pub struct AccountRuntime {
     deps: RuntimeDeps,
-    /// Serialises `start`, so two activations of one address cannot both create it.
+    /// Serialises `start` and `remove`, so two activations of one address cannot
+    /// both create it and a removal never races a start.
     starting: tokio::sync::Mutex<()>,
     running: Mutex<HashMap<AccountId, Running>>,
 }
@@ -184,8 +186,6 @@ impl AccountRuntime {
 
     /// Stops the account's tasks and takes its provider and gate out of service.
     /// Its data stays; returns whether it was running.
-    // The account removal step is the caller.
-    #[allow(dead_code)]
     pub fn stop(&self, account_id: &AccountId) -> bool {
         let Some(running) = self.running.lock().unwrap().remove(account_id) else {
             return false;
@@ -195,6 +195,88 @@ impl AccountRuntime {
         self.deps.auth_gates.remove(account_id);
         tracing::info!("Stopped account '{}'", running.name);
         true
+    }
+
+    /// Removes an account for good: stops it, records the removal in the log,
+    /// then forgets everything it had. The order makes a crash harmless. The
+    /// `AccountRemoved` event is the point of no return: from there on boot
+    /// ([`Self::recover_removals`]) finishes the job before it reads
+    /// `config.toml`, so the account cannot come back as a fresh one. The config
+    /// entry goes before the data, so no window leaves it declared with its
+    /// data gone.
+    pub async fn remove(&self, account_id: AccountId) -> Result<(), ApplicationError> {
+        let _lifecycle = self.starting.lock().await;
+        let deps = &self.deps;
+        let account = deps
+            .repository
+            .get_account(&account_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("Account", account_id.to_string()))?;
+        self.stop(&account_id);
+        deps.sync.forget(&account_id);
+        deps.command_bus
+            .dispatch(Command::RemoveAccount { account_id })
+            .await?;
+        self.finish_removal(account_id, Some(account.email.as_str().to_owned()))
+            .await
+            .map_err(|e| ApplicationError::Internal(format!("{e:#}")))
+    }
+
+    /// Finishes removals the server was interrupted in, returning how many it
+    /// found. Runs at boot before accounts are started or created from
+    /// `config.toml`, which may have changed.
+    pub async fn recover_removals(&self) -> anyhow::Result<usize> {
+        let _lifecycle = self.starting.lock().await;
+        let pending = self.deps.repository.pending_removals().await?;
+        for (account_id, email) in &pending {
+            let (account_id, email) = (*account_id, email.clone());
+            tracing::warn!("Finishing the removal of account {account_id} that was interrupted");
+            if let Err(e) = self.finish_removal(account_id, email).await {
+                tracing::error!("Could not finish removing account {account_id}: {e:#}");
+            }
+        }
+        Ok(pending.len())
+    }
+
+    /// Idempotent: each step may already be done.
+    async fn finish_removal(
+        &self,
+        account_id: AccountId,
+        email: Option<String>,
+    ) -> anyhow::Result<()> {
+        let deps = &self.deps;
+        // The address may belong to an account added again since; its config
+        // entry, keychain secrets and download log are not the old one's.
+        let email = match email {
+            Some(email) if !self.address_in_use(&email).await? => Some(email),
+            _ => None,
+        };
+        if let Some(email) = &email {
+            deps.provisioner
+                .deprovision(email)
+                .await
+                .context("removing the config entry and keychain secrets")?;
+        }
+        deps.search
+            .remove_account(&account_id)
+            .await
+            .context("removing search documents")?;
+        deps.repository
+            .purge_account(account_id, email)
+            .await
+            .context("deleting the account's data")?;
+        tracing::info!("Removed account {account_id} and all of its data");
+        Ok(())
+    }
+
+    async fn address_in_use(&self, email: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .deps
+            .repository
+            .list_accounts()
+            .await?
+            .iter()
+            .any(|a| a.email.as_str() == email))
     }
 
     /// Syncs at start, then every 5 minutes, and as soon as the account
@@ -290,12 +372,16 @@ impl AccountRuntime {
 }
 
 #[async_trait::async_trait]
-impl AccountActivator for AccountRuntime {
+impl AccountLifecycle for AccountRuntime {
     async fn activate(&self, email: &str) -> Result<(), ApplicationError> {
         self.start_declared(email)
             .await
             .map(|_| ())
             .map_err(|e| ApplicationError::Internal(format!("{e:#}")))
+    }
+
+    async fn remove(&self, account_id: AccountId) -> Result<(), ApplicationError> {
+        AccountRuntime::remove(self, account_id).await
     }
 }
 

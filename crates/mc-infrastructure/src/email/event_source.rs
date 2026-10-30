@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::{Stream, StreamExt};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use mc_domain::error::DomainError;
@@ -26,42 +27,53 @@ impl AnyAccountEventSource {
     }
 }
 
+type Notifications = Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send>>;
+
 impl AccountEventSource for AnyAccountEventSource {
-    fn watch(
-        &self,
-        mailboxes: &[MailboxPath],
-    ) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + 'static>>
-    {
-        watch_mailboxes(Arc::clone(&self.provider), mailboxes.to_vec())
+    fn watch(&self, mailboxes: &[MailboxPath]) -> Notifications {
+        let provider = Arc::clone(&self.provider);
+        merge_watches(mailboxes.to_vec(), move |mailbox| {
+            let provider = Arc::clone(&provider);
+            Box::pin(async_stream::stream! {
+                let mut stream = provider.watch_mailbox(&mailbox);
+                while let Some(notification) = stream.next().await {
+                    yield notification;
+                }
+            })
+        })
     }
 }
 
-/// Free function that creates a `'static` notification stream for the given
-/// mailboxes. Each mailbox gets its own background task (IMAP IDLE session, JMAP event stream).
-///
-/// Separated from `AnyAccountEventSource::watch` so the `'static` lifetime
-/// can be proven without the compiler tying the return value to `&self`.
-fn watch_mailboxes(
-    provider: Arc<AnyProvider>,
-    mailboxes: Vec<MailboxPath>,
-) -> Pin<Box<dyn Stream<Item = Result<ProviderNotification, DomainError>> + Send + 'static>> {
+/// One notification stream over the mailboxes, each watched by a background
+/// task (IMAP IDLE session, JMAP event stream) that `open` starts and that is
+/// restarted when it ends. Dropping the returned stream stops every task and
+/// so closes the sessions: they would otherwise only notice at their next send.
+fn merge_watches<F>(mailboxes: Vec<MailboxPath>, open: F) -> Notifications
+where
+    F: Fn(MailboxPath) -> Notifications + Clone + Send + 'static,
+{
     Box::pin(async_stream::stream! {
         let (tx, mut rx) =
             tokio::sync::mpsc::channel::<Result<ProviderNotification, DomainError>>(128);
+        let stop = CancellationToken::new();
+        let _stop_on_drop = stop.clone().drop_guard();
 
         for mailbox in mailboxes {
-            let p = Arc::clone(&provider);
-            let t = tx.clone();
+            let (open, tx, stop) = (open.clone(), tx.clone(), stop.clone());
             tokio::spawn(async move {
                 debug!(
                     "[AccountEventSource] Spawning watcher for {}",
                     mailbox.full_path()
                 );
                 loop {
-                    let mut stream = p.watch_mailbox(&mailbox);
-                    while let Some(notification) = stream.next().await {
-                        if t.send(notification).await.is_err() {
-                            // Receiver dropped — outer stream was closed
+                    let mut stream = open(mailbox.clone());
+                    loop {
+                        let notification = tokio::select! {
+                            _ = stop.cancelled() => return,
+                            notification = stream.next() => notification,
+                        };
+                        let Some(notification) = notification else { break };
+                        if tx.send(notification).await.is_err() {
                             return;
                         }
                     }
@@ -70,7 +82,10 @@ fn watch_mailboxes(
                         "[AccountEventSource] Watch stream ended for {}, restarting in 5s",
                         mailbox.full_path()
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = stop.cancelled() => return,
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
+                    }
                 }
             });
         }
@@ -82,3 +97,6 @@ fn watch_mailboxes(
         }
     })
 }
+
+#[cfg(test)]
+mod tests;

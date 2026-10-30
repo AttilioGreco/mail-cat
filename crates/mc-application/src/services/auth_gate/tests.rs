@@ -644,3 +644,21 @@ async fn the_refresh_timer_follows_accounts_added_and_removed_after_it_started()
     );
     token.cancel();
 }
+
+#[tokio::test]
+async fn watchers_hear_of_accounts_added_and_removed() {
+    let h = Harness::new(fresh);
+    let mut changes = h.gates.subscribe();
+
+    let id = h
+        .gates
+        .add(AccountId::new(), EMAIL, Credential::Password("pw".into()))
+        .account_id();
+    assert_eq!(changes.try_recv().unwrap(), id);
+
+    h.gates.remove(&id);
+    assert_eq!(changes.try_recv().unwrap(), id);
+    // Removing what is gone says nothing.
+    h.gates.remove(&id);
+    assert!(changes.try_recv().is_err());
+}

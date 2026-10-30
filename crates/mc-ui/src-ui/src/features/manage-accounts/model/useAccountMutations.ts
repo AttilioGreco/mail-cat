@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useSyncStore } from '@/entities/account';
+import { useSessionStore } from '@/entities/session';
 
 export interface ImapAccountInput {
   name: string;
@@ -27,11 +29,29 @@ export function useRemoveAccount() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (accountId: string) => invoke('remove_account', { accountId }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['accounts'] }),
+    onSuccess: (_, accountId) => {
+      if (useSessionStore.getState().selectedAccountId === accountId) {
+        useSessionStore.setState({
+          selectedAccountId: null,
+          selectedMailboxId: null,
+          selectedMessageId: null,
+          selectedMessageIds: [],
+          selectedThreadMessageId: null,
+          selectedThreadIds: [],
+        });
+      }
+      useSyncStore.getState().forget(accountId);
+      // Keys carry the account id alone or inside a "account::mailbox" key.
+      queryClient.removeQueries({
+        predicate: (q) =>
+          q.queryKey.some((k) => typeof k === 'string' && (k === accountId || k.startsWith(`${accountId}::`))),
+      });
+      queryClient.invalidateQueries({ queryKey: ['accounts'] });
+    },
   });
 }
 
-/** Store a new password in the server keychain; providers pick it up at restart. */
+/** Store a new password in the server keychain; the running account uses it at once. */
 export function useSetAccountPassword() {
   return useMutation({
     mutationFn: ({ accountId, password }: { accountId: string; password: string }) =>
@@ -55,11 +75,7 @@ export function useSyncNow() {
   });
 }
 
-/**
- * Restart the server. Adding an account no longer needs it; removing one does
- * until the server can stop accounts on its own, and so does an OAuth client
- * the server rejected.
- */
+/** Restart the server: what an OAuth client the server rejected needs. */
 export function useRestartServer() {
   const queryClient = useQueryClient();
   return useMutation({

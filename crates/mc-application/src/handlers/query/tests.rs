@@ -228,6 +228,10 @@ impl SearchIndex for MockSearchIndex {
         Ok(())
     }
 
+    async fn remove_account(&self, _id: &AccountId) -> Result<(), DomainError> {
+        Ok(())
+    }
+
     async fn search(
         &self,
         _query: &str,

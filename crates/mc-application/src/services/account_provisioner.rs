@@ -10,8 +10,8 @@
 //! [`SyncTrigger`](crate::services::sync_trigger::SyncTrigger).
 
 use async_trait::async_trait;
-use mc_domain::IncomingServer;
 use mc_domain::model::account::SmtpConnectionConfig;
+use mc_domain::{AccountId, IncomingServer};
 
 use crate::error::ApplicationError;
 
@@ -40,11 +40,18 @@ pub trait AccountProvisioner: Send + Sync {
     async fn set_password(&self, email: &str, password: &str) -> Result<(), ApplicationError>;
 }
 
-/// Port: start the live side of an account that is already declared in the
-/// server's configuration (gate, provider, sync, watchers). Without it an
-/// account added while the server runs would only come alive at the next boot.
+/// Port: the live side of an account whose declaration is in the server's
+/// configuration (gate, provider, sync, watchers), and its end. Without it an
+/// account added while the server runs would only come alive at the next boot,
+/// and a removed one would keep running and keep its data.
 #[async_trait]
-pub trait AccountActivator: Send + Sync {
+pub trait AccountLifecycle: Send + Sync {
     /// Idempotent: activating a running account is a no-op.
     async fn activate(&self, email: &str) -> Result<(), ApplicationError>;
+
+    /// Stops the account, then deletes everything the server keeps of it:
+    /// events, read-model rows, search documents, config entry and secrets.
+    /// The mailbox on the provider is untouched. Finishes at the next boot if
+    /// the server dies half-way.
+    async fn remove(&self, account_id: AccountId) -> Result<(), ApplicationError>;
 }

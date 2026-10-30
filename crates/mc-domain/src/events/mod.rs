@@ -363,6 +363,30 @@ impl DomainEvent {
         }
     }
 
+    /// The account the event names itself, for the events that do (the first
+    /// event of every account, mailbox and message aggregate does).
+    pub fn account_id(&self) -> Option<AccountId> {
+        match self {
+            Self::AccountAdded { account_id, .. }
+            | Self::AccountUpdated { account_id, .. }
+            | Self::AccountMailboxModelChanged { account_id, .. }
+            | Self::AccountTagsDetected { account_id, .. }
+            | Self::AccountRemoved { account_id }
+            | Self::AccountSyncStarted { account_id }
+            | Self::AccountSyncCompleted { account_id, .. }
+            | Self::AccountSyncFailed { account_id, .. }
+            | Self::AccountAuthExpired { account_id, .. }
+            | Self::AccountCredentialsRejected { account_id, .. }
+            | Self::AccountReauthenticated { account_id }
+            | Self::MailboxDiscovered { account_id, .. }
+            | Self::MailboxDeleted { account_id, .. }
+            | Self::MessageReceived { account_id, .. }
+            | Self::MessageSent { account_id, .. }
+            | Self::DraftSaved { account_id, .. } => Some(*account_id),
+            _ => None,
+        }
+    }
+
     /// Returns a human-readable event name.
     pub fn event_name(&self) -> &'static str {
         match self {

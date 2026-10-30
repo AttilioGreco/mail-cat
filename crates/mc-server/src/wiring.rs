@@ -9,7 +9,7 @@ use mc_application::CommandBus;
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::projections::{ProjectionEventHandler, SearchProjectionHandler};
 use mc_application::{
-    AccountActivator, AuthGates, EventPublisher, OAuthLoginTrigger, RefreshFn, SyncConfig,
+    AccountLifecycle, AuthGates, EventPublisher, OAuthLoginTrigger, RefreshFn, SyncConfig,
     SyncService, SyncTrigger,
 };
 use mc_domain::{
@@ -241,10 +241,15 @@ impl AppContext {
         // Keeps OAuth tokens ahead of expiry; logins refresh on their own too.
         auth_gates.spawn_refresh_timer(shutdown.clone());
 
+        let provisioner = Arc::new(crate::account_provisioner::ConfigAccountProvisioner::new(
+            std::path::PathBuf::from(config_path),
+            secret_store.clone(),
+        )) as Arc<dyn mc_application::AccountProvisioner>;
         let account_runtime = Arc::new(AccountRuntime::new(RuntimeDeps {
             config_path: config_path.to_owned(),
             db: db.clone(),
             secret_store: secret_store.clone(),
+            provisioner: provisioner.clone(),
             auth_gates: auth_gates.clone(),
             registry: provider_registry.clone(),
             repository: repository_arc.clone(),
@@ -257,10 +262,22 @@ impl AppContext {
             shutdown: shutdown.clone(),
         }));
 
+        // Before config.toml is read again: a removal the last run did not
+        // finish must not leave its account declared there.
+        let recovered = account_runtime
+            .recover_removals()
+            .await
+            .context("failed to finish interrupted account removals")?;
+        let declared = if recovered > 0 {
+            ServerConfig::load_or_default(config_path).accounts
+        } else {
+            config.accounts.clone()
+        };
+
         // Accounts declared in config but unknown to the database get their
         // aggregate now, so the catch-ups below replay their events.
         let mut created_new = false;
-        for account_config in &config.accounts {
+        for account_config in &declared {
             if existing_accounts
                 .iter()
                 .any(|a| a.email.as_str() == account_config.email)
@@ -326,6 +343,10 @@ impl AppContext {
                         e = sub.recv() => match e { Some(v) => v, None => break },
                     };
                     let (account_id, addrs) = match envelope.payload {
+                        mc_domain::DomainEvent::AccountRemoved { account_id } => {
+                            ensured.retain(|(id, _)| *id != account_id);
+                            continue;
+                        }
                         mc_domain::DomainEvent::MessageReceived {
                             account_id,
                             envelope: mail,
@@ -592,10 +613,10 @@ impl AppContext {
 
         // Last, so the subscribers above see the first transitions and the
         // catch-ups have already replayed what the sync loops will extend.
-        for account_config in &config.accounts {
+        for account_config in &declared {
             account_runtime.start(account_config).await?;
         }
-        tracing::info!("Started {} account(s)", config.accounts.len());
+        tracing::info!("Started {} account(s)", declared.len());
 
         // An OAuth account that died before the user re-authenticated (e.g. server
         // restarted mid-outage) gets its "Ri-autentica" notification reissued
@@ -624,13 +645,8 @@ impl AppContext {
             .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>)
             .with_oauth_trigger(oauth_trigger.clone())
             .with_auth_gates(auth_gates.clone())
-            .with_activator(account_runtime.clone() as Arc<dyn AccountActivator>)
-            .with_provisioner(
-                Arc::new(crate::account_provisioner::ConfigAccountProvisioner::new(
-                    std::path::PathBuf::from(config_path),
-                    secret_store.clone(),
-                )) as Arc<dyn mc_application::AccountProvisioner>,
-            );
+            .with_lifecycle(account_runtime.clone() as Arc<dyn AccountLifecycle>)
+            .with_provisioner(provisioner);
 
         let mailbox_service = MailboxServiceImpl::new(query_bus.clone())
             .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>);

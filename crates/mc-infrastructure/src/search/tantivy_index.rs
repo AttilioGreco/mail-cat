@@ -255,6 +255,12 @@ impl SearchIndex for TantivySearchIndex {
         Ok(())
     }
 
+    async fn remove_account(&self, account_id: &AccountId) -> Result<(), DomainError> {
+        let term = tantivy::Term::from_field_text(self.fields.account_id, &account_id.to_string());
+        self.writer.lock().delete_term(term);
+        self.commit_and_reload()
+    }
+
     async fn search(
         &self,
         query: &str,

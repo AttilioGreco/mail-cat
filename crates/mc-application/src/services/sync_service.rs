@@ -229,6 +229,15 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         lock.lock_owned().await
     }
 
+    /// Drops the per-account bookkeeping of a removed account.
+    pub fn forget(&self, account_id: &AccountId) {
+        self.account_locks.lock().unwrap().remove(account_id);
+        self.last_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(account_id);
+    }
+
     /// Subscribe to live sync progress for every account.
     pub fn subscribe_progress(&self) -> broadcast::Receiver<SyncProgressEvent> {
         self.progress_tx.subscribe()

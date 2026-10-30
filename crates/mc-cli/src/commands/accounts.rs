@@ -65,6 +65,15 @@ pub enum AccountsCmd {
         #[arg(value_enum)]
         model: ModelArg,
     },
+    /// Remove an account and delete everything the server keeps of it (messages,
+    /// events, search index, stored password). The mailbox on the provider is untouched.
+    Remove {
+        /// Account name, email or ID
+        account: String,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
     /// Rename an existing account's display name
     Rename {
         /// Email address of the account to rename
@@ -156,6 +165,7 @@ pub async fn run(cmd: AccountsCmd, client: MailCatClient, json: bool) -> Result<
             );
             Ok(())
         }
+        AccountsCmd::Remove { account, yes } => remove(client, account, yes).await,
         AccountsCmd::Rename { email, name } => rename(client, email, name).await,
     }
 }
@@ -174,17 +184,41 @@ fn read_password(from_stdin: bool) -> Result<String> {
     Ok(password)
 }
 
-async fn set_model(client: MailCatClient, wanted: String, model: ModelArg) -> Result<()> {
-    let account = client
+async fn find_account(client: &MailCatClient, wanted: &str) -> Result<mc_client::Account> {
+    client
         .list_accounts()
         .await?
         .into_iter()
         .find(|a| {
             [&a.id, &a.name, &a.email]
                 .iter()
-                .any(|v| v.eq_ignore_ascii_case(&wanted))
+                .any(|v| v.eq_ignore_ascii_case(wanted))
         })
-        .with_context(|| format!("no account named {wanted:?} (see `mc accounts list`)"))?;
+        .with_context(|| format!("no account named {wanted:?} (see `mc accounts list`)"))
+}
+
+async fn remove(client: MailCatClient, wanted: String, yes: bool) -> Result<()> {
+    let account = find_account(&client, &wanted).await?;
+    if !yes {
+        print!(
+            "Delete {} and ALL its data held by the server (messages, search index, stored password)?\n\
+             The mailbox on the provider is not touched. Type the email to confirm: ",
+            account.email
+        );
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case(&account.email) {
+            bail!("not confirmed, nothing removed");
+        }
+    }
+    client.remove_account(&account.id).await?;
+    println!("{} account {} removed", "✓".green(), account.email);
+    Ok(())
+}
+
+async fn set_model(client: MailCatClient, wanted: String, model: ModelArg) -> Result<()> {
+    let account = find_account(&client, &wanted).await?;
     let model = match model {
         ModelArg::Labels => MailboxModel::Labels,
         ModelArg::Folders => MailboxModel::Folders,

@@ -192,7 +192,7 @@ fi
 env HOME="$STATE/home" XDG_DATA_HOME="$STATE/home/.local/share" \
     XDG_CONFIG_HOME="$STATE/home/.config" XDG_RUNTIME_DIR="$STATE/run" \
     MAIL_CAT_CONFIG="$STATE/config.toml" NO_COLOR=1 SSL_CERT_FILE="$SERVER_CA" \
-    RUST_LOG="${RUST_LOG:-mc_server=info,mc_application=debug,mc_infrastructure=debug}" \
+    RUST_LOG="${RUST_LOG:-mail_cat_server=info,mc_server=info,mc_application=debug,mc_infrastructure=debug}" \
     setsid dbus-run-session --config-file="$HERE/dbus-session.conf" -- sh -c '
         echo itest | gnome-keyring-daemon --unlock --components=secrets >/dev/null
         echo $$ > "$0"

@@ -664,11 +664,17 @@ impl AuthGates {
             changes: self.changes.clone(),
         });
         self.gates.write().unwrap().insert(account_id, gate.clone());
+        // Watchers learn of the gate now, not at its next state change.
+        let _ = self.changes.send(account_id);
         gate
     }
 
     pub fn remove(&self, account_id: &AccountId) -> Option<Arc<AuthGate>> {
-        self.gates.write().unwrap().remove(account_id)
+        let removed = self.gates.write().unwrap().remove(account_id);
+        if removed.is_some() {
+            let _ = self.changes.send(*account_id);
+        }
+        removed
     }
 
     pub fn get(&self, account_id: &AccountId) -> Option<Arc<AuthGate>> {

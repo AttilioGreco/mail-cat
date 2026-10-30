@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::DateTime;
 use futures::Stream;
-use rusqlite::{Connection, Params, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Params, Row, TransactionBehavior, params};
 use tokio::sync::broadcast;
 use tracing::warn;
 use uuid::Uuid;
@@ -96,6 +96,30 @@ fn max_sequence(conn: &Connection, aggregate_id: &str) -> Result<u64, DomainErro
     .map_err(store_err)
 }
 
+/// The account an aggregate's events belong to, so a purge can find the ones
+/// that do not name it (a flag change only knows its message). The aggregate's
+/// first event always names it; later appends inherit it.
+fn account_of(
+    conn: &Connection,
+    aggregate_id: &str,
+    aggregate_type: AggregateType,
+    events: &[DomainEvent],
+) -> Result<Option<String>, DomainError> {
+    if aggregate_type == AggregateType::Contact {
+        return Ok(None);
+    }
+    if let Some(account_id) = events.iter().find_map(DomainEvent::account_id) {
+        return Ok(Some(account_id.to_string()));
+    }
+    conn.query_row(
+        "SELECT account_id FROM events WHERE aggregate_id = ?1 AND account_id IS NOT NULL LIMIT 1",
+        [aggregate_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(store_err)
+}
+
 #[async_trait]
 impl EventStore for SqliteEventStore {
     async fn append(
@@ -124,13 +148,14 @@ impl EventStore for SqliteEventStore {
                         actual: current,
                     });
                 }
+                let account_id = account_of(&tx, &aggregate_id, aggregate_type, &events)?;
                 let mut envelopes = Vec::with_capacity(events.len());
                 {
                     let mut insert = tx
                         .prepare_cached(
                             "INSERT INTO events (event_id, aggregate_id, aggregate_type, \
-                             sequence, event_type, occurred_at, payload) \
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                             account_id, sequence, event_type, occurred_at, payload) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         )
                         .map_err(store_err)?;
                     for (sequence, event) in (current + 1..).zip(events) {
@@ -151,6 +176,7 @@ impl EventStore for SqliteEventStore {
                                 &envelope.event_id.as_bytes()[..],
                                 aggregate_id,
                                 type_code(aggregate_type),
+                                account_id,
                                 sequence as i64,
                                 envelope.payload.event_name(),
                                 occurred_at,

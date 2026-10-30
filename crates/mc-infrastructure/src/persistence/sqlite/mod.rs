@@ -8,6 +8,7 @@ use rusqlite::{Connection, OpenFlags};
 
 pub mod event_store;
 mod projector;
+mod purge;
 pub mod repository;
 mod threading;
 
@@ -16,17 +17,22 @@ mod threading;
 /// is edited in place and the data folder wiped.
 pub(crate) const MIGRATIONS: &[&str] = &[
     // 1: event log. The rowid is the global position.
+    // AUTOINCREMENT: purging an account deletes events, and a position that
+    // is reused would sit below the projections' checkpoints and be skipped.
+    // `account_id` is what a purge deletes by; contact events have none.
     "CREATE TABLE events (
-        global_position INTEGER PRIMARY KEY,
+        global_position INTEGER PRIMARY KEY AUTOINCREMENT,
         event_id        BLOB    NOT NULL,
         aggregate_id    TEXT    NOT NULL,
         aggregate_type  INTEGER NOT NULL,
+        account_id      TEXT,
         sequence        INTEGER NOT NULL,
         event_type      TEXT    NOT NULL,
         occurred_at     INTEGER NOT NULL,
         payload         BLOB    NOT NULL,
         UNIQUE (aggregate_id, sequence)
-    );",
+    );
+    CREATE INDEX events_account ON events(account_id);",
     // 2: read model (spec §4). No FK from mailboxes to accounts or from
     // memberships to mailboxes, and no UNIQUE (mailbox, uid): catch-up replays
     // events over rows in any later state, and any of them would turn a
