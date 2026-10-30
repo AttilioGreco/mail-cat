@@ -19,6 +19,7 @@ import time
 from collections import Counter
 from email.message import EmailMessage
 
+import gmail_scenarios
 import imapctl
 
 HERE = imapctl.HERE
@@ -529,11 +530,16 @@ def jmap_labels(w):
 
 
 SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels]
+SCENARIOS += gmail_scenarios.make(sys.modules[__name__])
 
 
-def fresh_world():
+def fresh_world(gmail=False):
+    if gmail:  # the mailbox is seeded first so the server's first sync sees the fixture
+        from gmail import seed
+        seed.reset()
+    reset_env = {**os.environ, "ITEST_GMAIL": "1"} if gmail else None
     for cmd in ([str(HERE / "reset.sh")], [sys.executable, str(HERE / "seed.py")]):
-        p = subprocess.run(cmd, capture_output=True, text=True)
+        p = subprocess.run(cmd, capture_output=True, text=True, env=reset_env)
         if p.returncode:
             sys.exit(f"{cmd[-1]} failed:\n{p.stdout}{p.stderr}")
     w = World()
@@ -548,12 +554,17 @@ def main():
         sys.exit(f"unknown scenario(s): {', '.join(unknown)}")
     LOGS.mkdir(exist_ok=True)
     results = []
+    from gmail import api
+    gmail_ok, gmail_why = api.available()
     for s in SCENARIOS:
         if s.__name__ not in wanted:
             continue
+        if getattr(s, "gmail", False) and not gmail_ok:
+            print(f"── {s.__name__}\n   SKIP: {gmail_why}")
+            continue
         print(f"── {s.__name__}: {' '.join(s.__doc__.split()).split('. ')[0]}")
         try:
-            s(fresh_world())
+            s(fresh_world(getattr(s, "gmail", False)))
             results.append((s.__name__, None))
             print("   PASS")
         except (Exception, SystemExit) as e:  # SystemExit: imapctl selector misses

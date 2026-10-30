@@ -151,13 +151,47 @@ username      = "bob@itest.local"
 password      = "$BOB_PW"
 EOF
 
+# ITEST_GMAIL=1 (set by the Gmail scenarios) adds the Gmail test mailbox as an
+# OAuth account (the token the app stored for $MAILCAT_ITEST_GMAIL_CONFIRM, read
+# from the real keychain): the refresh token goes in the config only for the instant it
+# takes the server to move it into the keychain (secret_ingest), and the real
+# CA store is appended to the private CA so imap.gmail.com still verifies.
+SERVER_CA="$STATE/certs/ca.pem"
+if [[ -n ${ITEST_GMAIL:-} ]]; then
+    cat "$STATE/certs/ca.pem" /etc/ssl/certs/ca-certificates.crt > "$STATE/certs/bundle.pem"
+    SERVER_CA="$STATE/certs/bundle.pem"
+    chmod 600 "$STATE/config.toml"
+    PYTHONPATH="$HERE" python3 - >> "$STATE/config.toml" <<'PY'
+import os
+from gmail import api
+address = os.environ[api.CONFIRM_ENV]
+print(f"""
+[[accounts]]
+name           = "gmail"
+email          = "{address}"
+provider_type  = "imap"
+imap_host      = "imap.gmail.com"
+imap_port      = 993
+use_tls        = true
+username       = "{address}"
+oauth_provider = "google"
+oauth_refresh_token = "{api.keychain_token(address)}"
+
+[accounts.smtp]
+host     = "smtp.gmail.com"
+port     = 587
+security = "start_tls"
+""")
+PY
+fi
+
 # The private bus has no service dirs, so nothing gets D-Bus-activated
 # (a desktop notification would otherwise spawn the user's notification daemon).
 # The child records its own pid so stop_server kills the server, not the
 # dbus-run-session wrapper; the bus and keyring die with it.
 env HOME="$STATE/home" XDG_DATA_HOME="$STATE/home/.local/share" \
     XDG_CONFIG_HOME="$STATE/home/.config" XDG_RUNTIME_DIR="$STATE/run" \
-    MAIL_CAT_CONFIG="$STATE/config.toml" NO_COLOR=1 SSL_CERT_FILE="$STATE/certs/ca.pem" \
+    MAIL_CAT_CONFIG="$STATE/config.toml" NO_COLOR=1 SSL_CERT_FILE="$SERVER_CA" \
     RUST_LOG="${RUST_LOG:-mc_server=info,mc_application=debug,mc_infrastructure=debug}" \
     setsid dbus-run-session --config-file="$HERE/dbus-session.conf" -- sh -c '
         echo itest | gnome-keyring-daemon --unlock --components=secrets >/dev/null
@@ -166,4 +200,5 @@ env HOME="$STATE/home" XDG_DATA_HOME="$STATE/home/.local/share" \
 
 wait_for 30 "$MC" --server "http://127.0.0.1:$GRPC_PORT" accounts list
 kill -0 "$(<"$STATE/server.pid")" || { tail "$STATE/server.log"; exit 1; }
+rm -f "$STATE/config.toml.bak"  # holds the pre-ingest config, token included
 log "ready — server log: $STATE/server.log"

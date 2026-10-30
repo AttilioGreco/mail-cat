@@ -56,3 +56,62 @@ Drafts, Junk (special-use) and Projects. alice is configured in mail-cat over IM
 - `./seed.py`: deterministic messages with threads, missing Message-IDs,
   attachments and mixed flags; see its `--help`.
 - `./scenarios.py`: the assertions. Server logs of each run land in `.logs/`.
+
+## Gmail scenarios (real mailbox, Gmail API as oracle)
+
+`gmail_*` scenarios in `gmail_scenarios.py` sync a **dedicated, throwaway Gmail
+mailbox** with mail-cat (IMAP + X-GM-LABELS) and compare the result with what
+the Gmail REST API (`gmail/api.py`, stdlib `urllib`) reports, so the code is
+not checked through its own IMAP view. Without the setup below they print
+`SKIP` and never fail.
+
+One-time setup:
+
+1. Use a dedicated Gmail account (see below), and the Google OAuth
+   client the app uses (`MAILCAT_GOOGLE_CLIENT_ID` / `MAILCAT_GOOGLE_CLIENT_SECRET`
+   exported in your shell). The Gmail API must be enabled in that Cloud project;
+   the scope `https://mail.google.com/` already covers both IMAP and REST.
+2. Sign that mailbox in once with the normal app: `mc accounts add-oauth google
+   test@gmail.com`. The harness reuses the refresh token the app put in your
+   keychain (`secret-tool lookup service mail-cat username <address>`). Google
+   refresh tokens do not rotate, so the app is undisturbed. No token file exists
+   outside the keychain; access tokens live in memory only and are never printed.
+3. `export MAILCAT_ITEST_GMAIL_CONFIRM=test@gmail.com` (the exact address).
+4. `python3 tests/itest/gmail/selftest.py` (offline checks of the helpers and guards),
+   then `tests/itest/scenarios.py gmail_sync gmail_labels_mc_to_server gmail_server_to_mc gmail_delete_permanent gmail_model_default`
+   (plain `scenarios.py` runs them after the 11 others).
+
+Each Gmail scenario reseeds the sandbox, then runs `reset.sh` with
+`ITEST_GMAIL=1`, which adds the account to the isolated server's config
+(`oauth_refresh_token`, read from your keychain, is moved into the private
+keyring at startup by the server's secret ingest and the config backup is
+deleted) and trusts the system CA store next to the private CA.
+`gmail/seed.py` creates 12 messages `<mcitest-NNN@mc-itest.local>` and labels
+including `mc-itest/Clienti/Café`, `mc-itest/A/B/C`, `mc-itest/Presentations`,
+`mc-itest/Old Trash`, `mc-itest/Inbox Zero`, `work`/`Work` twins, a quote and a
+backslash name (Gmail may refuse the last few; they are skipped then).
+
+**Cost.** Every scenario is a fresh full IMAP sync; Gmail caps IMAP download at
+~2.5 GB/day and throttles repeated logins. Keep the fixture small.
+
+**Sandbox and guards.** All test messages carry the label `mc-itest`, all test
+labels are `mc-itest/<name>`; the harness never creates, renames or deletes any
+other label.
+
+- Nothing runs unless `MAILCAT_ITEST_GMAIL_CONFIRM` is set. Only that address is
+  looked up in the keychain; entries are never enumerated.
+- Every change goes through `Gmail.mutate`, which re-reads `users.getProfile`
+  (must equal the confirmed address) and then refuses unless each target message
+  carries `mc-itest` (so `batchDelete`/`batchModify` with any other id is refused),
+  each target label is under `mc-itest/`, new labels are under that prefix, and
+  inserted messages carry `mc-itest`. The label can't be removed from a message.
+- `seed.py` resets only messages carrying `mc-itest` and labels under `mc-itest/`
+  (Spam/Trash/Drafts fixtures carry the label too). It prints the address first.
+- Scenarios call mail-cat operations (labels, archive, delete, permanent delete)
+  only on messages with the seeded `mcitest-` Message-ID prefix.
+- `gmail/selftest.py` checks all of this offline against a fake transport.
+
+**What is still true.** mail-cat syncs the account's *whole* All Mail: a
+read-only download that spends the daily bandwidth, and every message lands in
+the local test DB under `.state/`. The sandbox protects other mail from
+destructive changes, not from exposure, so the mailbox should still be dedicated.
