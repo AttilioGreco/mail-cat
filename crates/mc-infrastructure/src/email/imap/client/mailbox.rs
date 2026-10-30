@@ -276,7 +276,7 @@ where
         let mailbox_type = if gmail {
             mapper::classify_gmail_mailbox(imap_name, mb.attributes())
         } else {
-            mapper::classify_mailbox(imap_name, mb.attributes())
+            mapper::classify_mailbox(imap_name, delimiter, mb.attributes())
         };
 
         // Create placeholder Mailbox - account_id and id will be set during sync

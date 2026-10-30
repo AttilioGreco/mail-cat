@@ -107,13 +107,16 @@ pub fn mailbox_path_to_string(path: &MailboxPath) -> String {
 /// Classify a mailbox from its `LIST` response.
 ///
 /// Prefers the RFC 6154 SPECIAL-USE attributes the server advertises, because the
-/// name heuristic below is English-only and silently misclassifies every localized
-/// account: "Archivio", "Cestino" and "Posta inviata" match none of these stems, and
-/// Gmail has no folder named "Archive" at all (its archive is `\All`). Getting this
-/// wrong breaks archive, delete-to-Trash and the Sent folder alike, so the attributes
-/// win whenever the server bothers to send them.
-pub fn classify_mailbox(name: &str, attributes: &[NameAttribute<'_>]) -> MailboxType {
-    special_use(name, attributes).unwrap_or_else(|| infer_mailbox_type(name))
+/// name heuristic below only knows a few languages and Gmail has no folder named
+/// "Archive" at all (its archive is `\All`). Getting this wrong breaks archive,
+/// delete-to-Trash and the Sent folder alike, so the attributes win whenever the
+/// server bothers to send them.
+pub fn classify_mailbox(
+    name: &str,
+    delimiter: char,
+    attributes: &[NameAttribute<'_>],
+) -> MailboxType {
+    special_use(name, attributes).unwrap_or_else(|| infer_mailbox_type(name, delimiter))
 }
 
 /// Gmail labels are user-named, so a name says nothing about the role: only
@@ -144,36 +147,92 @@ fn special_use(name: &str, attributes: &[NameAttribute<'_>]) -> Option<MailboxTy
         .then_some(MailboxType::Inbox)
 }
 
+/// Names servers give the system folders when they send no SPECIAL-USE, lowercase.
+const KNOWN_NAMES: &[(MailboxType, &[&str])] = &[
+    (MailboxType::Inbox, &["posta in arrivo"]),
+    (
+        MailboxType::Sent,
+        &[
+            "sent",
+            "sent items",
+            "sent mail",
+            "posta inviata",
+            "inviata",
+            "inviati",
+            "elementi inviati",
+            "gesendet",
+            "gesendete elemente",
+            "gesendete objekte",
+            "envoyé",
+            "envoyés",
+            "éléments envoyés",
+            "enviado",
+            "enviados",
+            "elementos enviados",
+        ],
+    ),
+    (
+        MailboxType::Drafts,
+        &[
+            "draft",
+            "drafts",
+            "bozza",
+            "bozze",
+            "entwurf",
+            "entwürfe",
+            "brouillon",
+            "brouillons",
+            "borrador",
+            "borradores",
+        ],
+    ),
+    (
+        MailboxType::Trash,
+        &[
+            "trash",
+            "deleted",
+            "deleted items",
+            "deleted messages",
+            "cestino",
+            "posta eliminata",
+            "elementi eliminati",
+            "papierkorb",
+            "gelöschte elemente",
+            "corbeille",
+            "papelera",
+        ],
+    ),
+    (
+        MailboxType::Spam,
+        &[
+            "spam",
+            "junk",
+            "junk e-mail",
+            "junk email",
+            "posta indesiderata",
+            "indesiderata",
+            "indesiderati",
+            "pourriel",
+            "pourriels",
+        ],
+    ),
+    (
+        MailboxType::Archive,
+        &["archive", "archives", "archivio", "archiv", "archief"],
+    ),
+];
+
 /// Infer mailbox type from name. Fallback for servers that don't advertise SPECIAL-USE.
 ///
-/// Stems are matched against the lowercased name, so they must be the shortest form
-/// shared by the languages we care about ("archiv" covers Archive/Archivio/Archiv).
-pub fn infer_mailbox_type(name: &str) -> MailboxType {
-    let name_lower = name.to_lowercase();
-    let has = |stems: &[&str]| stems.iter().any(|s| name_lower.contains(s));
-
-    if has(&["inbox", "posta in arrivo"]) {
-        MailboxType::Inbox
-    } else if has(&["sent", "inviat", "gesendet", "envoyé", "enviado"]) {
-        MailboxType::Sent
-    } else if has(&["draft", "bozze", "entwür", "brouillon", "borrador"]) {
-        MailboxType::Drafts
-    } else if has(&[
-        "trash",
-        "deleted",
-        "cestino",
-        "papierkorb",
-        "corbeille",
-        "papelera",
-    ]) {
-        MailboxType::Trash
-    } else if has(&["spam", "junk", "indesiderat", "pourriel"]) {
-        MailboxType::Spam
-    } else if has(&["archiv", "archief"]) {
-        MailboxType::Archive
-    } else {
-        MailboxType::Custom
-    }
+/// Only the leaf is compared, and whole: "INBOX/Fatture" and "Archives/2024" are
+/// the user's own folders, not the Inbox and the Archive. Namespaced servers
+/// ("INBOX.Sent") still resolve through their leaf.
+pub fn infer_mailbox_type(name: &str, delimiter: char) -> MailboxType {
+    let leaf = decode_utf7(name.rsplit(delimiter).next().unwrap_or(name)).to_lowercase();
+    KNOWN_NAMES
+        .iter()
+        .find(|(_, names)| names.contains(&leaf.as_str()))
+        .map_or(MailboxType::Custom, |(kind, _)| *kind)
 }
 
 /// Parse message body to extract text, HTML, and attachments.
@@ -342,21 +401,65 @@ mod tests {
 
     #[test]
     fn test_infer_mailbox_type() {
-        assert_eq!(infer_mailbox_type("INBOX"), MailboxType::Inbox);
-        assert_eq!(infer_mailbox_type("Sent"), MailboxType::Sent);
-        assert_eq!(infer_mailbox_type("Drafts"), MailboxType::Drafts);
-        assert_eq!(infer_mailbox_type("Trash"), MailboxType::Trash);
-        assert_eq!(infer_mailbox_type("Spam"), MailboxType::Spam);
-        assert_eq!(infer_mailbox_type("Archive"), MailboxType::Archive);
-        assert_eq!(infer_mailbox_type("Custom"), MailboxType::Custom);
+        for (name, kind) in [
+            ("Sent", MailboxType::Sent),
+            ("Drafts", MailboxType::Drafts),
+            ("Trash", MailboxType::Trash),
+            ("Spam", MailboxType::Spam),
+            ("Archive", MailboxType::Archive),
+            ("Custom", MailboxType::Custom),
+            // Localized names.
+            ("Archivio", MailboxType::Archive),
+            ("Archiv", MailboxType::Archive),
+            ("Cestino", MailboxType::Trash),
+            ("Posta inviata", MailboxType::Sent),
+            ("Bozze", MailboxType::Drafts),
+            ("Posta in arrivo", MailboxType::Inbox),
+            ("Posta indesiderata", MailboxType::Spam),
+            ("Gesendet", MailboxType::Sent),
+            ("Entw&APw-rfe", MailboxType::Drafts),
+            ("Envoy&AOk-", MailboxType::Sent),
+            ("Corbeille", MailboxType::Trash),
+            ("Sent Items", MailboxType::Sent),
+            // Namespaced servers keep their system folders under INBOX.
+            ("INBOX.Sent", MailboxType::Sent),
+            ("INBOX.Cestino", MailboxType::Trash),
+        ] {
+            let delimiter = if name.starts_with("INBOX.") { '.' } else { '/' };
+            assert_eq!(infer_mailbox_type(name, delimiter), kind, "{name}");
+        }
+        assert_eq!(infer_mailbox_type("INBOX/Sent", '/'), MailboxType::Sent);
+    }
 
-        // Localized names — these all fell through to Custom before, which is why
-        // "Archivia" from a notification silently did nothing.
-        assert_eq!(infer_mailbox_type("Archivio"), MailboxType::Archive);
-        assert_eq!(infer_mailbox_type("Archiv"), MailboxType::Archive);
-        assert_eq!(infer_mailbox_type("Cestino"), MailboxType::Trash);
-        assert_eq!(infer_mailbox_type("Posta inviata"), MailboxType::Sent);
-        assert_eq!(infer_mailbox_type("Bozze"), MailboxType::Drafts);
+    #[test]
+    fn subfolders_do_not_inherit_system_types() {
+        for name in [
+            "INBOX/Fatture",
+            "INBOX/Fatture/wasabi",
+            "INBOX/pubblicita",
+            "INBOX/DidWW",
+            "Archives/2024",
+            "Archivio/Sent Reports",
+            "Sent Reports",
+            "Old Trash",
+            "Inbox Zero",
+            "Absent",
+            "Spam Reports",
+            "INBOX/Inbox",
+        ] {
+            assert_eq!(
+                classify_mailbox(name, '/', &[]),
+                MailboxType::Custom,
+                "{name}"
+            );
+        }
+        assert_eq!(classify_mailbox("INBOX", '/', &[]), MailboxType::Inbox);
+        assert_eq!(classify_mailbox("inbox", '.', &[]), MailboxType::Inbox);
+        // Attributes still win on a subfolder.
+        assert_eq!(
+            classify_mailbox("INBOX/Mine", '/', &[NameAttribute::Sent]),
+            MailboxType::Sent
+        );
     }
 
     #[test]
@@ -364,16 +467,17 @@ mod tests {
         // Gmail's Italian All Mail: the name matches no stem, only the \All attribute
         // identifies it — and it is the archive target for Gmail accounts.
         assert_eq!(
-            classify_mailbox("[Gmail]/Tutti i messaggi", &[NameAttribute::All]),
+            classify_mailbox("[Gmail]/Tutti i messaggi", '/', &[NameAttribute::All]),
             MailboxType::All
         );
         assert_eq!(
-            classify_mailbox("[Gmail]/Posta inviata", &[NameAttribute::Sent]),
+            classify_mailbox("[Gmail]/Posta inviata", '/', &[NameAttribute::Sent]),
             MailboxType::Sent
         );
         assert_eq!(
             classify_mailbox(
                 "[Gmail]/Importanti",
+                '/',
                 &[NameAttribute::Extension("\\Important".into())]
             ),
             MailboxType::Important
@@ -402,12 +506,12 @@ mod tests {
             classify_gmail_mailbox("[Gmail]/Cestino", &[NameAttribute::Trash]),
             MailboxType::Trash
         );
-        assert_eq!(classify_mailbox("Archivio", &[]), MailboxType::Archive);
+        assert_eq!(classify_mailbox("Archivio", '/', &[]), MailboxType::Archive);
         // INBOX is a reserved name, not a special-use attribute.
-        assert_eq!(classify_mailbox("INBOX", &[]), MailboxType::Inbox);
+        assert_eq!(classify_mailbox("INBOX", '/', &[]), MailboxType::Inbox);
         // Non-special-use attributes must not shadow the name.
         assert_eq!(
-            classify_mailbox("Cestino", &[NameAttribute::NoInferiors]),
+            classify_mailbox("Cestino", '/', &[NameAttribute::NoInferiors]),
             MailboxType::Trash
         );
     }
