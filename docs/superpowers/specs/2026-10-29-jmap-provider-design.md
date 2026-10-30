@@ -195,4 +195,8 @@ Account stays `ProviderType::Imap`. Data folder is wiped (memberships change mea
      (flagging in All Mail is not a documented hard delete).
    - Tags: unchanged (PERMANENTFLAGS), STORE on All Mail.
    - IDLE on a view: a pure FETCH becomes `MailboxCountChanged` (UIDs of the view are not ours).
-6. **Subscriptions** (LSUB) are not consulted; future work, orthogonal.
+6. **Known limitation.** Spam and Trash rows are synced as those folders, so their custom
+   labels are not tracked (only the Spam/Trash membership): reading them needs an
+   `X-GM-LABELS` fetch whose ids are the folder's own, not All Mail's. LIST names arrive as
+   quoted strings, so `\"` and `\\` are unescaped before use.
+7. **Subscriptions** (LSUB) are not consulted; future work, orthogonal.

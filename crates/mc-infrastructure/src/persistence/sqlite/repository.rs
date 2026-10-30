@@ -25,6 +25,8 @@ use mc_domain::{
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
+use crate::email::imap::mapper::decode_utf7;
+
 use super::event_store::SqliteEventStore;
 use super::threading::{COUNTED, refresh_conversation};
 use super::{SqliteDb, repo_err};
@@ -432,8 +434,9 @@ fn mailbox_from_row(row: &Row) -> rusqlite::Result<Mailbox> {
     let delimiter = row.get::<_, String>(3)?.chars().next().unwrap_or('/');
     let display_path: String = row.get(4)?;
     // An opaque id (JMAP) is one segment even if it holds the delimiter; only
-    // an IMAP name, whose display path is the path itself, is a hierarchy.
-    let path = if display_path == path {
+    // an IMAP name, whose display path is the path itself (or its modified
+    // UTF-7 decoding), is a hierarchy.
+    let path = if display_path == path || display_path == decode_utf7(&path) {
         MailboxPath::parse(&path, delimiter)
     } else {
         MailboxPath::new(vec![path], delimiter)

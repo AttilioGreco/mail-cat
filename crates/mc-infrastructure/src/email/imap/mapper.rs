@@ -49,6 +49,20 @@ pub fn decode_utf7(name: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// imap-proto hands quoted strings (LIST names, `X-GM-LABELS`) back as
+/// written, `\"` and `\\` escapes included.
+pub fn unescape_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some('"' | '\\')) => out.extend(chars.next()),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// The base64 (alphabet with `,` for `/`) of UTF-16BE inside one `&…-` run.
 fn decode_utf7_run(run: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(run.len() * 3 / 4);
@@ -287,6 +301,10 @@ mod tests {
 
     #[test]
     fn utf7_names_decode_and_malformed_ones_stay() {
+        assert_eq!(
+            unescape_quoted(r#"Say \"hi\" back\\slash \n"#),
+            r#"Say "hi" back\slash \n"#
+        );
         assert_eq!(decode_utf7("INBOX"), "INBOX");
         assert_eq!(decode_utf7("Caf&AOk-"), "Café");
         assert_eq!(decode_utf7("A &- B"), "A & B");

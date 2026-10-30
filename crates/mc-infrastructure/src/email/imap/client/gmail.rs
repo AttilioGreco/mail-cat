@@ -21,7 +21,8 @@ use mc_domain::value_objects::remote_id::RemoteId;
 use mc_domain::value_objects::sync_cursor::SyncCursor;
 
 use super::super::mapper::{
-    decode_utf7, imap_flag_to_domain, mailbox_path_to_string, parse_mailbox_path, visible_flags,
+    decode_utf7, imap_flag_to_domain, mailbox_path_to_string, parse_mailbox_path, unescape_quoted,
+    visible_flags,
 };
 use super::commands::{
     ServerCaps, delete_uids, exchange, move_uids, quoted, store, timed, uids_of,
@@ -244,22 +245,13 @@ fn row_of(fetch: &Fetch) -> Option<Row> {
             .flags()
             .filter_map(|f| imap_flag_to_domain(&f))
             .collect(),
-        labels: fetch.gmail_labels()?.iter().map(|l| unescape(l)).collect(),
+        labels: fetch
+            .gmail_labels()?
+            .iter()
+            .map(|l| unescape_quoted(l))
+            .collect(),
         key: fetch.gmail_msg_id().copied(),
     })
-}
-
-/// imap-proto hands quoted strings back as written, escapes included.
-fn unescape(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    let mut chars = label.chars().peekable();
-    while let Some(c) = chars.next() {
-        match (c, chars.peek()) {
-            ('\\', Some('"' | '\\')) => out.extend(chars.next()),
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 /// Turn the UIDs still there (`present`) and the rows fetched per `plan` into

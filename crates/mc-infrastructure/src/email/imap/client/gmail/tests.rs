@@ -593,3 +593,38 @@ async fn deleting_for_good_from_all_mail_goes_through_trash() {
         ]
     );
 }
+
+/// LIST sends names as quoted strings, escapes and modified UTF-7 included.
+#[tokio::test]
+async fn listed_names_with_escapes_and_utf7_match_their_labels() {
+    let (mut session, _) = serving(|_| {
+        "* LIST (\\HasNoChildren) \"/\" INBOX\r\n\
+         * LIST (\\HasNoChildren \\All) \"/\" \"[Gmail]/All Mail\"\r\n\
+         * LIST (\\HasNoChildren) \"/\" \"mc-itest/Clienti/Caf&AOk-\"\r\n\
+         * LIST (\\HasNoChildren) \"/\" \"mc-itest/Say \\\"hi\\\"\"\r\n\
+         * LIST (\\HasNoChildren) \"/\" \"mc-itest/back\\\\slash\"\r\n\
+         $T OK done\r\n"
+            .to_owned()
+    })
+    .await;
+    let listed = list_on(&mut session, true).await.unwrap();
+    let layout = Layout::from_list(listed.iter().map(|l| Entry {
+        name: &l.name,
+        delimiter: '/',
+        kind: l.mailbox.mailbox_type,
+        starred: l.starred,
+    }))
+    .unwrap();
+    let wire = labels(&[
+        "mc-itest/Clienti/Caf&AOk-",
+        "mc-itest/Say \"hi\"",
+        "mc-itest/back\\slash",
+    ]);
+    assert_eq!(layout.paths_of(&wire).len(), 3);
+    let say = listed.iter().find(|l| l.name.contains("Say")).unwrap();
+    assert_eq!(say.mailbox.display_path, "mc-itest/Say \"hi\"");
+    assert_eq!(
+        layout.store_label(&say.name).unwrap(),
+        "\"mc-itest/Say \\\"hi\\\"\""
+    );
+}

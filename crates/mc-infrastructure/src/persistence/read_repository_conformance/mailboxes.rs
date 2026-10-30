@@ -1,5 +1,33 @@
 macro_rules! mailboxes_conformance {
     ($make:expr) => {
+        /// A non-ASCII IMAP name has a decoded display path unlike its path;
+        /// reading it back must keep the hierarchy, or sync sees a new mailbox.
+        #[tokio::test]
+        async fn a_utf7_imap_path_keeps_its_hierarchy() {
+            let (_guard, _es, repo) = $make;
+            let (account_id, mailbox_id) = (AccountId::new(), MailboxId::new());
+            let path = MailboxPath::parse("Clienti/Caf&AOk-", '/').unwrap();
+            let env = make_event_envelope(
+                1,
+                &mailbox_id.to_string(),
+                AggregateType::Mailbox,
+                1,
+                DomainEvent::MailboxDiscovered {
+                    mailbox_id,
+                    account_id,
+                    path: path.clone(),
+                    display_path: "Clienti/Café".into(),
+                    mailbox_type: MailboxType::Custom,
+                },
+            );
+            repo.project(&env).await.unwrap();
+            let read = MailboxReadRepository::get_mailbox(&repo, &mailbox_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(read.path, path);
+        }
+
         #[tokio::test]
         async fn project_mailbox_lifecycle() {
             let (_guard, _es, repo) = $make;

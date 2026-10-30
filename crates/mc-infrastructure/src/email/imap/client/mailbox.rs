@@ -16,7 +16,7 @@ use mc_domain::value_objects::remote_id::RemoteId;
 
 use super::super::mapper::{self, flag_to_imap, mailbox_path_to_string};
 use super::commands::{exchange, store, uids_of};
-use super::{COMMAND_TIMEOUT, IDLE_REISSUE, ImapEmailProvider, ImapSession};
+use super::{COMMAND_TIMEOUT, IDLE_REISSUE, ImapEmailProvider};
 
 impl ImapEmailProvider {
     pub(super) fn watch_stream(
@@ -240,10 +240,13 @@ pub(super) struct Listed {
     pub(super) starred: bool,
 }
 
-pub(super) async fn list_on(
-    session: &mut ImapSession,
+pub(super) async fn list_on<T>(
+    session: &mut async_imap::Session<T>,
     gmail: bool,
-) -> Result<Vec<Listed>, DomainError> {
+) -> Result<Vec<Listed>, DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
     use futures::stream::StreamExt;
     use mc_domain::model::account::AccountId;
     use mc_domain::model::mailbox::MailboxId;
@@ -262,7 +265,7 @@ pub(super) async fn list_on(
     for result in mailbox_list {
         let mb = result.map_err(|e| DomainError::Provider(format!("Mailbox name error: {}", e)))?;
 
-        let imap_name = mb.name();
+        let imap_name = &mapper::unescape_quoted(mb.name());
         let delimiter_str = mb.delimiter().unwrap_or("/");
         let delimiter = delimiter_str.chars().next().unwrap_or('/');
 
