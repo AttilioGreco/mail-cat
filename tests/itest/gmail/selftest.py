@@ -102,6 +102,8 @@ assert compare.label_name(box("Important", "[Gmail]/Importanti")) == "IMPORTANT"
 assert compare.label_name(box("Custom", "[Gmail]/Speciali")) == "STARRED"
 assert compare.label_name(box("Custom", "[Gmail]", "[Gmail]")) == "[Gmail]"
 assert compare.diff_labels({"1": {"SPAM", "mc-itest"}, "2": {"INBOX", "mc-itest"}}, {"1": {"SPAM"}, "2": {"INBOX", "mc-itest"}}) == []
+assert compare.diff_labels({"1": {"IMPORTANT", "TRASH"}}, {"1": {"TRASH"}}) == []
+assert compare.diff_labels({"1": {"TRASH"}}, {"1": {"SPAM"}}) != []
 assert compare.label_name(box("Custom", "Clienti/Caf&AOk-", "Clienti/Café")) == "Clienti/Café"
 assert compare.norm_message_id(" <a@b> ") == "a@b"
 assert not api.keep_label("UNREAD") and not api.keep_label("CATEGORY_PROMOTIONS") and api.keep_label("INBOX")

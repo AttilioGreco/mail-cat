@@ -7,6 +7,7 @@ Message-ID prefix mcitest-. `make(h)` takes the scenarios module `h` for
 its helpers, which avoids importing scenarios.py from here.
 """
 import json
+import time
 
 from gmail import api, compare, seed
 
@@ -113,6 +114,10 @@ def make(h):
         fresh = g.label_create(L("Fresh/New"))
         g.modify(gid(4), add=[fresh])
         sync()
+        # IMAP can lag the API: a second sync tells a lag from a lost update.
+        if compare.diff_labels(gm().snapshot(seed.ID_PREFIX), mc_state()[0]):
+            time.sleep(20)
+            sync()
         assert_equal("after API edits")
         names = set(mc_state()[2])
         if {L("Slides"), L("Fresh/New")} - names or {L("Presentations"), L("Old Trash")} & names:

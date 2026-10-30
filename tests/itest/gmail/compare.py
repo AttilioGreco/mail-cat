@@ -28,8 +28,10 @@ def norm_message_id(rfc_message_id):
 def diff_labels(api, mc):
     """Human-readable differences between {message-id: {labels}} maps; [] when equal.
     Messages in Spam or Trash are synced as those folders, which carry no
-    X-GM-LABELS: only their system labels are compared (documented limitation)."""
-    api = {m: ({x for x in ls if x in SYSTEM_IDS} if ls & {"SPAM", "TRASH"} else ls) for m, ls in api.items()}
+    X-GM-LABELS: only SPAM and TRASH are compared (documented limitation)."""
+    outside = {"SPAM", "TRASH"}
+    api = {m: (ls & outside if ls & outside else ls) for m, ls in api.items()}
+    mc = {m: (ls & outside if ls & outside else ls) for m, ls in mc.items()}
     out = [f"{m}: only in the API" for m in sorted(api.keys() - mc.keys())]
     out += [f"{m}: only in mail-cat" for m in sorted(mc.keys() - api.keys())]
     for m in sorted(api.keys() & mc.keys()):
