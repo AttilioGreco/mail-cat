@@ -184,6 +184,10 @@ impl AppContext {
             let sync = Arc::clone(&sync_service);
             tokio::spawn(async move { sync.serve_resyncs(resync_rx).await });
         }
+        {
+            let sync = Arc::clone(&sync_service);
+            tokio::spawn(async move { sync.serve_subscription_jobs().await });
+        }
 
         // Create projection event handlers and start catching up
         // Search index is an event-sourced projection with its own checkpoint,

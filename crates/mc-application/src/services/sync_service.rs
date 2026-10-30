@@ -138,6 +138,11 @@ pub struct SyncService<PR: ProviderRegistry, ES: EventStore, P: SyncStore> {
     /// `notify_one` stores a permit, so a wakeup between the worker's
     /// empty-queue check and its wait is not lost.
     backfill_wake: Notify,
+    /// Mailboxes whose subscription the user just changed: the slow part
+    /// (dropping thousands of messages, a first sync) runs in
+    /// [`Self::serve_subscription_jobs`], not in the RPC.
+    subscription_jobs: tokio::sync::mpsc::UnboundedSender<MailboxId>,
+    subscription_jobs_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<MailboxId>>>,
 }
 
 /// What makes one progress event distinguishable from the previous one.
@@ -191,6 +196,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         projector: Arc<P>,
         config: SyncConfig,
     ) -> Self {
+        let (subscription_jobs, jobs_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             provider_registry,
             event_store,
@@ -204,6 +210,8 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             last_progress: Mutex::new(HashMap::new()),
             account_locks: Mutex::new(HashMap::new()),
             backfill_wake: Notify::new(),
+            subscription_jobs,
+            subscription_jobs_rx: Mutex::new(Some(jobs_rx)),
         }
     }
 

@@ -146,6 +146,16 @@ async fn unsubscribing_removes_only_the_messages_that_are_nowhere_else() {
         .set_mailbox_subscribed(&work.id, false)
         .await
         .unwrap();
+    assert!(
+        w.projector
+            .stored
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.id == only_here),
+        "the RPC returns before the messages are dropped"
+    );
+    w.service.run_subscription_jobs().await;
 
     let stored = w.projector.stored.lock().unwrap();
     assert!(stored.iter().all(|m| m.id != only_here));
@@ -185,12 +195,15 @@ async fn subscribing_again_syncs_the_mailbox_afresh() {
         .set_mailbox_subscribed(&w.work_id(), false)
         .await
         .unwrap();
+    w.service.run_subscription_jobs().await;
     assert_eq!(received(&w.projector), 2);
 
     w.service
         .set_mailbox_subscribed(&w.work_id(), true)
         .await
         .unwrap();
+    assert_eq!(received(&w.projector), 2, "the first sync is a job");
+    w.service.run_subscription_jobs().await;
 
     assert!(w.local("Work").subscribed);
     assert_eq!(received(&w.projector), 3, "the message came back");
@@ -243,4 +256,65 @@ async fn the_inbox_cannot_be_unsubscribed() {
         "{err:?}"
     );
     assert!(w.local("INBOX").subscribed);
+}
+
+#[tokio::test]
+async fn a_restart_finishes_a_drop_it_interrupted() {
+    let w = World::new(true);
+    w.service.start_sync(&w.account_id).await.unwrap();
+    let work = w.local("Work");
+    let leftover = seed(&w.event_store, &w.projector, &work, Some(7), "<a@x>");
+    // Unsubscribed, but the job never ran.
+    w.service
+        .set_mailbox_subscribed(&work.id, false)
+        .await
+        .unwrap();
+
+    w.service.start_sync(&w.account_id).await.unwrap();
+
+    let stored = w.projector.stored.lock().unwrap();
+    assert!(stored.iter().all(|m| m.id != leftover));
+}
+
+#[tokio::test]
+async fn sent_drafts_and_archive_cannot_be_unsubscribed() {
+    let account_id = AccountId::new();
+    let mut mailboxes = vec![inbox_mailbox(account_id)];
+    for (name, kind) in [
+        ("Sent", MailboxType::Sent),
+        ("Drafts", MailboxType::Drafts),
+        ("All Mail", MailboxType::All),
+    ] {
+        mailboxes.push(
+            Mailbox::discover(
+                account_id,
+                MailboxPath::new(vec![name.to_owned()], '/').unwrap(),
+                kind,
+            )
+            .0,
+        );
+    }
+    let provider = MockEmailProvider::new().with_mailboxes(mailboxes);
+    let projector = Arc::new(MockProjector::new());
+    let service = make_service(provider, Arc::new(MockEventStore::new()), projector.clone());
+    service.start_sync(&account_id).await.unwrap();
+
+    for name in ["Sent", "Drafts", "All Mail"] {
+        let id = projector
+            .mailboxes
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|m| m.path.full_path() == name)
+            .unwrap()
+            .id;
+        let err = service
+            .set_mailbox_subscribed(&id, false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApplicationError::PreconditionFailed(m) if m.contains(name)),
+            "{err:?}"
+        );
+    }
 }
