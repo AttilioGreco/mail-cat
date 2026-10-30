@@ -157,6 +157,7 @@ fn scripted_changes(existing: Existing, reset: Option<Reset>) -> MailboxChanges 
         reset,
         added: vec![],
         keys: Default::default(),
+        labels: Default::default(),
         existing,
         counts: MailboxCounts {
             total: 1,

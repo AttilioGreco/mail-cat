@@ -8,7 +8,8 @@ use tracing::{debug, info, instrument, warn};
 
 use mc_domain::{
     AggregateType, DomainEvent, EmailProvider, EventStore, Existing, Flag, Mailbox, MailboxChanges,
-    MailboxType, MessageKey, MessageSummary, ProviderRegistry, RemoteId, Reset,
+    MailboxId, MailboxPath, MailboxType, Membership, MessageKey, MessageSummary, ProviderRegistry,
+    RemoteId, Reset,
 };
 
 use super::events::sync_failed;
@@ -20,18 +21,27 @@ use crate::error::ApplicationError;
 
 /// The event for a message the server no longer has in `mailbox_id`: the
 /// mailbox leaves its memberships, and the message goes with its last one.
+/// So do the `views` it was in, which exist only through that mailbox.
 /// Built from the read model's view: the stream is appended as-is.
-fn left_mailbox(summary: &MessageSummary, mailbox_id: mc_domain::MailboxId) -> DomainEvent {
-    if summary.memberships.len() > 1 {
+fn left_mailbox(summary: &MessageSummary, mailbox_id: MailboxId, views: &[Mailbox]) -> DomainEvent {
+    let removed: Vec<MailboxId> = std::iter::once(mailbox_id)
+        .chain(
+            views
+                .iter()
+                .map(|v| v.id)
+                .filter(|v| summary.membership(*v).is_some()),
+        )
+        .collect();
+    if summary.memberships.len() > removed.len() {
         return DomainEvent::MessageMailboxesChanged {
             message_id: summary.id,
             added: vec![],
-            removed: vec![mailbox_id],
+            removed,
         };
     }
     DomainEvent::MessageDeleted {
         message_id: summary.id,
-        mailbox_ids: vec![mailbox_id],
+        mailbox_ids: removed,
     }
 }
 
@@ -85,9 +95,10 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                 .map_err(sync_failed("pending_messages"))?
         };
 
+        let views = self.views_of(provider, local).await?;
         // `existing` was listed with `added`; ingesting can take minutes, in
         // which time user actions change what it describes, so apply it first.
-        let reconciled = self.reconcile(local, &changes).await?;
+        let reconciled = self.reconcile(local, &views, &changes).await?;
         let restored = self.restore(provider, local, &reconciled.missing).await?;
         let Some(ingested) = self
             .ingest_added(provider, local, &changes.added, &changes.keys, progress)
@@ -98,6 +109,9 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         let new_count = ingested + restored;
         if ids_invalidated {
             self.drop_unclaimed(local).await?;
+        }
+        if !views.is_empty() {
+            self.reconcile_views(local, &views, &changes.labels).await?;
         }
         let removed = reconciled.removed + self.settle_pending(provider, local, waiting).await?;
         if removed > 0 || reconciled.flags_changed > 0 || restored > 0 {
@@ -110,7 +124,105 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             .map_err(sync_failed("put_cursor"))?;
         self.update_mailbox_counts(local, changes.counts.total, changes.counts.unread)
             .await?;
+        if !views.is_empty() && (!changes.labels.is_empty() || removed > 0) {
+            self.update_view_counts(&views).await?;
+        }
         Ok(Some((new_count, removed)))
+    }
+
+    /// The mailboxes that are only views over `local` (Gmail labels over All
+    /// Mail): they have no sync of their own.
+    async fn views_of(
+        &self,
+        provider: &Arc<PR::Provider>,
+        local: &Mailbox,
+    ) -> Result<Vec<Mailbox>, ApplicationError> {
+        Ok(self
+            .projector
+            .list_mailboxes(&local.account_id)
+            .await
+            .map_err(sync_failed("list_mailboxes"))?
+            .into_iter()
+            .filter(|m| provider.backed_by(&m.path).as_ref() == Some(&local.path))
+            .collect())
+    }
+
+    /// Put each message `labels` names in exactly those of `views`, leaving
+    /// its other memberships alone. A view holds the id the message has in
+    /// the mailbox backing it.
+    async fn reconcile_views(
+        &self,
+        local: &Mailbox,
+        views: &[Mailbox],
+        labels: &HashMap<RemoteId, Vec<MailboxPath>>,
+    ) -> Result<(), ApplicationError> {
+        for (id, paths) in labels {
+            let Some(summary) = self
+                .projector
+                .find_by_remote_id(&local.id, id)
+                .await
+                .map_err(sync_failed("find_by_remote_id"))?
+            else {
+                continue;
+            };
+            let wanted = |view: &Mailbox| paths.contains(&view.path);
+            let added: Vec<Membership> = views
+                .iter()
+                .filter(|v| wanted(v) && summary.membership(v.id).is_none())
+                .map(|v| Membership {
+                    mailbox_id: v.id,
+                    remote_id: Some(id.clone()),
+                })
+                .collect();
+            let removed: Vec<MailboxId> = views
+                .iter()
+                .filter(|v| !wanted(v) && summary.membership(v.id).is_some())
+                .map(|v| v.id)
+                .collect();
+            if added.is_empty() && removed.is_empty() {
+                continue;
+            }
+            let event = DomainEvent::MessageMailboxesChanged {
+                message_id: summary.id,
+                added,
+                removed,
+            };
+            self.append_and_project(&summary.id.to_string(), AggregateType::Message, event)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Views are never listed by the server, so their totals come from the
+    /// read model (their unread counts follow memberships and flags already).
+    async fn update_view_counts(&self, views: &[Mailbox]) -> Result<(), ApplicationError> {
+        let Some(first) = views.first() else {
+            return Ok(());
+        };
+        let fresh = self
+            .projector
+            .list_mailboxes(&first.account_id)
+            .await
+            .map_err(sync_failed("list_mailboxes"))?;
+        let one = mc_shared::pagination::Pagination {
+            page: 1,
+            page_size: 1,
+        };
+        for view in views {
+            let total = self
+                .projector
+                .list_messages(&view.id, &one)
+                .await
+                .map_err(sync_failed("list_messages"))?
+                .total_count;
+            let unread = fresh
+                .iter()
+                .find(|m| m.id == view.id)
+                .map_or(0, |m| m.unread_messages);
+            self.update_mailbox_counts(view, total as u32, unread)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Fetch and store what arrived, in batches, newest first. `None` when
@@ -176,10 +288,11 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
     /// Compare the messages already known with the server's state: those it
     /// no longer has leave the mailbox, the rest get its flags. Server
     /// messages no local row holds are reported back, not fetched here.
-    #[instrument(skip(self, local, changes), fields(mailbox_id = %local.id))]
+    #[instrument(skip(self, local, views, changes), fields(mailbox_id = %local.id))]
     async fn reconcile(
         &self,
         local: &Mailbox,
+        views: &[Mailbox],
         changes: &MailboxChanges,
     ) -> Result<Reconciled, ApplicationError> {
         let mut out = Reconciled::default();
@@ -191,40 +304,16 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
 
         match &changes.existing {
             Existing::Snapshot(entries) => {
-                let all = mc_shared::pagination::Pagination {
-                    page: 1,
-                    page_size: u32::MAX,
-                };
-                let local_messages = self
-                    .projector
-                    .list_messages(&local.id, &all)
-                    .await
-                    .map_err(sync_failed("list_messages"))?
-                    .items;
-                let remote: HashMap<&RemoteId, &Vec<Flag>> =
-                    entries.iter().map(|(id, flags)| (id, flags)).collect();
-                let mut held = HashSet::new();
-                for summary in &local_messages {
-                    let Some(id) = summary
-                        .membership(local.id)
-                        .and_then(|m| m.remote_id.as_ref())
-                    else {
-                        continue;
-                    };
-                    held.insert(id);
-                    match remote.get(id) {
-                        Some(flags) => self.reconcile_flags(summary, flags, &mut out).await?,
-                        None => self.leave(summary, local, &mut out).await?,
-                    }
-                }
-                if restorable {
-                    out.missing = entries
-                        .iter()
-                        .map(|(id, _)| id)
-                        .filter(|id| !held.contains(id) && !arrived.contains(id))
-                        .cloned()
-                        .collect();
-                }
+                let listing = entries.iter().map(|(id, flags)| (id, Some(flags)));
+                self.reconcile_listing(local, views, listing, restorable, &arrived, &mut out)
+                    .await?;
+            }
+            Existing::Listed { present, changed } => {
+                let changed: HashMap<&RemoteId, &Vec<Flag>> =
+                    changed.iter().map(|(id, flags)| (id, flags)).collect();
+                let listing = present.iter().map(|id| (id, changed.get(id).copied()));
+                self.reconcile_listing(local, views, listing, restorable, &arrived, &mut out)
+                    .await?;
             }
             Existing::Delta { changed, removed } => {
                 for id in removed {
@@ -234,7 +323,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                         .await
                         .map_err(sync_failed("find_by_remote_id"))?
                     {
-                        self.leave(&summary, local, &mut out).await?;
+                        self.leave(&summary, local, views, &mut out).await?;
                     }
                 }
                 for (id, flags) in changed {
@@ -254,10 +343,58 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         Ok(out)
     }
 
+    /// Reconcile against a listing of every message the mailbox has, newest
+    /// first, with the flags of those that report them (`None`: unchanged).
+    async fn reconcile_listing<'a>(
+        &self,
+        local: &Mailbox,
+        views: &[Mailbox],
+        listing: impl Iterator<Item = (&'a RemoteId, Option<&'a Vec<Flag>>)> + Clone,
+        restorable: bool,
+        arrived: &HashSet<&RemoteId>,
+        out: &mut Reconciled,
+    ) -> Result<(), ApplicationError> {
+        let all = mc_shared::pagination::Pagination {
+            page: 1,
+            page_size: u32::MAX,
+        };
+        let local_messages = self
+            .projector
+            .list_messages(&local.id, &all)
+            .await
+            .map_err(sync_failed("list_messages"))?
+            .items;
+        let remote: HashMap<&RemoteId, Option<&Vec<Flag>>> = listing.clone().collect();
+        let mut held = HashSet::new();
+        for summary in &local_messages {
+            let Some(id) = summary
+                .membership(local.id)
+                .and_then(|m| m.remote_id.as_ref())
+            else {
+                continue;
+            };
+            held.insert(id);
+            match remote.get(id) {
+                Some(Some(flags)) => self.reconcile_flags(summary, flags, out).await?,
+                Some(None) => {}
+                None => self.leave(summary, local, views, out).await?,
+            }
+        }
+        if restorable {
+            out.missing = listing
+                .map(|(id, _)| id)
+                .filter(|id| !held.contains(id) && !arrived.contains(id))
+                .cloned()
+                .collect();
+        }
+        Ok(())
+    }
+
     async fn leave(
         &self,
         summary: &MessageSummary,
         local: &Mailbox,
+        views: &[Mailbox],
         out: &mut Reconciled,
     ) -> Result<(), ApplicationError> {
         info!(message_id = %summary.id, "Message gone from the server, deleting locally");
@@ -265,7 +402,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         self.append_and_project(
             &summary.id.to_string(),
             AggregateType::Message,
-            left_mailbox(summary, local.id),
+            left_mailbox(summary, local.id, views),
         )
         .await?;
         out.removed += 1;

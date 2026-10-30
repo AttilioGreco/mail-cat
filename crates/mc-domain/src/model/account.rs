@@ -69,8 +69,9 @@ pub enum MailboxModel {
 }
 
 impl MailboxModel {
-    /// ponytail: Gmail-over-IMAP stays `Folders` until phase 4 brings
-    /// X-GM-LABELS `change_labels`; a Gmail variant would key on it here.
+    /// Gmail over IMAP is `Folders` here too: the server decides, and the
+    /// provider reports `Labels` once it sees X-GM-EXT-1 (see
+    /// `EmailProvider::preferred_mailbox_model`).
     pub fn default_for(provider: ProviderType) -> Self {
         match provider {
             ProviderType::Imap => Self::Folders,

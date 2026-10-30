@@ -7,6 +7,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
+use crate::model::account::MailboxModel;
 use crate::model::mailbox::Mailbox;
 use crate::model::message::{Envelope, Message, OutgoingMessage};
 use crate::value_objects::flag::Flag;
@@ -130,6 +131,19 @@ pub trait EmailProvider: Send + Sync {
         ))
     }
 
+    /// The mailbox whose sync carries `mailbox`'s messages, when `mailbox` is
+    /// only a view over it (a Gmail label over All Mail). Views are never
+    /// synced themselves, and their memberships hold the backing mailbox's ids.
+    fn backed_by(&self, _mailbox: &MailboxPath) -> Option<MailboxPath> {
+        None
+    }
+
+    /// How this account's mailboxes should be presented unless the user chose,
+    /// when the server decides it (Gmail: labels).
+    fn preferred_mailbox_model(&self) -> Option<MailboxModel> {
+        None
+    }
+
     /// Whether the server takes arbitrary keywords (tags) on messages, when
     /// known: IMAP learns it from PERMANENTFLAGS on the first SELECT.
     fn supports_tags(&self) -> Option<bool> {
@@ -198,6 +212,10 @@ pub struct MailboxChanges {
     /// The [`MessageKey`] of those `added` the provider can tell across
     /// mailboxes; the others are absent.
     pub keys: HashMap<RemoteId, MessageKey>,
+    /// The views (see [`EmailProvider::backed_by`]) each of `added` and each
+    /// changed message is in, besides this mailbox. Empty for providers
+    /// without views.
+    pub labels: HashMap<RemoteId, Vec<MailboxPath>>,
     /// State of the messages already known.
     pub existing: Existing,
     /// The server's totals for the mailbox.
@@ -224,6 +242,13 @@ pub enum Existing {
     /// Every message the mailbox has, with its flags: one that is absent
     /// from it is gone.
     Snapshot(Vec<(RemoteId, Vec<Flag>)>),
+    /// What changed since the cursor, and every id still there: a known id
+    /// absent from `present` is gone (for servers that report changes but not
+    /// expunges).
+    Listed {
+        present: Vec<RemoteId>,
+        changed: Vec<(RemoteId, Vec<Flag>)>,
+    },
     /// Only what changed since the cursor.
     Delta {
         changed: Vec<(RemoteId, Vec<Flag>)>,

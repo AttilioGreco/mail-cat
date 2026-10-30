@@ -352,6 +352,9 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         })?;
 
         info!("Discovered {} remote mailboxes", remote_mailboxes.len());
+        if let Some(model) = provider.preferred_mailbox_model() {
+            self.default_mailbox_model(account_id, model).await?;
+        }
 
         // 3. Load local mailboxes for diff
         let local_mailboxes = self
@@ -424,8 +427,13 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             local_mailboxes.iter().map(|m| (&m.path, m)).collect();
 
         // 6. For each remote mailbox: sync envelopes
-        let total_mailboxes = remote_mailboxes.len() as u32;
-        for remote in &remote_mailboxes {
+        // Views over another mailbox come with its sync.
+        let synced: Vec<&Mailbox> = remote_mailboxes
+            .iter()
+            .filter(|m| provider.backed_by(&m.path).is_none())
+            .collect();
+        let total_mailboxes = synced.len() as u32;
+        for remote in synced {
             if self.is_cancelled() {
                 info!("Sync cancelled, stopping");
                 break;
@@ -532,6 +540,8 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
     ) -> Result<u32, ApplicationError> {
         let _exclusive = self.exclusive(account_id).await;
         let provider = self.provider_registry.get_provider(account_id)?;
+        let backing = provider.backed_by(mailbox_path);
+        let mailbox_path = backing.as_ref().unwrap_or(mailbox_path);
 
         // Find the local mailbox record
         let local_mailboxes = self

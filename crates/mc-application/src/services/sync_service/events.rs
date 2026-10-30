@@ -151,3 +151,31 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             .await
     }
 }
+
+impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> {
+    /// The model the provider prefers, recorded once: only while the account's
+    /// log holds no model change, which a user's own choice would have added.
+    pub(super) async fn default_mailbox_model(
+        &self,
+        account_id: &mc_domain::AccountId,
+        model: mc_domain::MailboxModel,
+    ) -> Result<(), ApplicationError> {
+        let stream = account_id.to_string();
+        let chosen = self
+            .event_store
+            .load_events(&stream, 0)
+            .await
+            .map_err(sync_failed("load_events"))?
+            .iter()
+            .any(|e| matches!(e.payload, DomainEvent::AccountMailboxModelChanged { .. }));
+        if chosen {
+            return Ok(());
+        }
+        let event = DomainEvent::AccountMailboxModelChanged {
+            account_id: *account_id,
+            model,
+        };
+        self.append_and_project(&stream, AggregateType::Account, event)
+            .await
+    }
+}

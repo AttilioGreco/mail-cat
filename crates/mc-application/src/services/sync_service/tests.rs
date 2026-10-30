@@ -228,3 +228,4 @@ mod cursor;
 mod lifecycle;
 mod pending;
 mod reconcile;
+mod views;

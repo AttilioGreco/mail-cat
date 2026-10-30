@@ -48,6 +48,11 @@ pub(super) struct MockEmailProvider {
     pub(super) found: HashMap<String, Vec<RemoteId>>,
     /// Size of each envelope fetch.
     pub(super) envelope_fetches: Mutex<Vec<usize>>,
+    /// Views (full path) and the mailbox each is a view over.
+    pub(super) views: HashMap<String, MailboxPath>,
+    pub(super) preferred_model: Option<mc_domain::MailboxModel>,
+    /// The mailboxes `mailbox_changes` was asked about, in order.
+    pub(super) changes_paths: Mutex<Vec<String>>,
 }
 
 pub(super) fn provider_error() -> DomainError {
@@ -78,6 +83,9 @@ impl MockEmailProvider {
             scripted: Mutex::new(None),
             found: HashMap::new(),
             envelope_fetches: Mutex::default(),
+            views: HashMap::new(),
+            preferred_model: None,
+            changes_paths: Mutex::default(),
         }
     }
 
@@ -127,12 +135,21 @@ impl EmailProvider for MockEmailProvider {
     /// A provider that numbers messages per mailbox, like IMAP: a message
     /// flagged `\Deleted` does not exist, and a cursor from another
     /// validity is void.
+    fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
+        self.views.get(&mailbox.full_path()).cloned()
+    }
+
+    fn preferred_mailbox_model(&self) -> Option<mc_domain::MailboxModel> {
+        self.preferred_model
+    }
+
     async fn mailbox_changes(
         &self,
-        _mailbox: &MailboxPath,
+        mailbox: &MailboxPath,
         since: Option<&SyncCursor>,
     ) -> Result<MailboxChanges, DomainError> {
         self.changes_calls.fetch_add(1, Ordering::SeqCst);
+        self.changes_paths.lock().unwrap().push(mailbox.full_path());
         if let Some(error) = self.changes_error {
             return Err(error());
         }
@@ -169,6 +186,7 @@ impl EmailProvider for MockEmailProvider {
                 .iter()
                 .filter_map(|e| Some((e.remote_id.clone(), e.key.clone()?)))
                 .collect(),
+            labels: Default::default(),
             existing: Existing::Snapshot(
                 live.into_iter()
                     .map(|(uid, flags)| (RemoteId::from(uid), flags))
