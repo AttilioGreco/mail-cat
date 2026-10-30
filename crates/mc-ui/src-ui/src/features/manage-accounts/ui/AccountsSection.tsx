@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Plus, RefreshCw, Trash2, AlertCircle, KeyRound, CheckCircle2, RotateCw } from 'lucide-react';
 import {
   useAccounts,
@@ -21,7 +21,7 @@ import {
 } from '../model/useAccountMutations';
 import { AddAccountDialog } from './AddAccountDialog';
 
-export function AccountsSection() {
+export function AccountsSection({ accountActions }: { accountActions?: (account: Account) => ReactNode }) {
   const { data: accounts = [], isLoading, error } = useAccounts();
   const [addOpen, setAddOpen] = useState(false);
   const [restartNeeded, setRestartNeeded] = useState(false);
@@ -92,6 +92,7 @@ export function AccountsSection() {
           <AccountCard
             key={account.id}
             account={account}
+            actions={accountActions?.(account)}
             onRestartNeeded={() => setRestartNeeded(true)}
           />
         ))}
@@ -111,9 +112,12 @@ export function AccountsSection() {
 
 function AccountCard({
   account,
+  actions,
   onRestartNeeded,
 }: {
   account: Account;
+  /** Buttons other features add next to the built-in ones. */
+  actions?: ReactNode;
   onRestartNeeded: () => void;
 }) {
   const { data: stats } = useAccountStats(account.id);
@@ -150,6 +154,7 @@ function AccountCard({
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
+          {actions}
           <button
             type="button"
             title="Sincronizza ora"

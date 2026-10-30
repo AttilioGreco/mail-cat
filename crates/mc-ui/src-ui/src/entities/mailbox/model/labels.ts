@@ -10,3 +10,8 @@ export function labelNames(mailboxes: Mailbox[], mailboxIds: string[], viewedId:
     .filter((m) => mailboxIds.includes(m.id) && m.id !== viewedId && !NOISE.has(m.kind))
     .map((m) => m.name);
 }
+
+/** What the sidebar and the label picker offer: unsubscribed mailboxes are neither shown nor synced. */
+export function subscribedOnly(mailboxes: Mailbox[]): Mailbox[] {
+  return mailboxes.filter((m) => m.subscribed);
+}

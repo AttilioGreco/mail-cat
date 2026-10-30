@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, RefreshCw, AlertCircle, Pencil, Settings, MailCheck, KeyRound } from 'lucide-react';
 import { cn } from '@/shared/lib/utils';
 import { ContextMenu } from '@/shared/ui/ContextMenu';
 import { useSessionStore } from '@/entities/session';
 import { authLabel, authState, useAccounts, useSecondsUntil, type Account } from '@/entities/account';
-import { useMailboxes, FolderItem, type Mailbox } from '@/entities/mailbox';
+import { useMailboxes, subscribedOnly, FolderItem, type Mailbox } from '@/entities/mailbox';
 import { useInboxWatcher } from '@/features/watch-mailbox';
 import { useComposeStore } from '@/features/compose-message';
 import { useSettingsStore } from '@/features/manage-settings';
@@ -271,7 +271,8 @@ function FolderTree({
   selectedMailboxId: string | null;
   onSelect: (mailboxId: string) => void;
 }) {
-  const { data: mailboxes = [], isLoading, error } = useMailboxes(accountId);
+  const { data: all = [], isLoading, error } = useMailboxes(accountId);
+  const mailboxes = useMemo(() => subscribedOnly(all), [all]);
   const markMailboxRead = useMarkMailboxRead();
   const [menu, setMenu] = useState<{ mailbox: Mailbox; x: number; y: number } | null>(null);
 

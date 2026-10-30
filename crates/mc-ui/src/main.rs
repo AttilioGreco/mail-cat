@@ -114,6 +114,7 @@ async fn main() {
             commands::set_account_password,
             commands::restart_server,
             commands::list_mailboxes,
+            commands::set_mailbox_subscribed,
             commands::list_messages,
             commands::get_message,
             commands::start_watching,

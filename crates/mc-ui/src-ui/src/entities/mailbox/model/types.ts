@@ -21,5 +21,7 @@ export interface Mailbox {
   kind: MailboxKind;
   totalMessages: number;
   unreadMessages: number;
+  /** Shown in the sidebar and synced. Unsubscribed ones appear only in the folder dialog. */
+  subscribed: boolean;
   attributes: string[];
 }

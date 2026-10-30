@@ -12,6 +12,7 @@ async function fetchMailboxes(accountId: string): Promise<Mailbox[]> {
     mailbox_type: MailboxKind;
     total_messages: number;
     unread_messages: number;
+    subscribed: boolean;
   }[]>('list_mailboxes', { accountId });
 
   return dtos.map((d) => ({
@@ -23,10 +24,13 @@ async function fetchMailboxes(accountId: string): Promise<Mailbox[]> {
     kind: d.mailbox_type,
     totalMessages: d.total_messages,
     unreadMessages: d.unread_messages,
+    subscribed: d.subscribed,
     attributes: [],
   }));
 }
 
+/** Every mailbox of the account, unsubscribed ones included (their names still
+ *  label messages). Sidebars and pickers use `subscribedOnly`. */
 export function useMailboxes(accountId: string | null) {
   return useQuery({
     queryKey: ['mailboxes', accountId],

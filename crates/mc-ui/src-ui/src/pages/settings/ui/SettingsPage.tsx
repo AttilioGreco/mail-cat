@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ArrowLeft, Users, Palette, Keyboard } from 'lucide-react';
 import { AccountsSection } from '@/features/manage-accounts';
+import { ManageFoldersButton } from '@/features/manage-folders';
 import { ShortcutsSection } from '@/features/keyboard-shortcuts';
 import { AppearanceSection } from './AppearanceSection';
 
@@ -52,7 +53,11 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
 
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[760px] p-6">
-          {tab === 'accounts' && <AccountsSection />}
+          {tab === 'accounts' && (
+            <AccountsSection
+              accountActions={(a) => <ManageFoldersButton accountId={a.id} accountName={a.name} />}
+            />
+          )}
           {tab === 'shortcuts' && <ShortcutsSection />}
           {tab === 'appearance' && <AppearanceSection />}
         </div>

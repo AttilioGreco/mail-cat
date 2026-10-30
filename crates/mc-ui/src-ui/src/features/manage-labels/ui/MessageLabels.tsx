@@ -3,7 +3,7 @@ import { Tag } from 'lucide-react';
 import { LabelChip } from '@/shared/ui/label-chip';
 import { Popover, PopoverContent, PopoverTrigger } from '@/shared/ui/popover';
 import { useAccounts } from '@/entities/account';
-import { useMailboxes, labelNames, type Mailbox } from '@/entities/mailbox';
+import { useMailboxes, labelNames, subscribedOnly, type Mailbox } from '@/entities/mailbox';
 import { useChangeLabels, useModifyTags } from '../model/useLabelMutations';
 
 interface MessageLabelsProps {
@@ -42,6 +42,11 @@ function LabelPicker({ messageId, mailboxes, mailboxIds }: { messageId: string; 
   const toggle = (id: string, on: boolean) =>
     change.mutate({ messageId, add: on ? [id] : [], remove: on ? [] : [id] });
 
+  // A label the message already carries stays listed, so it can still be removed.
+  const pickable = subscribedOnly(mailboxes).concat(
+    mailboxes.filter((m) => !m.subscribed && mailboxIds.includes(m.id)),
+  );
+
   return (
     <Popover onOpenChange={(open) => open && change.reset()}>
       <PopoverTrigger
@@ -53,7 +58,7 @@ function LabelPicker({ messageId, mailboxes, mailboxIds }: { messageId: string; 
       </PopoverTrigger>
       <PopoverContent>
         <ul aria-label="Etichette" className="max-h-64 overflow-y-auto">
-          {mailboxes.map((m) => (
+          {pickable.map((m) => (
             <li key={m.id}>
               <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-surface-hover">
                 <input

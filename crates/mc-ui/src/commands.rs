@@ -189,6 +189,7 @@ pub struct MailboxDto {
     pub mailbox_type: String,
     pub total_messages: u32,
     pub unread_messages: u32,
+    pub subscribed: bool,
 }
 
 #[derive(Serialize)]
@@ -298,6 +299,7 @@ fn mailbox_to_dto(m: Mailbox) -> MailboxDto {
         mailbox_type: m.mailbox_type.as_str().to_string(),
         total_messages: m.total_messages,
         unread_messages: m.unread_messages,
+        subscribed: m.subscribed,
     }
 }
 
@@ -762,6 +764,21 @@ pub async fn list_mailboxes(
         .list_mailboxes(&account_id)
         .await
         .map(|v| v.into_iter().map(mailbox_to_dto).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Subscribe or unsubscribe a mailbox. `Some` is a warning to show: the server
+/// could not be told, so the choice holds on this machine only.
+#[tauri::command]
+pub async fn set_mailbox_subscribed(
+    mailbox_id: String,
+    subscribed: bool,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .set_mailbox_subscribed(&mailbox_id, subscribed)
+        .await
         .map_err(|e| e.to_string())
 }
 
