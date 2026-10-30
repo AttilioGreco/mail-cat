@@ -50,7 +50,11 @@ pub fn ingest_plaintext_secrets(config_path: &Path, store: &dyn SecretStore) -> 
             .and_then(|i| i.as_table_mut())
             .and_then(|smtp| take_str(smtp, "password"));
 
-        if imap_pw.is_none() && smtp_pw.is_none() {
+        // Headless OAuth provisioning (itest): an already-expired access token
+        // makes the gate mint a fresh one from the refresh token on first use.
+        let refresh_token = take_str(table, "oauth_refresh_token");
+
+        if imap_pw.is_none() && smtp_pw.is_none() && refresh_token.is_none() {
             continue; // nothing plaintext to migrate
         }
 
@@ -61,6 +65,13 @@ pub fn ingest_plaintext_secrets(config_path: &Path, store: &dyn SecretStore) -> 
         }
         if smtp_pw.is_some() {
             secrets.smtp_password = smtp_pw;
+        }
+        if let Some(refresh_token) = refresh_token {
+            secrets.oauth = Some(mc_domain::OAuthSecrets {
+                access_token: String::new(),
+                refresh_token,
+                expires_at: chrono::DateTime::UNIX_EPOCH,
+            });
         }
         store
             .store(&email, &secrets)
@@ -141,6 +152,27 @@ host = "smtp.example.com"
 port = 587
 password = "smtp-secret"
 "#;
+
+    #[test]
+    fn ingests_oauth_refresh_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            CONFIG.replace("password = \"hunter2\"", "oauth_refresh_token = \"r-tok\""),
+        )
+        .unwrap();
+        let store = MockStore::default();
+        assert!(ingest_plaintext_secrets(&path, &store).unwrap());
+        let oauth = store
+            .load("test@example.com")
+            .unwrap()
+            .unwrap()
+            .oauth
+            .unwrap();
+        assert_eq!(oauth.refresh_token, "r-tok");
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("r-tok"));
+    }
 
     #[test]
     fn migrates_then_is_idempotent() {
