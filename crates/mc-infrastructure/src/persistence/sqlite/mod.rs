@@ -45,6 +45,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         id              BLOB PRIMARY KEY,
         account_id      BLOB NOT NULL,
         path            TEXT NOT NULL,
+        path_opaque     INTEGER NOT NULL DEFAULT 0,
         delimiter       TEXT NOT NULL,
         display_path    TEXT NOT NULL,
         display_name    TEXT NOT NULL,

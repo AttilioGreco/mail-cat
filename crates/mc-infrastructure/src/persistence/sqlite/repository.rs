@@ -25,8 +25,6 @@ use mc_domain::{
 };
 use mc_shared::pagination::{PagedResult, Pagination};
 
-use crate::email::imap::mapper::decode_utf7;
-
 use super::event_store::SqliteEventStore;
 use super::threading::{COUNTED, refresh_conversation};
 use super::{SqliteDb, repo_err};
@@ -427,20 +425,17 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountSummary> {
 }
 
 const SELECT_MAILBOX: &str = "SELECT id, account_id, path, delimiter, display_path, display_name, \
-     mailbox_type, flags, total_messages, unread_messages, subscribed, subscription_explicit \
-     FROM mailboxes";
+     mailbox_type, flags, total_messages, unread_messages, subscribed, subscription_explicit, \
+     path_opaque FROM mailboxes";
 
 fn mailbox_from_row(row: &Row) -> rusqlite::Result<Mailbox> {
     let path: String = row.get(2)?;
     let delimiter = row.get::<_, String>(3)?.chars().next().unwrap_or('/');
     let display_path: String = row.get(4)?;
-    // An opaque id (JMAP) is one segment even if it holds the delimiter; only
-    // an IMAP name, whose display path is the path itself (or its modified
-    // UTF-7 decoding), is a hierarchy.
-    let path = if display_path == path || display_path == decode_utf7(&path) {
-        MailboxPath::parse(&path, delimiter)
-    } else {
+    let path = if row.get(12)? {
         MailboxPath::new(vec![path], delimiter)
+    } else {
+        MailboxPath::parse(&path, delimiter)
     }
     .map_err(|e| conversion_err(2, Type::Text, e))?;
     Ok(Mailbox {

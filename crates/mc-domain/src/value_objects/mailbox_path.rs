@@ -1,31 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 
 use crate::error::DomainError;
 
 /// Represents a mailbox path with hierarchical segments and a delimiter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MailboxPath {
     segments: Vec<String>,
     delimiter: char,
-}
-
-// Equal by the joined name, not the segmentation: the store reloads an opaque id
-// holding the delimiter as one segment, while a LIST reply splits it, and the
-// two must still be the same mailbox.
-impl PartialEq for MailboxPath {
-    fn eq(&self, other: &Self) -> bool {
-        self.delimiter == other.delimiter && self.full_path() == other.full_path()
-    }
-}
-
-impl Eq for MailboxPath {}
-
-impl Hash for MailboxPath {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.full_path().hash(state);
-    }
 }
 
 impl MailboxPath {
@@ -64,6 +46,11 @@ impl MailboxPath {
         self.segments.join(&self.delimiter.to_string())
     }
 
+    /// A single segment that holds the delimiter (a JMAP id), not a hierarchy.
+    pub fn is_opaque(&self) -> bool {
+        self.segments.len() == 1 && self.segments[0].contains(self.delimiter)
+    }
+
     pub fn segments(&self) -> &[String] {
         &self.segments
     }
@@ -97,13 +84,6 @@ impl fmt::Display for MailboxPath {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn equality_ignores_segmentation() {
-        let split = MailboxPath::parse("[Gmail]/Bozze", '/').unwrap();
-        let opaque = MailboxPath::new(vec!["[Gmail]/Bozze".into()], '/').unwrap();
-        assert_eq!(split, opaque);
-    }
-
     use super::*;
 
     #[test]

@@ -163,12 +163,12 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             // Counts are transient (never in the log), so a replay must keep them.
             exec(
                 tx,
-                "INSERT INTO mailboxes (id, account_id, path, delimiter, display_path, display_name, mailbox_type, flags) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]') \
+                "INSERT INTO mailboxes (id, account_id, path, delimiter, display_path, display_name, mailbox_type, flags, path_opaque) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', ?8) \
                  ON CONFLICT(id) DO UPDATE SET account_id = excluded.account_id, path = excluded.path, \
                      delimiter = excluded.delimiter, display_path = excluded.display_path, \
                      display_name = excluded.display_name, \
-                     mailbox_type = excluded.mailbox_type",
+                     mailbox_type = excluded.mailbox_type, path_opaque = excluded.path_opaque",
                 params![
                     mailbox_id.as_uuid(),
                     account_id.as_uuid(),
@@ -176,7 +176,8 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     path.delimiter().to_string(),
                     display_path,
                     mc_domain::model::mailbox::leaf_name(display_path, path.delimiter()),
-                    json(mailbox_type)?
+                    json(mailbox_type)?,
+                    path.is_opaque()
                 ],
             )?;
         }
@@ -232,13 +233,14 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
         } => {
             exec(
                 tx,
-                "UPDATE mailboxes SET path = ?2, delimiter = ?3, display_name = ?4, display_path = ?5 WHERE id = ?1",
+                "UPDATE mailboxes SET path = ?2, delimiter = ?3, display_name = ?4, display_path = ?5, path_opaque = ?6 WHERE id = ?1",
                 params![
                     mailbox_id.as_uuid(),
                     new_path.full_path(),
                     new_path.delimiter().to_string(),
                     display_name,
-                    display_path
+                    display_path,
+                    new_path.is_opaque()
                 ],
             )?;
         }

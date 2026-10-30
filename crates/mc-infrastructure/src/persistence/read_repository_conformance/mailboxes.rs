@@ -1,5 +1,54 @@
 macro_rules! mailboxes_conformance {
     ($make:expr) => {
+        /// The segmentation is stored, not guessed from the display path: an
+        /// opaque JMAP id, an IMAP hierarchy and a Gmail system mailbox whose
+        /// display path drops "[Gmail]/" must all reload equal to what the
+        /// provider reports, or every sync rediscovers them.
+        #[tokio::test]
+        async fn paths_round_trip_through_the_projection() {
+            let (_guard, _es, repo) = $make;
+            let account_id = AccountId::new();
+            let cases = [
+                (
+                    MailboxPath::new(vec!["a/b".into()], '/').unwrap(),
+                    "Archive",
+                ),
+                (
+                    MailboxPath::parse("INBOX/Fatture", '/').unwrap(),
+                    "INBOX/Fatture",
+                ),
+                (MailboxPath::parse("[Gmail]/Bozze", '/').unwrap(), "Bozze"),
+            ];
+            for (i, (path, display_path)) in cases.iter().enumerate() {
+                let mailbox_id = MailboxId::new();
+                repo.project(&make_event_envelope(
+                    i as u64 + 1,
+                    &mailbox_id.to_string(),
+                    AggregateType::Mailbox,
+                    1,
+                    DomainEvent::MailboxDiscovered {
+                        mailbox_id,
+                        account_id,
+                        path: path.clone(),
+                        display_path: display_path.to_string(),
+                        mailbox_type: MailboxType::Custom,
+                    },
+                ))
+                .await
+                .unwrap();
+            }
+            let listed = MailboxReadRepository::list_mailboxes(&repo, &account_id)
+                .await
+                .unwrap();
+            for (path, _) in &cases {
+                assert_eq!(
+                    listed.iter().filter(|m| &m.path == path).count(),
+                    1,
+                    "{path}"
+                );
+            }
+        }
+
         /// A non-ASCII IMAP name has a decoded display path unlike its path;
         /// reading it back must keep the hierarchy, or sync sees a new mailbox.
         #[tokio::test]

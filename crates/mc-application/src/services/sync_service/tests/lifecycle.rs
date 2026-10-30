@@ -163,6 +163,24 @@ async fn sync_discovers_new_mailboxes() {
 }
 
 #[tokio::test]
+async fn second_sync_does_not_rediscover_a_mailbox_whose_display_path_differs() {
+    let account_id = AccountId::new();
+    let (drafts, _) = Mailbox::discover_as(
+        account_id,
+        MailboxPath::parse("[Gmail]/Bozze", '/').unwrap(),
+        "Bozze".into(),
+        MailboxType::Drafts,
+    );
+    let projector = Arc::new(MockProjector::new());
+    let provider = MockEmailProvider::new().with_mailboxes(vec![drafts]);
+    let service = make_service(provider, Arc::new(MockEventStore::new()), projector.clone());
+    service.start_sync(&account_id).await.unwrap();
+    service.start_sync(&account_id).await.unwrap();
+
+    assert_eq!(projector.mailboxes.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn sync_follows_a_server_side_rename() {
     let account_id = AccountId::new();
     let path = MailboxPath::new(vec!["mb7".to_string()], '/').unwrap();
