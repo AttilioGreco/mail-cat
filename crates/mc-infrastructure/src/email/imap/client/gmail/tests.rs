@@ -135,6 +135,13 @@ fn the_fingerprint_is_stable_across_releases() {
 }
 
 #[test]
+fn labels_the_last_list_did_not_show_are_reported() {
+    let rows = [row(1, vec![], &["\\Inbox", "Work", "Old Name", "New"], 1)];
+    let unlisted: Vec<_> = gmail_layout().unlisted(&rows).into_iter().collect();
+    assert_eq!(unlisted, ["New", "Old Name"]);
+}
+
+#[test]
 fn the_fingerprint_follows_the_label_set() {
     let layout = gmail_layout();
     assert_eq!(layout.fingerprint, gmail_layout().fingerprint);

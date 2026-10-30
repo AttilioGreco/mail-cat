@@ -4,7 +4,7 @@
 //! two). Every other mailbox is a *view*: its messages and their ids are All
 //! Mail's, and its membership is read off `X-GM-LABELS`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_imap::types::Fetch;
@@ -138,6 +138,16 @@ impl Layout {
         labels
             .iter()
             .filter_map(|l| self.by_label.get(&label_key(l)).cloned())
+            .collect()
+    }
+
+    /// User labels the rows carry that the last LIST did not (a rename or
+    /// creation not yet visible to IMAP): their messages lose them silently.
+    fn unlisted(&self, rows: &[Row]) -> BTreeSet<String> {
+        rows.iter()
+            .flat_map(|r| &r.labels)
+            .filter(|l| !l.starts_with('\\') && !self.by_label.contains_key(&label_key(l)))
+            .cloned()
             .collect()
     }
 
@@ -424,10 +434,12 @@ impl ImapEmailProvider {
         let rows = labelled_rows(&mut session, &present, plan.changed_since).await?;
         self.release(session);
         self.record_downloads().await;
+        let unlisted = layout.unlisted(&rows);
         let changes = changes_from(&layout, &plan, uid_validity, modseq, counts, present, rows);
         debug!(
             added = changes.added.len(),
             delta = plan.changed_since.is_some(),
+            ?unlisted,
             reset = ?changes.reset,
             cursor = %changes.cursor,
             "All Mail changes"
