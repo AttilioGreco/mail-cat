@@ -73,9 +73,15 @@ fn decode_utf7_run(run: &str) -> Option<String> {
     if bytes.len() % 2 != 0 || bits != 0 {
         return None;
     }
-    char::decode_utf16(bytes.chunks(2).map(|p| u16::from_be_bytes([p[0], p[1]])))
+    let text = char::decode_utf16(bytes.chunks(2).map(|p| u16::from_be_bytes([p[0], p[1]])))
         .collect::<Result<String, _>>()
-        .ok()
+        .ok()?;
+    // An encoder never emits an empty run, controls or printable ASCII (those
+    // go literal), so such a run ("Q&A-x", "&AAAAAA-") is a name, not encoding.
+    let canonical = text
+        .chars()
+        .all(|c| !c.is_control() && !c.is_ascii_graphic() && c != ' ');
+    (!text.is_empty() && canonical).then_some(text)
 }
 
 /// Convert MailboxPath to IMAP mailbox name string.
@@ -93,6 +99,16 @@ pub fn mailbox_path_to_string(path: &MailboxPath) -> String {
 /// wrong breaks archive, delete-to-Trash and the Sent folder alike, so the attributes
 /// win whenever the server bothers to send them.
 pub fn classify_mailbox(name: &str, attributes: &[NameAttribute<'_>]) -> MailboxType {
+    special_use(name, attributes).unwrap_or_else(|| infer_mailbox_type(name))
+}
+
+/// Gmail labels are user-named, so a name says nothing about the role: only
+/// the attributes and the reserved INBOX do ("Presentations" is not Sent).
+pub fn classify_gmail_mailbox(name: &str, attributes: &[NameAttribute<'_>]) -> MailboxType {
+    special_use(name, attributes).unwrap_or(MailboxType::Custom)
+}
+
+fn special_use(name: &str, attributes: &[NameAttribute<'_>]) -> Option<MailboxType> {
     for attr in attributes {
         let special = match attr {
             NameAttribute::Sent => MailboxType::Sent,
@@ -107,13 +123,11 @@ pub fn classify_mailbox(name: &str, attributes: &[NameAttribute<'_>]) -> Mailbox
             }
             _ => continue,
         };
-        return special;
+        return Some(special);
     }
     // INBOX is not a special-use attribute — it is a reserved name (RFC 3501 §5.1).
-    if name.eq_ignore_ascii_case("inbox") {
-        return MailboxType::Inbox;
-    }
-    infer_mailbox_type(name)
+    name.eq_ignore_ascii_case("inbox")
+        .then_some(MailboxType::Inbox)
 }
 
 /// Infer mailbox type from name. Fallback for servers that don't advertise SPECIAL-USE.
@@ -281,6 +295,9 @@ mod tests {
         assert_eq!(decode_utf7("Mail &2D3eAA-"), "Mail \u{1F600}");
         assert_eq!(decode_utf7("bad &!!-"), "bad &!!-");
         assert_eq!(decode_utf7("open &AOk"), "open &AOk");
+        assert_eq!(decode_utf7("Q&A-x"), "Q&A-x");
+        assert_eq!(decode_utf7("&AAAAAA-"), "&AAAAAA-");
+        assert_eq!(decode_utf7("&AGEAYg-"), "&AGEAYg-");
     }
 
     #[test]
@@ -344,6 +361,29 @@ mod tests {
             MailboxType::Important
         );
         // No attributes → fall back to the name.
+        for hijack in [
+            "Presentations",
+            "Absent",
+            "Inbox Zero",
+            "Drafts 2024",
+            "Spam Reports",
+            "Old Trash",
+        ] {
+            assert_eq!(
+                classify_gmail_mailbox(hijack, &[]),
+                MailboxType::Custom,
+                "{hijack}"
+            );
+        }
+        assert_eq!(classify_gmail_mailbox("INBOX", &[]), MailboxType::Inbox);
+        assert_eq!(
+            classify_gmail_mailbox("[Gmail]/Tutti i messaggi", &[NameAttribute::All]),
+            MailboxType::All
+        );
+        assert_eq!(
+            classify_gmail_mailbox("[Gmail]/Cestino", &[NameAttribute::Trash]),
+            MailboxType::Trash
+        );
         assert_eq!(classify_mailbox("Archivio", &[]), MailboxType::Archive);
         // INBOX is a reserved name, not a special-use attribute.
         assert_eq!(classify_mailbox("INBOX", &[]), MailboxType::Inbox);

@@ -5,7 +5,6 @@
 //! Mail's, and its membership is read off `X-GM-LABELS`.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_imap::types::Fetch;
@@ -100,9 +99,12 @@ impl Layout {
         }
         let mut names: Vec<&String> = layout.views.keys().collect();
         names.sort_unstable();
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        names.hash(&mut hasher);
-        layout.fingerprint = hasher.finish();
+        // FNV-1a: persisted in cursors, so it must not change between Rust releases.
+        layout.fingerprint = names.iter().fold(0xcbf2_9ce4_8422_2325, |h, name| {
+            name.bytes()
+                .chain([0])
+                .fold(h, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
+        });
         Some(layout)
     }
 
@@ -401,7 +403,7 @@ impl ImapEmailProvider {
         }
         let known = self.layout.lock().expect("layout lock poisoned").is_some();
         if !known {
-            self.learn_layout(&list_on(session).await?);
+            self.learn_layout(&list_on(session, true).await?);
         }
         Ok(self.layout())
     }

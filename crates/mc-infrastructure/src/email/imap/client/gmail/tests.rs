@@ -130,6 +130,11 @@ fn store_names_use_system_atoms_and_quote_the_rest() {
 }
 
 #[test]
+fn the_fingerprint_is_stable_across_releases() {
+    assert_eq!(gmail_layout().fingerprint, 4_226_677_756_450_693_453);
+}
+
+#[test]
 fn the_fingerprint_follows_the_label_set() {
     let layout = gmail_layout();
     assert_eq!(layout.fingerprint, gmail_layout().fingerprint);

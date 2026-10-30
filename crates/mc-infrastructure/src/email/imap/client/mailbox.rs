@@ -240,7 +240,10 @@ pub(super) struct Listed {
     pub(super) starred: bool,
 }
 
-pub(super) async fn list_on(session: &mut ImapSession) -> Result<Vec<Listed>, DomainError> {
+pub(super) async fn list_on(
+    session: &mut ImapSession,
+    gmail: bool,
+) -> Result<Vec<Listed>, DomainError> {
     use futures::stream::StreamExt;
     use mc_domain::model::account::AccountId;
     use mc_domain::model::mailbox::MailboxId;
@@ -266,7 +269,11 @@ pub(super) async fn list_on(session: &mut ImapSession) -> Result<Vec<Listed>, Do
         let path = mapper::parse_mailbox_path(imap_name, delimiter)?;
 
         // Classify from SPECIAL-USE attributes when the server sends them.
-        let mailbox_type = mapper::classify_mailbox(imap_name, mb.attributes());
+        let mailbox_type = if gmail {
+            mapper::classify_gmail_mailbox(imap_name, mb.attributes())
+        } else {
+            mapper::classify_mailbox(imap_name, mb.attributes())
+        };
 
         // Create placeholder Mailbox - account_id and id will be set during sync
         let display_path = mapper::decode_utf7(&path.full_path()).into_owned();
@@ -294,7 +301,7 @@ pub(super) async fn list_on(session: &mut ImapSession) -> Result<Vec<Listed>, Do
 impl ImapEmailProvider {
     pub(super) async fn list_all_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
         let mut session = self.session().await?;
-        let listed = list_on(&mut session).await?;
+        let listed = list_on(&mut session, self.has_gmail_ext()).await?;
         self.release(session);
         if self.has_gmail_ext() {
             self.learn_layout(&listed);
