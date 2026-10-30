@@ -66,7 +66,8 @@ pub fn ingest_plaintext_secrets(config_path: &Path, store: &dyn SecretStore) -> 
         if smtp_pw.is_some() {
             secrets.smtp_password = smtp_pw;
         }
-        if let Some(refresh_token) = refresh_token {
+        // An existing login wins: a stray key must not swap an account's OAuth tokens.
+        if let (Some(refresh_token), None) = (refresh_token, &secrets.oauth) {
             secrets.oauth = Some(mc_domain::OAuthSecrets {
                 access_token: String::new(),
                 refresh_token,

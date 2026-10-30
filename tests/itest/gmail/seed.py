@@ -58,7 +58,7 @@ def reset(g=None):
     """Delete the sandbox's messages and labels, then reseed. Returns {full label name: id}."""
     g = g or api.Gmail()
     prof = g.profile()
-    api.check_address(g.confirm, prof["emailAddress"])
+    api.check_address(g.confirm, prof["emailAddress"] or "")
     labels = g.labels()
     sandbox = next((l["id"] for l in labels if l["name"] == api.SANDBOX), None)
     old = g.message_ids(labelIds=[sandbox]) if sandbox else []

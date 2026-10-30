@@ -36,6 +36,8 @@ def check_address(confirm, actual):
     `actual` is None before the first profile read."""
     if not confirm:
         raise Refused(f"set {CONFIRM_ENV} to the address of the throwaway Gmail test mailbox")
+    if actual == "":
+        raise Refused("the profile returned an empty address")
     if actual is not None and actual.lower() != confirm.lower():
         raise Refused(f"the token opens {actual}, not the confirmed {confirm}")
 
@@ -107,7 +109,7 @@ class Gmail:
                 if e.code in (429, 500, 503) and attempt < retries:
                     time.sleep(2 ** attempt)
                     continue
-                raise GmailError(f"{req.method or 'GET'} {req.full_url.split('?')[0]}: {e.code} {e.read().decode()[:300]}") from None
+                raise GmailError(f"{req.get_method()} {req.full_url.split('?')[0]}: {e.code} {e.read().decode()[:300]}") from None
 
     def call(self, method, path, body=None, **query):
         url = BASE + path + (("?" + urllib.parse.urlencode(query, doseq=True)) if query else "")
@@ -122,7 +124,7 @@ class Gmail:
         """The only way to change the mailbox. `messages`/`labels` are the existing
         targets (must be inside the sandbox); `new_label` a label name being
         created or renamed to; `insert_labels` the labels of a message being inserted."""
-        check_address(self.confirm, self.profile()["emailAddress"])
+        check_address(self.confirm, self.profile()["emailAddress"] or "")
         names = {l["id"]: l["name"] for l in self.call("GET", "labels").get("labels", [])}
         sandbox = next((i for i, n in names.items() if n == SANDBOX), None)
         for mid in messages:
