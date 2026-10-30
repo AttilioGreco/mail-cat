@@ -116,6 +116,28 @@ def cmd_ensure_mailboxes(m, a):
         m.subscribe(quote(name))  # NO if already subscribed: fine
 
 
+def lsub(m):
+    """Names the server lists as subscribed."""
+    out = set()
+    for line in check(m.lsub()):
+        match = re.match(rb'\((.*?)\) (?:"[^"]*"|NIL) (.+)$', line)
+        name = match.group(2).decode()
+        out.add(name[1:-1] if name.startswith('"') else name)
+    return out
+
+
+def cmd_lsub(m, a):
+    print("\n".join(sorted(lsub(m))))
+
+
+def cmd_subscribe(m, a):
+    check(m.subscribe(quote(a.mailbox)))
+
+
+def cmd_unsubscribe(m, a):
+    check(m.unsubscribe(quote(a.mailbox)))
+
+
 def cmd_create(m, a):
     check(m.create(quote(a.mailbox)))
 
@@ -165,6 +187,9 @@ def main(argv=None):
     sub.add_parser("caps", help="CAPABILITY dump")
     sub.add_parser("mailboxes", help="mailboxes with MESSAGES/UIDNEXT/UIDVALIDITY")
     sub.add_parser("ensure-mailboxes", help="create " + ", ".join(STANDARD_MAILBOXES) + " if missing")
+    sub.add_parser("lsub", help="subscribed mailboxes")
+    sub.add_parser("subscribe").add_argument("mailbox")
+    sub.add_parser("unsubscribe").add_argument("mailbox")
     sub.add_parser("create").add_argument("mailbox")
     sub.add_parser("list", help="UID, flags, Message-ID, subject").add_argument("mailbox")
     sub.add_parser("expunge").add_argument("mailbox")

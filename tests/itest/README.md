@@ -51,7 +51,8 @@ Drafts, Junk (special-use) and Projects. alice is configured in mail-cat over IM
   (e.g. `./stalwart-cli query Account`).
 - `./imapctl.py`: the "other client". `list INBOX` (UID, flags, Message-ID),
   `move|copy MAILBOX MSG DEST`, `store MAILBOX MSG +\Seen -\Flagged`,
-  `delete MAILBOX MSG` (\Deleted + UID EXPUNGE), `expunge`, `mailboxes`, `caps`.
+  `delete MAILBOX MSG` (\Deleted + UID EXPUNGE), `expunge`, `mailboxes`, `caps`,
+  `lsub`, `subscribe|unsubscribe MAILBOX`.
   MSG is a UID or `tag:N`, the `[itest-NNN]` tag every seeded subject carries.
 - `./seed.py`: deterministic messages with threads, missing Message-IDs,
   attachments and mixed flags; see its `--help`.

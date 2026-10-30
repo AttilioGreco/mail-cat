@@ -529,7 +529,99 @@ def jmap_labels(w):
     mc("accounts", "set-model", "bob", "labels")
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels]
+def subscribed_on_server(user="alice"):
+    m = imapctl.connect(user)
+    try:
+        return imapctl.lsub(m)
+    finally:
+        m.logout()
+
+
+def subscribed_in_mc(account):
+    return {m["display_path"]: m["subscribed"] for m in json.loads(mc("--json", "mailboxes", "list", account))}
+
+
+def subscriptions_imap(w):
+    """alice unsubscribes Projects: its mail leaves mail-cat, the server's LSUB
+    drops it and syncs leave it alone; deleting into an unsubscribed Trash
+    only removes the message here; subscribing again brings the mail back; an
+    unsubscription made by another client is followed."""
+    projects = w.boxes["Projects"]["ID"]
+    others = {p: len(w.mc_list(p)) for p in ("INBOX", "Archive")}
+    if len(w.mc_list("Projects")) != 4 or not {"INBOX", "Projects", "Trash"} <= subscribed_on_server():
+        raise Fail("expected Projects synced (4) and subscribed on the server to start with")
+
+    mc("mailboxes", "unsubscribe", w.account, "Projects")
+    if w.mc_list("Projects") or subscribed_in_mc(w.account)["Projects"]:
+        raise Fail("Projects still subscribed or holding messages after unsubscribe")
+    wait(lambda: "Projects" not in subscribed_on_server(), "Projects gone from the server's LSUB")
+    w.sync()
+    if w.mc_list("Projects"):
+        raise Fail("a sync brought the unsubscribed Projects back")
+    for path, n in others.items():
+        if len(w.mc_list(path)) != n:
+            raise Fail(f"{path} changed with Projects' subscription: {len(w.mc_list(path))} != {n}")
+
+    # Trash unsubscribed: a delete files the message there on the server and just drops it here.
+    mc("mailboxes", "unsubscribe", w.account, "Trash")
+    mc("messages", "delete", w.mc_id("INBOX", 1), "--mailbox", w.boxes["INBOX"]["ID"])
+    wait(lambda: on_server(w, 1, "Trash") and not on_server(w, 1, "INBOX"), "tag 1 in Trash on the server")
+    w.sync()
+    w.assert_where(1, {"Trash": (1, 0)})
+
+    mc("mailboxes", "subscribe", w.account, "Projects")
+    if sorted(m["tag"] for m in w.mc_list("Projects")) != [5, 10, 15, 20]:
+        raise Fail(f"Projects after subscribing again: {w.mc_list('Projects')}")
+    wait(lambda: "Projects" in subscribed_on_server(), "Projects back in the server's LSUB")
+
+    # Another client unsubscribes Archive: mail-cat has no explicit choice there, so it follows.
+    imapctl.main(["unsubscribe", "Archive"])
+    w.sync()
+    if subscribed_in_mc(w.account)["Archive"] or w.mc_list("Archive"):
+        raise Fail("Archive unsubscribed elsewhere is still subscribed or synced in mail-cat")
+    # An explicit choice is not overridden: subscribe Archive here, the phone's LSUB still lacks it.
+    imapctl.main(["subscribe", "Archive"])
+    mc("mailboxes", "unsubscribe", w.account, "Projects")
+    imapctl.main(["subscribe", "Projects"])
+    w.sync()
+    if subscribed_in_mc(w.account)["Projects"]:
+        raise Fail("the server's subscription overrode an explicit unsubscribe")
+
+
+def subscriptions_jmap(w):
+    """bob, a JMAP account, unsubscribes Projects (Mailbox/set isSubscribed,
+    seen by IMAP's LSUB) and subscribes it again; another client's
+    unsubscription of Archive arrives with the next sync."""
+    bob = account_id("bob")
+    run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
+    jmap_sync_all(bob)
+    boxes, msgs = jmap_snapshot(bob)
+    if "Projects" not in subscribed_on_server("bob") or not boxes["Projects"]["subscribed"]:
+        raise Fail("expected Projects subscribed to start with")
+
+    mc("mailboxes", "unsubscribe", bob, "Projects")
+    boxes, msgs = jmap_snapshot(bob)
+    if boxes["Projects"]["subscribed"] or any(p == "Projects" for p, _ in msgs.values()):
+        raise Fail("Projects still subscribed or holding messages after unsubscribe")
+    if "Projects" in subscribed_on_server("bob"):
+        raise Fail("the server still lists Projects as subscribed")
+    jmap_sync_all(bob)
+    if any(p == "Projects" for p, _ in jmap_snapshot(bob)[1].values()):
+        raise Fail("a sync brought the unsubscribed Projects back")
+
+    mc("mailboxes", "subscribe", bob, "Projects")
+    boxes, msgs = jmap_snapshot(bob)
+    if not boxes["Projects"]["subscribed"] or [t for t, (p, _) in msgs.items() if p == "Projects"] != [5]:
+        raise Fail(f"Projects after subscribing again: {boxes['Projects']['subscribed']}, {msgs}")
+
+    imapctl.main(["--user", "bob", "unsubscribe", "Archive"])
+    mc("sync", bob)  # a full sync lists the mailboxes; per-mailbox syncs do not
+    boxes, msgs = jmap_snapshot(bob)
+    if boxes["Archive"]["subscribed"] or any(p == "Archive" for p, _ in msgs.values()):
+        raise Fail("Archive unsubscribed elsewhere is still subscribed or synced in mail-cat")
+
+
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap]
 SCENARIOS += gmail_scenarios.make(sys.modules[__name__])
 
 
