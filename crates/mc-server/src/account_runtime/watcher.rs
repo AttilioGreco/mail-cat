@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use mc_application::{Command, CommandBus, Query, QueryBus, QueryResult};
 use mc_domain::{
@@ -35,13 +36,14 @@ impl AccountRuntime {
         id: AccountId,
         name: String,
         provider: Arc<AnyProvider>,
-        stop: CancellationToken,
+        (stop, tasks): (CancellationToken, TaskTracker),
         first_sync: Arc<Notify>,
     ) {
         let sync = self.deps.sync.clone();
         let cmd_bus = self.deps.command_bus.clone();
         let query_bus = self.deps.query_bus.clone();
-        tokio::spawn(async move {
+        let spawner = tasks.clone();
+        tasks.spawn(async move {
             let mut mailboxes = local_mailboxes(&query_bus, id).await;
             // A brand-new account has no mailboxes until its first sync, and
             // the INBOX path (with the server's real delimiter) comes from there.
@@ -79,7 +81,14 @@ impl AccountRuntime {
                 };
                 match item {
                     Ok(notification) => {
-                        handle(notification, id, &sync, &sync_gate, &cmd_bus, &path_to_id).await
+                        let ctx = Triggered {
+                            id,
+                            sync: &sync,
+                            sync_gate: &sync_gate,
+                            stop: &stop,
+                            tasks: &spawner,
+                        };
+                        handle(notification, ctx, &cmd_bus, &path_to_id).await
                     }
                     Err(e) => tracing::warn!("[Watcher] IDLE error for '{name}': {e}"),
                 }
@@ -99,11 +108,25 @@ async fn local_mailboxes(query_bus: &QueryBusImpl, account_id: AccountId) -> Vec
     }
 }
 
+/// What a notification handler needs to start a sync that stopping the account
+/// can cancel and wait for.
+struct Triggered<'a> {
+    id: AccountId,
+    sync: &'a Arc<SyncServiceImpl>,
+    sync_gate: &'a Arc<Semaphore>,
+    stop: &'a CancellationToken,
+    tasks: &'a TaskTracker,
+}
+
 async fn handle(
     notification: ProviderNotification,
-    id: AccountId,
-    sync: &Arc<SyncServiceImpl>,
-    sync_gate: &Arc<Semaphore>,
+    Triggered {
+        id,
+        sync,
+        sync_gate,
+        stop,
+        tasks,
+    }: Triggered<'_>,
     cmd_bus: &CommandBusImpl,
     path_to_id: &HashMap<String, MailboxId>,
 ) {
@@ -117,9 +140,14 @@ async fn handle(
                 return;
             };
             let sync = sync.clone();
-            tokio::spawn(async move {
+            let stop = stop.clone();
+            tasks.spawn(async move {
                 let _permit = permit;
-                if let Err(e) = sync.sync_mailbox(&id, &mailbox).await {
+                let synced = tokio::select! {
+                    _ = stop.cancelled() => return,
+                    synced = sync.sync_mailbox(&id, &mailbox) => synced,
+                };
+                if let Err(e) = synced {
                     tracing::warn!("[Watcher] Partial sync failed: {e}");
                 }
             });

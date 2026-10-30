@@ -103,13 +103,13 @@ async fn stop_cancels_the_tasks_and_unregisters_provider_and_gate() {
     let stop = runtime.running.lock().unwrap()[&id].stop.clone();
     assert!(!stop.is_cancelled());
 
-    assert!(runtime.stop(&id));
+    assert!(runtime.stop(&id).await);
 
     assert!(stop.is_cancelled());
     assert!(!runtime.is_running(&id));
     assert!(f.ctx.provider_registry.get_provider(&id).is_err());
     assert!(runtime.deps.auth_gates.get(&id).is_none());
-    assert!(!runtime.stop(&id), "second stop is a no-op");
+    assert!(!runtime.stop(&id).await, "second stop is a no-op");
     assert!(
         !f.ctx.shutdown.is_cancelled(),
         "other accounts keep running"
@@ -285,7 +285,7 @@ async fn a_removal_the_server_died_in_is_finished_at_the_next_boot() {
     let id = runtime.start_declared("hot@example.com").await.unwrap();
     give_it_a_mailbox(&f, id).await;
     // The crash: removal recorded, config entry and data still there.
-    runtime.stop(&id);
+    runtime.stop(&id).await;
     runtime
         .deps
         .command_bus
@@ -306,7 +306,7 @@ async fn a_leftover_removal_does_not_touch_an_account_re_added_under_the_same_ad
     let f = fixture(ACCOUNT_TOML).await;
     let runtime = &f.ctx.account_runtime;
     let old = runtime.start_declared("hot@example.com").await.unwrap();
-    runtime.stop(&old);
+    runtime.stop(&old).await;
     runtime
         .deps
         .command_bus
@@ -323,4 +323,50 @@ async fn a_leftover_removal_does_not_touch_an_account_re_added_under_the_same_ad
         declared_in(&f, "hot@example.com"),
         "the new account stays declared"
     );
+}
+
+#[tokio::test]
+async fn stop_returns_only_after_the_account_tasks_finished() {
+    let f = fixture("").await;
+    let runtime = &f.ctx.account_runtime;
+    let id = runtime.start(&hot_account()).await.unwrap();
+    let (stop, tasks) = {
+        let running = runtime.running.lock().unwrap();
+        (running[&id].stop.clone(), running[&id].tasks.clone())
+    };
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = finished.clone();
+    tasks.spawn(async move {
+        stop.cancelled().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    runtime.stop(&id).await;
+
+    assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn remove_waits_for_a_sync_in_flight_and_leaves_nothing_behind() {
+    let f = fixture(ACCOUNT_TOML).await;
+    let runtime = &f.ctx.account_runtime;
+    let id = runtime.start_declared("hot@example.com").await.unwrap();
+    give_it_a_mailbox(&f, id).await;
+    // A sync a client asked for, still running when the removal begins.
+    let in_flight = runtime.deps.sync.exclusive(&id).await;
+
+    let removal = runtime.remove(id);
+    tokio::pin!(removal);
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(200), &mut removal).await;
+    assert!(waited.is_err(), "must wait for the running sync");
+    assert!(rows_of(&f, id).await.0 > 0, "nothing purged under it");
+
+    drop(in_flight);
+    removal.await.unwrap();
+
+    assert_eq!(rows_of(&f, id).await, (0, 0, 0));
+    let late = runtime.deps.sync.start_sync(&id).await;
+    assert!(late.is_err(), "a sync arriving later finds no provider");
+    assert_eq!(rows_of(&f, id).await, (0, 0, 0));
 }

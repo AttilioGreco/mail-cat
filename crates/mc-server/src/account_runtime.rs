@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use mc_application::{
     AccountLifecycle, AccountProvisioner, ApplicationError, AuthGate, AuthGates, AuthState,
@@ -59,6 +60,8 @@ struct Running {
     name: String,
     /// Child of the global shutdown; cancelling it stops this account's tasks only.
     stop: CancellationToken,
+    /// Every task spawned for the account, so stopping it can wait them out.
+    tasks: TaskTracker,
 }
 
 pub struct AccountRuntime {
@@ -153,22 +156,34 @@ impl AccountRuntime {
         retry_paused_login(&gate, account_config);
 
         let stop = deps.shutdown.child_token();
+        let tasks = TaskTracker::new();
         let first_sync = Arc::new(Notify::new());
         self.spawn_sync_loop(
             account_id,
             name.clone(),
             gate.clone(),
-            stop.clone(),
+            (stop.clone(), tasks.clone()),
             first_sync.clone(),
         );
-        self.spawn_backfill(account_id, account_config, gate, stop.clone());
+        self.spawn_backfill(
+            account_id,
+            account_config,
+            gate,
+            (stop.clone(), tasks.clone()),
+        );
         if deps.idle_enabled {
-            self.spawn_watcher(account_id, name.clone(), provider, stop.clone(), first_sync);
+            self.spawn_watcher(
+                account_id,
+                name.clone(),
+                provider,
+                (stop.clone(), tasks.clone()),
+                first_sync,
+            );
         }
         self.running
             .lock()
             .unwrap()
-            .insert(account_id, Running { name, stop });
+            .insert(account_id, Running { name, stop, tasks });
         Ok(account_id)
     }
 
@@ -184,15 +199,18 @@ impl AccountRuntime {
         self.start(account_config).await
     }
 
-    /// Stops the account's tasks and takes its provider and gate out of service.
-    /// Its data stays; returns whether it was running.
-    pub fn stop(&self, account_id: &AccountId) -> bool {
+    /// Stops the account's tasks, waits until they are gone, and takes its
+    /// provider and gate out of service. Its data stays; returns whether it
+    /// was running.
+    pub async fn stop(&self, account_id: &AccountId) -> bool {
         let Some(running) = self.running.lock().unwrap().remove(account_id) else {
             return false;
         };
         running.stop.cancel();
         self.deps.registry.remove_provider(account_id);
         self.deps.auth_gates.remove(account_id);
+        running.tasks.close();
+        running.tasks.wait().await;
         tracing::info!("Stopped account '{}'", running.name);
         true
     }
@@ -212,14 +230,21 @@ impl AccountRuntime {
             .get_account(&account_id)
             .await?
             .ok_or_else(|| ApplicationError::NotFound("Account", account_id.to_string()))?;
-        self.stop(&account_id);
-        deps.sync.forget(&account_id);
+        self.stop(&account_id).await;
+        // What is left is a sync a client asked for over gRPC. Waiting for its
+        // slot drains it, and holding the slot until the data is gone makes
+        // one that comes later find no provider, so nothing writes for the
+        // account after the purge.
+        let _no_sync = deps.sync.exclusive(&account_id).await;
         deps.command_bus
             .dispatch(Command::RemoveAccount { account_id })
             .await?;
-        self.finish_removal(account_id, Some(account.email.as_str().to_owned()))
+        let removed = self
+            .finish_removal(account_id, Some(account.email.as_str().to_owned()))
             .await
-            .map_err(|e| ApplicationError::Internal(format!("{e:#}")))
+            .map_err(|e| ApplicationError::Internal(format!("{e:#}")));
+        deps.sync.forget(&account_id);
+        removed
     }
 
     /// Finishes removals the server was interrupted in, returning how many it
@@ -257,14 +282,16 @@ impl AccountRuntime {
                 .await
                 .context("removing the config entry and keychain secrets")?;
         }
-        deps.search
-            .remove_account(&account_id)
-            .await
-            .context("removing search documents")?;
+        // Search goes after the purge: once the events are gone no catch-up
+        // can index the account again.
         deps.repository
             .purge_account(account_id, email)
             .await
             .context("deleting the account's data")?;
+        deps.search
+            .remove_account(&account_id)
+            .await
+            .context("removing search documents")?;
         tracing::info!("Removed account {account_id} and all of its data");
         Ok(())
     }
@@ -294,13 +321,13 @@ impl AccountRuntime {
         id: AccountId,
         name: String,
         gate: Arc<AuthGate>,
-        stop: CancellationToken,
+        (stop, tasks): (CancellationToken, TaskTracker),
         first_sync: Arc<Notify>,
     ) {
         let sync = self.deps.sync.clone();
         let search = self.deps.search.clone();
         let event_store = self.deps.event_store.clone();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => break,
@@ -360,11 +387,11 @@ impl AccountRuntime {
         id: AccountId,
         account_config: &AccountConfig,
         gate: Arc<AuthGate>,
-        stop: CancellationToken,
+        (stop, tasks): (CancellationToken, TaskTracker),
     ) {
         let sync = self.deps.sync.clone();
         let limit = account_config.daily_download_limit();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             sync.run_backfill(id, limit, gate as Arc<dyn LoginGate>, stop)
                 .await;
         });
