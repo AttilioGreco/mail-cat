@@ -264,3 +264,13 @@ server (other clients share it). This replaces §4's "No Trash/Spam special-casi
 7. **Tests.** Unit for the initial-value rules (mandatory roles, `\Noselect`), the refusals, gating, exclusive-message removal, failed
    propagation; IMAP command text; JMAP patch against the mock; itest `subscriptions_imap` (alice)
    and `subscriptions_jmap` (bob).
+
+## Account lifecycle at runtime
+
+Accounts were wired once in `AppContext::new`; adding or removing one needed a restart, and removal left the account's data behind.
+
+- **`AccountRuntime`** (mc-server) owns everything that lives per account: AuthGate, provider in the registry, sync loop, body backfill, IDLE/SSE watcher, re-auth notification. Each account gets a child `CancellationToken` of the global shutdown. `start(account)` is the body of the old boot loop; `stop(id)` cancels the token and removes provider and gate. Boot is `for a in accounts { runtime.start(a) }`.
+- `AuthGates` becomes add/remove-able behind interior mutability; global tasks (refresh timer, notification and contact subscribers) read the live map, not a boot snapshot.
+- **Hot add**: `AddAccount` and OAuth login completion create the aggregate (OAuth no longer waits for the next boot) and call `start`. The "restart the server" texts and button go away.
+- **Remove**: `stop`, then purge — the account's events, projected rows (mailboxes, messages and cascades, conversations, thread_links, sync_cursors, sent_counted, downloads), tantivy documents by `account_id`, keychain entry, config.toml table. `contacts`/`address_usage` are cross-account and are kept. `mc accounts remove` and a confirmed UI action.
+- The `start`/`stop` seam is where the per-account execution context can later be detached from the server process.
