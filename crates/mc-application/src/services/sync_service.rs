@@ -415,6 +415,9 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             }
         }
 
+        self.drop_gone_labels(&provider, &local_mailboxes, &remote_mailboxes)
+            .await?;
+
         // 5. Re-load local mailboxes (now includes newly discovered)
         let local_mailboxes = self
             .projector

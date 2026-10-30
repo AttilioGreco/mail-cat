@@ -244,16 +244,15 @@ impl Account {
         }
     }
 
-    /// `None` when the account already uses `model`.
-    pub fn set_mailbox_model(&mut self, model: MailboxModel) -> Option<DomainEvent> {
-        (self.mailbox_model != model).then(|| {
-            self.mailbox_model = model;
-            self.updated_at = Utc::now();
-            DomainEvent::AccountMailboxModelChanged {
-                account_id: self.id,
-                model,
-            }
-        })
+    /// Always an event, even when `model` is the current one: the log must
+    /// record the choice so a provider's default never overrides it later.
+    pub fn set_mailbox_model(&mut self, model: MailboxModel) -> DomainEvent {
+        self.mailbox_model = model;
+        self.updated_at = Utc::now();
+        DomainEvent::AccountMailboxModelChanged {
+            account_id: self.id,
+            model,
+        }
     }
 
     /// Mark the account as removed and produce the event.

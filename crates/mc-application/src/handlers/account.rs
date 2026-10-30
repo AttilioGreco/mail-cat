@@ -74,9 +74,7 @@ impl<W: AccountWriteRepository, B: EventPublisher> AccountCommandHandler<W, B> {
         model: MailboxModel,
     ) -> Result<CommandResult, ApplicationError> {
         let mut account = self.load_account(&account_id).await?;
-        let Some(event) = account.set_mailbox_model(model) else {
-            return Ok(CommandResult::MailboxModelSet);
-        };
+        let event = account.set_mailbox_model(model);
         self.write_repo.save(&account, vec![event.clone()]).await?;
         self.publish_event(account_id.to_string(), AggregateType::Account, event);
         info!(%account_id, ?model, "account mailbox model set");

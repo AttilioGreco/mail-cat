@@ -228,3 +228,71 @@ async fn the_preferred_model_is_recorded_once_and_never_over_a_choice() {
         .unwrap();
     assert_eq!(model_changes(&chosen.event_store), [MailboxModel::Folders]);
 }
+
+fn deleted(gmail: &Gmail) -> Vec<MailboxId> {
+    gmail
+        .projector
+        .projected_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DomainEvent::MailboxDeleted { mailbox_id, .. } => Some(mailbox_id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_label_gone_from_the_server_is_removed_with_its_memberships() {
+    let gmail = Gmail::new();
+    let service = gmail.service();
+    gmail.script(labelled(&[1], &[(1, &["Work"])], snapshot(&[1])));
+    service.start_sync(&gmail.account_id).await.unwrap();
+    assert_eq!(gmail.memberships(), ["All Mail", "Work"]);
+
+    // Work was renamed to Jobs on the server.
+    let all_mail = mailbox(gmail.account_id, "All Mail", MailboxType::All);
+    let jobs = mailbox(gmail.account_id, "Jobs", MailboxType::Custom);
+    let mut provider = MockEmailProvider::new().with_mailboxes(vec![all_mail.clone(), jobs]);
+    provider.views.insert("Jobs".into(), all_mail.path.clone());
+    provider.preferred_model = Some(MailboxModel::Labels);
+    let service = make_shared_service(
+        Arc::new(provider),
+        gmail.event_store.clone(),
+        gmail.projector.clone(),
+    );
+    service.start_sync(&gmail.account_id).await.unwrap();
+
+    let work = gmail
+        .projector
+        .mailboxes
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|m| m.path.full_path() == "Work")
+        .map(|m| m.id);
+    assert_eq!(deleted(&gmail), [work.unwrap()]);
+}
+
+#[tokio::test]
+async fn nothing_is_removed_without_all_mail_or_off_gmail() {
+    for gmail_provider in [true, false] {
+        let gmail = Gmail::new();
+        gmail.script(labelled(&[1], &[(1, &["Work"])], snapshot(&[1])));
+        gmail.service().start_sync(&gmail.account_id).await.unwrap();
+
+        // A LIST that lost All Mail (or a plain IMAP account): Work is not listed.
+        let mut provider = MockEmailProvider::new().with_mailboxes(vec![mailbox(
+            gmail.account_id,
+            "INBOX",
+            MailboxType::Inbox,
+        )]);
+        provider.preferred_model = gmail_provider.then_some(MailboxModel::Labels);
+        let service = make_shared_service(
+            Arc::new(provider),
+            gmail.event_store.clone(),
+            gmail.projector.clone(),
+        );
+        service.start_sync(&gmail.account_id).await.unwrap();
+        assert!(deleted(&gmail).is_empty());
+    }
+}

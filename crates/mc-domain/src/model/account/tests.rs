@@ -218,8 +218,15 @@ fn mailbox_model_defaults_by_provider_and_changes_once() {
         },
     );
     assert_eq!(account.mailbox_model, MailboxModel::Labels);
-    assert!(account.set_mailbox_model(MailboxModel::Labels).is_none());
-    let event = account.set_mailbox_model(MailboxModel::Folders).unwrap();
+    // Choosing the current model is still recorded, so a default never overrides it.
+    assert!(matches!(
+        account.set_mailbox_model(MailboxModel::Labels),
+        DomainEvent::AccountMailboxModelChanged {
+            model: MailboxModel::Labels,
+            ..
+        }
+    ));
+    let event = account.set_mailbox_model(MailboxModel::Folders);
     let rebuilt = Account::rehydrate(&[added, event]).unwrap();
     assert_eq!(rebuilt.mailbox_model, MailboxModel::Folders);
 }

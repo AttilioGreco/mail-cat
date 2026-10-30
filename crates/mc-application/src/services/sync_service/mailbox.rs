@@ -130,6 +130,36 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         Ok(Some((new_count, removed)))
     }
 
+    /// A label deleted or renamed on the server leaves a local view the
+    /// layout no longer knows, so no sync would reconcile it. Only Gmail has
+    /// them (its `provider` names a model), only `Custom` mailboxes are views
+    /// (All Mail, Spam and Trash are real), and a LIST without `\All` is not
+    /// to be trusted: it may be a failed or partial one.
+    /// Deleting the mailbox drops its memberships; a renamed label's messages
+    /// are labelled again by the full read the changed fingerprint forces.
+    pub(super) async fn drop_gone_labels(
+        &self,
+        provider: &Arc<PR::Provider>,
+        local: &[Mailbox],
+        remote: &[Mailbox],
+    ) -> Result<(), ApplicationError> {
+        if provider.preferred_mailbox_model().is_none()
+            || !remote.iter().any(|m| m.mailbox_type == MailboxType::All)
+        {
+            return Ok(());
+        }
+        let listed: HashSet<&MailboxPath> = remote.iter().map(|m| &m.path).collect();
+        for gone in local
+            .iter()
+            .filter(|m| m.mailbox_type == MailboxType::Custom && !listed.contains(&m.path))
+        {
+            info!(path = %gone.path, "Label gone from the server, removing it");
+            self.append_and_project(&gone.id.to_string(), AggregateType::Mailbox, gone.delete())
+                .await?;
+        }
+        Ok(())
+    }
+
     /// The mailboxes that are only views over `local` (Gmail labels over All
     /// Mail): they have no sync of their own.
     async fn views_of(
