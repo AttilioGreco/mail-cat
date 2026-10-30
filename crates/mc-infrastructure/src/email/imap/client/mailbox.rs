@@ -325,6 +325,9 @@ where
         Ok(reply) => reply
             .into_iter()
             .filter_map(Result::ok)
+            // RFC 3501: LSUB lists an unsubscribed parent as \Noselect when
+            // only a descendant is subscribed. The parent itself is not.
+            .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
             .map(|n| mapper::unescape_quoted(n.name()))
             .collect(),
         Err(e) => {
@@ -338,7 +341,7 @@ where
 /// Whether the user sees and syncs `listed`, given what `LSUB` returned.
 pub(super) fn is_subscribed(listed: &Listed, lsub: Option<&HashSet<String>>, gmail: bool) -> bool {
     match listed.mailbox.mailbox_type {
-        MailboxType::Inbox => true,
+        t if t.is_mandatory() => true,
         // Gmail's Trash and Spam are large and rarely wanted: opt in.
         MailboxType::Trash | MailboxType::Spam if gmail => false,
         _ => lsub.is_none_or(|names| names.contains(&listed.name)),

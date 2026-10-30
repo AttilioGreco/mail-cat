@@ -209,7 +209,9 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
         } => {
             exec(
                 tx,
-                "UPDATE mailboxes SET subscribed = ?2, subscription_explicit = subscription_explicit OR ?3 \
+                "UPDATE mailboxes SET subscribed = ?2, subscription_explicit = subscription_explicit OR ?3, \
+                 total_messages = CASE WHEN ?2 THEN total_messages ELSE 0 END, \
+                 unread_messages = CASE WHEN ?2 THEN unread_messages ELSE 0 END \
                  WHERE id = ?1",
                 params![mailbox_id.as_uuid(), subscribed, explicit],
             )?;

@@ -63,7 +63,21 @@ macro_rules! mailboxes_conformance {
             .await
             .unwrap();
 
-            for (seq, subscribed, explicit) in [(2, false, true), (3, true, false)] {
+            repo.project(&make_event_envelope(
+                2,
+                &mailbox_id.to_string(),
+                AggregateType::Mailbox,
+                2,
+                DomainEvent::MailboxCountsUpdated {
+                    mailbox_id,
+                    total_messages: 40_000,
+                    unread_messages: 9,
+                },
+            ))
+            .await
+            .unwrap();
+
+            for (seq, subscribed, explicit) in [(3, false, true), (4, true, false)] {
                 repo.project(&make_event_envelope(
                     seq,
                     &mailbox_id.to_string(),
@@ -84,6 +98,11 @@ macro_rules! mailboxes_conformance {
                 .unwrap()
                 .unwrap();
             assert!(work.subscribed, "the last change wins");
+            assert_eq!(
+                (work.total_messages, work.unread_messages),
+                (0, 0),
+                "unsubscribing drops the server's counts"
+            );
             assert!(
                 work.subscription_explicit,
                 "an explicit choice stays marked"

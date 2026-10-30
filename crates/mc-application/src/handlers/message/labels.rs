@@ -141,6 +141,9 @@ impl<
                 for mailbox in add.iter().chain(&remove) {
                     path_of(mailbox)?;
                 }
+                for &mailbox in &add {
+                    self.require_visible_target(mailbox, false).await?;
+                }
                 let add: Vec<_> = add
                     .into_iter()
                     .filter(|m| message.membership(*m).is_none())

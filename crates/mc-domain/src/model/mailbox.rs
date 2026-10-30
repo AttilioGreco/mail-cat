@@ -59,6 +59,17 @@ pub enum MailboxType {
     Custom,
 }
 
+impl MailboxType {
+    /// Mail the user sends, drafts, receives or archives lives here: hiding
+    /// the mailbox would hide that mail, so it is always subscribed.
+    pub fn is_mandatory(self) -> bool {
+        matches!(
+            self,
+            Self::Inbox | Self::Sent | Self::Drafts | Self::Archive | Self::All
+        )
+    }
+}
+
 pub fn leaf_name(display_path: &str, delimiter: char) -> &str {
     display_path
         .rsplit(delimiter)
@@ -223,6 +234,10 @@ impl Mailbox {
             } => {
                 self.subscribed = *subscribed;
                 self.subscription_explicit |= *explicit;
+                if !subscribed {
+                    self.total_messages = 0;
+                    self.unread_messages = 0;
+                }
             }
             DomainEvent::MailboxRenamed {
                 new_path,

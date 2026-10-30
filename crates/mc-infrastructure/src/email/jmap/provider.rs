@@ -12,8 +12,8 @@ use mc_domain::error::DomainError;
 use mc_domain::traits::login_gate::LoginGate;
 use mc_domain::{
     AccountId, EmailProvider, Existing, Flag, Mailbox, MailboxChanges, MailboxCounts, MailboxId,
-    MailboxPath, MailboxType, Message, MessageBodyResult, MessageEnvelopeSummary, MessageKey,
-    OutgoingMessage, ProviderNotification, RemoteId, Reset, SendOutcome, SyncCursor,
+    MailboxPath, Message, MessageBodyResult, MessageEnvelopeSummary, MessageKey, OutgoingMessage,
+    ProviderNotification, RemoteId, Reset, SendOutcome, SyncCursor,
 };
 
 use super::client::{JmapClient, MethodError};
@@ -343,7 +343,7 @@ impl EmailProvider for JmapEmailProvider {
                     total_messages: count("totalEmails"),
                     unread_messages: count("unreadEmails"),
                     // A server without the property has no subscriptions.
-                    subscribed: mailbox_type == MailboxType::Inbox
+                    subscribed: mailbox_type.is_mandatory()
                         || m["isSubscribed"].as_bool().unwrap_or(true),
                     subscription_explicit: false,
                 })

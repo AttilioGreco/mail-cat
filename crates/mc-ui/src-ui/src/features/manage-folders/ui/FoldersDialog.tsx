@@ -1,6 +1,6 @@
 import { AlertCircle, RefreshCw, X } from 'lucide-react';
 import { useMemo } from 'react';
-import { buildLabelTree, useMailboxes, type LabelNode } from '@/entities/mailbox';
+import { buildLabelTree, useMailboxes, type LabelNode, type MailboxKind } from '@/entities/mailbox';
 import { useRefreshFolders, useSetSubscribed } from '../model/useSubscription';
 
 interface FoldersDialogProps {
@@ -9,6 +9,8 @@ interface FoldersDialogProps {
   accountName: string;
   onClose: () => void;
 }
+
+const ALWAYS_SUBSCRIBED: MailboxKind[] = ['inbox', 'sent', 'drafts', 'archive', 'all'];
 
 /** Thunderbird's Subscribe dialog: every mailbox of the account; the checked
  *  ones are shown in the sidebar and synced, the others hold no local mail. */
@@ -111,8 +113,8 @@ function FolderNode({
             <input
               type="checkbox"
               checked={mailbox.subscribed}
-              // The Inbox is always subscribed.
-              disabled={disabled || mailbox.kind === 'inbox'}
+              // Where the user's own mail lives: always subscribed.
+              disabled={disabled || ALWAYS_SUBSCRIBED.includes(mailbox.kind)}
               onChange={(e) => onToggle(mailbox.id, e.target.checked)}
             />
             <span className="truncate text-foreground">{node.segment}</span>

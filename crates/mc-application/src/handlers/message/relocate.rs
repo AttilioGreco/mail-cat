@@ -20,6 +20,7 @@ impl<
         to_mailbox_id: MailboxId,
         to_mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
+        self.require_visible_target(to_mailbox_id, true).await?;
         self.apply_one(
             message_id,
             from_mailbox_id,
@@ -113,6 +114,7 @@ impl<
         to_mailbox_id: MailboxId,
         to_mailbox_path: MailboxPath,
     ) -> Result<CommandResult, ApplicationError> {
+        self.require_visible_target(to_mailbox_id, true).await?;
         self.apply_many(messages, to_mailbox(to_mailbox_id, to_mailbox_path))
             .await
     }
@@ -325,6 +327,37 @@ impl<
         })
         .await
         .map(drop)
+    }
+
+    /// A message put into an unsubscribed real mailbox would be neither synced
+    /// nor listed: nowhere to be seen. Trash and Spam are the exception for a
+    /// move (`leaves_ok`): the message just leaves the local store. A view
+    /// (Gmail label) is only a label on All Mail, so it is fine.
+    pub(super) async fn require_visible_target(
+        &self,
+        mailbox_id: MailboxId,
+        leaves_ok: bool,
+    ) -> Result<(), ApplicationError> {
+        let Some(mailbox) = self.message_read_repo.get_mailbox(&mailbox_id).await? else {
+            return Ok(());
+        };
+        let leaves =
+            leaves_ok && matches!(mailbox.mailbox_type, MailboxType::Trash | MailboxType::Spam);
+        if mailbox.subscribed || leaves {
+            return Ok(());
+        }
+        if self
+            .provider_registry
+            .get_provider(&mailbox.account_id)?
+            .backed_by(&mailbox.path)
+            .is_some()
+        {
+            return Ok(());
+        }
+        Err(ApplicationError::PreconditionFailed(format!(
+            "{} is not subscribed: mail put there would be hidden. Subscribe to it first",
+            mailbox.display_path
+        )))
     }
 
     pub(super) fn request_resync(

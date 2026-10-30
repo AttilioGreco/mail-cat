@@ -297,6 +297,14 @@ async fn lsub_lists_the_subscribed_names_and_nothing_means_everything() {
     assert_eq!(uid_commands(&commands), ["LSUB \"\" \"*\""]);
     assert!(names.contains("Work") && names.contains("INBOX") && names.len() == 2);
 
+    // A \Noselect parent only stands in for a subscribed child.
+    let (mut session, _) = scripted(
+        |_| "* LSUB (\\Noselect) \"/\" \"Parent\"\r\n* LSUB () \"/\" \"Parent/Kid\"\r\n$T OK Done\r\n",
+    )
+    .await;
+    let names = lsub_names(&mut session).await.unwrap();
+    assert!(names.contains("Parent/Kid") && !names.contains("Parent"));
+
     let (mut session, _) = scripted(|_| "$T OK Done\r\n").await;
     assert!(
         lsub_names(&mut session).await.is_none(),
@@ -337,8 +345,17 @@ fn initial_subscription_rules() {
         some,
         false
     ));
+    for (name, kind) in [
+        ("Sent", MailboxType::Sent),
+        ("Drafts", MailboxType::Drafts),
+        ("All", MailboxType::All),
+        ("Archive", MailboxType::Archive),
+    ] {
+        assert!(is_subscribed(&listed(name, kind), some, false), "{name}");
+        assert!(is_subscribed(&listed(name, kind), some, true), "{name}");
+    }
     assert!(!is_subscribed(
-        &listed("Sent", MailboxType::Sent),
+        &listed("Junk", MailboxType::Spam),
         some,
         false
     ));

@@ -175,3 +175,56 @@ async fn archive_under_folders_is_a_move() {
     let (after, _) = s.handler.load_message(&s.msg.id).await.unwrap();
     assert!(after.membership(s.archive.id).is_some() && after.memberships.len() == 1);
 }
+
+/// Hidden mail must not be made by the user's own action: a label or a move
+/// into an unsubscribed real mailbox is refused, a move into Trash is not.
+#[tokio::test]
+async fn an_unsubscribed_real_mailbox_is_not_a_target() {
+    let msg = make_test_message();
+    let hidden = mc_domain::Mailbox {
+        subscribed: false,
+        ..test_mailbox(msg.account_id, "hidden", MailboxType::Custom)
+    };
+    let spam = mc_domain::Mailbox {
+        subscribed: false,
+        ..test_mailbox(msg.account_id, "Spam", MailboxType::Spam)
+    };
+    let provider = Arc::new(MockEmailProvider::moving_to(900));
+    let handler = MessageCommandHandler::new(
+        Arc::new(MockEventStore::with_message(&msg)),
+        Arc::new(MockProviderRegistry::new(provider.clone())),
+        Arc::new(MockMessageReadRepo::with_mailboxes(vec![
+            inbox_of(&msg),
+            hidden.clone(),
+            spam.clone(),
+        ])),
+        Arc::new(MockEventBus::new()),
+    );
+
+    let labelled = handler
+        .handle_change_labels(vec![msg.id], vec![hidden.id], vec![])
+        .await;
+    let moved = handler
+        .handle_move(msg.id, mailbox_of(&msg), hidden.id, hidden.path.clone())
+        .await;
+    let moved_many = handler
+        .handle_move_many(
+            vec![(msg.id, mailbox_of(&msg))],
+            hidden.id,
+            hidden.path.clone(),
+        )
+        .await;
+
+    for refused in [labelled, moved, moved_many] {
+        assert!(
+            matches!(refused, Err(ApplicationError::PreconditionFailed(_))),
+            "{refused:?}"
+        );
+    }
+    assert!(provider.relabelled.read().unwrap().is_empty());
+    assert!(provider.moved.read().unwrap().is_empty());
+    handler
+        .handle_move(msg.id, mailbox_of(&msg), spam.id, spam.path.clone())
+        .await
+        .unwrap();
+}
