@@ -97,6 +97,16 @@ itest-seed *args:
 itest *args:
     tests/itest/scenarios.py {{args}}
 
+# scenari Gmail veri contro la casella di test (tests/itest/README.md, "Gmail scenarios"):
+# richiede MAILCAT_ITEST_GMAIL_CONFIRM e MAILCAT_GOOGLE_CLIENT_ID/SECRET (anche da .env) e il login `mc accounts add-oauth`
+gmail-integration-test:
+    #!/usr/bin/env fish
+    for v in MAILCAT_ITEST_GMAIL_CONFIRM MAILCAT_GOOGLE_CLIENT_ID MAILCAT_GOOGLE_CLIENT_SECRET
+        set -q $v; or begin; echo "manca $v (vedi tests/itest/README.md)"; exit 1; end
+    end
+    python3 tests/itest/gmail/selftest.py; or exit 1
+    tests/itest/scenarios.py gmail_sync gmail_labels_mc_to_server gmail_server_to_mc gmail_delete_permanent gmail_model_default
+
 # benchmark di sync con corpus da ~3000 messaggi e proxy che conta i byte
 # (es: just itest-bench branch; just itest-bench main --root ../mail-cat-bench-main)
 itest-bench label *args:
