@@ -167,7 +167,18 @@ impl MailCatClient {
         Ok(())
     }
 
-    /// Replace a password account's IMAP/SMTP password; active after a server restart.
+    /// Stop the account's tasks and start them again, keeping its data.
+    pub async fn restart_account(&self, account_id: &str) -> Result<()> {
+        let mut client = AccountServiceClient::new(self.channel.clone());
+        client
+            .restart_account(pb::RestartAccountRequest {
+                account_id: account_id.to_owned(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Replace a password account's IMAP/SMTP password; SMTP takes it once the account restarts.
     pub async fn set_account_password(&self, account_id: &str, password: &str) -> Result<()> {
         let mut client = AccountServiceClient::new(self.channel.clone());
         client

@@ -823,7 +823,45 @@ def remove_account(w):
         raise Fail(f"the removed account's rows came back: {came_back}")
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk, hot_add, remove_account]
+def restart_account(w):
+    """Restarting one account of the running server stops and restarts only its tasks:
+    the server process stays, mail delivered afterwards arrives by push, and the other
+    account is not touched."""
+    create_carol()
+    for n in range(3):
+        deliver_to_carol(n)
+    pid = (HERE / ".state" / "server.pid").read_text()
+    log = HERE / ".state" / "server.log"
+
+    def logged(text):
+        return log.read_text(errors="replace").count(text)
+
+    add_carol()
+    wait(lambda: carol_inbox_total() == 3, "carol synced", timeout=60)
+    wait(lambda: logged("Started INBOX IDLE for 'carol'") == 1, "carol's watcher running", timeout=30)
+    alice_before = rows_of_account(w.account, "alice@itest.local")
+    alice_stops = logged("INBOX IDLE stopped for 'alice'")
+
+    mc("accounts", "restart", "carol@itest.local")
+
+    wait(lambda: logged("INBOX IDLE stopped for 'carol'") == 1, "the old watcher stopped")
+    wait(lambda: logged("Started INBOX IDLE for 'carol'") == 2, "a new watcher running", timeout=30)
+    if carol_inbox_total() != 3:
+        raise Fail("carol's data changed by the restart")
+    deliver_to_carol(3)
+    wait(lambda: carol_inbox_total() == 4, "a message delivered after the restart arrives by push", timeout=30)
+    if logged("INBOX IDLE stopped for 'alice'") != alice_stops:
+        raise Fail("alice's watcher was stopped")
+    if rows_of_account(w.account, "alice@itest.local") != alice_before:
+        raise Fail("alice's data changed")
+    w.assert_consistent()
+    if (HERE / ".state" / "server.pid").read_text() != pid:
+        raise Fail("the server was restarted")
+    if "no account named" not in mc_refuses("accounts", "restart", "nobody"):
+        raise Fail("restarting an unknown account was not refused")
+
+
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk, hot_add, remove_account, restart_account]
 SCENARIOS += gmail_scenarios.make(sys.modules[__name__])
 
 

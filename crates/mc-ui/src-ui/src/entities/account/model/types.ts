@@ -32,6 +32,8 @@ export interface AccountAuth {
   tokenExpiresAt: string | null;
   /** Why the last SMTP login was refused: sending is blocked, the account state is not. */
   smtpError: string | null;
+  /** A background task crashed for good; restarting the account revives it. */
+  taskError: string | null;
 }
 
 /** How an account's mailboxes are presented: a folder tree, or labels on messages. */

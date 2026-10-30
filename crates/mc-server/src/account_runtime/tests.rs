@@ -370,3 +370,48 @@ async fn remove_waits_for_a_sync_in_flight_and_leaves_nothing_behind() {
     assert!(late.is_err(), "a sync arriving later finds no provider");
     assert_eq!(rows_of(&f, id).await, (0, 0, 0));
 }
+
+#[tokio::test]
+async fn restart_brings_the_account_back_with_fresh_tasks_and_keeps_its_data() {
+    let f = fixture(ACCOUNT_TOML).await;
+    let runtime = &f.ctx.account_runtime;
+    let id = runtime.start_declared("hot@example.com").await.unwrap();
+    give_it_a_mailbox(&f, id).await;
+    let rows = rows_of(&f, id).await;
+    let (old_stop, old_gate) = (
+        runtime.running.lock().unwrap()[&id].stop.clone(),
+        runtime.deps.auth_gates.get(&id).unwrap(),
+    );
+    old_gate.task_failed("watcher stopped".into());
+
+    runtime.restart(id).await.unwrap();
+
+    assert!(old_stop.is_cancelled());
+    let new_stop = runtime.running.lock().unwrap()[&id].stop.clone();
+    assert!(!new_stop.is_cancelled(), "fresh tasks");
+    assert!(f.ctx.provider_registry.get_provider(&id).is_ok());
+    let gate = runtime.deps.auth_gates.get(&id).unwrap();
+    assert!(!Arc::ptr_eq(&gate, &old_gate));
+    assert_eq!(
+        gate.status().task_error,
+        None,
+        "the crash report is cleared"
+    );
+    assert_eq!(rows_of(&f, id).await, rows, "data untouched");
+    assert_eq!(account_count(&f).await, 1);
+}
+
+#[tokio::test]
+async fn restart_of_an_unknown_or_undeclared_account_changes_nothing() {
+    let f = fixture(ACCOUNT_TOML).await;
+    let runtime = &f.ctx.account_runtime;
+    assert!(matches!(
+        runtime.restart(AccountId::new()).await,
+        Err(ApplicationError::NotFound(..))
+    ));
+
+    let id = runtime.start_declared("hot@example.com").await.unwrap();
+    std::fs::write(&runtime.deps.config_path, "").unwrap();
+    assert!(runtime.restart(id).await.is_err());
+    assert!(runtime.is_running(&id), "still running as before");
+}

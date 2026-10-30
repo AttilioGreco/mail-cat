@@ -331,6 +331,23 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> AccountService for AccountS
         Ok(Response::new(RemoveAccountResponse { success: true }))
     }
 
+    async fn restart_account(
+        &self,
+        request: Request<proto::RestartAccountRequest>,
+    ) -> Result<Response<proto::RestartAccountResponse>, Status> {
+        let account_id = AccountId::from_uuid(
+            uuid::Uuid::parse_str(&request.into_inner().account_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
+        );
+        self.lifecycle
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("account lifecycle not configured"))?
+            .restart(account_id)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(proto::RestartAccountResponse {}))
+    }
+
     async fn get_account_stats(
         &self,
         request: Request<proto::GetAccountStatsRequest>,

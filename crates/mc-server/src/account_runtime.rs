@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use mc_application::{
-    AccountLifecycle, AccountProvisioner, ApplicationError, AuthGate, AuthGates, AuthState,
-    Command, CommandBus, CommandResult, Credential,
+    AccountLifecycle, AccountProvisioner, ApplicationError, AuthGate, AuthGates, Command,
+    CommandBus, CommandResult, Credential,
 };
 use mc_domain::model::account::{IncomingServer, SmtpConnectionConfig, SmtpSecurity};
 use mc_domain::{
@@ -30,12 +30,9 @@ use crate::wiring::{
     CommandBusImpl, ProviderRegistryImpl, QueryBusImpl, SearchHandlerImpl, SyncServiceImpl,
 };
 
+mod supervisor;
+mod tasks;
 mod watcher;
-
-/// How often an account is re-synced when nothing else prompts it.
-const SYNC_PERIOD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-/// Least wait before re-syncing after a failure the gate did not schedule.
-const SYNC_RETRY_FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What the runtime needs from the rest of the server.
 pub struct RuntimeDeps {
@@ -54,6 +51,16 @@ pub struct RuntimeDeps {
     /// Push watchers off: tests need syncs to happen only when they ask.
     pub idle_enabled: bool,
     pub shutdown: CancellationToken,
+}
+
+/// What a supervised per-account task needs to run, stop and report.
+#[derive(Clone)]
+struct TaskCtx {
+    id: AccountId,
+    name: String,
+    gate: Arc<AuthGate>,
+    stop: CancellationToken,
+    tasks: TaskTracker,
 }
 
 struct Running {
@@ -94,6 +101,10 @@ impl AccountRuntime {
     /// the database has none yet. Idempotent. On failure nothing is left behind.
     pub async fn start(&self, account_config: &AccountConfig) -> anyhow::Result<AccountId> {
         let _starting = self.starting.lock().await;
+        self.start_locked(account_config).await
+    }
+
+    async fn start_locked(&self, account_config: &AccountConfig) -> anyhow::Result<AccountId> {
         let deps = &self.deps;
         let existing = deps
             .repository
@@ -158,27 +169,17 @@ impl AccountRuntime {
         let stop = deps.shutdown.child_token();
         let tasks = TaskTracker::new();
         let first_sync = Arc::new(Notify::new());
-        self.spawn_sync_loop(
-            account_id,
-            name.clone(),
-            gate.clone(),
-            (stop.clone(), tasks.clone()),
-            first_sync.clone(),
-        );
-        self.spawn_backfill(
-            account_id,
-            account_config,
+        let task_ctx = TaskCtx {
+            id: account_id,
+            name: name.clone(),
             gate,
-            (stop.clone(), tasks.clone()),
-        );
+            stop: stop.clone(),
+            tasks: tasks.clone(),
+        };
+        self.spawn_sync_loop(task_ctx.clone(), first_sync.clone());
+        self.spawn_backfill(task_ctx.clone(), account_config.daily_download_limit());
         if deps.idle_enabled {
-            self.spawn_watcher(
-                account_id,
-                name.clone(),
-                provider,
-                (stop.clone(), tasks.clone()),
-                first_sync,
-            );
+            self.spawn_watcher(task_ctx, provider, first_sync);
         }
         self.running
             .lock()
@@ -190,13 +191,35 @@ impl AccountRuntime {
     /// Starts the account `config.toml` declares under `email`: what a login
     /// or `AddAccount` has just written there.
     pub async fn start_declared(&self, email: &str) -> anyhow::Result<AccountId> {
-        let config = ServerConfig::load_or_default(&self.deps.config_path);
-        let account_config = config
+        self.start(&self.declared(email)?).await
+    }
+
+    fn declared(&self, email: &str) -> anyhow::Result<AccountConfig> {
+        ServerConfig::load_or_default(&self.deps.config_path)
             .accounts
-            .iter()
+            .into_iter()
             .find(|a| a.email == email)
-            .with_context(|| format!("{email} is not declared in {}", self.deps.config_path))?;
-        self.start(account_config).await
+            .with_context(|| format!("{email} is not declared in {}", self.deps.config_path))
+    }
+
+    /// Stops the account and starts it again from `config.toml`, which
+    /// rebuilds everything per run: the credential, the SMTP sender and the
+    /// tasks. Its data stays. A failed start leaves it stopped.
+    pub async fn restart(&self, account_id: AccountId) -> Result<(), ApplicationError> {
+        let _lifecycle = self.starting.lock().await;
+        let account = self
+            .deps
+            .repository
+            .get_account(&account_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("Account", account_id.to_string()))?;
+        let internal = |e: anyhow::Error| ApplicationError::Internal(format!("{e:#}"));
+        let account_config = self.declared(account.email.as_str()).map_err(internal)?;
+        self.stop(&account_id).await;
+        self.start_locked(&account_config)
+            .await
+            .map(|_| ())
+            .map_err(internal)
     }
 
     /// Stops the account's tasks, waits until they are gone, and takes its
@@ -305,97 +328,6 @@ impl AccountRuntime {
             .iter()
             .any(|a| a.email.as_str() == email))
     }
-
-    /// Syncs at start, then every 5 minutes, and as soon as the account
-    /// recovers. Each pass waits on the gate: an account that needs the user
-    /// stays quiet, an offline one follows the gate's retry schedule. The
-    /// first pass is the account's first real login, so its state is known
-    /// within seconds.
-    /// After each sync, run the search-index catch-up: sync appends events in
-    /// bulk and the live bus drops under that load, so this lossless replay
-    /// from the event store is what makes synced messages searchable.
-    // ponytail: concurrent per-account catch-ups are idempotent (writer is
-    // mutex-guarded); redundant overlap is fine, no coordination needed.
-    fn spawn_sync_loop(
-        &self,
-        id: AccountId,
-        name: String,
-        gate: Arc<AuthGate>,
-        (stop, tasks): (CancellationToken, TaskTracker),
-        first_sync: Arc<Notify>,
-    ) {
-        let sync = self.deps.sync.clone();
-        let search = self.deps.search.clone();
-        let event_store = self.deps.event_store.clone();
-        tasks.spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = stop.cancelled() => break,
-                    () = gate.ready() => {}
-                }
-                let synced = tokio::select! {
-                    _ = stop.cancelled() => break,
-                    synced = sync.start_sync(&id) => synced,
-                };
-                let failed = match synced {
-                    Ok(events) => {
-                        tracing::info!("Sync done for '{name}': {} event(s)", events.len());
-                        // IMAP answered, even over a pooled session: not offline.
-                        gate.login_succeeded();
-                        first_sync.notify_one();
-                        false
-                    }
-                    Err(e) => {
-                        tracing::error!("Sync failed for '{name}': {e}");
-                        true
-                    }
-                };
-                if let Err(e) = search.catch_up(event_store.as_ref()).await {
-                    tracing::warn!("Search index catch-up after sync of '{name}' failed: {e}");
-                }
-                // A failure while the retry is already due wasn't a login the
-                // gate rescheduled: don't spin on it.
-                if failed
-                    && let AuthState::Offline { next_retry } = gate.status().state
-                    && next_retry <= Utc::now()
-                {
-                    tokio::select! {
-                        _ = stop.cancelled() => break,
-                        _ = tokio::time::sleep(SYNC_RETRY_FLOOR) => {}
-                    }
-                    continue;
-                }
-                // Offline, the gate's schedule (2s, 5s, …) beats the 5-minute period.
-                tokio::select! {
-                    _ = stop.cancelled() => break,
-                    _ = tokio::time::sleep(SYNC_PERIOD) => {}
-                    () = gate.recovered() => {}
-                    () = gate.retry_due() => {}
-                }
-            }
-            tracing::info!("Sync loop stopped for '{name}'");
-        });
-    }
-
-    /// Message bodies are downloaded here, not by the initial sync (envelopes
-    /// only): INBOX first, capped text only, once per Message-ID, at full
-    /// speed up to 90% of the account's daily download cap (Gmail locks an
-    /// account out past 2.5 GB/day). Each fetch indexes the body for search
-    /// and dequeues itself.
-    fn spawn_backfill(
-        &self,
-        id: AccountId,
-        account_config: &AccountConfig,
-        gate: Arc<AuthGate>,
-        (stop, tasks): (CancellationToken, TaskTracker),
-    ) {
-        let sync = self.deps.sync.clone();
-        let limit = account_config.daily_download_limit();
-        tasks.spawn(async move {
-            sync.run_backfill(id, limit, gate as Arc<dyn LoginGate>, stop)
-                .await;
-        });
-    }
 }
 
 #[async_trait::async_trait]
@@ -405,6 +337,10 @@ impl AccountLifecycle for AccountRuntime {
             .await
             .map(|_| ())
             .map_err(|e| ApplicationError::Internal(format!("{e:#}")))
+    }
+
+    async fn restart(&self, account_id: AccountId) -> Result<(), ApplicationError> {
+        AccountRuntime::restart(self, account_id).await
     }
 
     async fn remove(&self, account_id: AccountId) -> Result<(), ApplicationError> {

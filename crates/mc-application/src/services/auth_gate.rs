@@ -107,6 +107,9 @@ pub struct AuthStatus {
     /// Why the last SMTP login was refused; sending only, the account's
     /// state is IMAP's.
     pub smtp_error: Option<String>,
+    /// A background task of the account crashed for good: it looks active but
+    /// part of it no longer runs, until the account is restarted.
+    pub task_error: Option<String>,
 }
 
 /// Exchanges a refresh token for fresh tokens at the provider.
@@ -133,6 +136,7 @@ struct Tracked {
     throttle_rounds: u32,
     last_throttled: Option<DateTime<Utc>>,
     smtp_error: Option<String>,
+    task_error: Option<String>,
 }
 
 pub struct AuthGate {
@@ -179,7 +183,14 @@ impl AuthGate {
             oauth_provider,
             token_expires_at,
             smtp_error: tracked.smtp_error.clone(),
+            task_error: tracked.task_error.clone(),
         }
+    }
+
+    /// Shows clients that a background task of the account gave up.
+    pub fn task_failed(&self, reason: String) {
+        self.tracked.send_modify(|t| t.task_error = Some(reason));
+        let _ = self.changes.send(self.account_id);
     }
 
     /// Takes over the state persisted before a restart: an account that was
@@ -657,6 +668,7 @@ impl AuthGates {
                 throttle_rounds: 0,
                 last_throttled: None,
                 smtp_error: None,
+                task_error: None,
             }),
             refresh: self.refresh.clone(),
             secret_store: self.secret_store.clone(),

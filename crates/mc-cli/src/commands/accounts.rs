@@ -74,6 +74,12 @@ pub enum AccountsCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Stop an account's tasks and start them again, keeping its data. Applies
+    /// a changed SMTP password and revives a task that crashed.
+    Restart {
+        /// Account name, email or ID
+        account: String,
+    },
     /// Rename an existing account's display name
     Rename {
         /// Email address of the account to rename
@@ -166,6 +172,12 @@ pub async fn run(cmd: AccountsCmd, client: MailCatClient, json: bool) -> Result<
             Ok(())
         }
         AccountsCmd::Remove { account, yes } => remove(client, account, yes).await,
+        AccountsCmd::Restart { account } => {
+            let account = find_account(&client, &account).await?;
+            client.restart_account(&account.id).await?;
+            println!("{} account {} restarted", "✓".green(), account.email);
+            Ok(())
+        }
         AccountsCmd::Rename { email, name } => rename(client, email, name).await,
     }
 }
@@ -358,6 +370,8 @@ struct StatusRow {
     next_retry: String,
     #[tabled(rename = "SMTP")]
     smtp: String,
+    #[tabled(rename = "Tasks")]
+    tasks: String,
 }
 
 async fn status(client: MailCatClient) -> Result<()> {
@@ -384,6 +398,7 @@ async fn status(client: MailCatClient) -> Result<()> {
                     token_expires: dash(),
                     next_retry: dash(),
                     smtp: dash(),
+                    tasks: dash(),
                 };
             };
             let state = auth.state.as_str();
@@ -408,6 +423,7 @@ async fn status(client: MailCatClient) -> Result<()> {
                 smtp: auth
                     .smtp_error
                     .map_or_else(dash, |e| format!("refused: {e}")),
+                tasks: auth.task_error.map_or_else(dash, |e| e.red().to_string()),
             }
         })
         .collect();

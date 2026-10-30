@@ -104,6 +104,7 @@ async fn main() {
             commands::account_stats,
             commands::add_imap_account,
             commands::remove_account,
+            commands::restart_account,
             commands::sync_now,
             commands::start_sync_watch,
             commands::stop_sync_watch,

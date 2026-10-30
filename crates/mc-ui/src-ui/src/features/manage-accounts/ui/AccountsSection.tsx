@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Plus, RefreshCw, Trash2, AlertCircle, KeyRound, CheckCircle2 } from 'lucide-react';
+import { Plus, RefreshCw, RotateCw, Trash2, AlertCircle, KeyRound, CheckCircle2 } from 'lucide-react';
 import {
   useAccounts,
   useAccountStats,
@@ -14,6 +14,7 @@ import {
 } from '@/entities/account';
 import {
   useRemoveAccount,
+  useRestartAccount,
   useSetAccountPassword,
   useSetMailboxModel,
   useSyncNow,
@@ -89,6 +90,7 @@ function AccountCard({
   const lastBatch = useSyncStore((s) => s.lastBodyBatch[account.id]);
   const syncNow = useSyncNow();
   const removeAccount = useRemoveAccount();
+  const restartAccount = useRestartAccount();
   const [confirming, setConfirming] = useState(false);
   // A rejected password is what the user came here to fix.
   const [editingPassword, setEditingPassword] = useState(() => authState(account) === 'credentials_rejected');
@@ -130,6 +132,15 @@ function AccountCard({
           </button>
           <button
             type="button"
+            title="Riavvia account"
+            disabled={restartAccount.isPending}
+            onClick={() => restartAccount.mutate(account.id)}
+            className="rounded border border-border bg-background p-1.5 text-muted hover:bg-surface-hover hover:text-foreground disabled:opacity-50"
+          >
+            <RotateCw size={13} className={restartAccount.isPending ? 'animate-spin' : undefined} />
+          </button>
+          <button
+            type="button"
             title="Aggiorna password"
             onClick={() => setEditingPassword((v) => !v)}
             className="rounded border border-border bg-background p-1.5 text-muted hover:bg-surface-hover hover:text-foreground"
@@ -163,6 +174,16 @@ function AccountCard({
           />
           {lastBatch && stats.pendingBodies > 0 && <BodyBatchLine batch={lastBatch} />}
         </div>
+      )}
+
+      {account.auth?.taskError && (
+        <p className="mt-2 flex items-center gap-1.5 text-[11px] text-destructive">
+          <AlertCircle size={10} />
+          <span>{account.auth.taskError}: usa Riavvia account</span>
+        </p>
+      )}
+      {restartAccount.isError && (
+        <p className="mt-2 text-xs text-destructive">{String(restartAccount.error)}</p>
       )}
 
       <MailboxModelField account={account} />
@@ -271,6 +292,9 @@ function PasswordForm({
     >
       <label className="block text-xs text-foreground">
         Nuova password IMAP/SMTP (salvata nel keychain)
+        <span className="block text-[11px] text-muted">
+          IMAP la usa subito; per l'invio (SMTP) riavvia l'account.
+        </span>
         <input
           type="password"
           autoFocus

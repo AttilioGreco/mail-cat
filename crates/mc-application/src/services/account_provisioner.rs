@@ -53,5 +53,7 @@ pub trait AccountLifecycle: Send + Sync {
     /// events, read-model rows, search documents, config entry and secrets.
     /// The mailbox on the provider is untouched. Finishes at the next boot if
     /// the server dies half-way.
+    async fn restart(&self, account_id: AccountId) -> Result<(), ApplicationError>;
+
     async fn remove(&self, account_id: AccountId) -> Result<(), ApplicationError>;
 }

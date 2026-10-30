@@ -54,6 +54,8 @@ pub struct AuthStatus {
     pub token_expires_at: Option<DateTime<Utc>>,
     /// Why the last SMTP login was refused; never affects `state`.
     pub smtp_error: Option<String>,
+    /// A background task crashed for good; `mc accounts restart` revives it.
+    pub task_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

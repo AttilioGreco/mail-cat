@@ -51,7 +51,14 @@ export function useRemoveAccount() {
   });
 }
 
-/** Store a new password in the server keychain; the running account uses it at once. */
+/** Stop and start one account again; its data stays. Applies a new SMTP password. */
+export function useRestartAccount() {
+  return useMutation({
+    mutationFn: (accountId: string) => invoke('restart_account', { accountId }),
+  });
+}
+
+/** Store a new password in the server keychain; IMAP uses it at once, SMTP after the account restarts. */
 export function useSetAccountPassword() {
   return useMutation({
     mutationFn: ({ accountId, password }: { accountId: string; password: string }) =>

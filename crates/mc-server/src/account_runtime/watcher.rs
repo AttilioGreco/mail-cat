@@ -27,74 +27,114 @@ use mc_domain::{
 };
 use mc_infrastructure::{AnyAccountEventSource, AnyProvider};
 
-use super::AccountRuntime;
+use super::supervisor::supervise;
+use super::{AccountRuntime, TaskCtx};
 use crate::wiring::{CommandBusImpl, QueryBusImpl, SyncServiceImpl};
+
+#[derive(Clone)]
+struct Watcher {
+    id: AccountId,
+    name: String,
+    provider: Arc<AnyProvider>,
+    stop: CancellationToken,
+    tasks: TaskTracker,
+    first_sync: Arc<Notify>,
+    sync: Arc<SyncServiceImpl>,
+    cmd_bus: Arc<CommandBusImpl>,
+    query_bus: Arc<QueryBusImpl>,
+}
 
 impl AccountRuntime {
     pub(super) fn spawn_watcher(
         &self,
-        id: AccountId,
-        name: String,
+        ctx: TaskCtx,
         provider: Arc<AnyProvider>,
-        (stop, tasks): (CancellationToken, TaskTracker),
         first_sync: Arc<Notify>,
     ) {
-        let sync = self.deps.sync.clone();
-        let cmd_bus = self.deps.command_bus.clone();
-        let query_bus = self.deps.query_bus.clone();
-        let spawner = tasks.clone();
-        tasks.spawn(async move {
-            let mut mailboxes = local_mailboxes(&query_bus, id).await;
-            // A brand-new account has no mailboxes until its first sync, and
-            // the INBOX path (with the server's real delimiter) comes from there.
-            if !mailboxes
-                .iter()
-                .any(|m| m.mailbox_type == MailboxType::Inbox)
-            {
-                tokio::select! {
-                    _ = stop.cancelled() => return,
-                    () = first_sync.notified() => {}
-                }
-                mailboxes = local_mailboxes(&query_bus, id).await;
-            }
-            // The stored path matches what's in the read model, whatever delimiter
-            // the server uses.
-            let inbox_path = mailboxes
-                .iter()
-                .find(|mb| mb.mailbox_type == MailboxType::Inbox)
-                .map(|mb| mb.path.clone())
-                .unwrap_or_else(MailboxPath::inbox);
-            let path_to_id: HashMap<String, MailboxId> = mailboxes
-                .into_iter()
-                .map(|mb| (mb.path.full_path().to_string(), mb.id))
-                .collect();
+        let watcher = Watcher {
+            id: ctx.id,
+            name: ctx.name.clone(),
+            provider,
+            stop: ctx.stop.clone(),
+            tasks: ctx.tasks.clone(),
+            first_sync,
+            sync: self.deps.sync.clone(),
+            cmd_bus: self.deps.command_bus.clone(),
+            query_bus: self.deps.query_bus.clone(),
+        };
+        supervise(
+            ("watcher", ctx.name),
+            ctx.stop,
+            &ctx.tasks,
+            move |reason| ctx.gate.task_failed(reason),
+            move || watcher.clone().run(),
+        );
+    }
+}
 
-            let mut stream =
-                AnyAccountEventSource::new(provider).watch(std::slice::from_ref(&inbox_path));
-            // At most one triggered sync in flight per account.
-            let sync_gate = Arc::new(Semaphore::new(1));
-            tracing::info!("[Watcher] Started INBOX IDLE for '{name}'");
-            loop {
-                let item = tokio::select! {
-                    _ = stop.cancelled() => break,
-                    item = stream.next() => match item { Some(v) => v, None => break },
-                };
-                match item {
-                    Ok(notification) => {
-                        let ctx = Triggered {
-                            id,
-                            sync: &sync,
-                            sync_gate: &sync_gate,
-                            stop: &stop,
-                            tasks: &spawner,
-                        };
-                        handle(notification, ctx, &cmd_bus, &path_to_id).await
-                    }
-                    Err(e) => tracing::warn!("[Watcher] IDLE error for '{name}': {e}"),
-                }
+impl Watcher {
+    async fn run(self) {
+        let Self {
+            id,
+            name,
+            provider,
+            stop,
+            tasks,
+            first_sync,
+            sync,
+            cmd_bus,
+            query_bus,
+        } = self;
+        let mut mailboxes = local_mailboxes(&query_bus, id).await;
+        // A brand-new account has no mailboxes until its first sync, and
+        // the INBOX path (with the server's real delimiter) comes from there.
+        if !mailboxes
+            .iter()
+            .any(|m| m.mailbox_type == MailboxType::Inbox)
+        {
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                () = first_sync.notified() => {}
             }
-            tracing::info!("[Watcher] INBOX IDLE stopped for '{name}'");
-        });
+            mailboxes = local_mailboxes(&query_bus, id).await;
+        }
+        // The stored path matches what's in the read model, whatever delimiter
+        // the server uses.
+        let inbox_path = mailboxes
+            .iter()
+            .find(|mb| mb.mailbox_type == MailboxType::Inbox)
+            .map(|mb| mb.path.clone())
+            .unwrap_or_else(MailboxPath::inbox);
+        let path_to_id: HashMap<String, MailboxId> = mailboxes
+            .into_iter()
+            .map(|mb| (mb.path.full_path().to_string(), mb.id))
+            .collect();
+
+        let mut stream =
+            AnyAccountEventSource::new(provider).watch(std::slice::from_ref(&inbox_path));
+        // At most one triggered sync in flight per account.
+        let sync_gate = Arc::new(Semaphore::new(1));
+        tracing::info!("[Watcher] Started INBOX IDLE for '{name}'");
+        loop {
+            let item = tokio::select! {
+                _ = stop.cancelled() => break,
+                item = stream.next() => match item { Some(v) => v, None => break },
+            };
+            match item {
+                Ok(notification) => {
+                    let ctx = Triggered {
+                        id,
+                        sync: &sync,
+                        sync_gate: &sync_gate,
+                        stop: &stop,
+                        tasks: &tasks,
+                    };
+                    handle(notification, ctx, &cmd_bus, &path_to_id).await
+                }
+                Err(e) => tracing::warn!("[Watcher] IDLE error for '{name}': {e}"),
+            }
+        }
+        tracing::info!("[Watcher] INBOX IDLE stopped for '{name}'");
     }
 }
 

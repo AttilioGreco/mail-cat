@@ -147,6 +147,7 @@ pub struct AuthStatusDto {
     pub token_expires_at: Option<String>,
     /// Why the last SMTP login was refused; sending only.
     pub smtp_error: Option<String>,
+    pub task_error: Option<String>,
 }
 
 /// Download progress for one account.
@@ -261,6 +262,7 @@ fn auth_status_to_dto(s: AuthStatus) -> AuthStatusDto {
         }),
         token_expires_at: s.token_expires_at.map(|t| t.to_rfc3339()),
         smtp_error: s.smtp_error,
+        task_error: s.task_error,
     }
 }
 
@@ -434,6 +436,15 @@ pub async fn remove_account(account_id: String, state: State<'_, AppState>) -> R
     let client = get_or_connect(&state).await?;
     client
         .remove_account(&account_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn restart_account(account_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .restart_account(&account_id)
         .await
         .map_err(|e| e.to_string())
 }
