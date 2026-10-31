@@ -2,6 +2,9 @@
 // save_draft): the backend owns recipients, subject, quoting and identity
 // choice, the UI only edits what it is handed.
 
+/** What `body` is: HTML from the visual editor, or markdown. Fixed for a message's life. */
+export type BodyKind = 'html' | 'markdown';
+
 export type ComposeMode = 'new' | 'reply' | 'replyAll' | 'forward' | 'draft';
 
 export interface Identity {
@@ -27,7 +30,8 @@ export interface ComposeDto {
   cc: string[];
   bcc: string[];
   subject: string;
-  bodyMd: string;
+  body: string;
+  bodyKind: BodyKind;
   quotedHtml: string | null;
   signatureHtml: string | null;
   forwardedAttachments: ForwardedAttachment[];
@@ -40,7 +44,7 @@ export interface ComposeDto {
 export interface ComposeAttachment {
   filename: string;
   mimeType: string;
-  /** Set for inline images, referenced as cid:<contentId> in bodyMd. */
+  /** Set for inline images, referenced as cid:<contentId> in body. */
   contentId: string | null;
   dataBase64: string;
 }
@@ -52,7 +56,8 @@ export interface ComposeInput {
   cc: string[];
   bcc: string[];
   subject: string;
-  bodyMd: string;
+  body: string;
+  bodyKind: BodyKind;
   mode: ComposeMode;
   sourceMessageId: string | null;
   attachments: ComposeAttachment[];
@@ -63,6 +68,6 @@ export interface InlineImage {
   cid: string;
   blob: Blob;
   mimeType: string;
-  /** Object URL the editor's markdown points at until it is swapped for cid: on send. */
+  /** Object URL the editor's body points at until it is swapped for cid: on send. */
   url: string;
 }

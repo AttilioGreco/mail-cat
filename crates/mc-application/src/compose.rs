@@ -12,7 +12,7 @@ use mailparse::{DispositionType, MailAddr, MailHeader, MailHeaderMap, ParsedMail
 use mc_domain::{
     Account, AccountId, Address, EmailAddress, Envelope, MessageId, OutgoingAttachment,
 };
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::error::ApplicationError;
 
@@ -57,6 +57,31 @@ impl ComposeMode {
     }
 }
 
+/// What the body the user wrote is made of. The two are independent: a
+/// message keeps its kind for life, nothing converts one into the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyKind {
+    Html,
+    Markdown,
+}
+
+impl BodyKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "html" => Self::Html,
+            "markdown" => Self::Markdown,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Html => "html",
+            Self::Markdown => "markdown",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ComposeIdentity {
     pub account_id: AccountId,
@@ -85,11 +110,12 @@ pub struct ComposeView {
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
     pub subject: String,
-    pub body_md: String,
+    pub body: String,
+    pub body_kind: BodyKind,
     pub quoted_html: Option<String>,
     pub signature_html: Option<String>,
     pub forwarded_attachments: Vec<ForwardedAttachment>,
-    /// A restored draft's images shown inline (`cid:` in `body_md` or the
+    /// A restored draft's images shown inline (`cid:` in the body or the
     /// quote), so the editor can display them; empty otherwise.
     pub inline_images: Vec<OutgoingAttachment>,
     /// For a restored draft this is the mode it was started with, so the
@@ -107,7 +133,8 @@ pub struct ComposeInput {
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
     pub subject: String,
-    pub body_md: String,
+    pub body: String,
+    pub body_kind: BodyKind,
     pub mode: ComposeMode,
     pub source_message_id: Option<MessageId>,
     pub attachments: Vec<OutgoingAttachment>,
@@ -547,20 +574,80 @@ pub fn markdown_to_html(md: &str) -> String {
     html
 }
 
-pub fn assemble_html(body_md: &str, signature_html: Option<&str>, quote: Option<&Quote>) -> String {
-    let mut body = format!("<div>{}</div>", markdown_to_html(body_md));
-    if let Some(sig) = signature_html.filter(|s| !s.trim().is_empty()) {
-        body.push_str(&format!("<br><div class=\"signature\">{sig}</div>"));
+/// The body as HTML, whichever way it was written.
+pub fn body_to_html(kind: BodyKind, body: &str) -> String {
+    match kind {
+        BodyKind::Html => body.to_owned(),
+        BodyKind::Markdown => markdown_to_html(body),
     }
-    if let Some(q) = quote {
-        body.push_str("<br>");
-        body.push_str(&q.html);
-    }
-    format!("<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>{body}</body></html>")
 }
 
-pub fn assemble_text(body_md: &str, signature_text: Option<&str>, quote: Option<&Quote>) -> String {
-    let mut text = body_md.trim_end().to_owned();
+/// Markdown as readable plain text: syntax dropped, links kept as `text (url)`.
+fn markdown_to_text(md: &str) -> String {
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let mut text = String::with_capacity(md.len());
+    let mut links: Vec<pulldown_cmark::CowStr> = Vec::new();
+    for event in Parser::new_ext(md, options) {
+        match event {
+            Event::Text(t) | Event::Code(t) => text.push_str(&t),
+            Event::SoftBreak | Event::HardBreak => text.push('\n'),
+            Event::Rule => text.push_str("---\n\n"),
+            Event::Start(Tag::Item) => text.push_str("- "),
+            Event::Start(Tag::Link { dest_url, .. }) => links.push(dest_url),
+            Event::End(TagEnd::Link) => {
+                if let Some(url) = links.pop().filter(|u| !text.ends_with(u.as_ref())) {
+                    text.push_str(&format!(" ({url})"));
+                }
+            }
+            Event::End(TagEnd::TableCell) => text.push_str(" | "),
+            Event::End(TagEnd::Item | TagEnd::TableRow | TagEnd::TableHead | TagEnd::List(_)) => {
+                text.push('\n')
+            }
+            Event::End(
+                TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::BlockQuote(_),
+            ) => text.push_str("\n\n"),
+            _ => {}
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines().map(str::trim_end) {
+        if line.is_empty() && out.ends_with("\n\n") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim().to_owned()
+}
+
+pub fn assemble_html(
+    kind: BodyKind,
+    body: &str,
+    signature_html: Option<&str>,
+    quote: Option<&Quote>,
+) -> String {
+    let mut out = format!("<div>{}</div>", body_to_html(kind, body));
+    if let Some(sig) = signature_html.filter(|s| !s.trim().is_empty()) {
+        out.push_str(&format!("<br><div class=\"signature\">{sig}</div>"));
+    }
+    if let Some(q) = quote {
+        out.push_str("<br>");
+        out.push_str(&q.html);
+    }
+    format!("<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>{out}</body></html>")
+}
+
+pub fn assemble_text(
+    kind: BodyKind,
+    body: &str,
+    signature_text: Option<&str>,
+    quote: Option<&Quote>,
+) -> String {
+    let mut text = match kind {
+        BodyKind::Html => html_to_text(body),
+        BodyKind::Markdown => markdown_to_text(body),
+    };
     if let Some(sig) = signature_text.filter(|s| !s.trim().is_empty()) {
         text.push_str("\n\n-- \n");
         text.push_str(sig.trim_end());
@@ -582,7 +669,8 @@ pub fn signature_text(account: &Account) -> Option<String> {
 
 // ── Existing messages (forward source, stored drafts) ────────────────────────
 
-const MARKDOWN_HEADER: &str = "X-Mail-Cat-Markdown";
+const BODY_HEADER: &str = "X-Mail-Cat-Body";
+const BODY_KIND_HEADER: &str = "X-Mail-Cat-Body-Kind";
 const MODE_HEADER: &str = "X-Mail-Cat-Mode";
 const SOURCE_HEADER: &str = "X-Mail-Cat-Source";
 
@@ -591,18 +679,20 @@ const SOURCE_HEADER: &str = "X-Mail-Cat-Source";
 pub struct DraftMeta {
     pub mode: ComposeMode,
     pub source_message_id: Option<MessageId>,
+    pub body_kind: BodyKind,
     /// `None` for drafts written by other clients.
-    pub body_md: Option<String>,
+    pub body: Option<String>,
 }
 
 pub fn draft_headers(
     mode: ComposeMode,
     source: Option<MessageId>,
-    body_md: &str,
+    body_kind: BodyKind,
+    body: &str,
 ) -> Vec<(String, String)> {
     // Split into words so the header encoder can fold the base64 under the
     // 998-octet line limit; whitespace is dropped again when decoding.
-    let encoded = BASE64.encode(body_md);
+    let encoded = BASE64.encode(body);
     let folded = encoded
         .as_bytes()
         .chunks(76)
@@ -611,7 +701,8 @@ pub fn draft_headers(
         .join(" ");
     let mut headers = vec![
         (MODE_HEADER.to_owned(), mode.as_str().to_owned()),
-        (MARKDOWN_HEADER.to_owned(), folded),
+        (BODY_KIND_HEADER.to_owned(), body_kind.as_str().to_owned()),
+        (BODY_HEADER.to_owned(), folded),
     ];
     if let Some(id) = source {
         headers.push((SOURCE_HEADER.to_owned(), id.to_string()));
@@ -620,7 +711,7 @@ pub fn draft_headers(
 }
 
 fn draft_meta(headers: &[MailHeader]) -> DraftMeta {
-    let body_md = headers.get_first_value(MARKDOWN_HEADER).and_then(|v| {
+    let body = headers.get_first_value(BODY_HEADER).and_then(|v| {
         let compact: String = v.split_whitespace().collect();
         BASE64
             .decode(compact)
@@ -636,7 +727,11 @@ fn draft_meta(headers: &[MailHeader]) -> DraftMeta {
             .get_first_value(SOURCE_HEADER)
             .and_then(|v| uuid::Uuid::parse_str(v.trim()).ok())
             .map(MessageId::from_uuid),
-        body_md,
+        body_kind: headers
+            .get_first_value(BODY_KIND_HEADER)
+            .and_then(|k| BodyKind::parse(k.trim()))
+            .unwrap_or(BodyKind::Markdown),
+        body,
     }
 }
 

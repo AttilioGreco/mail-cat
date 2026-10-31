@@ -29,7 +29,8 @@ impl<
             cc: vec![],
             bcc: vec![],
             subject: String::new(),
-            body_md: String::new(),
+            body: String::new(),
+            body_kind: BodyKind::Html,
             quoted_html: None,
             signature_html: None,
             forwarded_attachments: vec![],
@@ -94,15 +95,16 @@ impl<
         view.cc = parsed.cc.clone();
         view.bcc = parsed.bcc.clone();
         view.subject = parsed.subject.clone();
-        view.body_md = meta
+        view.body_kind = meta.as_ref().map_or(BodyKind::Markdown, |m| m.body_kind);
+        view.body = meta
             .as_ref()
-            .and_then(|m| m.body_md.clone())
+            .and_then(|m| m.body.clone())
             .or_else(|| parsed.text.clone())
             .unwrap_or_default();
         // Quote and threading are rebuilt from the original; without it the
         // draft carries on as a plain new message.
         view.mode = ComposeMode::New;
-        let mut shown_html = compose::markdown_to_html(&view.body_md);
+        let mut shown_html = compose::body_to_html(view.body_kind, &view.body);
         if let Some(meta) = meta.filter(|m| m.mode.quotes_source())
             && let Some(source_id) = meta.source_message_id
         {
@@ -335,12 +337,14 @@ impl<
         };
         let quote = source.as_ref().and_then(|s| compose::quote_for(mode, s));
         let body_html = compose::assemble_html(
-            &input.body_md,
+            input.body_kind,
+            &input.body,
             account.identity.signature_html.as_deref(),
             quote.as_ref(),
         );
         let body_text = compose::assemble_text(
-            &input.body_md,
+            input.body_kind,
+            &input.body,
             compose::signature_text(account).as_deref(),
             quote.as_ref(),
         );
@@ -417,7 +421,7 @@ impl<
             references,
             attachments,
             extra_headers: if draft {
-                compose::draft_headers(mode, input.source_message_id, &input.body_md)
+                compose::draft_headers(mode, input.source_message_id, input.body_kind, &input.body)
             } else {
                 vec![]
             },

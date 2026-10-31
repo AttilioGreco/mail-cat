@@ -146,9 +146,16 @@ export function RecipientField({
         filter={null}
         autoHighlight
         value={values}
-        onValueChange={(next: string[]) => onChange(mergeAddresses([], next))}
+        onValueChange={(next: string[]) => {
+          onChange(mergeAddresses([], next));
+          if (next.length > values.length) onQueryChange('');
+        }}
         inputValue={query}
-        onInputValueChange={onQueryChange}
+        // Base UI wipes the input whenever the popup closes in multiple mode, and
+        // popupOpen drops to false on every keystroke until the search answers.
+        onInputValueChange={(next, details) => {
+          if (details.reason !== 'input-clear') onQueryChange(next);
+        }}
         open={popupOpen}
         onOpenChange={setOpen}
         onItemHighlighted={(value: string | undefined) => {

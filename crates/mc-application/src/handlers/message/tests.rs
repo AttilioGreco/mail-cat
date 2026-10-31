@@ -123,7 +123,8 @@ fn compose_input(account_id: AccountId) -> ComposeInput {
         cc: vec![],
         bcc: vec![],
         subject: "Ciao".into(),
-        body_md: "**ciao**".into(),
+        body: "**ciao**".into(),
+        body_kind: BodyKind::Markdown,
         mode: ComposeMode::New,
         source_message_id: None,
         attachments: vec![mc_domain::OutgoingAttachment {

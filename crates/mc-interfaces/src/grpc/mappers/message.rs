@@ -3,7 +3,7 @@ use super::{
     proto_email_to_domain, proto_flag_to_domain, timestamp_to_datetime,
 };
 use crate::grpc::proto::{self, AttachmentInfo, MessageDetail, MessageEnvelope, MessageSummary};
-use mc_application::compose::{ComposeInput, ComposeMode, ComposeView};
+use mc_application::compose::{BodyKind, ComposeInput, ComposeMode, ComposeView};
 use mc_domain::model::attachment::Attachment as DomainAttachment;
 use mc_domain::model::message::{Envelope as DomainEnvelope, Message};
 use mc_domain::value_objects::flag::Flag as DomainFlag;
@@ -151,7 +151,9 @@ pub fn proto_compose_input_to_app(input: proto::ComposeInput) -> Result<ComposeI
         cc: input.cc,
         bcc: input.bcc,
         subject: input.subject,
-        body_md: input.body_md,
+        body: input.body,
+        body_kind: BodyKind::parse(&input.body_kind)
+            .ok_or_else(|| format!("invalid body kind: {:?}", input.body_kind))?,
         mode: proto_compose_mode(&input.mode)?,
         source_message_id: message_id("source_message_id", input.source_message_id)?,
         attachments: input
@@ -186,7 +188,8 @@ pub fn compose_view_to_proto(view: ComposeView) -> proto::ComposeView {
         cc: view.cc,
         bcc: view.bcc,
         subject: view.subject,
-        body_md: view.body_md,
+        body: view.body,
+        body_kind: view.body_kind.as_str().to_owned(),
         quoted_html: view.quoted_html,
         signature_html: view.signature_html,
         forwarded_attachments: view

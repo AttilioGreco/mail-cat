@@ -231,6 +231,7 @@ fn bodies_put_text_then_signature_then_quote() {
         text: "> Q".into(),
     };
     let html = assemble_html(
+        BodyKind::Markdown,
         "**ciao**\nriga\n\n| a |\n|---|\n| 1 |\n\n~~no~~\n\n- [x] ok",
         Some("<i>Mario</i>"),
         Some(&quote),
@@ -246,10 +247,48 @@ fn bodies_put_text_then_signature_then_quote() {
     );
 
     assert_eq!(
-        assemble_text("ciao\n", Some("Mario"), Some(&quote)),
+        assemble_text(BodyKind::Markdown, "ciao\n", Some("Mario"), Some(&quote)),
         "ciao\n\n-- \nMario\n\n> Q"
     );
-    assert_eq!(assemble_text("ciao", None, None), "ciao");
+    assert_eq!(
+        assemble_text(BodyKind::Markdown, "ciao", None, None),
+        "ciao"
+    );
+}
+
+#[test]
+fn markdown_plain_text_drops_the_syntax() {
+    let text = assemble_text(
+        BodyKind::Markdown,
+        "# Titolo\n\n**grassetto** e [sito](https://x.it)\n\n- uno\n- due\n\n| a | b |\n|---|---|\n| 1 | 2 |",
+        None,
+        None,
+    );
+    assert_eq!(
+        text,
+        "Titolo\n\ngrassetto e sito (https://x.it)\n\n- uno\n- due\n\na | b |\n1 | 2 |"
+    );
+}
+
+#[test]
+fn html_bodies_are_kept_as_written_and_get_a_text_part() {
+    let quote = Quote {
+        html: "<blockquote>Q</blockquote>".into(),
+        text: "> Q".into(),
+    };
+    let body = "<p>ciao <b>tu</b></p><table><tr><td>1</td><td>2</td></tr></table>";
+    let html = assemble_html(BodyKind::Html, body, Some("<i>Mario</i>"), Some(&quote));
+    let (body_at, sig_at, quote_at) = (
+        html.find(body).unwrap(),
+        html.find("<i>Mario</i>").unwrap(),
+        html.find("<blockquote>Q").unwrap(),
+    );
+    assert!(body_at < sig_at && sig_at < quote_at);
+
+    let text = assemble_text(BodyKind::Html, body, Some("Mario"), Some(&quote));
+    assert!(text.starts_with("ciao tu\n"), "{text:?}");
+    assert!(text.ends_with("-- \nMario\n\n> Q"), "{text:?}");
+    assert!(!text.contains('<'));
 }
 
 #[test]
@@ -274,7 +313,7 @@ fn html_to_text_keeps_line_structure() {
 fn draft_metadata_survives_a_mime_round_trip() {
     let source = MessageId::new();
     let md = "# Titolo\n\nàèìòù ".repeat(200);
-    let headers: String = draft_headers(ComposeMode::Reply, Some(source), &md)
+    let headers: String = draft_headers(ComposeMode::Reply, Some(source), BodyKind::Html, &md)
         .into_iter()
         // Shape of what the header encoder writes: folded at the spaces.
         .map(|(k, v)| format!("{k}: {}\r\n", v.replace(' ', "\r\n ")))
@@ -288,7 +327,8 @@ fn draft_metadata_survives_a_mime_round_trip() {
         Some(DraftMeta {
             mode: ComposeMode::Reply,
             source_message_id: Some(source),
-            body_md: Some(md)
+            body_kind: BodyKind::Html,
+            body: Some(md)
         })
     );
     assert_eq!(

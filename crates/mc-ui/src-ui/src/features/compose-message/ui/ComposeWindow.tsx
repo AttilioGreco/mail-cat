@@ -14,10 +14,13 @@ import type { ComposeDto, ComposeInput, ComposeMode, InlineImage } from '../mode
 import { ComposeHeader, type PendingRecipients, type Recipients } from './ComposeHeader';
 import { isValidAddress, mergeAddresses, splitAddresses } from './RecipientField';
 
-// ponytail: split out, pulls in CodeMirror + remark (~5.7MB source) that's
-// dead weight until the user actually opens compose.
-const ComposeEditor = lazy(() =>
-  import('./ComposeEditor').then((m) => ({ default: m.ComposeEditor })),
+// ponytail: split out, pull in Tiptap / CodeMirror + remark (MBs of source)
+// that are dead weight until the user actually opens compose.
+const SimpleEditor = lazy(() =>
+  import('./SimpleEditor').then((m) => ({ default: m.SimpleEditor })),
+);
+const MarkdownEditor = lazy(() =>
+  import('./MarkdownEditor').then((m) => ({ default: m.MarkdownEditor })),
 );
 
 const TITLES: Record<ComposeMode, string> = {
@@ -104,7 +107,8 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
   // A reopened draft's images: the editor shows them via blob URLs, swapped
   // back to the same cid: on save/send.
   const [initial] = useState(() => restoreInlineImages(dto));
-  const [bodyMd, setBodyMd] = useState(initial.md);
+  const [body, setBody] = useState(initial.body);
+  const [bodyKind, setBodyKind] = useState(dto.bodyKind);
   const [images, setImages] = useState(initial.images);
   const [files, setFiles] = useState<File[]>([]);
   const [forwarded, setForwarded] = useState(dto.forwardedAttachments);
@@ -134,7 +138,7 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
   const changed =
     accountId !== dto.accountId ||
     !sameList(to, dto.to) || !sameList(cc, dto.cc) || !sameList(bcc, dto.bcc) ||
-    subject !== dto.subject || bodyMd !== initial.md ||
+    subject !== dto.subject || body !== initial.body ||
     files.length > 0 || forwarded.length !== dto.forwardedAttachments.length;
   const dirty = changed || hasPending;
 
@@ -156,8 +160,8 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
   const signatureHtml = accountId === dto.accountId ? dto.signatureHtml : (identity?.signatureHtml ?? null);
 
   const buildInput = async (r: Recipients): Promise<ComposeInput> => {
-    const used = images.filter((i) => bodyMd.includes(i.url));
-    const md = used.reduce((acc, i) => acc.split(i.url).join(`cid:${i.cid}`), bodyMd);
+    const used = images.filter((i) => body.includes(i.url));
+    const withCids = used.reduce((acc, i) => acc.split(i.url).join(`cid:${i.cid}`), body);
     const attachments = await Promise.all([
       ...files.map(async (f) => ({
         filename: f.name,
@@ -175,7 +179,8 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
     return {
       draftId: draftId.current,
       accountId, ...r, subject,
-      bodyMd: md,
+      body: withCids,
+      bodyKind,
       mode: dto.mode,
       sourceMessageId: dto.sourceMessageId,
       attachments,
@@ -198,11 +203,12 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
     accountId: dto.accountId,
     to: dto.to, cc: dto.cc, bcc: dto.bcc,
     subject: dto.subject,
-    bodyMd: dto.bodyMd,
+    body: dto.body,
+    bodyKind: dto.bodyKind,
     mode: dto.mode,
     sourceMessageId: dto.sourceMessageId,
     attachments: dto.inlineImages
-      .filter((i) => dto.bodyMd.includes(`cid:${i.contentId}`))
+      .filter((i) => dto.body.includes(`cid:${i.contentId}`))
       .map((i) => ({ filename: i.contentId, mimeType: i.mimeType, contentId: i.contentId, dataBase64: i.dataBase64 })),
     forwardedAttachmentIds: dto.forwardedAttachments.map((a) => a.id),
   });
@@ -294,7 +300,7 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
     if (!changed) return;
     const timer = setTimeout(autosave, AUTOSAVE_MS);
     return () => clearTimeout(timer);
-  }, [changed, accountId, recipients, subject, bodyMd, images, files, forwarded]);
+  }, [changed, accountId, recipients, subject, body, bodyKind, images, files, forwarded]);
 
   const onShortcut = useEffectEvent((e: KeyboardEvent) => {
     if (!(e.metaKey || e.ctrlKey) || confirm) return;
@@ -326,6 +332,10 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
   };
 
   const replying = dto.mode === 'reply' || dto.mode === 'replyAll';
+  // The kind is a choice made before writing: once there is content, or the
+  // message is a draft, switching would mean converting it, which we don't do.
+  const canChooseKind = dto.mode === 'new' && !reopened && body.trim() === '';
+  const Editor = bodyKind === 'markdown' ? MarkdownEditor : SimpleEditor;
 
   return (
     <div
@@ -364,10 +374,21 @@ function ComposeForm({ dto, requestCloseRef }: { dto: ComposeDto; requestCloseRe
         focusRecipients={!replying}
       />
 
+      {canChooseKind && (
+        <label className="flex shrink-0 cursor-pointer items-center gap-2 border-b border-border px-4 py-1.5 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={bodyKind === 'markdown'}
+            onChange={(e) => setBodyKind(e.target.checked ? 'markdown' : 'html')}
+          />
+          Avanzato (markdown)
+        </label>
+      )}
+
       <Suspense fallback={<div className="flex flex-1 items-center justify-center text-sm text-muted">Caricamento editor…</div>}>
-        <ComposeEditor
-          initialMd={initial.md}
-          onMdChange={setBodyMd}
+        <Editor
+          initialBody={initial.body}
+          onBodyChange={setBody}
           onImageAdd={(image) => setImages((prev) => [...prev, image])}
           onSend={() => void send()}
           onSaveDraft={() => void saveNow()}
@@ -474,14 +495,14 @@ function AttachmentChip({ icon, name, size, onRemove }: {
   );
 }
 
-function restoreInlineImages(dto: ComposeDto): { md: string; images: InlineImage[] } {
+function restoreInlineImages(dto: ComposeDto): { body: string; images: InlineImage[] } {
   const images = dto.inlineImages.map(({ contentId, mimeType, dataBase64 }) => {
     const bytes = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
     const blob = new Blob([bytes], { type: mimeType });
     return { cid: contentId, blob, mimeType, url: URL.createObjectURL(blob) };
   });
-  const md = images.reduce((acc, i) => acc.split(`cid:${i.cid}`).join(i.url), dto.bodyMd);
-  return { md, images };
+  const body = images.reduce((acc, i) => acc.split(`cid:${i.cid}`).join(i.url), dto.body);
+  return { body, images };
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((v, i) => v === b[i]);

@@ -295,7 +295,9 @@ pub struct ComposeView {
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
     pub subject: String,
-    pub body_md: String,
+    pub body: String,
+    /// "html" | "markdown"
+    pub body_kind: String,
     pub quoted_html: Option<String>,
     pub signature_html: Option<String>,
     pub forwarded_attachments: Vec<ForwardedAttachment>,
@@ -323,7 +325,9 @@ pub struct ComposeInput {
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
     pub subject: String,
-    pub body_md: String,
+    pub body: String,
+    /// "html" | "markdown"
+    pub body_kind: String,
     pub mode: String,
     pub source_message_id: Option<String>,
     pub attachments: Vec<ComposeAttachment>,

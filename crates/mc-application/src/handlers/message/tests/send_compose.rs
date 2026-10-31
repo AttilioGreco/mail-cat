@@ -24,7 +24,7 @@ async fn send_compose_hands_the_sent_mailbox_to_the_provider_and_records_it() {
             .unwrap()
             .contains("<strong>ciao</strong>")
     );
-    assert_eq!(out.body_text.as_deref(), Some("**ciao**\n\n-- \nMario"));
+    assert_eq!(out.body_text.as_deref(), Some("ciao\n\n-- \nMario"));
 
     assert_eq!(
         *f.provider.sent_to.read().unwrap(),
@@ -367,11 +367,15 @@ async fn draft_restores_markdown_recipients_and_attachments() {
         Some(source_message(account, inbox))
     });
     let draft = f.seeded.clone().unwrap();
-    let headers: String =
-        compose::draft_headers(ComposeMode::Forward, None, "**ciao**\n![](cid:img@x)")
-            .into_iter()
-            .map(|(k, v)| format!("{k}: {v}\r\n"))
-            .collect();
+    let headers: String = compose::draft_headers(
+        ComposeMode::Forward,
+        None,
+        BodyKind::Markdown,
+        "**ciao**\n![](cid:img@x)",
+    )
+    .into_iter()
+    .map(|(k, v)| format!("{k}: {v}\r\n"))
+    .collect();
     *f.provider.raw.write().unwrap() = format!(
         "{headers}To: Anna <anna@example.com>\r\nBcc: b@example.com\r\nSubject: Bozza\r\n\
 Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
@@ -396,7 +400,8 @@ Content-Type: multipart/mixed; boundary=\"M\"\r\n\r\n\
         panic!("expected ComposePrepared");
     };
     assert_eq!(view.draft_id, Some(draft.id));
-    assert_eq!(view.body_md, "**ciao**\n![](cid:img@x)");
+    assert_eq!(view.body, "**ciao**\n![](cid:img@x)");
+    assert_eq!(view.body_kind, BodyKind::Markdown);
     assert_eq!(view.to, ["Anna <anna@example.com>"]);
     assert_eq!(view.bcc, ["b@example.com"]);
     assert_eq!(view.subject, "Bozza");

@@ -22,7 +22,7 @@ use tracing::{info, warn};
 
 use crate::bus::EventPublisher;
 use crate::commands::CommandResult;
-use crate::compose::{self, ComposeInput, ComposeMode, ComposeView, ParsedSource};
+use crate::compose::{self, BodyKind, ComposeInput, ComposeMode, ComposeView, ParsedSource};
 use crate::error::ApplicationError;
 
 /// Handles Message-related commands.

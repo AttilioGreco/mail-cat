@@ -25,7 +25,7 @@ pub(super) async fn send_test(
 
     let stamp = chrono::Utc::now().to_rfc3339();
     let subject = format!("[mail-cat test] {stamp}");
-    let body_md = format!(
+    let body = format!(
         "Messaggio di test inviato da mail-cat CLI alle {stamp}.\n\
          Verifica: invio SMTP, persistenza del corpo, visibilità in lista, threading."
     );
@@ -40,7 +40,8 @@ pub(super) async fn send_test(
             cc: vec![],
             bcc: vec![],
             subject,
-            body_md: body_md.clone(),
+            body: body.clone(),
+            body_kind: "markdown".to_owned(),
             mode: if reply_to.is_some() { "reply" } else { "new" }.to_owned(),
             source_message_id: reply_to.as_ref().map(|(id, _)| id.clone()),
             attachments: vec![],
@@ -83,7 +84,7 @@ pub(super) async fn send_test(
         let body_ok = fetched
             .text_body
             .as_deref()
-            .is_some_and(|t| t.starts_with(body_md.as_str()));
+            .is_some_and(|t| t.starts_with(body.as_str()));
         println!(
             "  {} body persisted correctly",
             if body_ok { "✓".green() } else { "✗".red() }

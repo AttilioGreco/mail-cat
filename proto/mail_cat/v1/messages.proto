@@ -311,13 +311,14 @@ message ComposeView {
   repeated string cc = 5;
   repeated string bcc = 6;
   string subject = 7;
-  string body_md = 8;
+  string body = 8;  // HTML or markdown, per body_kind
   optional string quoted_html = 9;
   optional string signature_html = 10;
   repeated ForwardedAttachment forwarded_attachments = 11;
   string mode = 12;
   optional string source_message_id = 13;
   repeated InlineImage inline_images = 14;
+  string body_kind = 15;  // "html" | "markdown"
 }
 
 message ComposeAttachment {
@@ -334,11 +335,12 @@ message ComposeInput {
   repeated string cc = 4;
   repeated string bcc = 5;
   string subject = 6;
-  string body_md = 7;
+  string body = 7;  // HTML or markdown, per body_kind
   string mode = 8;
   optional string source_message_id = 9;
   repeated ComposeAttachment attachments = 10;
   repeated string forwarded_attachment_ids = 11;
+  string body_kind = 12;  // "html" | "markdown"
 }
 
 message SendComposeResponse {

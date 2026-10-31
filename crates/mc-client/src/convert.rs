@@ -342,7 +342,8 @@ pub fn compose_view_from_proto(v: pb::ComposeView) -> ComposeView {
         cc: v.cc,
         bcc: v.bcc,
         subject: v.subject,
-        body_md: v.body_md,
+        body: v.body,
+        body_kind: v.body_kind,
         quoted_html: v.quoted_html,
         signature_html: v.signature_html,
         forwarded_attachments: v
@@ -377,7 +378,8 @@ pub fn compose_input_to_proto(i: ComposeInput) -> pb::ComposeInput {
         cc: i.cc,
         bcc: i.bcc,
         subject: i.subject,
-        body_md: i.body_md,
+        body: i.body,
+        body_kind: i.body_kind,
         mode: i.mode,
         source_message_id: i.source_message_id,
         attachments: i
