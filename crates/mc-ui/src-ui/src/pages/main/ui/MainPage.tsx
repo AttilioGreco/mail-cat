@@ -1,4 +1,5 @@
-import { Sidebar } from '@/widgets/sidebar';
+import { AccountRail } from '@/widgets/account-rail';
+import { FolderBar } from '@/widgets/folder-bar';
 import { MessageList } from '@/widgets/message-list';
 import { MessagePane } from '@/widgets/message-pane';
 import { ComposeWindow } from '@/features/compose-message';
@@ -7,20 +8,21 @@ import { useResizableWidth } from '@/shared/lib/useResizableWidth';
 import { ResizeHandle } from '@/shared/ui/resize-handle';
 
 /**
- * Root layout: 3-column email shell, the first two columns resizable.
- *   [Sidebar 220px] | [MessageList 320px] | [MessagePane flex-1]
+ * Root layout: 4-column email shell, the folder bar and list resizable.
+ *   [AccountRail 56px] | [FolderBar 176px] | [MessageList 320px] | [MessagePane flex-1]
  */
 export function MainPage() {
   // Notification click → jump to that message.
   useDeepLink();
 
-  const sidebar = useResizableWidth('mc.sidebarWidth', 220, 160, 400);
+  const sidebar = useResizableWidth('mc.sidebarWidth', 176, 160, 400);
   const list = useResizableWidth('mc.messageListWidth', 320, 240, 720);
 
   return (
     <div className="flex h-full overflow-hidden bg-background">
+      <AccountRail />
       <div className="shrink-0 overflow-hidden" style={{ width: sidebar.width }}>
-        <Sidebar />
+        <FolderBar />
       </div>
       <ResizeHandle
         width={sidebar.width}

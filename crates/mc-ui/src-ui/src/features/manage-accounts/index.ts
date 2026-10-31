@@ -1,4 +1,5 @@
 export { AccountsSection } from './ui/AccountsSection';
+export { AddAccountDialog } from './ui/AddAccountDialog';
 export {
   useAddImapAccount,
   useRemoveAccount,

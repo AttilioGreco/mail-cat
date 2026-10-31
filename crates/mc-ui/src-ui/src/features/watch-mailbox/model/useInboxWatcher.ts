@@ -6,8 +6,8 @@ import type { MailboxEventPayload } from './useMailboxWatcher'
 import type { Mailbox } from '@/entities/mailbox'
 
 /**
- * Permanently watches the INBOX of an account so that unread badges in the
- * sidebar stay up to date even when the user is viewing another folder.
+ * Permanently watches the INBOX of an account so that unread badges on the account rail
+ * stay up to date for every account, whichever folder is open.
  *
  * Works alongside `useMailboxWatcher` in MessageList: the WatchState on the
  * Rust side is ref-counted, so both hooks can call start/stop_watching for the

@@ -21,6 +21,11 @@ server:
 ui:
     cargo tauri dev
 
+# avvia solo il dev server Vite del frontend (nel browser, senza backend Tauri)
+[working-directory: 'crates/mc-ui/src-ui']
+ui-web:
+    bun run dev
+
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 # compila tutto il workspace (Rust)

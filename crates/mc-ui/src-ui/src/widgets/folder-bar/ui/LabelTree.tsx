@@ -122,9 +122,9 @@ export function LabelTree({ accountId, labels, selectedMailboxId, onSelect, onCo
               e.preventDefault();
               onContextMenu(node.mailbox, e.clientX, e.clientY);
             }}
-            style={{ paddingLeft: 10 + depth * 14 }}
+            style={{ paddingLeft: 8 + depth * 16 }}
             className={cn(
-              'flex w-full cursor-default items-center gap-1.5 rounded-md py-1.5 pr-2.5 text-sm outline-none transition-colors focus-visible:ring-1 focus-visible:ring-accent',
+              'flex w-full cursor-default items-center gap-2 rounded-md h-8 pr-2 text-sm outline-none transition-colors focus-visible:ring-1 focus-visible:ring-accent',
               isSelected ? 'bg-accent/15 text-accent' : 'text-muted-foreground hover:bg-surface-hover hover:text-foreground',
             )}
           >

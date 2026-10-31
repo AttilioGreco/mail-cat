@@ -60,7 +60,7 @@ export function FolderItem({ mailbox, isSelected, onSelect, asLabel = false, onC
         onContextMenu(e.clientX, e.clientY);
       }}
       className={cn(
-        'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors',
+        'flex w-full items-center gap-2 rounded-md px-2 h-8 text-sm transition-colors',
         isSelected
           ? 'bg-accent/15 text-accent'
           : 'text-muted-foreground hover:bg-surface-hover hover:text-foreground',
