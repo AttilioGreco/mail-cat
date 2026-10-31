@@ -8,6 +8,16 @@ pub fn resident_bytes() -> Option<u64> {
     Some(pages * 4096)
 }
 
+/// Hands freed heap back to the OS. glibc keeps freed arenas mapped, so after
+/// a model is dropped the process would otherwise stay at its peak size.
+pub fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only walks the allocator's own free lists.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #[test]

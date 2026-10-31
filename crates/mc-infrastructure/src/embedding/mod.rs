@@ -120,6 +120,7 @@ impl<E: Engine> LazyEmbedder<E> {
     /// Frees the engines now rather than after the idle time.
     pub fn unload(&self) {
         self.state.lock().engines.clear();
+        mc_shared::memory::release_free_memory();
     }
 
     fn touch(&self) -> Option<Engines<E>> {
@@ -140,12 +141,13 @@ async fn unload_when_idle<E>(state: Arc<Mutex<State<E>>>, idle: Duration) {
             if wait.is_zero() {
                 state.engines.clear();
                 state.watching = false;
-                return;
+                break;
             }
             wait
         };
         tokio::time::sleep(wait).await;
     }
+    mc_shared::memory::release_free_memory();
 }
 
 #[async_trait]
