@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use crate::error::DomainError;
 use crate::model::account::AccountId;
 use crate::model::tagging::{
-    AutoApplied, Example, GroupId, LabelSettings, LabelledVector, Lesson, ModelStats, Scope,
-    SourceFilter, TagSource, TrainingGroup,
+    AutoApplied, BackgroundSpeed, Example, GroupId, LabelSettings, LabelledVector, Lesson,
+    ModelStats, Scope, SourceFilter, TagSource, TrainingGroup,
 };
 use crate::value_objects::message_id::MessageId;
 
@@ -78,6 +78,8 @@ pub trait TaggingStore: Send + Sync {
     /// Whether the user agreed to download the model and embed their mail.
     async fn embeddings_enabled(&self) -> Result<bool, DomainError>;
     async fn set_embeddings_enabled(&self, enabled: bool) -> Result<(), DomainError>;
+    async fn background_speed(&self) -> Result<BackgroundSpeed, DomainError>;
+    async fn set_background_speed(&self, speed: BackgroundSpeed) -> Result<(), DomainError>;
     /// Replaces any vector the messages have, whatever model made it.
     async fn put_vectors(
         &self,
@@ -96,6 +98,14 @@ pub trait TaggingStore: Send + Sync {
         scope: Scope,
         model: &str,
     ) -> Result<Vec<LabelledVector>, DomainError>;
+    /// Messages of the accounts the model can read, of that kind.
+    async fn count_sources(
+        &self,
+        accounts: &[AccountId],
+        filter: SourceFilter,
+    ) -> Result<u64, DomainError>;
+    /// (messages with a vector of `model`, messages that could have one).
+    async fn embedding_counts(&self, model: &str) -> Result<(u64, u64), DomainError>;
     /// Messages with a body and no vector of `model`, newest first, below
     /// `before`. Trash, Spam and Drafts are skipped.
     async fn unembedded(

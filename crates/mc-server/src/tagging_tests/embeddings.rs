@@ -158,3 +158,63 @@ async fn neighbours_join_the_words_once_the_user_agrees() {
     assert_eq!(confidence(&service, regular).await, Some(Confidence::High));
     shutdown.cancel();
 }
+
+#[tokio::test]
+async fn the_backlog_waits_while_a_scope_is_being_retrained() {
+    let (world, _, _) = group_with_taught_label().await;
+    let fake = Arc::new(Fake(AtomicUsize::new(0)));
+    let service = Arc::new(
+        Service::new(
+            SqliteTaggingStore::new(world.db.clone()),
+            world.repo.clone(),
+            Arc::new(Recording::default()),
+        )
+        .with_embedder(fake.clone()),
+    );
+    let store = SqliteTaggingStore::new(world.db.clone());
+    let accounts = vec![world.account];
+    let ids: Vec<_> = store
+        .source_page(&accounts, mc_domain::SourceFilter::Any, None, false, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    for &id in &ids {
+        give_body(&world, id, "cena").await;
+    }
+    // The retrain rests between pages (500 ms at the normal speed), so it
+    // is under way for about a second after the service starts.
+    store.set_embeddings_enabled(true).await.unwrap();
+    store
+        .mark_untrained(mc_domain::Scope::Group(GroupId::DEFAULT))
+        .await
+        .unwrap();
+    let shutdown = CancellationToken::new();
+    service.spawn(InProcessEventBus::new(16).subscribe(), shutdown.clone());
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fake.0.load(Ordering::SeqCst),
+        0,
+        "embedding waits for the retrain"
+    );
+    assert!(
+        !store
+            .is_trained(mc_domain::Scope::Group(GroupId::DEFAULT))
+            .await
+            .unwrap()
+    );
+
+    until("the backlog is embedded after the retrain", || async {
+        fake.0.load(Ordering::SeqCst) == ids.len()
+    })
+    .await;
+    assert!(
+        store
+            .is_trained(mc_domain::Scope::Group(GroupId::DEFAULT))
+            .await
+            .unwrap()
+    );
+    shutdown.cancel();
+}

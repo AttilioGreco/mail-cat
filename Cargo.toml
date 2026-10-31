@@ -18,6 +18,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+libc = "0.2"
 # Internal crates
 mc-domain = { path = "crates/mc-domain" }
 mc-application = { path = "crates/mc-application" }

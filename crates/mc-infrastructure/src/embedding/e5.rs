@@ -23,9 +23,6 @@ const REVISION: &str = "761b726dd34fb83930e26aab4e9ac3899aa1fa78";
 pub const MODEL: &str = "multilingual-e5-small-q@761b726";
 /// Tokens read per text: subject and the start of the body say what a mail is.
 const MAX_TOKENS: usize = 256;
-/// Texts per forward pass, and ONNX threads: bounded so it never hogs the CPU.
-const BATCH: usize = 16;
-const THREADS: usize = 2;
 
 /// (path in the repository, SHA-256).
 const FILES: [(&str, &str); 5] = [
@@ -60,7 +57,7 @@ impl Engine for E5 {
         let texts: Vec<String> = texts.iter().map(|t| format!("query: {t}")).collect();
         let mut vectors = self
             .0
-            .embed(texts, Some(BATCH))
+            .embed(texts, None)
             .map_err(|e| DomainError::Provider(format!("embedding: {e}")))?;
         vectors.iter_mut().for_each(|v| normalize(v));
         Ok(vectors)
@@ -80,38 +77,51 @@ pub fn multilingual_e5_small(dir: PathBuf, idle: Duration) -> LazyEmbedder<impl 
     LazyEmbedder::new(
         MODEL,
         idle,
-        Box::new(move || {
+        Box::new(move |workers, threads| {
             let dir = dir.clone();
-            Box::pin(async move { load(&dir).await })
+            Box::pin(async move { load(&dir, workers, threads).await })
         }),
     )
 }
 
-async fn load(dir: &Path) -> Result<E5, DomainError> {
+/// Each worker's session is built on a niced thread of its own: ONNX Runtime
+/// starts its intra-op threads while building, and on Linux they inherit the
+/// priority of the thread that did.
+async fn load(dir: &Path, workers: usize, threads: usize) -> Result<Vec<E5>, DomainError> {
     let mut files = Vec::with_capacity(FILES.len());
     for (name, sha256) in FILES {
         files.push(fetch(dir, name, sha256).await?);
     }
-    tokio::task::spawn_blocking(move || {
-        let mut files = files.into_iter();
-        let onnx = files.next().unwrap_or_default();
-        let mut next = || files.next().unwrap_or_default();
-        let tokenizer = TokenizerFiles {
-            tokenizer_file: next(),
-            config_file: next(),
-            special_tokens_map_file: next(),
-            tokenizer_config_file: next(),
-        };
-        let model = UserDefinedEmbeddingModel::new(onnx, tokenizer).with_pooling(Pooling::Mean);
-        let options = InitOptionsUserDefined::new()
-            .with_max_length(MAX_TOKENS)
-            .with_intra_threads(THREADS);
-        TextEmbedding::try_new_from_user_defined(model, options)
-            .map(E5)
-            .map_err(|e| DomainError::Provider(format!("loading the embedding model: {e}")))
-    })
-    .await
-    .map_err(|e| DomainError::Provider(format!("loading task: {e}")))?
+    let mut files = files.into_iter();
+    let onnx = files.next().unwrap_or_default();
+    let mut next = || files.next().unwrap_or_default();
+    let tokenizer = TokenizerFiles {
+        tokenizer_file: next(),
+        config_file: next(),
+        special_tokens_map_file: next(),
+        tokenizer_config_file: next(),
+    };
+    let model = UserDefinedEmbeddingModel::new(onnx, tokenizer).with_pooling(Pooling::Mean);
+    let builds = (0..workers).map(|_| {
+        let model = model.clone();
+        super::niced(move || {
+            // ponytail: a GPU execution provider (CUDA/CoreML/DirectML via ort)
+            // would be added to these options with `with_execution_providers`.
+            // Windows does not hand thread priority down to ONNX Runtime's
+            // pool; ort's ThreadManager could, but fastembed does not expose
+            // it. Until then Leggera (1 thread) is the quiet choice there.
+            let options = InitOptionsUserDefined::new()
+                .with_max_length(MAX_TOKENS)
+                .with_intra_threads(threads);
+            TextEmbedding::try_new_from_user_defined(model, options)
+                .map(E5)
+                .map_err(|e| DomainError::Provider(format!("loading the embedding model: {e}")))
+        })
+    });
+    futures::future::try_join_all(builds)
+        .await?
+        .into_iter()
+        .collect()
 }
 
 /// The file's bytes: from `dir` if they match the checksum, else downloaded.

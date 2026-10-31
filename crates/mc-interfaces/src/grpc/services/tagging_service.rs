@@ -4,7 +4,9 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use mc_application::CommandBus;
-use mc_application::services::tagging::{LabelStatus as AppLabelStatus, TaggingService};
+use mc_application::services::tagging::{
+    EmbedderState, LabelStatus as AppLabelStatus, TaggingService,
+};
 use mc_domain::{
     AccountId, Confidence, GroupId, LabelMode, LabelSettings, MailboxReadRepository, MessageId,
     TaggingStore,
@@ -34,6 +36,7 @@ where
             enabled: self.service.embeddings_enabled(),
             available: self.service.embedding_model().is_some(),
             model: self.service.embedding_model().unwrap_or_default().into(),
+            speed: self.service.background_speed().as_str().into(),
         }
     }
 }
@@ -350,5 +353,62 @@ where
             .await
             .map_err(application_error_to_status)?;
         Ok(Response::new(self.embeddings()))
+    }
+
+    async fn set_background_speed(
+        &self,
+        request: Request<pb::SetBackgroundSpeedRequest>,
+    ) -> Result<Response<pb::EmbeddingsStatus>, Status> {
+        let speed = request
+            .into_inner()
+            .speed
+            .parse()
+            .map_err(Status::invalid_argument)?;
+        self.service
+            .set_background_speed(speed)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(self.embeddings()))
+    }
+
+    async fn get_background_stats(
+        &self,
+        _: Request<pb::GetBackgroundStatsRequest>,
+    ) -> Result<Response<pb::BackgroundStats>, Status> {
+        let s = self
+            .service
+            .background_stats()
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(pb::BackgroundStats {
+            speed: s.speed.as_str().into(),
+            workers: s.profile.workers as u32,
+            threads: s.profile.threads as u32,
+            batch: s.profile.batch,
+            pause_ms: s.profile.pause.as_millis() as u32,
+            state: match s.state {
+                EmbedderState::Off => "off",
+                EmbedderState::Loading => "loading",
+                EmbedderState::Active => "active",
+                EmbedderState::PausedForRetrain => "paused_for_retrain",
+                EmbedderState::Idle => "idle",
+            }
+            .into(),
+            model_loaded: s.model_loaded,
+            embedded: s.embedded,
+            eligible: s.eligible,
+            per_second: s.per_second,
+            eta_seconds: s.eta.map_or(0, |d| d.as_secs()),
+            worker_bytes: s.worker_bytes.unwrap_or_default(),
+            retrains: s
+                .retrains
+                .into_iter()
+                .map(|r| pb::RetrainProgress {
+                    scope: r.scope,
+                    done: r.done,
+                    total: r.total,
+                })
+                .collect(),
+        }))
     }
 }

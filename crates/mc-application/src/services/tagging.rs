@@ -12,6 +12,7 @@ mod features;
 mod knn;
 mod placement;
 mod retro;
+mod stats;
 mod training;
 mod vectors;
 
@@ -19,7 +20,8 @@ mod vectors;
 mod tests;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -29,9 +31,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use mc_domain::{
-    AccountId, AutoApplied, Confidence, DomainEvent, Embedder, EventEnvelope, Flag, GroupId,
-    LabelMode, LabelSettings, Mailbox, MailboxId, MailboxReadRepository, MailboxType, MessageId,
-    Scope, TagSource, TaggingStore, TrainingGroup,
+    AccountId, AutoApplied, BackgroundSpeed, Confidence, DomainEvent, Embedder, EventEnvelope,
+    Flag, GroupId, LabelMode, LabelSettings, Mailbox, MailboxId, MailboxReadRepository,
+    MailboxType, MessageId, Scope, TagSource, TaggingStore, TrainingGroup,
 };
 
 use crate::bus::{CommandBus, EventSubscriber};
@@ -41,6 +43,7 @@ use crate::error::ApplicationError;
 pub use eval::{EvalRow, LabelEval};
 use placement::{Placement, display_name};
 pub use retro::{Preview, PreviewItem};
+pub use stats::{BackgroundStats, EmbedderState, RetrainProgress};
 
 /// Live auto-apply only touches recent mail: an initial sync delivers years
 /// of "new" messages, and old mail is for the previewed bulk apply.
@@ -106,7 +109,30 @@ pub struct TaggingService<S, R, C> {
     embedding_on: AtomicBool,
     /// Rouses the embedding worker: a body arrived, or consent was given.
     wake: Notify,
+    speed: Mutex<BackgroundSpeed>,
+    /// Scopes being retrained right now: the embedding backlog gives way.
+    retraining: AtomicUsize,
+    activity: Mutex<stats::Activity>,
     pools: Mutex<Pools>,
+}
+
+/// Runs `work` polled on a thread of its own at background priority, for the
+/// CPU-heavy retraining; its I/O still goes through the runtime. The thread is
+/// not reused, as the priority cannot be raised back.
+async fn niced<T: Send + 'static>(
+    work: impl Future<Output = Result<T, ApplicationError>> + Send + 'static,
+) -> Result<T, ApplicationError> {
+    let runtime = tokio::runtime::Handle::current();
+    let (done, result) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        if let Err(e) = mc_shared::priority::lower_thread_priority() {
+            tracing::debug!(error = %e, "label classifier: could not lower the thread priority");
+        }
+        let _ = done.send(runtime.block_on(work));
+    });
+    result
+        .await
+        .map_err(|_| ApplicationError::Internal("background thread ended unexpectedly".into()))?
 }
 
 pub(crate) fn label_key(name: &str) -> String {
@@ -144,6 +170,9 @@ where
             embedder: None,
             embedding_on: AtomicBool::new(false),
             wake: Notify::new(),
+            speed: Mutex::new(BackgroundSpeed::default()),
+            retraining: AtomicUsize::new(0),
+            activity: Mutex::default(),
             pools: Mutex::new(HashMap::new()),
         }
     }
@@ -184,14 +213,15 @@ where
                 let stop = stop.clone();
                 async move { worker.run_embedder(stop).await }
             });
-            if let Err(e) = service.bootstrap().await {
+            let boot = Arc::clone(&service);
+            if let Err(e) = niced(async move { boot.bootstrap().await }).await {
                 warn!(error = %e, "label classifier: initial training failed");
             }
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => break,
                     event = events.recv() => match event {
-                        Some(e) => service.on_event(&e).await,
+                        Some(e) => Self::on_event(&service, &e).await,
                         None => break,
                     },
                 }
@@ -212,7 +242,7 @@ where
         });
     }
 
-    async fn on_event(&self, envelope: &EventEnvelope) {
+    async fn on_event(self: &Arc<Self>, envelope: &EventEnvelope) {
         let (message_id, auto) = match &envelope.payload {
             DomainEvent::MessageReceived {
                 message_id,
@@ -224,7 +254,9 @@ where
             // The labels of a labels account are its Custom mailboxes: a
             // mailbox gaining or losing that type changes what was taught.
             DomainEvent::MailboxTypeChanged { mailbox_id, .. } => {
-                if let Err(e) = self.relearn_mailbox(mailbox_id).await {
+                let (this, mailbox_id) = (Arc::clone(self), *mailbox_id);
+                if let Err(e) = niced(async move { this.relearn_mailbox(&mailbox_id).await }).await
+                {
                     warn!(%mailbox_id, error = %e, "label classifier: retraining after a type change failed");
                 }
                 return;
@@ -234,7 +266,9 @@ where
                 mailbox_id,
                 account_id,
             } => {
-                if let Err(e) = self.relearn_scope_of(*account_id).await {
+                let (this, account_id) = (Arc::clone(self), *account_id);
+                if let Err(e) = niced(async move { this.relearn_scope_of(account_id).await }).await
+                {
                     warn!(%mailbox_id, error = %e, "label classifier: retraining after a mailbox deletion failed");
                 }
                 return;

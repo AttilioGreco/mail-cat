@@ -1,9 +1,9 @@
 use chrono::Utc;
 use mc_domain::{
-    AccountId, AggregateType, DomainEvent, EmailAddress, Envelope, EventStore, Flag, GroupId,
-    LabelMode, LabelSettings, Lesson, ListHeaders, MailboxId, MailboxModel, MailboxPath,
-    MailboxType, Membership, MessageId, ProviderType, ReadModelProjector, RemoteId, Scope,
-    SourceFilter, TaggingStore,
+    AccountId, AggregateType, BackgroundSpeed, DomainEvent, EmailAddress, Envelope, EventStore,
+    Flag, GroupId, LabelMode, LabelSettings, Lesson, ListHeaders, MailboxId, MailboxModel,
+    MailboxPath, MailboxType, Membership, MessageId, ProviderType, ReadModelProjector, RemoteId,
+    Scope, SourceFilter, TaggingStore,
 };
 
 use super::*;
@@ -496,4 +496,29 @@ async fn embeddings_are_off_until_the_user_agrees() {
     assert!(f.store.embeddings_enabled().await.unwrap());
     f.store.set_embeddings_enabled(false).await.unwrap();
     assert!(!f.store.embeddings_enabled().await.unwrap());
+}
+
+#[tokio::test]
+async fn background_speed_defaults_to_normal_and_is_kept() {
+    let f = open();
+    assert_eq!(
+        f.store.background_speed().await.unwrap(),
+        BackgroundSpeed::Normal
+    );
+    f.store
+        .set_background_speed(BackgroundSpeed::Light)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.background_speed().await.unwrap(),
+        BackgroundSpeed::Light
+    );
+    f.store
+        .set_background_speed(BackgroundSpeed::Max)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.background_speed().await.unwrap(),
+        BackgroundSpeed::Max
+    );
 }

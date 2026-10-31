@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Plus, RefreshCw, RotateCw, Trash2, AlertCircle, KeyRound, CheckCircle2 } from 'lucide-react';
+import { ProgressRow } from '@/shared/ui/progress-row';
 import {
   useAccounts,
   useAccountStats,
@@ -345,35 +346,6 @@ function BodyBatchLine({ batch }: { batch: BodyBatch }) {
       </span>
       ultimo lotto +{batch.added.toLocaleString()} · {seconds < 60 ? `${seconds}s fa` : `${Math.floor(seconds / 60)} min fa`}
     </p>
-  );
-}
-
-function ProgressRow({
-  label,
-  done,
-  total,
-  missingLabel,
-}: {
-  label: string;
-  done: number;
-  total: number;
-  missingLabel: string;
-}) {
-  const percent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 100;
-
-  return (
-    <div>
-      <div className="mb-1 flex items-baseline justify-between text-[11px]">
-        <span className="text-muted">{label}</span>
-        <span className="text-foreground">
-          {done.toLocaleString()} / {total.toLocaleString()} · {percent}%
-        </span>
-      </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-background">
-        <div className="h-full rounded-full bg-accent transition-[width] duration-700 ease-out" style={{ width: `${percent}%` }} />
-      </div>
-      <p className="mt-0.5 text-[11px] text-muted">{missingLabel}</p>
-    </div>
   );
 }
 

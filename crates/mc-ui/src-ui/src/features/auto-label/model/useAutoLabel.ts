@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
-import type { ApplyPreview, EmbeddingsStatus, LabelMode, LabelStatus, MessageTags, TrainingGroup } from './types';
+import type { ApplyPreview, BackgroundStats, EmbeddingsStatus, LabelMode, LabelStatus, MessageTags, TrainingGroup } from './types';
 
 /** Labels changed behind the views' backs: everything that shows them is re-read. */
 function requery(qc: QueryClient) {
@@ -99,6 +99,15 @@ export function useGroupMutations() {
   };
 }
 
+/** Polled only while a component using it is mounted (the settings tab). */
+export function useBackgroundStats() {
+  return useQuery({
+    queryKey: ['background-stats'],
+    queryFn: () => invoke<BackgroundStats>('get_background_stats'),
+    refetchInterval: 2000,
+  });
+}
+
 export function useEmbeddings() {
   const qc = useQueryClient();
   const status = useQuery({ queryKey: ['embeddings'], queryFn: () => invoke<EmbeddingsStatus>('get_embeddings') });
@@ -106,5 +115,9 @@ export function useEmbeddings() {
     mutationFn: (enabled: boolean) => invoke<EmbeddingsStatus>('set_embeddings', { enabled }),
     onSuccess: (next) => qc.setQueryData(['embeddings'], next),
   });
-  return { status: status.data, set };
+  const setSpeed = useMutation({
+    mutationFn: (speed: EmbeddingsStatus['speed']) => invoke<EmbeddingsStatus>('set_background_speed', { speed }),
+    onSuccess: (next) => qc.setQueryData(['embeddings'], next),
+  });
+  return { status: status.data, set, setSpeed };
 }

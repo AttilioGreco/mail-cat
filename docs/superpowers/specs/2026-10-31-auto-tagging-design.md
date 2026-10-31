@@ -182,12 +182,60 @@ existing provider throttling/backoff.
 - Discovery proposals: a list (settings page section or a panel) with name,
   keywords, size, sample messages; accept / rename / reject.
 
+### Model abstraction (added 2026-10-31, user-approved)
+
+Goal: swap models, or let users pick one that fits their hardware, without
+touching the application layer.
+
+**Domain ports (mc-domain)** — what the application needs, not how:
+
+- `Embedder`
+  - `model() -> ModelId` (id + revision; vectors of different ids are never
+    compared — a model change means background re-embedding).
+  - `dims()`.
+  - `embed(texts, purpose)` with `purpose: Document | Query`. Each model owns
+    its own handling (e5 `passage:`/`query:` prefixes, none for others), so
+    the application never knows about prefixes. Phase-2 vectors were stored
+    with the `query:` prefix; the first model id under this API differs, so
+    they are re-embedded once.
+  - parallelism/load/stats hooks as today.
+- `LabelNamer` — given a cluster summary (distinctive keywords, dominant
+  senders/domains, sample subjects) returns a proposed name. Phase 3 ships a
+  keyword-based implementation; a local-LLM implementation can replace it.
+- A generic text-generation port (summaries, extraction, LLM naming) is
+  **not** defined now; it is added when first used (user decision).
+
+**Model catalog (mc-infrastructure)** — the menu users choose from. Each
+entry: id, revision, files + SHA-256, dims, max tokens, document/query
+handling, download size, RAM per worker, quality tier, languages. Profiles:
+
+| Profile | Example model | Size |
+|---|---|---|
+| Leggero | multilingual-e5-small (today) | ~120 MB |
+| Bilanciato | multilingual-e5-base | ~280 MB |
+| Qualità | bge-m3 or multilingual-e5-large | ~600 MB+ |
+
+Exact models are the builder's call; each must cover Italian + English.
+
+**Execution (mc-infrastructure, not domain)** — `ExecutionTarget`:
+`Cpu` | `Gpu(Cuda | Rocm | DirectMl | CoreMl)` | `Npu(VitisAi)`. Only `Cpu` is
+implemented now; the others are declared with a clear "not available on this
+build/machine" error. Speed (workers × threads, low OS priority on dedicated
+threads) belongs to this layer too.
+
+**User settings** — model profile, execution target, background speed, plus
+the live stats/progress card. Changing model → new `ModelId` → background
+re-embedding with the progress bar; until vectors exist the kNN signal is
+simply absent (Bayes alone, already the no-vector behaviour).
+
 ## Phases
 
 1. **Headers + Bayes + per-label settings + suggestion UI.** Delivers
    Newsletter/promotion suggestions and auto-apply.
 2. **Local embeddings + kNN signal + background embedding of the backlog.**
-3. **Discovery: clustering, keyword naming, proposals, feedback into 1–2.**
+2b. **Model abstraction** (section above) + background speed/stats.
+3. **Discovery: clustering, keyword naming (`LabelNamer`), proposals,
+   feedback into 1–2.**
 
 ## Constraints
 

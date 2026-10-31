@@ -5,9 +5,16 @@ import { Button } from '@/shared/ui/button';
 import { Input } from '@/shared/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/shared/ui/select';
 import { useAccounts } from '@/entities/account';
+import { BackgroundStatsCard } from './BackgroundStatsCard';
 import { useEmbeddings, useGroupMutations, useTrainingGroups } from '../model/useAutoLabel';
 
 const NO_GROUP = '';
+
+const SPEEDS = [
+  { value: 'light', label: 'Leggera' },
+  { value: 'normal', label: 'Normale' },
+  { value: 'max', label: 'Massima' },
+] as const;
 
 /** Which accounts learn their labels together. Accounts of a group share what
  *  each label looks like, matched by name. */
@@ -15,7 +22,7 @@ export function TrainingGroupsSection() {
   const { data: groups = [] } = useTrainingGroups();
   const { data: accounts = [] } = useAccounts();
   const { create, rename, remove, assign } = useGroupMutations();
-  const { status: embeddings, set: setEmbeddings } = useEmbeddings();
+  const { status: embeddings, set: setEmbeddings, setSpeed } = useEmbeddings();
   const [name, setName] = useState('');
   const fail = (e: Error) => toast.error(String(e));
 
@@ -45,6 +52,37 @@ export function TrainingGroupsSection() {
           </span>
         </label>
       )}
+
+      {embeddings && (
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-xs">
+            <div className="text-foreground">Velocità elaborazione in background</div>
+            <p className="text-muted">
+              Quanto computer possono usare apprendimento e analisi dei messaggi; hanno sempre priorità bassa, quindi non
+              rallentano le altre app.
+            </p>
+          </div>
+          <Select
+            value={embeddings.speed}
+            items={SPEEDS}
+            onValueChange={(v: string | null) =>
+              v !== null && setSpeed.mutate(v as typeof embeddings.speed, { onError: fail })
+            }
+          >
+            <SelectTrigger size="sm" className="w-36 shrink-0">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SPEEDS.map((s) => (
+                <SelectItem key={s.value} value={s.value}>
+                  {s.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      {embeddings && <BackgroundStatsCard />}
 
       <div className="space-y-2">
         <h3 className="text-xs font-medium text-muted-foreground">Account</h3>

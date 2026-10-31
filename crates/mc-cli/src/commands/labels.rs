@@ -13,11 +13,14 @@ pub enum LabelsCmd {
         #[arg(long)]
         account: String,
     },
+    /// Show what the background embedding and retraining are doing
+    Stats,
 }
 
 pub async fn run(cmd: LabelsCmd, client: MailCatClient, json: bool) -> Result<()> {
     match cmd {
         LabelsCmd::Eval { account } => eval(&account, client, json).await,
+        LabelsCmd::Stats => stats(client, json).await,
     }
 }
 
@@ -78,5 +81,38 @@ async fn eval(account: &str, client: MailCatClient, json: bool) -> Result<()> {
          words where the held-out mail has no embedding (embeddings off, or not yet done)."
             .dimmed()
     );
+    Ok(())
+}
+
+async fn stats(client: MailCatClient, json: bool) -> Result<()> {
+    let s = client.get_background_stats().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&s)?);
+        return Ok(());
+    }
+    println!(
+        "Speed: {} ({} workers x {} threads, batch {}, pause {} ms)",
+        s.speed, s.workers, s.threads, s.batch, s.pause_ms
+    );
+    println!(
+        "Embedder: {} (model {})",
+        s.state,
+        if s.model_loaded {
+            "in memory"
+        } else {
+            "not loaded"
+        }
+    );
+    println!("Embedded: {} / {}", s.embedded, s.eligible);
+    println!("Throughput: {:.1} msg/s", s.per_second);
+    if s.eta_seconds > 0 {
+        println!("ETA: {} min", s.eta_seconds.div_ceil(60));
+    }
+    if s.worker_bytes > 0 {
+        println!("Memory per worker: ~{} MB", s.worker_bytes / 1_000_000);
+    }
+    for r in &s.retrains {
+        println!("Retraining {}: {} / {}", r.scope, r.done, r.total);
+    }
     Ok(())
 }

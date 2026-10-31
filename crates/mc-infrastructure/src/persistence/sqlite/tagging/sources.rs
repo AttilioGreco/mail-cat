@@ -13,7 +13,9 @@ use mc_domain::{
     AccountId, DomainError, ListHeaders, MailboxId, MailboxType, MessageId, SourceFilter, TagSource,
 };
 
-use crate::persistence::sqlite::repository::{body_col, conversion_err, json_col, query_all};
+use crate::persistence::sqlite::repository::{
+    body_col, conversion_err, json_col, query_all, query_one,
+};
 
 /// Parameters per statement stay far below SQLite's limit.
 pub(super) fn placeholders(from: usize, n: usize) -> String {
@@ -155,4 +157,41 @@ pub(super) fn unembedded(
         rusqlite::params![before, model],
         source_from_row,
     )
+}
+
+pub(super) fn count(
+    conn: &Connection,
+    accounts: &[Uuid],
+    filter: SourceFilter,
+) -> Result<u64, DomainError> {
+    let kind = match filter {
+        SourceFilter::Labelled => format!("AND {LABELLED}"),
+        SourceFilter::Unlabelled => format!("AND NOT ({LABELLED})"),
+        SourceFilter::Any => String::new(),
+    };
+    let sql = format!(
+        "SELECT COUNT(*) FROM messages m JOIN accounts a ON a.id = m.account_id \
+         WHERE m.account_id IN ({}) AND {UNREADABLE} {kind}",
+        placeholders(1, accounts.len())
+    );
+    Ok(
+        query_one(conn, &sql, params_from_iter(accounts.iter()), |r| {
+            r.get::<_, i64>(0).map(|n| n as u64)
+        })?
+        .unwrap_or_default(),
+    )
+}
+
+/// (embedded, embeddable): the same mail `unembedded` looks at.
+pub(super) fn embedding_counts(conn: &Connection, model: &str) -> Result<(u64, u64), DomainError> {
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(EXISTS (SELECT 1 FROM tag_vectors v \
+         WHERE v.message_id = m.id AND v.model = ?1)), 0) \
+         FROM messages m JOIN message_bodies b ON b.message_id = m.id \
+         WHERE (b.text_zstd IS NOT NULL OR b.html_zstd IS NOT NULL) AND {UNREADABLE}"
+    );
+    Ok(query_one(conn, &sql, [model], |r| {
+        Ok((r.get::<_, i64>(1)? as u64, r.get::<_, i64>(0)? as u64))
+    })?
+    .unwrap_or_default())
 }

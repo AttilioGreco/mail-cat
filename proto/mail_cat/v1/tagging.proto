@@ -31,6 +31,11 @@ service TaggingService {
   // turning them on downloads the model and embeds the mail in the background.
   rpc GetEmbeddings(GetEmbeddingsRequest) returns (EmbeddingsStatus);
   rpc SetEmbeddings(SetEmbeddingsRequest) returns (EmbeddingsStatus);
+  // How hard background embedding and learning may work (always at low OS
+  // priority): "light", "normal" or "max". Applies without a restart.
+  // What the background work is doing right now (in memory, not stored).
+  rpc GetBackgroundStats(GetBackgroundStatsRequest) returns (BackgroundStats);
+  rpc SetBackgroundSpeed(SetBackgroundSpeedRequest) returns (EmbeddingsStatus);
 }
 
 message GetEmbeddingsRequest {}
@@ -40,7 +45,33 @@ message EmbeddingsStatus {
   // False where the server was built or started without a model.
   bool available = 2;
   string model = 3;
+  string speed = 4;
 }
+message GetBackgroundStatsRequest {}
+message BackgroundStats {
+  string speed = 1;
+  uint32 workers = 2;
+  uint32 threads = 3;
+  uint32 batch = 4;
+  uint32 pause_ms = 5;
+  // "off", "loading", "active", "paused_for_retrain" or "idle".
+  string state = 6;
+  bool model_loaded = 7;
+  uint64 embedded = 8;
+  uint64 eligible = 9;
+  double per_second = 10;
+  // 0 when unknown.
+  uint64 eta_seconds = 11;
+  // 0 when unknown.
+  uint64 worker_bytes = 12;
+  repeated RetrainProgress retrains = 13;
+}
+message RetrainProgress {
+  string scope = 1;
+  uint64 done = 2;
+  uint64 total = 3;
+}
+message SetBackgroundSpeedRequest { string speed = 1; }
 
 message TrainingGroup {
   string id = 1;

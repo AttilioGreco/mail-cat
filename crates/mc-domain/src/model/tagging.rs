@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -110,6 +111,74 @@ impl FromStr for LabelMode {
             "apply" => Self::Apply,
             "apply_archive" => Self::ApplyArchive,
             other => return Err(format!("unknown label mode {other:?}")),
+        })
+    }
+}
+
+/// How hard background learning and embedding may work. They always run at
+/// low OS priority; this only sets how much of the machine they may fill.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackgroundSpeed {
+    Light,
+    #[default]
+    Normal,
+    Max,
+}
+
+/// What a `BackgroundSpeed` comes to on a machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackgroundProfile {
+    /// Copies of the model embedding side by side.
+    pub workers: usize,
+    /// Inference threads of each.
+    pub threads: usize,
+    /// Messages embedded per batch.
+    pub batch: u32,
+    /// Rest between batches (and between pages of a retrain).
+    pub pause: Duration,
+}
+
+/// Each worker holds its own copy of the model: about 600 MB resident.
+const MAX_WORKERS: usize = 4;
+
+impl BackgroundSpeed {
+    pub fn profile(self, cores: usize) -> BackgroundProfile {
+        let (workers, threads, batch, pause) = match self {
+            Self::Light => (1, 1, 8, Duration::from_secs(3)),
+            Self::Normal => (
+                (cores / 8).clamp(1, MAX_WORKERS),
+                2,
+                16,
+                Duration::from_millis(500),
+            ),
+            Self::Max => ((cores / 4).clamp(1, MAX_WORKERS), 2, 32, Duration::ZERO),
+        };
+        BackgroundProfile {
+            workers,
+            threads,
+            batch,
+            pause,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Normal => "normal",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl FromStr for BackgroundSpeed {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        Ok(match s {
+            "light" => Self::Light,
+            "normal" => Self::Normal,
+            "max" => Self::Max,
+            other => return Err(format!("unknown background speed {other:?}")),
         })
     }
 }
@@ -271,4 +340,43 @@ pub struct AutoApplied {
     pub score: f64,
     pub archived: bool,
     pub at: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_speed_comes_to_threads_batch_and_pause() {
+        let p = |speed: BackgroundSpeed, cores| {
+            let p = speed.profile(cores);
+            (p.workers, p.threads, p.batch, p.pause)
+        };
+        assert_eq!(
+            p(BackgroundSpeed::Light, 16),
+            (1, 1, 8, Duration::from_secs(3))
+        );
+        assert_eq!(
+            p(BackgroundSpeed::Normal, 16),
+            (2, 2, 16, Duration::from_millis(500))
+        );
+        assert_eq!(
+            p(BackgroundSpeed::Normal, 1),
+            (1, 2, 16, Duration::from_millis(500))
+        );
+        assert_eq!(p(BackgroundSpeed::Max, 16), (4, 2, 32, Duration::ZERO));
+        assert_eq!(BackgroundSpeed::default(), BackgroundSpeed::Normal);
+    }
+
+    #[test]
+    fn speeds_survive_their_name() {
+        for s in [
+            BackgroundSpeed::Light,
+            BackgroundSpeed::Normal,
+            BackgroundSpeed::Max,
+        ] {
+            assert_eq!(s.as_str().parse(), Ok(s));
+        }
+        assert!("fast".parse::<BackgroundSpeed>().is_err());
+    }
 }

@@ -57,4 +57,25 @@ export interface EmbeddingsStatus {
   /** False where the server has no model. */
   available: boolean;
   model: string;
+  speed: 'light' | 'normal' | 'max';
+}
+
+export type EmbedderState = 'off' | 'loading' | 'active' | 'paused_for_retrain' | 'idle';
+
+export interface BackgroundStats {
+  speed: EmbeddingsStatus['speed'];
+  workers: number;
+  threads: number;
+  batch: number;
+  pauseMs: number;
+  state: EmbedderState;
+  modelLoaded: boolean;
+  embedded: number;
+  eligible: number;
+  perSecond: number;
+  /** Zero when unknown. */
+  etaSeconds: number;
+  /** Zero when unknown. */
+  workerBytes: number;
+  retrains: { scope: string; done: number; total: number }[];
 }

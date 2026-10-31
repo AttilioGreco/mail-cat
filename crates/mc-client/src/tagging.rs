@@ -98,6 +98,38 @@ pub struct EmbeddingsStatus {
     /// False where the server has no model.
     pub available: bool,
     pub model: String,
+    /// "light", "normal" or "max".
+    pub speed: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrainProgress {
+    pub scope: String,
+    pub done: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundStats {
+    /// "light", "normal" or "max".
+    pub speed: String,
+    pub workers: u32,
+    pub threads: u32,
+    pub batch: u32,
+    pub pause_ms: u32,
+    /// "off", "loading", "active", "paused_for_retrain" or "idle".
+    pub state: String,
+    pub model_loaded: bool,
+    pub embedded: u64,
+    pub eligible: u64,
+    pub per_second: f64,
+    /// Zero when unknown.
+    pub eta_seconds: u64,
+    /// Zero when unknown.
+    pub worker_bytes: u64,
+    pub retrains: Vec<RetrainProgress>,
 }
 
 fn group(g: pb::TrainingGroup) -> TrainingGroup {
@@ -362,6 +394,47 @@ impl MailCatClient {
             .await?;
         Ok(embeddings(resp.into_inner()))
     }
+
+    pub async fn get_background_stats(&self) -> Result<BackgroundStats> {
+        let s = self
+            .tagging()
+            .get_background_stats(pb::GetBackgroundStatsRequest {})
+            .await?
+            .into_inner();
+        Ok(BackgroundStats {
+            speed: s.speed,
+            workers: s.workers,
+            threads: s.threads,
+            batch: s.batch,
+            pause_ms: s.pause_ms,
+            state: s.state,
+            model_loaded: s.model_loaded,
+            embedded: s.embedded,
+            eligible: s.eligible,
+            per_second: s.per_second,
+            eta_seconds: s.eta_seconds,
+            worker_bytes: s.worker_bytes,
+            retrains: s
+                .retrains
+                .into_iter()
+                .map(|r| RetrainProgress {
+                    scope: r.scope,
+                    done: r.done,
+                    total: r.total,
+                })
+                .collect(),
+        })
+    }
+
+    pub async fn set_background_speed(&self, speed: &str) -> Result<EmbeddingsStatus> {
+        let resp = self
+            .tagging()
+            .set_background_speed(pb::SetBackgroundSpeedRequest {
+                speed: speed.to_owned(),
+            })
+            .await?;
+        Ok(embeddings(resp.into_inner()))
+    }
 }
 
 fn embeddings(s: pb::EmbeddingsStatus) -> EmbeddingsStatus {
@@ -369,5 +442,6 @@ fn embeddings(s: pb::EmbeddingsStatus) -> EmbeddingsStatus {
         enabled: s.enabled,
         available: s.available,
         model: s.model,
+        speed: s.speed,
     }
 }

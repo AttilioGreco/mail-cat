@@ -11,9 +11,9 @@ use rusqlite::{Connection, Row, params, params_from_iter};
 use uuid::Uuid;
 
 use mc_domain::{
-    AccountId, AutoApplied, DomainError, Example, GroupId, LabelMode, LabelSettings, LabelStats,
-    LabelledVector, Lesson, MessageId, ModelStats, Scope, SourceFilter, TagSource, TaggingStore,
-    TrainingGroup,
+    AccountId, AutoApplied, BackgroundSpeed, DomainError, Example, GroupId, LabelMode,
+    LabelSettings, LabelStats, LabelledVector, Lesson, MessageId, ModelStats, Scope, SourceFilter,
+    TagSource, TaggingStore, TrainingGroup,
 };
 
 use super::repository::{conversion_err, exec, json, json_col, nanos, query_all, query_one};
@@ -607,6 +607,16 @@ impl TaggingStore for SqliteTaggingStore {
             .await
     }
 
+    async fn background_speed(&self) -> Result<BackgroundSpeed, DomainError> {
+        self.db.read(vectors::speed).await
+    }
+
+    async fn set_background_speed(&self, speed: BackgroundSpeed) -> Result<(), DomainError> {
+        self.db
+            .write(move |conn| vectors::set_speed(conn, speed))
+            .await
+    }
+
     async fn put_vectors(
         &self,
         model: &str,
@@ -638,6 +648,27 @@ impl TaggingStore for SqliteTaggingStore {
         let model = model.to_owned();
         self.db
             .read(move |conn| vectors::scope(conn, scope, &model))
+            .await
+    }
+
+    async fn count_sources(
+        &self,
+        accounts: &[AccountId],
+        filter: SourceFilter,
+    ) -> Result<u64, DomainError> {
+        if accounts.is_empty() {
+            return Ok(0);
+        }
+        let accounts: Vec<Uuid> = accounts.iter().map(|a| *a.as_uuid()).collect();
+        self.db
+            .read(move |conn| sources::count(conn, &accounts, filter))
+            .await
+    }
+
+    async fn embedding_counts(&self, model: &str) -> Result<(u64, u64), DomainError> {
+        let model = model.to_owned();
+        self.db
+            .read(move |conn| sources::embedding_counts(conn, &model))
             .await
     }
 

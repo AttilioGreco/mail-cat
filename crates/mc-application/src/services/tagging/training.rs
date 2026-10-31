@@ -1,7 +1,7 @@
 //! Teaching the model: from the labels mail already has, then message by
 //! message as they change.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::Utc;
 use mc_domain::{
@@ -22,6 +22,15 @@ const PAGE: u32 = 200;
 /// by someone; sooner, the change may simply not have arrived yet.
 const AUTO_SETTLE: chrono::Duration = chrono::Duration::minutes(5);
 
+/// Counts a retrain as over when dropped, however it ends.
+struct Retraining<'a>(&'a AtomicUsize);
+
+impl Drop for Retraining<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl<S, R, C> TaggingService<S, R, C>
 where
     S: TaggingStore + 'static,
@@ -38,11 +47,38 @@ where
         Ok(())
     }
 
+    /// The writer is shared with sync, and the machine with its user: rest
+    /// between pages as long as the background speed asks.
+    async fn breathe(&self) {
+        let pause = self.profile().pause;
+        if !pause.is_zero() {
+            tokio::time::sleep(pause).await;
+        }
+    }
+
     /// Forget the scope's counts and teach them again from the mail as it is.
     pub(crate) async fn train_scope(&self, scope: Scope) -> Result<(), ApplicationError> {
+        self.retraining.fetch_add(1, Ordering::Relaxed);
+        let _done = Retraining(&self.retraining);
+        let result = self.learn_scope(scope).await;
+        self.lock_activity().retrains.remove(&scope);
+        result
+    }
+
+    async fn learn_scope(&self, scope: Scope) -> Result<(), ApplicationError> {
         self.store.reset(scope).await?;
         self.forget_pools();
         let accounts = self.store.scope_accounts(scope).await?;
+        let total = self
+            .store
+            .count_sources(&accounts, SourceFilter::Labelled)
+            .await?
+            + self
+                .store
+                .count_sources(&accounts, SourceFilter::Unlabelled)
+                .await?
+                .min(UNLABELLED_SAMPLE as u64);
+        let mut done = 0;
         let mut cursor = None;
         loop {
             let page = self
@@ -55,9 +91,10 @@ where
             cursor = Some(last);
             for source in &page {
                 self.retrain(source, scope, None, false).await?;
+                done += 1;
             }
-            // The writer is shared with sync; leave it room.
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.lock_activity().retrains.insert(scope, (done, total));
+            self.breathe().await;
         }
         let mut cursor = None;
         let mut taken = 0;
@@ -73,8 +110,10 @@ where
             for source in page.iter().take(UNLABELLED_SAMPLE - taken) {
                 self.retrain(source, scope, None, true).await?;
                 taken += 1;
+                done += 1;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.lock_activity().retrains.insert(scope, (done, total));
+            self.breathe().await;
         }
         self.store.mark_trained(scope).await?;
         self.forget_pools();

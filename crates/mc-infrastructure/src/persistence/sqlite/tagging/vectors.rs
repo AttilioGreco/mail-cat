@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rusqlite::{Connection, params, params_from_iter};
 use uuid::Uuid;
 
-use mc_domain::{DomainError, LabelledVector, MessageId, Scope};
+use mc_domain::{BackgroundSpeed, DomainError, LabelledVector, MessageId, Scope};
 
 use super::sources::placeholders;
 use crate::persistence::sqlite::repository::{exec, json_col, query_all, query_one};
@@ -40,6 +40,27 @@ pub(super) fn set_enabled(conn: &Connection, on: bool) -> Result<(), DomainError
         "INSERT INTO tag_prefs (key, value) VALUES ('embeddings', ?1) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [if on { "on" } else { "off" }],
+    )
+    .map(drop)
+}
+
+pub(super) fn speed(conn: &Connection) -> Result<BackgroundSpeed, DomainError> {
+    Ok(query_one(
+        conn,
+        "SELECT value FROM tag_prefs WHERE key = 'speed'",
+        [],
+        |r| r.get::<_, String>(0),
+    )?
+    .and_then(|v| v.parse().ok())
+    .unwrap_or_default())
+}
+
+pub(super) fn set_speed(conn: &Connection, speed: BackgroundSpeed) -> Result<(), DomainError> {
+    exec(
+        conn,
+        "INSERT INTO tag_prefs (key, value) VALUES ('speed', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [speed.as_str()],
     )
     .map(drop)
 }
