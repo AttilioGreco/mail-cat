@@ -35,8 +35,36 @@ where
         pb::EmbeddingsStatus {
             enabled: self.service.embeddings_enabled(),
             available: self.service.embedding_model().is_some(),
-            model: self.service.embedding_model().unwrap_or_default().into(),
+            model: self
+                .service
+                .embedding_model()
+                .map(|m| m.to_string())
+                .unwrap_or_default(),
             speed: self.service.background_speed().as_str().into(),
+            profile: self.service.model_profile().as_str().into(),
+            models: self
+                .service
+                .model_options()
+                .into_iter()
+                .map(|m| pb::ModelOption {
+                    profile: m.profile.as_str().into(),
+                    model: m.model.to_string(),
+                    dims: m.dims as u32,
+                    download_bytes: m.download_bytes,
+                    worker_bytes: m.worker_bytes,
+                    quality: m.quality.into(),
+                })
+                .collect(),
+            target: self.service.execution_target(),
+            targets: self
+                .service
+                .target_options()
+                .into_iter()
+                .map(|t| pb::TargetOption {
+                    id: t.id,
+                    available: t.available,
+                })
+                .collect(),
         }
     }
 }
@@ -371,6 +399,33 @@ where
         Ok(Response::new(self.embeddings()))
     }
 
+    async fn set_embedding_model(
+        &self,
+        request: Request<pb::SetEmbeddingModelRequest>,
+    ) -> Result<Response<pb::EmbeddingsStatus>, Status> {
+        let profile = request
+            .into_inner()
+            .profile
+            .parse()
+            .map_err(Status::invalid_argument)?;
+        self.service
+            .set_model_profile(profile)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(self.embeddings()))
+    }
+
+    async fn set_execution_target(
+        &self,
+        request: Request<pb::SetExecutionTargetRequest>,
+    ) -> Result<Response<pb::EmbeddingsStatus>, Status> {
+        self.service
+            .set_execution_target(&request.into_inner().target)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(self.embeddings()))
+    }
+
     async fn get_background_stats(
         &self,
         _: Request<pb::GetBackgroundStatsRequest>,
@@ -395,6 +450,7 @@ where
             }
             .into(),
             model_loaded: s.model_loaded,
+            model: s.model.map(|m| m.to_string()).unwrap_or_default(),
             embedded: s.embedded,
             eligible: s.eligible,
             per_second: s.per_second,

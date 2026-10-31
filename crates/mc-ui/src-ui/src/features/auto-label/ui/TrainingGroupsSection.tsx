@@ -6,6 +6,7 @@ import { Input } from '@/shared/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/shared/ui/select';
 import { useAccounts } from '@/entities/account';
 import { BackgroundStatsCard } from './BackgroundStatsCard';
+import { ModelSettings } from './ModelSettings';
 import { useEmbeddings, useGroupMutations, useTrainingGroups } from '../model/useAutoLabel';
 
 const NO_GROUP = '';
@@ -26,6 +27,9 @@ export function TrainingGroupsSection() {
   const [name, setName] = useState('');
   const fail = (e: Error) => toast.error(String(e));
 
+  const downloadMb = Math.round(
+    (embeddings?.models.find((m) => m.profile === embeddings.profile)?.downloadBytes ?? 120e6) / 1e6,
+  );
   const groupItems = [{ value: NO_GROUP, label: 'Nessun gruppo' }, ...groups.map((g) => ({ value: g.id, label: g.name }))];
 
   return (
@@ -48,10 +52,13 @@ export function TrainingGroupsSection() {
             onChange={(e) => setEmbeddings.mutate(e.target.checked, { onError: fail })}
           />
           <span>
-            Riconosci anche i messaggi simili (scarica una volta un modello di ~120 MB; tutto resta sul tuo computer)
+            Riconosci anche i messaggi simili (scarica una volta il modello scelto, ~{downloadMb} MB; tutto resta sul
+            tuo computer)
           </span>
         </label>
       )}
+
+      {embeddings && <ModelSettings />}
 
       {embeddings && (
         <div className="flex items-center justify-between gap-3">

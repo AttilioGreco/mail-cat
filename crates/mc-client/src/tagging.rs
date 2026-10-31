@@ -100,6 +100,31 @@ pub struct EmbeddingsStatus {
     pub model: String,
     /// "light", "normal" or "max".
     pub speed: String,
+    /// "light", "balanced" or "quality".
+    pub profile: String,
+    pub models: Vec<ModelOption>,
+    /// "cpu", "gpu-cuda", ...
+    pub target: String,
+    pub targets: Vec<TargetOption>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOption {
+    pub profile: String,
+    pub model: String,
+    pub dims: u32,
+    pub download_bytes: u64,
+    pub worker_bytes: u64,
+    /// 1 (good) to 3 (best).
+    pub quality: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetOption {
+    pub id: String,
+    pub available: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -113,6 +138,8 @@ pub struct RetrainProgress {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundStats {
+    /// Model in use; empty without one.
+    pub model: String,
     /// "light", "normal" or "max".
     pub speed: String,
     pub workers: u32,
@@ -402,6 +429,7 @@ impl MailCatClient {
             .await?
             .into_inner();
         Ok(BackgroundStats {
+            model: s.model,
             speed: s.speed,
             workers: s.workers,
             threads: s.threads,
@@ -435,6 +463,26 @@ impl MailCatClient {
             .await?;
         Ok(embeddings(resp.into_inner()))
     }
+
+    pub async fn set_embedding_model(&self, profile: &str) -> Result<EmbeddingsStatus> {
+        let resp = self
+            .tagging()
+            .set_embedding_model(pb::SetEmbeddingModelRequest {
+                profile: profile.to_owned(),
+            })
+            .await?;
+        Ok(embeddings(resp.into_inner()))
+    }
+
+    pub async fn set_execution_target(&self, target: &str) -> Result<EmbeddingsStatus> {
+        let resp = self
+            .tagging()
+            .set_execution_target(pb::SetExecutionTargetRequest {
+                target: target.to_owned(),
+            })
+            .await?;
+        Ok(embeddings(resp.into_inner()))
+    }
 }
 
 fn embeddings(s: pb::EmbeddingsStatus) -> EmbeddingsStatus {
@@ -443,5 +491,27 @@ fn embeddings(s: pb::EmbeddingsStatus) -> EmbeddingsStatus {
         available: s.available,
         model: s.model,
         speed: s.speed,
+        profile: s.profile,
+        models: s
+            .models
+            .into_iter()
+            .map(|m| ModelOption {
+                profile: m.profile,
+                model: m.model,
+                dims: m.dims,
+                download_bytes: m.download_bytes,
+                worker_bytes: m.worker_bytes,
+                quality: m.quality,
+            })
+            .collect(),
+        target: s.target,
+        targets: s
+            .targets
+            .into_iter()
+            .map(|t| TargetOption {
+                id: t.id,
+                available: t.available,
+            })
+            .collect(),
     }
 }

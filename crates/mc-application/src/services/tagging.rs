@@ -10,6 +10,7 @@ mod bayes;
 mod eval;
 mod features;
 mod knn;
+mod naming;
 mod placement;
 mod retro;
 mod stats;
@@ -33,7 +34,7 @@ use tracing::{info, warn};
 use mc_domain::{
     AccountId, AutoApplied, BackgroundSpeed, Confidence, DomainEvent, Embedder, EventEnvelope,
     Flag, GroupId, LabelMode, LabelSettings, Mailbox, MailboxId, MailboxReadRepository,
-    MailboxType, MessageId, Scope, TagSource, TaggingStore, TrainingGroup,
+    MailboxType, MessageId, ModelProfile, Scope, TagSource, TaggingStore, TrainingGroup,
 };
 
 use crate::bus::{CommandBus, EventSubscriber};
@@ -41,6 +42,7 @@ use crate::commands::Command;
 use crate::error::ApplicationError;
 
 pub use eval::{EvalRow, LabelEval};
+pub use naming::KeywordNamer;
 use placement::{Placement, display_name};
 pub use retro::{Preview, PreviewItem};
 pub use stats::{BackgroundStats, EmbedderState, RetrainProgress};
@@ -110,6 +112,8 @@ pub struct TaggingService<S, R, C> {
     /// Rouses the embedding worker: a body arrived, or consent was given.
     wake: Notify,
     speed: Mutex<BackgroundSpeed>,
+    /// The model profile and execution target the user picked.
+    model_choice: Mutex<(ModelProfile, String)>,
     /// Scopes being retrained right now: the embedding backlog gives way.
     retraining: AtomicUsize,
     activity: Mutex<stats::Activity>,
@@ -171,6 +175,7 @@ where
             embedding_on: AtomicBool::new(false),
             wake: Notify::new(),
             speed: Mutex::new(BackgroundSpeed::default()),
+            model_choice: Mutex::new((ModelProfile::default(), "cpu".into())),
             retraining: AtomicUsize::new(0),
             activity: Mutex::default(),
             pools: Mutex::new(HashMap::new()),

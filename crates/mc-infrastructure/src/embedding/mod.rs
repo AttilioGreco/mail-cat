@@ -5,11 +5,13 @@
 //! never held across an await: two first requests may both load, and the
 //! second engine is simply discarded.
 
-mod e5;
+mod catalog;
+mod onnx;
 
 #[cfg(test)]
 mod tests;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,13 +20,19 @@ use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use tokio::time::Instant;
 
-use mc_domain::{DomainError, Embedder};
+use mc_domain::{
+    DomainError, EmbedPurpose, Embedder, ModelId, ModelOption, ModelProfile, TargetOption,
+};
 
-pub use e5::multilingual_e5_small;
+pub use catalog::{CATALOG, ExecutionTarget, ModelSpec};
 
 /// Dropped (and so freed) when the embedder lets go of it.
 pub trait Engine: Send + 'static {
-    fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, DomainError>;
+    fn embed(
+        &mut self,
+        texts: Vec<String>,
+        purpose: EmbedPurpose,
+    ) -> Result<Vec<Vec<f32>>, DomainError>;
 }
 
 /// Builds `workers` engines, each running inference on `threads` threads.
@@ -44,16 +52,18 @@ struct State<E> {
 }
 
 pub struct LazyEmbedder<E: Engine> {
-    model: String,
+    model: ModelId,
+    dims: usize,
     load: Loader<E>,
     idle: Duration,
     state: Arc<Mutex<State<E>>>,
 }
 
 impl<E: Engine> LazyEmbedder<E> {
-    pub fn new(model: &str, idle: Duration, load: Loader<E>) -> Self {
+    pub fn new(model: ModelId, dims: usize, idle: Duration, load: Loader<E>) -> Self {
         Self {
-            model: model.to_owned(),
+            model,
+            dims,
             load,
             idle,
             state: Arc::new(Mutex::new(State {
@@ -107,6 +117,11 @@ impl<E: Engine> LazyEmbedder<E> {
         }
     }
 
+    /// Frees the engines now rather than after the idle time.
+    pub fn unload(&self) {
+        self.state.lock().engines.clear();
+    }
+
     fn touch(&self) -> Option<Engines<E>> {
         let mut state = self.state.lock();
         if state.engines.is_empty() {
@@ -135,8 +150,12 @@ async fn unload_when_idle<E>(state: Arc<Mutex<State<E>>>, idle: Duration) {
 
 #[async_trait]
 impl<E: Engine> Embedder for LazyEmbedder<E> {
-    fn model(&self) -> &str {
-        &self.model
+    fn model(&self) -> ModelId {
+        self.model.clone()
+    }
+
+    fn dims(&self) -> usize {
+        self.dims
     }
 
     fn loaded(&self) -> bool {
@@ -159,14 +178,18 @@ impl<E: Engine> Embedder for LazyEmbedder<E> {
 
     /// The texts are shared out among the workers, each on a niced thread of
     /// its own, and come back in order.
-    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, DomainError> {
+    async fn embed(
+        &self,
+        texts: Vec<String>,
+        purpose: EmbedPurpose,
+    ) -> Result<Vec<Vec<f32>>, DomainError> {
         let engines = self.engines().await?;
         let chunk = texts.len().div_ceil(engines.len()).max(1);
         let runs = texts
             .chunks(chunk)
             .map(<[String]>::to_vec)
             .zip(engines)
-            .map(|(part, engine)| niced(move || engine.lock().embed(part)));
+            .map(|(part, engine)| niced(move || engine.lock().embed(part, purpose)));
         let parts = futures::future::try_join_all(runs).await?;
         // Inference may have outlasted the idle time.
         self.touch();
@@ -199,4 +222,94 @@ async fn niced<T: Send + 'static>(
     .ok()
     .and_then(Result::ok)
     .ok_or_else(|| DomainError::Provider("embedding thread ended unexpectedly".into()))
+}
+
+/// The catalog model the user picked, on the execution target they picked.
+/// Switching drops the old model from memory and starts the new one lazily.
+pub struct CatalogEmbedder {
+    dir: PathBuf,
+    idle: Duration,
+    current: parking_lot::RwLock<Current>,
+}
+
+struct Current {
+    spec: &'static ModelSpec,
+    embedder: Arc<LazyEmbedder<onnx::Onnx>>,
+    shape: (usize, usize),
+}
+
+impl CatalogEmbedder {
+    /// Starts on the Leggero model; nothing is downloaded before the first `embed`.
+    pub fn new(dir: PathBuf, idle: Duration) -> Self {
+        let spec = ModelSpec::for_profile(ModelProfile::default());
+        Self {
+            current: parking_lot::RwLock::new(Current {
+                spec,
+                embedder: Arc::new(onnx::onnx_embedder(spec, dir.clone(), idle)),
+                shape: (1, 1),
+            }),
+            dir,
+            idle,
+        }
+    }
+
+    fn embedder(&self) -> Arc<LazyEmbedder<onnx::Onnx>> {
+        self.current.read().embedder.clone()
+    }
+}
+
+#[async_trait]
+impl Embedder for CatalogEmbedder {
+    fn model(&self) -> ModelId {
+        self.current.read().spec.model_id()
+    }
+
+    fn dims(&self) -> usize {
+        self.current.read().spec.dims
+    }
+
+    fn options(&self) -> Vec<ModelOption> {
+        CATALOG.iter().map(ModelSpec::option).collect()
+    }
+
+    fn targets(&self) -> Vec<TargetOption> {
+        ExecutionTarget::options()
+    }
+
+    fn select(&self, profile: ModelProfile, target: &str) -> Result<(), DomainError> {
+        let target: ExecutionTarget = target.parse()?;
+        target.ensure_available()?;
+        let spec = ModelSpec::for_profile(profile);
+        let mut current = self.current.write();
+        if std::ptr::eq(current.spec, spec) {
+            return Ok(());
+        }
+        current.embedder.unload();
+        let embedder = onnx::onnx_embedder(spec, self.dir.clone(), self.idle);
+        embedder.set_parallelism(current.shape.0, current.shape.1);
+        (current.spec, current.embedder) = (spec, Arc::new(embedder));
+        Ok(())
+    }
+
+    fn set_parallelism(&self, workers: usize, threads: usize) {
+        let mut current = self.current.write();
+        current.shape = (workers, threads);
+        current.embedder.set_parallelism(workers, threads);
+    }
+
+    fn loaded(&self) -> bool {
+        self.embedder().loaded()
+    }
+
+    fn worker_bytes(&self) -> Option<u64> {
+        self.embedder().worker_bytes()
+    }
+
+    async fn embed(
+        &self,
+        texts: Vec<String>,
+        purpose: EmbedPurpose,
+    ) -> Result<Vec<Vec<f32>>, DomainError> {
+        self.embedder().embed(texts, purpose).await
+    }
 }

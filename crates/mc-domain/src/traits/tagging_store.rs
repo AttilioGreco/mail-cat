@@ -6,6 +6,7 @@ use async_trait::async_trait;
 
 use crate::error::DomainError;
 use crate::model::account::AccountId;
+use crate::model::embedding::ModelProfile;
 use crate::model::tagging::{
     AutoApplied, BackgroundSpeed, Example, GroupId, LabelSettings, LabelledVector, Lesson,
     ModelStats, Scope, SourceFilter, TagSource, TrainingGroup,
@@ -80,6 +81,12 @@ pub trait TaggingStore: Send + Sync {
     async fn set_embeddings_enabled(&self, enabled: bool) -> Result<(), DomainError>;
     async fn background_speed(&self) -> Result<BackgroundSpeed, DomainError>;
     async fn set_background_speed(&self, speed: BackgroundSpeed) -> Result<(), DomainError>;
+    /// Light until the user picks another.
+    async fn model_profile(&self) -> Result<ModelProfile, DomainError>;
+    async fn set_model_profile(&self, profile: ModelProfile) -> Result<(), DomainError>;
+    /// Id of the execution target ("cpu" until the user picks another).
+    async fn execution_target(&self) -> Result<String, DomainError>;
+    async fn set_execution_target(&self, target: &str) -> Result<(), DomainError>;
     /// Replaces any vector the messages have, whatever model made it.
     async fn put_vectors(
         &self,

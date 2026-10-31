@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rusqlite::{Connection, params, params_from_iter};
 use uuid::Uuid;
 
-use mc_domain::{BackgroundSpeed, DomainError, LabelledVector, MessageId, Scope};
+use mc_domain::{BackgroundSpeed, DomainError, LabelledVector, MessageId, ModelProfile, Scope};
 
 use super::sources::placeholders;
 use crate::persistence::sqlite::repository::{exec, json_col, query_all, query_one};
@@ -63,6 +63,43 @@ pub(super) fn set_speed(conn: &Connection, speed: BackgroundSpeed) -> Result<(),
         [speed.as_str()],
     )
     .map(drop)
+}
+
+fn pref(conn: &Connection, key: &str) -> Result<Option<String>, DomainError> {
+    query_one(
+        conn,
+        "SELECT value FROM tag_prefs WHERE key = ?1",
+        [key],
+        |r| r.get(0),
+    )
+}
+
+fn set_pref(conn: &Connection, key: &str, value: &str) -> Result<(), DomainError> {
+    exec(
+        conn,
+        "INSERT INTO tag_prefs (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [key, value],
+    )
+    .map(drop)
+}
+
+pub(super) fn profile(conn: &Connection) -> Result<ModelProfile, DomainError> {
+    Ok(pref(conn, "model")?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_default())
+}
+
+pub(super) fn set_profile(conn: &Connection, profile: ModelProfile) -> Result<(), DomainError> {
+    set_pref(conn, "model", profile.as_str())
+}
+
+pub(super) fn target(conn: &Connection) -> Result<String, DomainError> {
+    Ok(pref(conn, "target")?.unwrap_or_else(|| "cpu".into()))
+}
+
+pub(super) fn set_target(conn: &Connection, target: &str) -> Result<(), DomainError> {
+    set_pref(conn, "target", target)
 }
 
 pub(super) fn put(

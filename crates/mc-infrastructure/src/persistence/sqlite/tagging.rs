@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AutoApplied, BackgroundSpeed, DomainError, Example, GroupId, LabelMode,
-    LabelSettings, LabelStats, LabelledVector, Lesson, MessageId, ModelStats, Scope, SourceFilter,
-    TagSource, TaggingStore, TrainingGroup,
+    LabelSettings, LabelStats, LabelledVector, Lesson, MessageId, ModelProfile, ModelStats, Scope,
+    SourceFilter, TagSource, TaggingStore, TrainingGroup,
 };
 
 use super::repository::{conversion_err, exec, json, json_col, nanos, query_all, query_one};
@@ -614,6 +614,27 @@ impl TaggingStore for SqliteTaggingStore {
     async fn set_background_speed(&self, speed: BackgroundSpeed) -> Result<(), DomainError> {
         self.db
             .write(move |conn| vectors::set_speed(conn, speed))
+            .await
+    }
+
+    async fn model_profile(&self) -> Result<ModelProfile, DomainError> {
+        self.db.read(vectors::profile).await
+    }
+
+    async fn set_model_profile(&self, profile: ModelProfile) -> Result<(), DomainError> {
+        self.db
+            .write(move |conn| vectors::set_profile(conn, profile))
+            .await
+    }
+
+    async fn execution_target(&self) -> Result<String, DomainError> {
+        self.db.read(vectors::target).await
+    }
+
+    async fn set_execution_target(&self, target: &str) -> Result<(), DomainError> {
+        let target = target.to_owned();
+        self.db
+            .write(move |conn| vectors::set_target(conn, &target))
             .await
     }
 

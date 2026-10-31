@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use mc_domain::{
-    BackgroundProfile, BackgroundSpeed, Embedder, MailboxReadRepository, MessageId, Scope,
-    TagSource, TaggingStore,
+    BackgroundProfile, BackgroundSpeed, EmbedPurpose, Embedder, MailboxReadRepository, MessageId,
+    ModelId, ModelOption, ModelProfile, Scope, TagSource, TaggingStore, TargetOption,
 };
 
 use super::TaggingService;
@@ -59,9 +59,63 @@ where
         self.embedder.is_some() && self.embedding_on.load(Ordering::Relaxed)
     }
 
-    /// The model's name, for display.
-    pub fn embedding_model(&self) -> Option<&str> {
+    /// The model in use, for display.
+    pub fn embedding_model(&self) -> Option<ModelId> {
         self.embedder.as_deref().map(Embedder::model)
+    }
+
+    pub fn model_options(&self) -> Vec<ModelOption> {
+        self.embedder
+            .as_deref()
+            .map(Embedder::options)
+            .unwrap_or_default()
+    }
+
+    pub fn target_options(&self) -> Vec<TargetOption> {
+        self.embedder
+            .as_deref()
+            .map(Embedder::targets)
+            .unwrap_or_default()
+    }
+
+    pub fn model_profile(&self) -> ModelProfile {
+        self.selection().0
+    }
+
+    pub fn execution_target(&self) -> String {
+        self.selection().1
+    }
+
+    fn selection(&self) -> (ModelProfile, String) {
+        self.model_choice
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Another model means another `ModelId`: the backlog worker embeds the
+    /// mail again in the background, and until it has, only words count.
+    pub async fn set_model_profile(&self, profile: ModelProfile) -> Result<(), ApplicationError> {
+        self.choose(profile, &self.execution_target()).await
+    }
+
+    pub async fn set_execution_target(&self, target: &str) -> Result<(), ApplicationError> {
+        self.choose(self.model_profile(), target).await
+    }
+
+    async fn choose(&self, profile: ModelProfile, target: &str) -> Result<(), ApplicationError> {
+        if let Some(embedder) = &self.embedder {
+            embedder.select(profile, target)?;
+        }
+        self.store.set_model_profile(profile).await?;
+        self.store.set_execution_target(target).await?;
+        *self
+            .model_choice
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (profile, target.to_owned());
+        self.forget_pools();
+        self.wake.notify_one();
+        Ok(())
     }
 
     pub async fn set_embeddings(&self, enabled: bool) -> Result<(), ApplicationError> {
@@ -127,6 +181,20 @@ where
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             self.store.background_speed().await?;
+        let choice = (
+            self.store.model_profile().await?,
+            self.store.execution_target().await?,
+        );
+        if let Some(embedder) = &self.embedder
+            && let Err(e) = embedder.select(choice.0, &choice.1)
+        {
+            warn!(error = %e, "embeddings: saved model choice not usable, keeping the default");
+            return Ok(());
+        }
+        *self
+            .model_choice
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = choice;
         Ok(())
     }
 
@@ -191,9 +259,10 @@ where
         before: &mut Option<MessageId>,
         batch: u32,
     ) -> Result<bool, ApplicationError> {
+        let model = embedder.model();
         let page = self
             .store
-            .unembedded(embedder.model(), *before, batch)
+            .unembedded(&model.to_string(), *before, batch)
             .await?;
         let Some(last) = page.last().map(|s| s.id) else {
             return Ok(false);
@@ -207,11 +276,15 @@ where
             return Ok(true);
         }
         self.lock_activity().embedding = true;
-        let vectors = embedder.embed(texts).await;
+        let vectors = embedder.embed(texts, EmbedPurpose::Document).await;
         self.lock_activity().embedding = false;
         let vectors = vectors?;
+        if embedder.model() != model {
+            // Switched while embedding: these vectors are not this model's.
+            return Ok(true);
+        }
         let batch: Vec<_> = ids.into_iter().zip(vectors).collect();
-        self.store.put_vectors(embedder.model(), &batch).await?;
+        self.store.put_vectors(&model.to_string(), &batch).await?;
         self.lock_activity()
             .record(Instant::now(), batch.len() as u32);
         debug!(count = batch.len(), "embeddings: batch stored");
@@ -228,11 +301,12 @@ where
         let Some(embedder) = self.embedder.as_ref().filter(|_| self.embeddings_enabled()) else {
             return Ok(HashMap::new());
         };
-        let queries = self.store.vectors(embedder.model(), ids).await?;
+        let model = embedder.model().to_string();
+        let queries = self.store.vectors(&model, ids).await?;
         if queries.is_empty() {
             return Ok(HashMap::new());
         }
-        let pool = self.pool(scope, embedder.model()).await?;
+        let pool = self.pool(scope, &model).await?;
         // 200 messages against 20k vectors is a second of arithmetic.
         tokio::task::spawn_blocking(move || {
             queries

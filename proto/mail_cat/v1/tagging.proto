@@ -36,6 +36,10 @@ service TaggingService {
   // What the background work is doing right now (in memory, not stored).
   rpc GetBackgroundStats(GetBackgroundStatsRequest) returns (BackgroundStats);
   rpc SetBackgroundSpeed(SetBackgroundSpeedRequest) returns (EmbeddingsStatus);
+  // Which model embeds the mail ("light", "balanced" or "quality") and where
+  // it runs. A new model re-embeds the mail in the background.
+  rpc SetEmbeddingModel(SetEmbeddingModelRequest) returns (EmbeddingsStatus);
+  rpc SetExecutionTarget(SetExecutionTargetRequest) returns (EmbeddingsStatus);
 }
 
 message GetEmbeddingsRequest {}
@@ -44,9 +48,32 @@ message EmbeddingsStatus {
   bool enabled = 1;
   // False where the server was built or started without a model.
   bool available = 2;
+  // Id and revision of the model in use.
   string model = 3;
   string speed = 4;
+  // "light", "balanced" or "quality".
+  string profile = 5;
+  repeated ModelOption models = 6;
+  // "cpu", "gpu-cuda", "gpu-rocm", "gpu-directml", "gpu-coreml", "npu-vitisai".
+  string target = 7;
+  repeated TargetOption targets = 8;
 }
+message ModelOption {
+  string profile = 1;
+  string model = 2;
+  uint32 dims = 3;
+  uint64 download_bytes = 4;
+  // Estimate of the memory each worker holds.
+  uint64 worker_bytes = 5;
+  // 1 (good) to 3 (best).
+  uint32 quality = 6;
+}
+message TargetOption {
+  string id = 1;
+  bool available = 2;
+}
+message SetEmbeddingModelRequest { string profile = 1; }
+message SetExecutionTargetRequest { string target = 1; }
 message GetBackgroundStatsRequest {}
 message BackgroundStats {
   string speed = 1;
@@ -65,6 +92,8 @@ message BackgroundStats {
   // 0 when unknown.
   uint64 worker_bytes = 12;
   repeated RetrainProgress retrains = 13;
+  // Id and revision of the model in use; empty without one.
+  string model = 14;
 }
 message RetrainProgress {
   string scope = 1;

@@ -213,6 +213,30 @@ pub async fn set_background_speed(
 }
 
 #[tauri::command]
+pub async fn set_embedding_model(
+    profile: String,
+    state: State<'_, AppState>,
+) -> Result<EmbeddingsStatus, String> {
+    get_or_connect(&state)
+        .await?
+        .set_embedding_model(&profile)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_execution_target(
+    target: String,
+    state: State<'_, AppState>,
+) -> Result<EmbeddingsStatus, String> {
+    get_or_connect(&state)
+        .await?
+        .set_execution_target(&target)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
 pub async fn get_background_stats(state: State<'_, AppState>) -> Result<BackgroundStats, String> {
     get_or_connect(&state)
         .await?

@@ -95,8 +95,13 @@ async fn stats(client: MailCatClient, json: bool) -> Result<()> {
         s.speed, s.workers, s.threads, s.batch, s.pause_ms
     );
     println!(
-        "Embedder: {} (model {})",
+        "Embedder: {} ({}, {})",
         s.state,
+        if s.model.is_empty() {
+            "no model"
+        } else {
+            &s.model
+        },
         if s.model_loaded {
             "in memory"
         } else {

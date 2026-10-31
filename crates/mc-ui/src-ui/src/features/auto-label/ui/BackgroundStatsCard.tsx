@@ -31,6 +31,7 @@ export function BackgroundStatsCard() {
           {idleNote}
         </span>
         <span className="text-muted">
+          {s.model && `${s.model} · `}
           {s.workers} × {s.threads} thread · gruppi da {s.batch}
           {s.workerBytes > 0 && ` · ~${Math.round(s.workerBytes / 1e6)} MB per modello`}
         </span>

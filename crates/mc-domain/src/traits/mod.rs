@@ -7,6 +7,7 @@ pub mod contact_index;
 pub mod email_provider;
 pub mod embedder;
 pub mod event_store;
+pub mod label_namer;
 pub mod login_gate;
 pub mod provider_registry;
 pub mod read_model_projector;

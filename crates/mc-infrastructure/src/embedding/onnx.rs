@@ -1,10 +1,7 @@
-//! multilingual-e5-small, int8-quantized ONNX (Xenova's export): 384
-//! dimensions, 100 languages incl. Italian, ~118 MB. Chosen over
-//! paraphrase-multilingual-MiniLM-L12-v2 for its better retrieval quality at
-//! the same size and a 512-token window.
+//! Runs a catalog model through fastembed/ONNX Runtime.
 //!
-//! The files are fetched once from a pinned Hugging Face revision into the
-//! data folder and checked against their SHA-256 on every load.
+//! The files are fetched once from the model's pinned Hugging Face revision
+//! into the data folder and checked against their SHA-256 on every load.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,49 +11,26 @@ use fastembed::{
 };
 use sha2::{Digest, Sha256};
 
-use mc_domain::DomainError;
+use mc_domain::{DomainError, EmbedPurpose};
 
+use super::catalog::ModelSpec;
 use super::{Engine, LazyEmbedder};
 
-const REVISION: &str = "761b726dd34fb83930e26aab4e9ac3899aa1fa78";
-/// Changes with the model, its revision or how texts are fed to it.
-pub const MODEL: &str = "multilingual-e5-small-q@761b726";
-/// Tokens read per text: subject and the start of the body say what a mail is.
-const MAX_TOKENS: usize = 256;
+pub struct Onnx {
+    model: TextEmbedding,
+    spec: &'static ModelSpec,
+}
 
-/// (path in the repository, SHA-256).
-const FILES: [(&str, &str); 5] = [
-    (
-        "onnx/model_quantized.onnx",
-        "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
-    ),
-    (
-        "tokenizer.json",
-        "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
-    ),
-    (
-        "config.json",
-        "cb99455288675345e1a4f411438d5d0adbba5fbd3a67ea4fb03c015433b996c1",
-    ),
-    (
-        "special_tokens_map.json",
-        "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7",
-    ),
-    (
-        "tokenizer_config.json",
-        "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b",
-    ),
-];
-
-struct E5(TextEmbedding);
-
-impl Engine for E5 {
-    fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, DomainError> {
-        // The model was trained with a prefix; "query: " is the one for
-        // symmetric tasks such as similarity.
-        let texts: Vec<String> = texts.iter().map(|t| format!("query: {t}")).collect();
+impl Engine for Onnx {
+    fn embed(
+        &mut self,
+        texts: Vec<String>,
+        purpose: EmbedPurpose,
+    ) -> Result<Vec<Vec<f32>>, DomainError> {
+        let prefix = self.spec.prefix(purpose);
+        let texts: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
         let mut vectors = self
-            .0
+            .model
             .embed(texts, None)
             .map_err(|e| DomainError::Provider(format!("embedding: {e}")))?;
         vectors.iter_mut().for_each(|v| normalize(v));
@@ -73,13 +47,14 @@ fn normalize(v: &mut [f32]) {
 
 /// An embedder that downloads the model into `dir` when first asked, and lets
 /// go of it after `idle`. Nothing is fetched before the first `embed`.
-pub fn multilingual_e5_small(dir: PathBuf, idle: Duration) -> LazyEmbedder<impl Engine> {
+pub fn onnx_embedder(spec: &'static ModelSpec, dir: PathBuf, idle: Duration) -> LazyEmbedder<Onnx> {
     LazyEmbedder::new(
-        MODEL,
+        spec.model_id(),
+        spec.dims,
         idle,
         Box::new(move |workers, threads| {
             let dir = dir.clone();
-            Box::pin(async move { load(&dir, workers, threads).await })
+            Box::pin(async move { load(spec, &dir, workers, threads).await })
         }),
     )
 }
@@ -87,14 +62,20 @@ pub fn multilingual_e5_small(dir: PathBuf, idle: Duration) -> LazyEmbedder<impl 
 /// Each worker's session is built on a niced thread of its own: ONNX Runtime
 /// starts its intra-op threads while building, and on Linux they inherit the
 /// priority of the thread that did.
-async fn load(dir: &Path, workers: usize, threads: usize) -> Result<Vec<E5>, DomainError> {
-    let mut files = Vec::with_capacity(FILES.len());
-    for (name, sha256) in FILES {
-        files.push(fetch(dir, name, sha256).await?);
+async fn load(
+    spec: &'static ModelSpec,
+    dir: &Path,
+    workers: usize,
+    threads: usize,
+) -> Result<Vec<Onnx>, DomainError> {
+    let mut files = Vec::with_capacity(spec.files.len());
+    for (name, sha256, _) in spec.files {
+        files.push(fetch(spec, dir, name, sha256).await?);
     }
     let mut files = files.into_iter();
     let onnx = files.next().unwrap_or_default();
     let mut next = || files.next().unwrap_or_default();
+    // Same order as `ModelSpec::files`.
     let tokenizer = TokenizerFiles {
         tokenizer_file: next(),
         config_file: next(),
@@ -105,16 +86,17 @@ async fn load(dir: &Path, workers: usize, threads: usize) -> Result<Vec<E5>, Dom
     let builds = (0..workers).map(|_| {
         let model = model.clone();
         super::niced(move || {
-            // ponytail: a GPU execution provider (CUDA/CoreML/DirectML via ort)
-            // would be added to these options with `with_execution_providers`.
-            // Windows does not hand thread priority down to ONNX Runtime's
-            // pool; ort's ThreadManager could, but fastembed does not expose
-            // it. Until then Leggera (1 thread) is the quiet choice there.
+            // ponytail: other execution targets (CUDA/CoreML/DirectML via ort)
+            // would be added to these options with `with_execution_providers`,
+            // chosen by `ExecutionTarget`. Windows does not hand thread
+            // priority down to ONNX Runtime's pool; ort's ThreadManager could,
+            // but fastembed does not expose it. Until then Leggero (1 thread)
+            // is the quiet choice there.
             let options = InitOptionsUserDefined::new()
-                .with_max_length(MAX_TOKENS)
+                .with_max_length(spec.max_tokens)
                 .with_intra_threads(threads);
             TextEmbedding::try_new_from_user_defined(model, options)
-                .map(E5)
+                .map(|model| Onnx { model, spec })
                 .map_err(|e| DomainError::Provider(format!("loading the embedding model: {e}")))
         })
     });
@@ -125,15 +107,22 @@ async fn load(dir: &Path, workers: usize, threads: usize) -> Result<Vec<E5>, Dom
 }
 
 /// The file's bytes: from `dir` if they match the checksum, else downloaded.
-async fn fetch(dir: &Path, name: &str, sha256: &str) -> Result<Vec<u8>, DomainError> {
-    let path = dir.join(REVISION).join(name);
+async fn fetch(
+    spec: &ModelSpec,
+    dir: &Path,
+    name: &str,
+    sha256: &str,
+) -> Result<Vec<u8>, DomainError> {
+    let path = dir.join(spec.revision).join(name);
     if let Ok(bytes) = tokio::fs::read(&path).await
         && matches(&bytes, sha256)
     {
         return Ok(bytes);
     }
-    let url =
-        format!("https://huggingface.co/Xenova/multilingual-e5-small/resolve/{REVISION}/{name}");
+    let url = format!(
+        "https://huggingface.co/{}/resolve/{}/{name}",
+        spec.repo, spec.revision
+    );
     let bytes = download(&url).await?;
     if !matches(&bytes, sha256) {
         return Err(DomainError::Provider(format!(

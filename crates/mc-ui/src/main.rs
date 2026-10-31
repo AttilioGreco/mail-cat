@@ -158,6 +158,8 @@ async fn main() {
             commands::tagging::get_embeddings,
             commands::tagging::set_embeddings,
             commands::tagging::set_background_speed,
+            commands::tagging::set_embedding_model,
+            commands::tagging::set_execution_target,
             commands::tagging::get_background_stats,
         ])
         .run(tauri::generate_context!())

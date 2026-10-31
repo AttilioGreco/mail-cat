@@ -28,6 +28,7 @@ pub use value_objects::sync_cursor::SyncCursor;
 // Trait re-exports
 pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource};
 pub use model::conversation::Conversation;
+pub use model::embedding::{EmbedPurpose, ModelId, ModelOption, ModelProfile, TargetOption};
 pub use model::tagging::{
     AutoApplied, BackgroundProfile, BackgroundSpeed, Confidence, Example, GroupId, LabelMode,
     LabelSettings, LabelStats, LabelledVector, Lesson, ModelStats, Scope, Score, SourceFilter,
@@ -41,6 +42,7 @@ pub use traits::email_provider::{
 };
 pub use traits::embedder::Embedder;
 pub use traits::event_store::EventStore;
+pub use traits::label_namer::{ClusterSummary, LabelNamer, ProposedName};
 pub use traits::login_gate::{LoginGate, LoginSecret, login_with};
 pub use traits::provider_registry::ProviderRegistry;
 pub use traits::read_model_projector::ReadModelProjector;

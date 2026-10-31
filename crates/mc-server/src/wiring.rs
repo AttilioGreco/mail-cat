@@ -17,8 +17,8 @@ use mc_domain::{
     DomainEvent, EventEnvelope, EventStore, MailboxPath,
 };
 use mc_infrastructure::{
-    AnyProvider, InMemoryProviderRegistry, SqliteDb, SqliteEventStore, SqliteRepository,
-    SqliteTaggingStore, TantivySearchIndex, multilingual_e5_small,
+    AnyProvider, CatalogEmbedder, InMemoryProviderRegistry, SqliteDb, SqliteEventStore,
+    SqliteRepository, SqliteTaggingStore, TantivySearchIndex,
 };
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl,
@@ -202,7 +202,7 @@ impl AppContext {
         // The model is downloaded next to the database only once the user
         // agrees, and is dropped from memory after 5 minutes unused.
         let models = db_path.parent().unwrap_or(db_path).join("models");
-        let embedder = Arc::new(multilingual_e5_small(models, EMBEDDER_IDLE));
+        let embedder = Arc::new(CatalogEmbedder::new(models, EMBEDDER_IDLE));
         let tagging = Arc::new(
             TaggingServiceInner::new(
                 SqliteTaggingStore::new(db.clone()),

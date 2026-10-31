@@ -58,11 +58,31 @@ export interface EmbeddingsStatus {
   available: boolean;
   model: string;
   speed: 'light' | 'normal' | 'max';
+  profile: ModelProfile;
+  models: ModelOption[];
+  /** 'cpu', 'gpu-cuda', 'gpu-rocm', 'gpu-directml', 'gpu-coreml' or 'npu-vitisai'. */
+  target: string;
+  targets: { id: string; available: boolean }[];
+}
+
+export type ModelProfile = 'light' | 'balanced' | 'quality';
+
+export interface ModelOption {
+  profile: ModelProfile;
+  model: string;
+  dims: number;
+  downloadBytes: number;
+  /** Estimate of the memory each worker holds. */
+  workerBytes: number;
+  /** 1 (good) to 3 (best). */
+  quality: number;
 }
 
 export type EmbedderState = 'off' | 'loading' | 'active' | 'paused_for_retrain' | 'idle';
 
 export interface BackgroundStats {
+  /** Model in use; empty without one. */
+  model: string;
   speed: EmbeddingsStatus['speed'];
   workers: number;
   threads: number;

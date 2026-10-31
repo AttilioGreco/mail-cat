@@ -196,7 +196,11 @@ where
         });
         let ids: Vec<MessageId> = train.iter().chain(&test).map(|s| s.id).collect();
         let vectors = match self.embedder.as_ref().filter(|_| self.embeddings_enabled()) {
-            Some(embedder) => self.store.vectors(embedder.model(), &ids).await?,
+            Some(embedder) => {
+                self.store
+                    .vectors(&embedder.model().to_string(), &ids)
+                    .await?
+            }
             None => HashMap::new(),
         };
         Ok(evaluate(&train, &test, &labels, &vectors))

@@ -14,7 +14,7 @@ pub mod secret;
 pub use email::{
     AnyAccountEventSource, AnyProvider, ImapEmailProvider, JmapEmailProvider, SmtpSender,
 };
-pub use embedding::{LazyEmbedder, multilingual_e5_small};
+pub use embedding::{CATALOG, CatalogEmbedder, ExecutionTarget, LazyEmbedder, ModelSpec};
 pub use persistence::{
     DownloadMeter, SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore,
 };

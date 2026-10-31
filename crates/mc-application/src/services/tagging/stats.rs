@@ -5,7 +5,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use mc_domain::{BackgroundProfile, BackgroundSpeed, MailboxReadRepository, Scope, TaggingStore};
+use mc_domain::{
+    BackgroundProfile, BackgroundSpeed, MailboxReadRepository, ModelId, Scope, TaggingStore,
+};
 
 use super::TaggingService;
 use crate::bus::CommandBus;
@@ -39,6 +41,7 @@ pub struct RetrainProgress {
 #[derive(Debug, Clone)]
 pub struct BackgroundStats {
     pub speed: BackgroundSpeed,
+    pub model: Option<ModelId>,
     pub profile: BackgroundProfile,
     pub state: EmbedderState,
     pub model_loaded: bool,
@@ -148,6 +151,7 @@ where
             .collect();
         Ok(BackgroundStats {
             speed: self.background_speed(),
+            model: self.embedding_model(),
             profile: self.profile(),
             state,
             model_loaded,
@@ -169,7 +173,10 @@ where
         {
             return Ok(counts);
         }
-        let counts = self.store.embedding_counts(embedder.model()).await?;
+        let counts = self
+            .store
+            .embedding_counts(&embedder.model().to_string())
+            .await?;
         self.lock_activity().counts = Some((Instant::now(), counts));
         Ok(counts)
     }

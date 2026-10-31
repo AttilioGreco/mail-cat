@@ -522,3 +522,20 @@ async fn background_speed_defaults_to_normal_and_is_kept() {
         BackgroundSpeed::Max
     );
 }
+
+#[tokio::test]
+async fn model_and_target_default_to_light_on_cpu_and_are_kept() {
+    let f = open();
+    assert_eq!(f.store.model_profile().await.unwrap(), ModelProfile::Light);
+    assert_eq!(f.store.execution_target().await.unwrap(), "cpu");
+    f.store
+        .set_model_profile(ModelProfile::Quality)
+        .await
+        .unwrap();
+    f.store.set_execution_target("gpu-cuda").await.unwrap();
+    assert_eq!(
+        f.store.model_profile().await.unwrap(),
+        ModelProfile::Quality
+    );
+    assert_eq!(f.store.execution_target().await.unwrap(), "gpu-cuda");
+}
