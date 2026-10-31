@@ -5,7 +5,7 @@ import { Button } from '@/shared/ui/button';
 import { Input } from '@/shared/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/shared/ui/select';
 import { useAccounts } from '@/entities/account';
-import { useGroupMutations, useTrainingGroups } from '../model/useAutoLabel';
+import { useEmbeddings, useGroupMutations, useTrainingGroups } from '../model/useAutoLabel';
 
 const NO_GROUP = '';
 
@@ -15,6 +15,7 @@ export function TrainingGroupsSection() {
   const { data: groups = [] } = useTrainingGroups();
   const { data: accounts = [] } = useAccounts();
   const { create, rename, remove, assign } = useGroupMutations();
+  const { status: embeddings, set: setEmbeddings } = useEmbeddings();
   const [name, setName] = useState('');
   const fail = (e: Error) => toast.error(String(e));
 
@@ -29,6 +30,21 @@ export function TrainingGroupsSection() {
           come una sola. Un account senza gruppo impara da solo.
         </p>
       </header>
+
+      {embeddings?.available && (
+        <label className="flex items-start gap-2 text-xs text-foreground">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={embeddings.enabled}
+            disabled={setEmbeddings.isPending}
+            onChange={(e) => setEmbeddings.mutate(e.target.checked, { onError: fail })}
+          />
+          <span>
+            Riconosci anche i messaggi simili (scarica una volta un modello di ~120 MB; tutto resta sul tuo computer)
+          </span>
+        </label>
+      )}
 
       <div className="space-y-2">
         <h3 className="text-xs font-medium text-muted-foreground">Account</h3>

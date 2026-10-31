@@ -252,6 +252,16 @@ pub struct LabelStats {
     pub tokens: HashMap<String, (f64, f64)>,
 }
 
+/// A trained message's embedding with what the model was taught about it.
+#[derive(Debug, Clone)]
+pub struct LabelledVector {
+    pub message_id: MessageId,
+    pub vector: Vec<f32>,
+    pub positives: Vec<String>,
+    /// Rejected suggestions and undone auto-applies.
+    pub negatives: Vec<String>,
+}
+
 /// A label put on a message by the classifier, kept so it can be shown as
 /// automatic and undone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
-import type { ApplyPreview, LabelMode, LabelStatus, MessageTags, TrainingGroup } from './types';
+import type { ApplyPreview, EmbeddingsStatus, LabelMode, LabelStatus, MessageTags, TrainingGroup } from './types';
 
 /** Labels changed behind the views' backs: everything that shows them is re-read. */
 function requery(qc: QueryClient) {
@@ -97,4 +97,14 @@ export function useGroupMutations() {
       ...done,
     }),
   };
+}
+
+export function useEmbeddings() {
+  const qc = useQueryClient();
+  const status = useQuery({ queryKey: ['embeddings'], queryFn: () => invoke<EmbeddingsStatus>('get_embeddings') });
+  const set = useMutation({
+    mutationFn: (enabled: boolean) => invoke<EmbeddingsStatus>('set_embeddings', { enabled }),
+    onSuccess: (next) => qc.setQueryData(['embeddings'], next),
+  });
+  return { status: status.data, set };
 }

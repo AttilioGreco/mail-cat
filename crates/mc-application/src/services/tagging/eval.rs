@@ -2,11 +2,15 @@
 //! from the rest, and see what each threshold would have done to the
 //! held-out mail. Used to pick thresholds; changes nothing.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use mc_domain::{
-    AccountId, LabelSettings, Lesson, MailboxReadRepository, ModelStats, SourceFilter, TagSource,
-    TaggingStore,
+    AccountId, LabelSettings, LabelledVector, Lesson, MailboxReadRepository, MessageId, ModelStats,
+    Score, SourceFilter, TagSource, TaggingStore,
 };
 
+use super::knn::{Nearest, Pool};
 use super::training::{UNLABELLED_SAMPLE, UNLABELLED_WEIGHT};
 use super::{TaggingService, bayes, features};
 use crate::bus::CommandBus;
@@ -32,6 +36,11 @@ pub struct LabelEval {
     pub label: String,
     /// Held-out messages that carry the label.
     pub held_out: u32,
+    /// Of those, how many have an embedding to be judged by neighbours.
+    pub embedded: u32,
+    /// Words only.
+    pub bayes_rows: Vec<EvalRow>,
+    /// As the classifier scores: words and neighbours where a vector exists.
     pub rows: Vec<EvalRow>,
 }
 
@@ -39,11 +48,13 @@ fn held_out(source: &TagSource) -> bool {
     source.id.as_uuid().as_u128().is_multiple_of(HOLDOUT_EVERY)
 }
 
-/// Per label of `labels`, how each threshold does on the held-out sources.
+/// Per label of `labels`, how each threshold does on the held-out sources,
+/// by words alone and with neighbours from `vectors` (by message).
 pub(super) fn evaluate(
     train: &[TagSource],
     test: &[TagSource],
     labels: &[String],
+    vectors: &HashMap<MessageId, Vec<f32>>,
 ) -> Vec<LabelEval> {
     let mut stats = ModelStats::default();
     for source in train {
@@ -63,45 +74,71 @@ pub(super) fn evaluate(
             },
         );
     }
-    let scored: Vec<(Vec<mc_domain::Score>, &TagSource)> = test
-        .iter()
-        .map(|s| {
-            (
-                bayes::scores(
-                    &stats,
-                    labels.iter().map(String::as_str),
-                    &features::tokens(s, true),
-                ),
-                s,
-            )
+    let pool = Arc::new(Pool::new(train.iter().filter_map(|s| {
+        Some(LabelledVector {
+            message_id: s.id,
+            vector: vectors.get(&s.id)?.clone(),
+            positives: s.labels.clone(),
+            negatives: Vec::new(),
         })
+    })));
+    let neighbours: Vec<Option<Nearest>> = test
+        .iter()
+        .map(|s| vectors.get(&s.id).map(|v| pool.nearest(v, s.id)))
         .collect();
+    let scored = |with_neighbours: bool| -> Vec<(Vec<Score>, &TagSource)> {
+        test.iter()
+            .zip(&neighbours)
+            .map(|(s, near)| {
+                let near = near.as_ref().filter(|_| with_neighbours);
+                let tokens = features::tokens(s, true);
+                let scores =
+                    bayes::scores(&stats, labels.iter().map(String::as_str), &tokens, near);
+                (scores, s)
+            })
+            .collect()
+    };
+    let (alone, combined) = (scored(false), scored(true));
     labels
         .iter()
         .map(|label| {
-            let truth = |s: &TagSource| s.labels.contains(label);
-            let held = scored.iter().filter(|(_, s)| truth(s)).count() as u32;
-            let rows = THRESHOLDS
-                .iter()
-                .map(|&threshold| {
-                    let hits = |s: &[mc_domain::Score]| {
-                        s.iter().any(|x| &x.label == label && x.score >= threshold)
-                    };
-                    let flagged = scored.iter().filter(|(s, _)| hits(s)).count() as u32;
-                    let correct = scored.iter().filter(|(s, t)| hits(s) && truth(t)).count() as u32;
-                    EvalRow {
-                        threshold,
-                        flagged,
-                        correct,
-                        precision: ratio(correct, flagged),
-                        recall: ratio(correct, held),
-                    }
-                })
-                .collect();
+            let held = |s: &&TagSource| s.labels.contains(label);
             LabelEval {
                 label: label.clone(),
-                held_out: held,
-                rows,
+                held_out: test.iter().filter(held).count() as u32,
+                embedded: test
+                    .iter()
+                    .filter(held)
+                    .filter(|s| vectors.contains_key(&s.id))
+                    .count() as u32,
+                bayes_rows: rows(label, &alone),
+                rows: rows(label, &combined),
+            }
+        })
+        .collect()
+}
+
+fn rows(label: &str, scored: &[(Vec<Score>, &TagSource)]) -> Vec<EvalRow> {
+    let held = scored
+        .iter()
+        .filter(|(_, s)| s.labels.iter().any(|l| l == label))
+        .count() as u32;
+    THRESHOLDS
+        .iter()
+        .map(|&threshold| {
+            let flagged_by =
+                |s: &[Score]| s.iter().any(|x| x.label == label && x.score >= threshold);
+            let flagged = scored.iter().filter(|(s, _)| flagged_by(s)).count() as u32;
+            let correct = scored
+                .iter()
+                .filter(|(s, t)| flagged_by(s) && t.labels.iter().any(|l| l == label))
+                .count() as u32;
+            EvalRow {
+                threshold,
+                flagged,
+                correct,
+                precision: ratio(correct, flagged),
+                recall: ratio(correct, held),
             }
         })
         .collect()
@@ -157,6 +194,11 @@ where
             train.iter().filter(|s| s.labels.contains(l)).count() as u32
                 >= LabelSettings::MIN_POSITIVES
         });
-        Ok(evaluate(&train, &test, &labels))
+        let ids: Vec<MessageId> = train.iter().chain(&test).map(|s| s.id).collect();
+        let vectors = match self.embedder.as_ref().filter(|_| self.embeddings_enabled()) {
+            Some(embedder) => self.store.vectors(embedder.model(), &ids).await?,
+            None => HashMap::new(),
+        };
+        Ok(evaluate(&train, &test, &labels, &vectors))
     }
 }

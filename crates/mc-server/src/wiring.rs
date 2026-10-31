@@ -18,7 +18,7 @@ use mc_domain::{
 };
 use mc_infrastructure::{
     AnyProvider, InMemoryProviderRegistry, SqliteDb, SqliteEventStore, SqliteRepository,
-    SqliteTaggingStore, TantivySearchIndex,
+    SqliteTaggingStore, TantivySearchIndex, multilingual_e5_small,
 };
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl,
@@ -49,6 +49,9 @@ pub(crate) type QueryBusImpl = InProcessQueryBus<
 >;
 pub(crate) type SyncServiceImpl =
     SyncService<ProviderRegistryImpl, SqliteEventStore, SqliteRepository>;
+/// How long the embedding model may sit unused in memory.
+const EMBEDDER_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub(crate) type TaggingServiceInner =
     mc_application::TaggingService<SqliteTaggingStore, SqliteRepository, CommandBusImpl>;
 pub(crate) type SearchHandlerImpl =
@@ -196,11 +199,18 @@ impl AppContext {
             bare_repository.clone(),
             bare_repository.clone(),
         ));
-        let tagging = Arc::new(TaggingServiceInner::new(
-            SqliteTaggingStore::new(db.clone()),
-            bare_repository.clone(),
-            command_bus.clone(),
-        ));
+        // The model is downloaded next to the database only once the user
+        // agrees, and is dropped from memory after 5 minutes unused.
+        let models = db_path.parent().unwrap_or(db_path).join("models");
+        let embedder = Arc::new(multilingual_e5_small(models, EMBEDDER_IDLE));
+        let tagging = Arc::new(
+            TaggingServiceInner::new(
+                SqliteTaggingStore::new(db.clone()),
+                bare_repository.clone(),
+                command_bus.clone(),
+            )
+            .with_embedder(embedder),
+        );
         let projection_handler =
             ProjectionEventHandler::new(bare_repository.clone(), bare_repository);
         tracing::info!("Initialized projection handlers");

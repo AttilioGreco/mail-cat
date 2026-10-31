@@ -325,7 +325,7 @@ impl EmailProvider for JmapEmailProvider {
         let reply = reply.remove(0)?;
         let mailboxes = list_of(&reply);
         let paths = mapper::display_paths(mailboxes);
-        mailboxes
+        let mut listed: Vec<Mailbox> = mailboxes
             .iter()
             .filter_map(|m| m["id"].as_str().map(|id| (id, m)))
             .map(|(id, m)| {
@@ -348,7 +348,13 @@ impl EmailProvider for JmapEmailProvider {
                     subscription_explicit: false,
                 })
             })
-            .collect()
+            .collect::<Result<_, DomainError>>()?;
+        let declared: Vec<_> = listed.iter().map(|m| m.mailbox_type).collect();
+        for m in &mut listed {
+            m.infer_undeclared_type(&declared);
+            m.subscribed |= m.mailbox_type.is_mandatory();
+        }
+        Ok(listed)
     }
 
     async fn mailbox_changes(

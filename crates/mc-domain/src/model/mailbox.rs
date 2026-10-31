@@ -72,6 +72,140 @@ impl MailboxType {
     }
 }
 
+/// Names servers give the system folders when they declare no role, lowercase.
+/// The one place language lives: used only where the server said nothing.
+const KNOWN_NAMES: &[(MailboxType, &[&str])] = &[
+    (MailboxType::Inbox, &["posta in arrivo"]),
+    (
+        MailboxType::Sent,
+        &[
+            "sent",
+            "sent items",
+            "sent mail",
+            "sent messages",
+            "posta inviata",
+            "inviata",
+            "inviati",
+            "elementi inviati",
+            "messaggi inviati",
+            "gesendet",
+            "gesendete elemente",
+            "gesendete objekte",
+            "envoyé",
+            "envoyés",
+            "éléments envoyés",
+            "messages envoyés",
+            "enviado",
+            "enviados",
+            "elementos enviados",
+            "correo enviado",
+            "itens enviados",
+            "mensagens enviadas",
+            "verzonden",
+            "verzonden items",
+            "verzonden berichten",
+        ],
+    ),
+    (
+        MailboxType::Drafts,
+        &[
+            "draft",
+            "drafts",
+            "bozza",
+            "bozze",
+            "entwurf",
+            "entwürfe",
+            "brouillon",
+            "brouillons",
+            "borrador",
+            "borradores",
+            "rascunho",
+            "rascunhos",
+            "concept",
+            "concepten",
+        ],
+    ),
+    (
+        MailboxType::Trash,
+        &[
+            "trash",
+            "bin",
+            "deleted",
+            "deleted items",
+            "deleted messages",
+            "cestino",
+            "posta eliminata",
+            "elementi eliminati",
+            "eliminati",
+            "papierkorb",
+            "gelöscht",
+            "gelöschte elemente",
+            "gelöschte objekte",
+            "corbeille",
+            "éléments supprimés",
+            "papelera",
+            "papelera de reciclaje",
+            "elementos eliminados",
+            "lixeira",
+            "itens excluídos",
+            "itens apagados",
+            "prullenbak",
+            "verwijderde items",
+        ],
+    ),
+    (
+        MailboxType::Spam,
+        &[
+            "spam",
+            "junk",
+            "junk e-mail",
+            "junk email",
+            "junk mail",
+            "bulk mail",
+            "posta indesiderata",
+            "indesiderata",
+            "indesiderati",
+            "junk-e-mail",
+            "pourriel",
+            "pourriels",
+            "courrier indésirable",
+            "correo no deseado",
+            "no deseado",
+            "lixo eletrónico",
+            "lixo eletrônico",
+            "ongewenst",
+            "ongewenste e-mail",
+        ],
+    ),
+    (
+        MailboxType::Archive,
+        &[
+            "archive",
+            "archives",
+            "archivio",
+            "archiviati",
+            "archiv",
+            "archief",
+            "archivo",
+            "archivados",
+            "arquivo",
+            "arquivados",
+        ],
+    ),
+];
+
+impl MailboxType {
+    /// The system role a folder name says (whole name, any case), for servers
+    /// that declare none.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.to_lowercase();
+        KNOWN_NAMES
+            .iter()
+            .find(|(_, names)| names.contains(&name.as_str()))
+            .map(|(kind, _)| *kind)
+    }
+}
+
 pub fn leaf_name(display_path: &str, delimiter: char) -> &str {
     display_path
         .rsplit(delimiter)
@@ -145,6 +279,28 @@ impl Mailbox {
         };
 
         (mailbox, event)
+    }
+
+    /// Fall back to the name for a mailbox the server gave no role, unless
+    /// the server declared that role to another one (`declared`: the types the
+    /// listing carries): a second "Sent" next to a declared Sent is the
+    /// user's folder, and two Sent folders would make the target ambiguous.
+    /// Only top-level folders and children of INBOX ("INBOX.Sent") qualify.
+    pub fn infer_undeclared_type(&mut self, declared: &[MailboxType]) {
+        if self.mailbox_type != MailboxType::Custom {
+            return;
+        }
+        let Some(parent) = self.display_path.strip_suffix(&self.display_name) else {
+            return;
+        };
+        if !(parent.is_empty() || parent.len() == 6 && parent.to_lowercase().starts_with("inbox")) {
+            return;
+        }
+        if let Some(kind) = MailboxType::from_name(&self.display_name)
+            && !declared.contains(&kind)
+        {
+            self.mailbox_type = kind;
+        }
     }
 
     /// Update message counts and produce the event.
@@ -299,6 +455,57 @@ impl Mailbox {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn names_fill_in_missing_roles_in_any_language() {
+        for (name, kind) in [
+            ("Sent", MailboxType::Sent),
+            ("Posta inviata", MailboxType::Sent),
+            ("Gesendet", MailboxType::Sent),
+            ("Envoyés", MailboxType::Sent),
+            ("Itens enviados", MailboxType::Sent),
+            ("Verzonden", MailboxType::Sent),
+            ("Cestino", MailboxType::Trash),
+            ("Papierkorb", MailboxType::Trash),
+            ("Papelera", MailboxType::Trash),
+            ("Junk E-mail", MailboxType::Spam),
+            ("Courrier indésirable", MailboxType::Spam),
+            ("Bozze", MailboxType::Drafts),
+            ("Archives", MailboxType::Archive),
+            ("Arquivo", MailboxType::Archive),
+            ("Presentations", MailboxType::Custom),
+            ("Old Trash", MailboxType::Custom),
+        ] {
+            let found = MailboxType::from_name(name).unwrap_or(MailboxType::Custom);
+            assert_eq!(found, kind, "{name}");
+        }
+    }
+
+    fn custom(display_path: &str) -> Mailbox {
+        let (mut m, _) = Mailbox::discover_as(
+            AccountId::new(),
+            MailboxPath::parse("x", '/').unwrap(),
+            display_path.into(),
+            MailboxType::Custom,
+        );
+        m.display_name = leaf_name(display_path, '/').into();
+        m
+    }
+
+    #[test]
+    fn the_name_fallback_skips_declared_roles_and_subfolders() {
+        for (path, declared, expected) in [
+            ("Cestino", vec![], MailboxType::Trash),
+            ("INBOX/Sent", vec![], MailboxType::Sent),
+            ("Sent", vec![MailboxType::Sent], MailboxType::Custom),
+            ("Archives/Sent", vec![], MailboxType::Custom),
+            ("Work/Trash", vec![], MailboxType::Custom),
+        ] {
+            let mut m = custom(path);
+            m.infer_undeclared_type(&declared);
+            assert_eq!(m.mailbox_type, expected, "{path}");
+        }
+    }
+
     use super::*;
 
     #[test]

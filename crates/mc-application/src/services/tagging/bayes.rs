@@ -5,6 +5,8 @@
 
 use mc_domain::{LabelStats, Lesson, ModelStats, Score};
 
+use super::knn::Nearest;
+
 /// Pseudo-documents pulling a token's rate towards the label's base rate.
 const SHRINK: f64 = 2.0;
 /// Most evidence one token may carry (log-odds) and how many tokens count:
@@ -13,15 +15,23 @@ const SHRINK: f64 = 2.0;
 const MAX_EVIDENCE: f64 = 3.0;
 const TOP_TOKENS: usize = 15;
 
-/// What each signal says about a (message, label); signals added later (e.g.
-/// nearest neighbours) join here and in [`combine`].
+/// How much the neighbours' say counts against the words'. Bayes is the more
+/// extreme of the two, so a high score needs both to agree.
+const KNN_WEIGHT: f64 = 0.4;
+
+/// What each signal says about a (message, label). `knn` is `None` while the
+/// message has no embedding, or nothing is close to it.
 pub struct Signals {
     pub bayes: f64,
+    pub knn: Option<f64>,
 }
 
 /// The confidence in [0, 1] from the available signals.
 pub fn combine(signals: &Signals) -> f64 {
-    signals.bayes
+    match signals.knn {
+        Some(knn) => (1.0 - KNN_WEIGHT) * signals.bayes + KNN_WEIGHT * knn,
+        None => signals.bayes,
+    }
 }
 
 /// Apply a lesson to in-memory counts: the arithmetic the store performs in
@@ -89,19 +99,31 @@ pub fn bayes_score(stats: &ModelStats, label: &str, tokens: &[String]) -> Option
     ))
 }
 
+/// The confidence that the message belongs under `label`.
+pub fn score(
+    stats: &ModelStats,
+    label: &str,
+    tokens: &[String],
+    nearest: Option<&Nearest>,
+) -> Option<f64> {
+    let bayes = bayes_score(stats, label, tokens)?;
+    let knn = nearest.and_then(|n| n.share(label));
+    Some(combine(&Signals { bayes, knn }))
+}
+
 /// Combined scores of the message for each of `labels`, best first.
 pub fn scores<'a>(
     stats: &ModelStats,
     labels: impl IntoIterator<Item = &'a str>,
     tokens: &[String],
+    nearest: Option<&Nearest>,
 ) -> Vec<Score> {
     let mut scored: Vec<Score> = labels
         .into_iter()
         .filter_map(|label| {
-            let bayes = bayes_score(stats, label, tokens)?;
             Some(Score {
                 label: label.to_owned(),
-                score: combine(&Signals { bayes }),
+                score: score(stats, label, tokens, nearest)?,
             })
         })
         .collect();

@@ -26,6 +26,20 @@ service TaggingService {
   rpc ConfirmApply(ApplyRequest) returns (ApplyPreview);
 
   rpc EvalLabels(EvalRequest) returns (EvalResponse);
+
+  // Local embeddings (nearest-neighbour signal). Off until the user agrees:
+  // turning them on downloads the model and embeds the mail in the background.
+  rpc GetEmbeddings(GetEmbeddingsRequest) returns (EmbeddingsStatus);
+  rpc SetEmbeddings(SetEmbeddingsRequest) returns (EmbeddingsStatus);
+}
+
+message GetEmbeddingsRequest {}
+message SetEmbeddingsRequest { bool enabled = 1; }
+message EmbeddingsStatus {
+  bool enabled = 1;
+  // False where the server was built or started without a model.
+  bool available = 2;
+  string model = 3;
 }
 
 message TrainingGroup {
@@ -132,7 +146,9 @@ message EvalRow {
 message LabelEval {
   string label = 1;
   uint32 held_out = 2;
-  repeated EvalRow rows = 3;
+  repeated EvalRow rows = 3;     // words and neighbours
+  uint32 embedded = 4;           // held-out messages with a vector
+  repeated EvalRow bayes_rows = 5;  // words only
 }
 
 message EvalResponse { repeated LabelEval labels = 1; }

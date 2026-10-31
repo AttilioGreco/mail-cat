@@ -5,6 +5,7 @@
 pub mod account_event_source;
 pub mod contact_index;
 pub mod email_provider;
+pub mod embedder;
 pub mod event_store;
 pub mod login_gate;
 pub mod provider_registry;

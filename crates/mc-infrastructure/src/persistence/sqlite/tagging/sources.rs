@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use mc_domain::model::message::strip_html;
 use mc_domain::{
-    AccountId, DomainError, ListHeaders, MailboxId, MessageId, SourceFilter, TagSource,
+    AccountId, DomainError, ListHeaders, MailboxId, MailboxType, MessageId, SourceFilter, TagSource,
 };
 
 use crate::persistence::sqlite::repository::{body_col, conversion_err, json_col, query_all};
@@ -63,6 +63,12 @@ const UNREADABLE: &str = "NOT EXISTS (SELECT 1 FROM message_mailboxes x \
      JOIN mailboxes mb ON mb.id = x.mailbox_id WHERE x.message_id = m.id \
      AND mb.mailbox_type IN ('\"Trash\"', '\"Spam\"', '\"Drafts\"'))";
 
+/// A duplicate of a system folder the server did not give the role ("Sent"
+/// beside a declared "Sent Items") is still not a label to learn.
+fn is_system_name(label: &str) -> bool {
+    MailboxType::from_name(label).is_some()
+}
+
 fn source_from_row(row: &Row) -> rusqlite::Result<TagSource> {
     let list_headers = row
         .get::<_, Option<String>>(5)?
@@ -82,7 +88,10 @@ fn source_from_row(row: &Row) -> rusqlite::Result<TagSource> {
         subject: row.get(4)?,
         list_headers,
         body,
-        labels: json_col(row, 8)?,
+        labels: json_col::<Vec<String>>(row, 8)?
+            .into_iter()
+            .filter(|l| !is_system_name(l))
+            .collect(),
         in_inbox: row.get(9)?,
         received_at: DateTime::from_timestamp_nanos(row.get(10)?),
         keywords: row.get(11)?,
@@ -125,4 +134,25 @@ pub(super) fn page(
     );
     let args = std::iter::once(&cursor).chain(accounts.iter());
     query_all(conn, &sql, params_from_iter(args), source_from_row)
+}
+
+/// Newest first; a message without a body has nothing to embed yet.
+pub(super) fn unembedded(
+    conn: &Connection,
+    model: &str,
+    before: Uuid,
+    limit: u32,
+) -> Result<Vec<TagSource>, DomainError> {
+    let sql = format!(
+        "{SOURCE_COLUMNS} WHERE m.id < ?1 AND (b.text_zstd IS NOT NULL OR b.html_zstd IS NOT NULL) \
+         AND {UNREADABLE} \
+         AND NOT EXISTS (SELECT 1 FROM tag_vectors v WHERE v.message_id = m.id AND v.model = ?2) \
+         ORDER BY m.id DESC LIMIT {limit}"
+    );
+    query_all(
+        conn,
+        &sql,
+        rusqlite::params![before, model],
+        source_from_row,
+    )
 }

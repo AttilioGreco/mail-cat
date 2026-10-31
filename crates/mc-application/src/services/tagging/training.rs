@@ -41,6 +41,7 @@ where
     /// Forget the scope's counts and teach them again from the mail as it is.
     pub(crate) async fn train_scope(&self, scope: Scope) -> Result<(), ApplicationError> {
         self.store.reset(scope).await?;
+        self.forget_pools();
         let accounts = self.store.scope_accounts(scope).await?;
         let mut cursor = None;
         loop {
@@ -76,6 +77,7 @@ where
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         self.store.mark_trained(scope).await?;
+        self.forget_pools();
         Ok(())
     }
 

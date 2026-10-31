@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod email;
+pub mod embedding;
 pub mod oauth;
 pub mod persistence;
 pub mod provider_registry;
@@ -13,6 +14,7 @@ pub mod secret;
 pub use email::{
     AnyAccountEventSource, AnyProvider, ImapEmailProvider, JmapEmailProvider, SmtpSender,
 };
+pub use embedding::{LazyEmbedder, multilingual_e5_small};
 pub use persistence::{
     DownloadMeter, SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore,
 };

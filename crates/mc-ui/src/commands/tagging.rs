@@ -1,6 +1,6 @@
 //! Tauri commands for label suggestion; thin wrappers over the gRPC client.
 
-use mc_client::{ApplyPreview, LabelStatus, MessageTags, TrainingGroup};
+use mc_client::{ApplyPreview, EmbeddingsStatus, LabelStatus, MessageTags, TrainingGroup};
 use tauri::State;
 
 use super::{AppState, get_or_connect};
@@ -173,6 +173,27 @@ pub async fn confirm_apply(
     get_or_connect(&state)
         .await?
         .confirm_apply(&account_id, &label, &mode, threshold)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn get_embeddings(state: State<'_, AppState>) -> Result<EmbeddingsStatus, String> {
+    get_or_connect(&state)
+        .await?
+        .get_embeddings()
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_embeddings(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<EmbeddingsStatus, String> {
+    get_or_connect(&state)
+        .await?
+        .set_embeddings(enabled)
         .await
         .map_err(err)
 }

@@ -143,11 +143,13 @@ where
                 .collect();
             let wanted = candidates.iter().flat_map(|(_, t)| t.iter().cloned());
             let stats = self.stats_for(scope, wanted.collect()).await?;
+            let ids: Vec<MessageId> = candidates.iter().map(|(s, _)| s.id).collect();
+            let nearest = self.nearest(scope, &ids).await?;
             for (source, tokens) in candidates {
-                let Some(score) = bayes::bayes_score(&stats, label, &tokens) else {
+                let Some(score) = bayes::score(&stats, label, &tokens, nearest.get(&source.id))
+                else {
                     return Ok(plan);
                 };
-                let score = bayes::combine(&bayes::Signals { bayes: score });
                 if score < threshold || self.rejected(source.id, label).await? {
                     continue;
                 }

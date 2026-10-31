@@ -83,7 +83,21 @@ pub struct EvalRow {
 pub struct LabelEval {
     pub label: String,
     pub held_out: u32,
+    /// Held-out messages with an embedding.
+    pub embedded: u32,
+    /// Words only.
+    pub bayes_rows: Vec<EvalRow>,
+    /// Words and nearest neighbours.
     pub rows: Vec<EvalRow>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingsStatus {
+    pub enabled: bool,
+    /// False where the server has no model.
+    pub available: bool,
+    pub model: String,
 }
 
 fn group(g: pb::TrainingGroup) -> TrainingGroup {
@@ -308,24 +322,52 @@ impl MailCatClient {
             })
             .await?
             .into_inner();
+        let rows = |rows: Vec<pb::EvalRow>| {
+            rows.into_iter()
+                .map(|r| EvalRow {
+                    threshold: r.threshold,
+                    flagged: r.flagged,
+                    correct: r.correct,
+                    precision: r.precision,
+                    recall: r.recall,
+                })
+                .collect()
+        };
         Ok(resp
             .labels
             .into_iter()
             .map(|l| LabelEval {
                 label: l.label,
                 held_out: l.held_out,
-                rows: l
-                    .rows
-                    .into_iter()
-                    .map(|r| EvalRow {
-                        threshold: r.threshold,
-                        flagged: r.flagged,
-                        correct: r.correct,
-                        precision: r.precision,
-                        recall: r.recall,
-                    })
-                    .collect(),
+                embedded: l.embedded,
+                bayes_rows: rows(l.bayes_rows),
+                rows: rows(l.rows),
             })
             .collect())
+    }
+
+    pub async fn get_embeddings(&self) -> Result<EmbeddingsStatus> {
+        let resp = self
+            .tagging()
+            .get_embeddings(pb::GetEmbeddingsRequest {})
+            .await?;
+        Ok(embeddings(resp.into_inner()))
+    }
+
+    /// Agreeing downloads the model (once) and embeds the mail in the background.
+    pub async fn set_embeddings(&self, enabled: bool) -> Result<EmbeddingsStatus> {
+        let resp = self
+            .tagging()
+            .set_embeddings(pb::SetEmbeddingsRequest { enabled })
+            .await?;
+        Ok(embeddings(resp.into_inner()))
+    }
+}
+
+fn embeddings(s: pb::EmbeddingsStatus) -> EmbeddingsStatus {
+    EmbeddingsStatus {
+        enabled: s.enabled,
+        available: s.available,
+        model: s.model,
     }
 }

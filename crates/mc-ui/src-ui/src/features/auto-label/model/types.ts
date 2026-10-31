@@ -51,3 +51,10 @@ export const THRESHOLDS = [
   { value: 0.9, label: 'Alta' },
   { value: 0.75, label: 'Media' },
 ] as const;
+
+export interface EmbeddingsStatus {
+  enabled: boolean;
+  /** False where the server has no model. */
+  available: boolean;
+  model: string;
+}

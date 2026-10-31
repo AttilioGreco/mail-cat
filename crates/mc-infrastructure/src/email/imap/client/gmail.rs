@@ -403,7 +403,7 @@ impl ImapEmailProvider {
         }
         let known = self.layout.lock().expect("layout lock poisoned").is_some();
         if !known {
-            self.learn_layout(&list_on(session, true).await?);
+            self.learn_layout(&list_on(session).await?);
         }
         Ok(self.layout())
     }

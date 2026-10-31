@@ -23,6 +23,21 @@ impl<S, R, C> TaggingServiceImpl<S, R, C> {
     }
 }
 
+impl<S, R, C> TaggingServiceImpl<S, R, C>
+where
+    S: TaggingStore + 'static,
+    R: MailboxReadRepository + 'static,
+    C: CommandBus + 'static,
+{
+    fn embeddings(&self) -> pb::EmbeddingsStatus {
+        pb::EmbeddingsStatus {
+            enabled: self.service.embeddings_enabled(),
+            available: self.service.embedding_model().is_some(),
+            model: self.service.embedding_model().unwrap_or_default().into(),
+        }
+    }
+}
+
 fn uuid(id: &str) -> Result<Uuid, Status> {
     Uuid::parse_str(id).map_err(|_| Status::invalid_argument(format!("invalid id {id:?}")))
 }
@@ -294,25 +309,46 @@ where
             .eval(account(&request.into_inner().account_id)?)
             .await
             .map_err(application_error_to_status)?;
+        let rows = |rows: Vec<mc_application::services::tagging::EvalRow>| {
+            rows.into_iter()
+                .map(|r| pb::EvalRow {
+                    threshold: r.threshold,
+                    flagged: r.flagged,
+                    correct: r.correct,
+                    precision: r.precision,
+                    recall: r.recall,
+                })
+                .collect()
+        };
         Ok(Response::new(pb::EvalResponse {
             labels: report
                 .into_iter()
                 .map(|l| pb::LabelEval {
                     label: l.label,
                     held_out: l.held_out,
-                    rows: l
-                        .rows
-                        .into_iter()
-                        .map(|r| pb::EvalRow {
-                            threshold: r.threshold,
-                            flagged: r.flagged,
-                            correct: r.correct,
-                            precision: r.precision,
-                            recall: r.recall,
-                        })
-                        .collect(),
+                    embedded: l.embedded,
+                    rows: rows(l.rows),
+                    bayes_rows: rows(l.bayes_rows),
                 })
                 .collect(),
         }))
+    }
+
+    async fn get_embeddings(
+        &self,
+        _: Request<pb::GetEmbeddingsRequest>,
+    ) -> Result<Response<pb::EmbeddingsStatus>, Status> {
+        Ok(Response::new(self.embeddings()))
+    }
+
+    async fn set_embeddings(
+        &self,
+        request: Request<pb::SetEmbeddingsRequest>,
+    ) -> Result<Response<pb::EmbeddingsStatus>, Status> {
+        self.service
+            .set_embeddings(request.into_inner().enabled)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(self.embeddings()))
     }
 }

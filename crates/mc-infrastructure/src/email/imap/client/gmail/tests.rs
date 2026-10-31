@@ -609,7 +609,7 @@ async fn listed_names_with_escapes_and_utf7_match_their_labels() {
             .to_owned()
     })
     .await;
-    let listed = list_on(&mut session, true).await.unwrap();
+    let listed = list_on(&mut session).await.unwrap();
     let layout = Layout::from_list(listed.iter().map(|l| Entry {
         name: &l.name,
         delimiter: '/',

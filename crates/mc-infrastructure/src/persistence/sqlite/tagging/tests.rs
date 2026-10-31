@@ -229,6 +229,41 @@ async fn labels_of_one_name_are_one_label_across_a_groups_accounts() {
 }
 
 #[tokio::test]
+async fn only_user_mailboxes_are_labels() {
+    let f = open();
+    let a = f.account("a@x.example", MailboxModel::Labels).await;
+    let inbox = f.mailbox(a, "INBOX", MailboxType::Inbox).await;
+    let mut boxes = vec![inbox];
+    for (name, kind) in [
+        ("Posta inviata", MailboxType::Sent),
+        ("Cestino", MailboxType::Trash),
+        ("Tutti i messaggi", MailboxType::All),
+        ("Sent Mail", MailboxType::Custom),
+        ("Fatture", MailboxType::Custom),
+    ] {
+        boxes.push(f.mailbox(a, name, kind).await);
+    }
+    let id = f
+        .message(a, inbox, &boxes[1..], ListHeaders::default())
+        .await;
+
+    let source = f.store.sources(&[id]).await.unwrap().pop();
+
+    // A Trash copy is unreadable, so the message is not seen at all.
+    assert!(source.is_none());
+    let id = f
+        .message(
+            a,
+            inbox,
+            &[boxes[1], boxes[3], boxes[4], boxes[5]],
+            ListHeaders::default(),
+        )
+        .await;
+    let source = f.store.sources(&[id]).await.unwrap().pop().unwrap();
+    assert_eq!(source.labels, ["fatture"]);
+}
+
+#[tokio::test]
 async fn a_folders_accounts_labels_are_its_keywords() {
     let f = open();
     let a = f.account("a@x.example", MailboxModel::Folders).await;
@@ -321,4 +356,144 @@ async fn settings_and_auto_records_round_trip() {
     assert_eq!(f.store.autos(message).await.unwrap().len(), 1);
     assert!(f.store.take_auto(message, "newsletter").await.unwrap());
     assert!(!f.store.take_auto(message, "newsletter").await.unwrap());
+}
+
+const MODEL: &str = "test-model@1";
+
+async fn with_body(f: &Fixture, id: MessageId) {
+    mc_domain::MessageBodyStore::put_body(&f.repo, &id, Some("corpo".into()), None, false)
+        .await
+        .unwrap();
+}
+
+#[test]
+fn vectors_round_trip_as_little_endian_floats() {
+    let v = vec![0.0, -1.5, 0.25, f32::MIN_POSITIVE, 1e10];
+    let blob = vectors::encode(&v);
+    assert_eq!(blob.len(), 20);
+    assert_eq!(&blob[4..8], (-1.5f32).to_le_bytes());
+    assert_eq!(vectors::decode(&blob), Some(v));
+    assert_eq!(
+        vectors::decode(&blob[..7]),
+        None,
+        "a torn blob is not a vector"
+    );
+}
+
+#[tokio::test]
+async fn a_vector_of_another_model_is_not_seen_and_is_replaced() {
+    let f = open();
+    let account = f.account("a@x.example", MailboxModel::Labels).await;
+    let inbox = f.mailbox(account, "INBOX", MailboxType::Inbox).await;
+    let id = f.message(account, inbox, &[], ListHeaders::default()).await;
+    with_body(&f, id).await;
+
+    assert_eq!(f.store.unembedded(MODEL, None, 10).await.unwrap().len(), 1);
+    f.store
+        .put_vectors("old-model", &[(id, vec![1.0, 0.0])])
+        .await
+        .unwrap();
+    assert!(f.store.vectors(MODEL, &[id]).await.unwrap().is_empty());
+    assert_eq!(
+        f.store.unembedded(MODEL, None, 10).await.unwrap().len(),
+        1,
+        "stale vectors leave the message to be embedded again"
+    );
+
+    f.store
+        .put_vectors(MODEL, &[(id, vec![0.0, 1.0])])
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.vectors(MODEL, &[id]).await.unwrap()[&id],
+        vec![0.0, 1.0]
+    );
+    assert!(
+        f.store
+            .vectors("old-model", &[id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        f.store
+            .unembedded(MODEL, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn only_readable_mail_with_a_body_is_left_to_embed() {
+    let f = open();
+    let account = f.account("a@x.example", MailboxModel::Labels).await;
+    let inbox = f.mailbox(account, "INBOX", MailboxType::Inbox).await;
+    let trash = f.mailbox(account, "Trash", MailboxType::Trash).await;
+    let bare = f.message(account, inbox, &[], ListHeaders::default()).await;
+    let binned = f.message(account, trash, &[], ListHeaders::default()).await;
+    let wanted = f.message(account, inbox, &[], ListHeaders::default()).await;
+    for id in [binned, wanted] {
+        with_body(&f, id).await;
+    }
+    let left = f.store.unembedded(MODEL, None, 10).await.unwrap();
+    assert_eq!(left.iter().map(|s| s.id).collect::<Vec<_>>(), vec![wanted]);
+    assert_ne!(bare, wanted);
+    assert!(
+        f.store
+            .unembedded(MODEL, Some(wanted), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_scopes_vectors_come_with_what_its_model_was_taught() {
+    let f = open();
+    let account = f.account("a@x.example", MailboxModel::Labels).await;
+    let inbox = f.mailbox(account, "INBOX", MailboxType::Inbox).await;
+    let (taught, untaught) = (
+        f.message(account, inbox, &[], ListHeaders::default()).await,
+        f.message(account, inbox, &[], ListHeaders::default()).await,
+    );
+    let scope = f.store.scope_of(account).await.unwrap();
+    f.store
+        .put_example(&Example {
+            message_id: taught,
+            account_id: account,
+            scope: scope.key(),
+            positives: vec!["newsletter".into()],
+            negatives: vec!["lavoro".into()],
+            with_body: true,
+            weight: 1.0,
+        })
+        .await
+        .unwrap();
+    f.store
+        .put_vectors(MODEL, &[(taught, vec![1.0]), (untaught, vec![0.5])])
+        .await
+        .unwrap();
+    let found = f.store.scope_vectors(scope, MODEL).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].message_id, taught);
+    assert_eq!(found[0].positives, vec!["newsletter"]);
+    assert_eq!(found[0].negatives, vec!["lavoro"]);
+    assert!(
+        f.store
+            .scope_vectors(scope, "other")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn embeddings_are_off_until_the_user_agrees() {
+    let f = open();
+    assert!(!f.store.embeddings_enabled().await.unwrap());
+    f.store.set_embeddings_enabled(true).await.unwrap();
+    assert!(f.store.embeddings_enabled().await.unwrap());
+    f.store.set_embeddings_enabled(false).await.unwrap();
+    assert!(!f.store.embeddings_enabled().await.unwrap());
 }

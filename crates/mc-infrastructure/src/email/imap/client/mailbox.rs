@@ -243,7 +243,6 @@ pub(super) struct Listed {
 
 pub(super) async fn list_on<T>(
     session: &mut async_imap::Session<T>,
-    gmail: bool,
 ) -> Result<Vec<Listed>, DomainError>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
@@ -272,12 +271,8 @@ where
 
         let path = mapper::parse_mailbox_path(imap_name, delimiter)?;
 
-        // Classify from SPECIAL-USE attributes when the server sends them.
-        let mailbox_type = if gmail {
-            mapper::classify_gmail_mailbox(imap_name, mb.attributes())
-        } else {
-            mapper::classify_mailbox(imap_name, delimiter, mb.attributes())
-        };
+        // The server's own roles; names only fill in what it left undeclared.
+        let mailbox_type = mapper::classify_mailbox(imap_name, mb.attributes());
 
         // Create placeholder Mailbox - account_id and id will be set during sync
         let display_path = mapper::decode_utf7(&path.full_path()).into_owned();
@@ -390,14 +385,19 @@ fn lists_as(display_path: &str, wanted: &str) -> bool {
 impl ImapEmailProvider {
     pub(super) async fn list_all_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
         let mut session = self.session().await?;
-        let mut listed = list_on(&mut session, self.has_gmail_ext()).await?;
+        let mut listed = list_on(&mut session).await?;
         let lsub = lsub_names(&mut session).await;
         self.release(session);
         if self.has_gmail_ext() {
             self.learn_layout(&listed);
         }
         let gmail = self.layout().is_some();
+        // Gmail labels are user-named: its roles come from attributes alone.
+        let declared: Vec<_> = listed.iter().map(|l| l.mailbox.mailbox_type).collect();
         for l in &mut listed {
+            if !gmail {
+                l.mailbox.infer_undeclared_type(&declared);
+            }
             l.mailbox.subscribed = is_subscribed(l, lsub.as_ref(), gmail);
             if gmail {
                 strip_gmail_prefix(&mut l.mailbox.display_path);

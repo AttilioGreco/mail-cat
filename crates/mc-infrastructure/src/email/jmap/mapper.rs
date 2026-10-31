@@ -60,6 +60,7 @@ pub(super) fn mailbox_type(role: Option<&str>) -> MailboxType {
         Some("archive") => MailboxType::Archive,
         Some("all") => MailboxType::All,
         Some("important") => MailboxType::Important,
+        Some("flagged") => MailboxType::Starred,
         _ => MailboxType::Custom,
     }
 }

@@ -9,26 +9,29 @@
 mod bayes;
 mod eval;
 mod features;
+mod knn;
 mod placement;
 mod retro;
 mod training;
+mod vectors;
 
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use mc_domain::{
-    AccountId, AutoApplied, Confidence, DomainEvent, EventEnvelope, Flag, GroupId, LabelMode,
-    LabelSettings, Mailbox, MailboxId, MailboxReadRepository, MailboxType, MessageId, Scope,
-    TagSource, TaggingStore, TrainingGroup,
+    AccountId, AutoApplied, Confidence, DomainEvent, Embedder, EventEnvelope, Flag, GroupId,
+    LabelMode, LabelSettings, Mailbox, MailboxId, MailboxReadRepository, MailboxType, MessageId,
+    Scope, TagSource, TaggingStore, TrainingGroup,
 };
 
 use crate::bus::{CommandBus, EventSubscriber};
@@ -77,6 +80,9 @@ pub struct MessageTags {
     pub auto: Vec<AutoLabel>,
 }
 
+/// Per scope, when its labelled vectors were read and the vectors.
+type Pools = HashMap<Scope, (std::time::Instant, Arc<knn::Pool>)>;
+
 /// A label to put on a message by itself.
 struct AutoJob {
     message_id: MessageId,
@@ -94,6 +100,13 @@ pub struct TaggingService<S, R, C> {
     page: u32,
     jobs: mpsc::UnboundedSender<AutoJob>,
     inbox: Mutex<Option<mpsc::UnboundedReceiver<AutoJob>>>,
+    /// `None` where no model is wired in: the classifier is words only.
+    embedder: Option<Arc<dyn Embedder>>,
+    /// The user's consent, mirrored from the store so scoring need not ask.
+    embedding_on: AtomicBool,
+    /// Rouses the embedding worker: a body arrived, or consent was given.
+    wake: Notify,
+    pools: Mutex<Pools>,
 }
 
 pub(crate) fn label_key(name: &str) -> String {
@@ -128,7 +141,18 @@ where
             page: retro::PAGE,
             jobs,
             inbox: Mutex::new(Some(inbox)),
+            embedder: None,
+            embedding_on: AtomicBool::new(false),
+            wake: Notify::new(),
+            pools: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Add the embedding signal; it stays dormant until the user consents.
+    #[must_use]
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     /// Scan existing mail `page` messages at a time.
@@ -152,6 +176,14 @@ where
         let service = Arc::clone(self);
         let stop = shutdown.clone();
         tokio::spawn(async move {
+            if let Err(e) = service.load_consent().await {
+                warn!(error = %e, "label classifier: could not read the embeddings setting");
+            }
+            let worker = Arc::clone(&service);
+            tokio::spawn({
+                let stop = stop.clone();
+                async move { worker.run_embedder(stop).await }
+            });
             if let Err(e) = service.bootstrap().await {
                 warn!(error = %e, "label classifier: initial training failed");
             }
@@ -189,6 +221,14 @@ where
             }
             | DomainEvent::MessageBodyFetched { message_id, .. } => (*message_id, true),
             DomainEvent::MessageMailboxesChanged { message_id, .. } => (*message_id, false),
+            // The labels of a labels account are its Custom mailboxes: a
+            // mailbox gaining or losing that type changes what was taught.
+            DomainEvent::MailboxTypeChanged { mailbox_id, .. } => {
+                if let Err(e) = self.relearn_mailbox(mailbox_id).await {
+                    warn!(%mailbox_id, error = %e, "label classifier: retraining after a type change failed");
+                }
+                return;
+            }
             // A keyword is how a folders account labels.
             DomainEvent::MessageFlagged {
                 message_id,
@@ -203,9 +243,21 @@ where
             }
             _ => return,
         };
+        if auto {
+            self.wake.notify_one();
+        }
         if let Err(e) = self.consider(message_id, auto).await {
             warn!(%message_id, error = %e, "label classifier: message skipped");
         }
+    }
+
+    async fn relearn_mailbox(&self, mailbox: &MailboxId) -> Result<(), ApplicationError> {
+        let Some(mailbox) = self.read.get_mailbox(mailbox).await? else {
+            return Ok(());
+        };
+        let scope = self.store.scope_of(mailbox.account_id).await?;
+        self.store.mark_untrained(scope).await?;
+        self.bootstrap().await
     }
 
     /// Learn from the message as it is now, then decide on labelling it.
@@ -287,7 +339,13 @@ where
     ) -> Result<Vec<mc_domain::Score>, ApplicationError> {
         let tokens = features::tokens(source, true);
         let stats = self.store.stats(scope, &tokens).await?;
-        Ok(bayes::scores(&stats, labels, &tokens))
+        let nearest = self.nearest(scope, &[source.id]).await?;
+        Ok(bayes::scores(
+            &stats,
+            labels,
+            &tokens,
+            nearest.get(&source.id),
+        ))
     }
 
     /// The record goes in before the change so that the event the change
@@ -372,6 +430,7 @@ where
             .map(|g| g.accounts)
             .unwrap_or_default();
         self.store.delete_group(id).await?;
+        self.forget_pools();
         // The members are in the default group now, which learns from them.
         if !members.is_empty() {
             self.train_scope(Scope::Group(GroupId::DEFAULT)).await?;

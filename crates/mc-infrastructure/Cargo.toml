@@ -11,6 +11,8 @@ tokio = { workspace = true }
 rusqlite = { workspace = true }
 zstd = { workspace = true }
 tantivy = { workspace = true }
+fastembed = { workspace = true }
+sha2 = { workspace = true }
 lettre = { workspace = true }
 async-imap = { workspace = true }
 async-native-tls = { workspace = true }

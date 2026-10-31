@@ -1,12 +1,14 @@
 //! Where the label classifier keeps its groups, settings and counts.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 
 use crate::error::DomainError;
 use crate::model::account::AccountId;
 use crate::model::tagging::{
-    AutoApplied, Example, GroupId, LabelSettings, Lesson, ModelStats, Scope, SourceFilter,
-    TagSource, TrainingGroup,
+    AutoApplied, Example, GroupId, LabelSettings, LabelledVector, Lesson, ModelStats, Scope,
+    SourceFilter, TagSource, TrainingGroup,
 };
 use crate::value_objects::message_id::MessageId;
 
@@ -46,6 +48,8 @@ pub trait TaggingStore: Send + Sync {
     /// Whether the scope was trained from existing labels yet.
     async fn is_trained(&self, scope: Scope) -> Result<bool, DomainError>;
     async fn mark_trained(&self, scope: Scope) -> Result<(), DomainError>;
+    /// Make the next [`Self::is_trained`] false: the labels changed under it.
+    async fn mark_untrained(&self, scope: Scope) -> Result<(), DomainError>;
 
     async fn example(&self, message: MessageId) -> Result<Option<Example>, DomainError>;
     async fn put_example(&self, example: &Example) -> Result<(), DomainError>;
@@ -69,4 +73,35 @@ pub trait TaggingStore: Send + Sync {
     async fn autos(&self, message: MessageId) -> Result<Vec<AutoApplied>, DomainError>;
     /// Forget the record; `true` when there was one.
     async fn take_auto(&self, message: MessageId, label: &str) -> Result<bool, DomainError>;
+
+    // ── Embeddings ──
+    /// Whether the user agreed to download the model and embed their mail.
+    async fn embeddings_enabled(&self) -> Result<bool, DomainError>;
+    async fn set_embeddings_enabled(&self, enabled: bool) -> Result<(), DomainError>;
+    /// Replaces any vector the messages have, whatever model made it.
+    async fn put_vectors(
+        &self,
+        model: &str,
+        vectors: &[(MessageId, Vec<f32>)],
+    ) -> Result<(), DomainError>;
+    /// The vectors `model` made for `ids`; a message with none is absent.
+    async fn vectors(
+        &self,
+        model: &str,
+        ids: &[MessageId],
+    ) -> Result<HashMap<MessageId, Vec<f32>>, DomainError>;
+    /// Vectors of the messages the scope's model was taught from.
+    async fn scope_vectors(
+        &self,
+        scope: Scope,
+        model: &str,
+    ) -> Result<Vec<LabelledVector>, DomainError>;
+    /// Messages with a body and no vector of `model`, newest first, below
+    /// `before`. Trash, Spam and Drafts are skipped.
+    async fn unembedded(
+        &self,
+        model: &str,
+        before: Option<MessageId>,
+        limit: u32,
+    ) -> Result<Vec<TagSource>, DomainError>;
 }

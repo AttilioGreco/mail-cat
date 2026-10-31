@@ -27,6 +27,8 @@ struct Row {
     label: String,
     #[tabled(rename = "Held out")]
     held_out: u32,
+    #[tabled(rename = "Signal")]
+    signal: &'static str,
     #[tabled(rename = "Threshold")]
     threshold: String,
     #[tabled(rename = "Flagged")]
@@ -52,21 +54,29 @@ async fn eval(account: &str, client: MailCatClient, json: bool) -> Result<()> {
         .into_iter()
         .flat_map(|l| {
             let (label, held_out) = (l.label, l.held_out);
-            l.rows.into_iter().map(move |r| Row {
-                label: label.clone(),
-                held_out,
-                threshold: format!("{:.2}", r.threshold),
-                flagged: r.flagged,
-                correct: r.correct,
-                precision: format!("{:.0}%", r.precision * 100.0),
-                recall: format!("{:.0}%", r.recall * 100.0),
+            // Without a vector in the held-out mail the two are the same.
+            let signals = [("words", l.bayes_rows), ("words+knn", l.rows)];
+            signals.into_iter().flat_map(move |(signal, rows)| {
+                let label = label.clone();
+                rows.into_iter().map(move |r| Row {
+                    label: label.clone(),
+                    held_out,
+                    signal,
+                    threshold: format!("{:.2}", r.threshold),
+                    flagged: r.flagged,
+                    correct: r.correct,
+                    precision: format!("{:.0}%", r.precision * 100.0),
+                    recall: format!("{:.0}%", r.recall * 100.0),
+                })
             })
         })
         .collect();
     println!("{}", Table::new(rows));
     println!(
         "{}",
-        "Mail under a label you never applied counts against precision.".dimmed()
+        "Mail under a label you never applied counts against precision. words+knn equals \
+         words where the held-out mail has no embedding (embeddings off, or not yet done)."
+            .dimmed()
     );
     Ok(())
 }

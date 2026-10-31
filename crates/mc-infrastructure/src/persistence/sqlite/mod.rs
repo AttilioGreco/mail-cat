@@ -228,6 +228,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         archived INTEGER NOT NULL, at INTEGER NOT NULL,
         PRIMARY KEY (message_id, label)
     ) WITHOUT ROWID;",
+    // 9: sentence embeddings for label suggestion. One vector per message
+    // (f32 little-endian, unit length); `model` names the model and revision
+    // that made it, and a vector of any other is ignored and made again.
+    // `tag_prefs` holds the user's consent to download the model and embed.
+    "CREATE TABLE tag_vectors (
+        message_id BLOB PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        model TEXT NOT NULL, vec BLOB NOT NULL
+    );
+    CREATE TABLE tag_prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

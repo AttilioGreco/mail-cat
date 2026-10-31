@@ -27,6 +27,7 @@ fn roles_map_to_mailbox_types() {
         (Some("archive"), MailboxType::Archive),
         (Some("all"), MailboxType::All),
         (Some("important"), MailboxType::Important),
+        (Some("flagged"), MailboxType::Starred),
         (Some("shared-by-nobody"), MailboxType::Custom),
         (None, MailboxType::Custom),
     ];
@@ -383,6 +384,41 @@ async fn delta_sorts_what_arrived_and_drops_what_moved_out() {
     assert_eq!(changed, [(RemoteId::new("u1"), vec![Flag::Seen])]);
     let removed: Vec<&str> = removed.iter().map(RemoteId::as_str).collect();
     assert_eq!(removed, ["d1", "other", "gone"]);
+}
+
+#[tokio::test]
+async fn names_fill_in_only_the_roles_the_server_left_out() {
+    let base = serve(|_, _| {
+        json!({"list": [
+            {"id": "a", "name": "Inbox", "role": "inbox"},
+            {"id": "b", "name": "Sent Items", "role": "sent"},
+            {"id": "c", "name": "Sent"},
+            {"id": "d", "name": "Archives"},
+            {"id": "e", "name": "Archives", "parentId": "d"},
+            {"id": "f", "name": "Fatture", "parentId": "d"},
+        ]})
+    })
+    .await;
+
+    let types: Vec<_> = provider(&base)
+        .list_mailboxes()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.mailbox_type)
+        .collect();
+
+    assert_eq!(
+        types,
+        [
+            MailboxType::Inbox,
+            MailboxType::Sent,
+            MailboxType::Custom,
+            MailboxType::Archive,
+            MailboxType::Custom,
+            MailboxType::Custom,
+        ]
+    );
 }
 
 #[tokio::test]

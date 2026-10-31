@@ -12,13 +12,15 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AutoApplied, DomainError, Example, GroupId, LabelMode, LabelSettings, LabelStats,
-    Lesson, MessageId, ModelStats, Scope, SourceFilter, TagSource, TaggingStore, TrainingGroup,
+    LabelledVector, Lesson, MessageId, ModelStats, Scope, SourceFilter, TagSource, TaggingStore,
+    TrainingGroup,
 };
 
 use super::repository::{conversion_err, exec, json, json_col, nanos, query_all, query_one};
 use super::{SqliteDb, repo_err};
 
 mod sources;
+mod vectors;
 use sources::placeholders;
 
 pub struct SqliteTaggingStore {
@@ -33,6 +35,9 @@ impl SqliteTaggingStore {
 
 /// Parameters per statement stay far below SQLite's limit.
 const MAX_TOKENS: usize = 2000;
+/// Bumped when what tokens or labels mean changes, so scopes trained under
+/// the old meaning (stored as 1) retrain on the next start.
+const TRAINING_VERSION: u32 = 2;
 
 fn group_of_row(row: &Row) -> rusqlite::Result<(GroupId, String)> {
     Ok((GroupId::from_uuid(row.get(0)?), row.get(1)?))
@@ -421,9 +426,9 @@ impl TaggingStore for SqliteTaggingStore {
                     conn,
                     "SELECT trained FROM tag_scopes WHERE scope = ?1",
                     [key],
-                    |r| r.get::<_, bool>(0),
+                    |r| r.get::<_, u32>(0),
                 )?
-                .unwrap_or(false))
+                .is_some_and(|v| v >= TRAINING_VERSION))
             })
             .await
     }
@@ -434,8 +439,22 @@ impl TaggingStore for SqliteTaggingStore {
             .write(move |conn| {
                 exec(
                     conn,
-                    "INSERT INTO tag_scopes (scope, trained) VALUES (?1, 1) \
-                     ON CONFLICT(scope) DO UPDATE SET trained = 1",
+                    "INSERT INTO tag_scopes (scope, trained) VALUES (?1, ?2) \
+                     ON CONFLICT(scope) DO UPDATE SET trained = ?2",
+                    params![key, TRAINING_VERSION],
+                )
+                .map(drop)
+            })
+            .await
+    }
+
+    async fn mark_untrained(&self, scope: Scope) -> Result<(), DomainError> {
+        let key = scope.key();
+        self.db
+            .write(move |conn| {
+                exec(
+                    conn,
+                    "UPDATE tag_scopes SET trained = 0 WHERE scope = ?1",
                     [key],
                 )
                 .map(drop)
@@ -576,6 +595,62 @@ impl TaggingStore for SqliteTaggingStore {
                 )
                 .map(|n| n > 0)
             })
+            .await
+    }
+    async fn embeddings_enabled(&self) -> Result<bool, DomainError> {
+        self.db.read(vectors::enabled).await
+    }
+
+    async fn set_embeddings_enabled(&self, enabled: bool) -> Result<(), DomainError> {
+        self.db
+            .write(move |conn| vectors::set_enabled(conn, enabled))
+            .await
+    }
+
+    async fn put_vectors(
+        &self,
+        model: &str,
+        batch: &[(MessageId, Vec<f32>)],
+    ) -> Result<(), DomainError> {
+        let (model, batch) = (model.to_owned(), batch.to_vec());
+        self.db
+            .write(move |conn| vectors::put(conn, &model, &batch))
+            .await
+    }
+
+    async fn vectors(
+        &self,
+        model: &str,
+        ids: &[MessageId],
+    ) -> Result<HashMap<MessageId, Vec<f32>>, DomainError> {
+        let (model, ids): (String, Vec<Uuid>) =
+            (model.to_owned(), ids.iter().map(|i| *i.as_uuid()).collect());
+        self.db
+            .read(move |conn| vectors::of(conn, &model, &ids))
+            .await
+    }
+
+    async fn scope_vectors(
+        &self,
+        scope: Scope,
+        model: &str,
+    ) -> Result<Vec<LabelledVector>, DomainError> {
+        let model = model.to_owned();
+        self.db
+            .read(move |conn| vectors::scope(conn, scope, &model))
+            .await
+    }
+
+    async fn unembedded(
+        &self,
+        model: &str,
+        before: Option<MessageId>,
+        limit: u32,
+    ) -> Result<Vec<TagSource>, DomainError> {
+        let model = model.to_owned();
+        let before = before.map_or_else(Uuid::max, |m| *m.as_uuid());
+        self.db
+            .read(move |conn| sources::unembedded(conn, &model, before, limit))
             .await
     }
 }

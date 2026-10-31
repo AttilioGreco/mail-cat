@@ -155,6 +155,8 @@ async fn main() {
             commands::tagging::undo_auto_label,
             commands::tagging::preview_apply,
             commands::tagging::confirm_apply,
+            commands::tagging::get_embeddings,
+            commands::tagging::set_embeddings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

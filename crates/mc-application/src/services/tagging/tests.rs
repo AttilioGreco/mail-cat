@@ -291,9 +291,187 @@ fn eval_reports_precision_and_recall_on_held_out_mail() {
         test.into_iter().map(|x| x.1).collect(),
         train.into_iter().map(|x| x.1).collect(),
     );
-    let report = eval::evaluate(&train, &test, &["newsletter".to_string()]);
+    let report = eval::evaluate(
+        &train,
+        &test,
+        &["newsletter".to_string()],
+        &Default::default(),
+    );
     let at_90 = report[0].rows.iter().find(|r| r.threshold == 0.9).unwrap();
     assert!(report[0].held_out > 0);
     assert_eq!(at_90.precision, 1.0);
     assert_eq!(at_90.recall, 1.0);
+}
+
+mod neighbours {
+    use std::sync::Arc;
+
+    use mc_domain::{LabelledVector, MessageId, ModelStats};
+
+    use super::super::knn::Pool;
+    use super::super::vectors::embedding_text;
+    use super::{bayes, features, source, trained};
+
+    fn unit(v: &[f32]) -> Vec<f32> {
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        v.iter().map(|x| x / n).collect()
+    }
+
+    fn item(vector: &[f32], positives: &[&str], negatives: &[&str]) -> LabelledVector {
+        LabelledVector {
+            message_id: MessageId::new(),
+            vector: unit(vector),
+            positives: positives.iter().map(|l| l.to_string()).collect(),
+            negatives: negatives.iter().map(|l| l.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_share_is_the_labelled_part_of_the_closest() {
+        let pool = Arc::new(Pool::new([
+            item(&[1.0, 0.0], &["newsletter"], &[]),
+            item(&[1.0, 0.1], &["newsletter"], &[]),
+            item(&[1.0, 0.2], &["lavoro"], &[]),
+            item(&[0.0, 1.0], &["lavoro"], &[]),
+        ]));
+        let near = pool.nearest(&unit(&[1.0, 0.05]), MessageId::new());
+        let share = near.share("newsletter").unwrap();
+        assert!(share > 0.6 && share < 0.8, "{share}");
+        assert!(near.share("lavoro").unwrap() < share);
+        assert_eq!(near.share("nothing").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_message_is_not_its_own_neighbour() {
+        let mine = item(&[1.0, 0.0], &["newsletter"], &[]);
+        let me = mine.message_id;
+        let pool = Arc::new(Pool::new([mine, item(&[1.0, 0.0], &["lavoro"], &[])]));
+        let near = pool.nearest(&unit(&[1.0, 0.0]), me);
+        assert_eq!(near.share("newsletter"), Some(0.0));
+        assert_eq!(near.share("lavoro"), Some(1.0));
+    }
+
+    #[test]
+    fn rejected_and_unlabelled_neighbours_count_against_the_label() {
+        let v = [1.0, 0.0];
+        let pool = Arc::new(Pool::new([
+            item(&v, &["newsletter"], &[]),
+            item(&v, &[], &["newsletter"]),
+        ]));
+        let share = pool
+            .nearest(&unit(&v), MessageId::new())
+            .share("newsletter");
+        assert_eq!(share, Some(0.5), "a rejection weighs as much as an example");
+
+        let pool = Arc::new(Pool::new([
+            item(&v, &["newsletter"], &[]),
+            item(&v, &[], &[]),
+        ]));
+        let share = pool
+            .nearest(&unit(&v), MessageId::new())
+            .share("newsletter")
+            .unwrap();
+        assert!(
+            share > 0.7 && share < 0.8,
+            "unlabelled mail counts, but less: {share}"
+        );
+    }
+
+    #[test]
+    fn nothing_close_says_nothing() {
+        let pool = Arc::new(Pool::new([item(&[1.0, 0.0], &["newsletter"], &[])]));
+        assert_eq!(
+            pool.nearest(&unit(&[0.0, 1.0]), MessageId::new())
+                .share("newsletter"),
+            None
+        );
+        // Nor does a vector from another model (other size).
+        assert_eq!(
+            pool.nearest(&[1.0], MessageId::new()).share("newsletter"),
+            None
+        );
+    }
+
+    #[test]
+    fn combine_is_bayes_alone_without_a_vector_and_needs_both_to_agree_with_one() {
+        let alone = bayes::Signals {
+            bayes: 0.95,
+            knn: None,
+        };
+        assert_eq!(bayes::combine(&alone), 0.95);
+        let agree = bayes::combine(&bayes::Signals {
+            bayes: 0.95,
+            knn: Some(1.0),
+        });
+        let disagree = bayes::combine(&bayes::Signals {
+            bayes: 0.95,
+            knn: Some(0.0),
+        });
+        assert!(agree > 0.95 && agree <= 1.0);
+        assert!(
+            disagree < 0.6,
+            "words alone cannot auto-apply what neighbours deny: {disagree}"
+        );
+    }
+
+    #[test]
+    fn scores_without_a_vector_are_the_words_alone() {
+        let stats: ModelStats = trained();
+        let s = source("news@shop.example", "offerte speciali", &[]);
+        let tokens = features::tokens(&s, true);
+        let words = bayes::bayes_score(&stats, "newsletter", &tokens).unwrap();
+        let scored = bayes::scores(&stats, ["newsletter"], &tokens, None);
+        assert_eq!(scored[0].score, words);
+
+        let pool = Arc::new(Pool::new([item(&[1.0, 0.0], &["lavoro"], &[])]));
+        let near = pool.nearest(&unit(&[1.0, 0.0]), s.id);
+        let with = bayes::scores(&stats, ["newsletter"], &tokens, Some(&near));
+        assert!(
+            with[0].score < words,
+            "neighbours that say otherwise pull it down"
+        );
+    }
+
+    #[test]
+    fn what_is_embedded_is_the_subject_and_the_start_of_the_body() {
+        let mut s = source("a@x.example", "  Ordine   spedito ", &[]);
+        assert_eq!(embedding_text(&s).unwrap(), "Ordine spedito");
+        s.body = Some(format!("ciao\n\n  mondo {}", "x".repeat(5000)));
+        let text = embedding_text(&s).unwrap();
+        assert!(text.starts_with("Ordine spedito ciao mondo xxx"));
+        assert!(text.chars().count() < 1300);
+        s.subject.clear();
+        s.body = None;
+        assert_eq!(embedding_text(&s), None);
+    }
+
+    /// `cargo test --release -p mc-application scan_time -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing"]
+    fn scan_time_at_20k_vectors() {
+        let mut seed = 1u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        let mut random = || (0..384).map(|_| next()).collect::<Vec<f32>>();
+        let start = std::time::Instant::now();
+        let pool = Arc::new(Pool::new((0..20_000).map(|i| {
+            item(
+                &random(),
+                if i % 4 == 0 { &["newsletter"] } else { &[] },
+                &[],
+            )
+        })));
+        println!("build: {:?}", start.elapsed());
+        let query = unit(&random());
+        let me = MessageId::new();
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            std::hint::black_box(pool.nearest(&query, me).share("newsletter"));
+        }
+        println!("per query at 20k x 384: {:?}", start.elapsed() / 50);
+    }
 }
