@@ -6,7 +6,7 @@ use crate::model::account::{AccountId, ConnectionConfig, MailboxModel, ProviderT
 use crate::model::attachment::Attachment;
 use crate::model::contact::{ContactEmail, ContactSource};
 use crate::model::mailbox::{MailboxId, MailboxType};
-use crate::model::message::{Envelope, Membership};
+use crate::model::message::{Envelope, ListHeaders, Membership};
 use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::flag::Flag;
@@ -221,6 +221,9 @@ pub enum DomainEvent {
         /// one: later copies of it join this message instead of making rows.
         #[serde(default)]
         provider_key: Option<MessageKey>,
+        /// Mailing-list headers; classifier input, not shown.
+        #[serde(default)]
+        list_headers: ListHeaders,
     },
 
     /// A message body was fetched and stored (`MessageBodyStore`). The body

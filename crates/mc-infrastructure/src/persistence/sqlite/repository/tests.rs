@@ -48,6 +48,7 @@ fn received(account_id: AccountId, mailbox_id: MailboxId, rfc: &str) -> (Message
         received_at: Utc::now(),
         restored: false,
         provider_key: None,
+        list_headers: Default::default(),
     };
     (message_id, event)
 }

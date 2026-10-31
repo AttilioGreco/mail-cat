@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, RefreshCw, AlertCircle, MailCheck } from 'lucide-react';
+import { ChevronDown, ChevronRight, RefreshCw, AlertCircle, MailCheck, Sparkles } from 'lucide-react';
 import { ContextMenu } from '@/shared/ui/ContextMenu';
 import { useMailboxes, subscribedOnly, FolderItem, type Mailbox, type MailboxKind } from '@/entities/mailbox';
+import { LabelSettingsDialog } from '@/features/auto-label';
 import { useMarkMailboxRead } from '@/features/message-actions';
 import { LabelTree } from './LabelTree';
 
@@ -35,6 +36,7 @@ export function FolderTree({
   const mailboxes = useMemo(() => subscribedOnly(all), [all]);
   const markMailboxRead = useMarkMailboxRead();
   const [menu, setMenu] = useState<{ mailbox: Mailbox; x: number; y: number } | null>(null);
+  const [autoLabel, setAutoLabel] = useState<Mailbox | null>(null);
   const [more, setMore] = useState(() => ({ accountId, open: loadMoreOpen(accountId) }));
   const moreOpen = more.accountId === accountId ? more.open : loadMoreOpen(accountId);
   const toggleMore = () => {
@@ -133,7 +135,28 @@ export function FolderTree({
             <MailCheck size={14} className="shrink-0" />
             Segna tutti come letti
           </button>
+          {labels && menu.mailbox.kind === 'custom' && (
+            <button
+              type="button"
+              onClick={() => {
+                setAutoLabel(menu.mailbox);
+                setMenu(null);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-hover"
+            >
+              <Sparkles size={14} className="shrink-0" />
+              Etichetta automatica…
+            </button>
+          )}
         </ContextMenu>
+      )}
+      {autoLabel && (
+        <LabelSettingsDialog
+          open
+          accountId={accountId}
+          label={autoLabel.displayPath}
+          onClose={() => setAutoLabel(null)}
+        />
       )}
     </nav>
   );

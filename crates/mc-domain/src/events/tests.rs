@@ -102,6 +102,7 @@ fn message_received_event_serialization() {
         received_at: Utc::now(),
         restored: false,
         provider_key: None,
+        list_headers: Default::default(),
     };
 
     let json = serde_json::to_string_pretty(&event).unwrap();

@@ -29,6 +29,7 @@ macro_rules! messages_conformance {
                     received_at,
                     restored: false,
                     provider_key: None,
+                    list_headers: Default::default(),
                 },
             );
             repo.project(&env).await.unwrap();
@@ -180,6 +181,7 @@ macro_rules! messages_conformance {
                         received_at: now,
                         restored: false,
                         provider_key: None,
+                        list_headers: Default::default(),
                     },
                 )
             };
@@ -317,6 +319,7 @@ macro_rules! messages_conformance {
                     received_at,
                     restored: false,
                     provider_key: None,
+                    list_headers: Default::default(),
                 },
             );
             repo.project(&env).await.unwrap();
@@ -452,6 +455,7 @@ macro_rules! messages_conformance {
                     received_at: chrono::Utc::now(),
                     restored: false,
                     provider_key: None,
+                    list_headers: Default::default(),
                 },
             );
             repo.project(&env).await.unwrap();

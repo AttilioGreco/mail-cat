@@ -194,6 +194,7 @@ fn move_message() {
             received_at: Utc::now(),
             restored: false,
             provider_key: None,
+            list_headers: Default::default(),
         },
         event,
         attached,
@@ -326,6 +327,7 @@ fn rehydrate_message_from_events() {
             received_at,
             restored: false,
             provider_key: None,
+            list_headers: Default::default(),
         },
         DomainEvent::MessageBodyFetched {
             message_id: msg_id,
@@ -420,4 +422,54 @@ fn a_sent_placeholder_rehydrates_and_can_adopt_its_remote_id() {
         again.membership(sent).unwrap().remote_id,
         Some(RemoteId::from(9))
     );
+}
+
+#[test]
+fn list_headers_recognise_bulk_mail_and_ignore_the_rest() {
+    let mut headers = ListHeaders::default();
+    for (name, value) in [
+        ("List-Unsubscribe", "<mailto:u@x.example>"),
+        ("list-id", "Shop news <news.shop.example>"),
+        ("Precedence", " Bulk "),
+        ("Auto-Submitted", "auto-generated"),
+        ("Subject", "ignored"),
+    ] {
+        headers.note(name, value);
+    }
+    assert_eq!(
+        headers,
+        ListHeaders {
+            unsubscribe: true,
+            list_id: Some("Shop news <news.shop.example>".into()),
+            bulk: true,
+            auto_submitted: true,
+        }
+    );
+
+    let mut person = ListHeaders::default();
+    person.note("Precedence", "first-class");
+    person.note("Auto-Submitted", "no");
+    assert!(person.is_empty());
+}
+
+#[test]
+fn plain_body_falls_back_to_stripped_html() {
+    let (mut message, _) = Message::receive(
+        AccountId::new(),
+        MailboxId::new(),
+        RemoteId::from(1),
+        None,
+        None,
+        vec![],
+        test_envelope(),
+        vec![],
+        0,
+        false,
+        chrono::Utc::now(),
+    );
+    assert!(message.plain_body().is_none());
+    message.body_html = Some("<p>ciao <b>mondo</b></p>".into());
+    assert_eq!(message.plain_body().unwrap(), "ciao mondo");
+    message.body_text = Some("testo".into());
+    assert_eq!(message.plain_body().unwrap(), "testo");
 }

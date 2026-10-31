@@ -15,7 +15,7 @@ pub use model::attachment::{Attachment, AttachmentId};
 pub use model::identity::Identity;
 pub use model::mailbox::{Mailbox, MailboxId, MailboxType};
 pub use model::message::{
-    Address, Envelope, Membership, Message, OutgoingAttachment, OutgoingMessage,
+    Address, Envelope, ListHeaders, Membership, Message, OutgoingAttachment, OutgoingMessage,
 };
 pub use value_objects::email_address::EmailAddress;
 pub use value_objects::flag::Flag;
@@ -28,6 +28,10 @@ pub use value_objects::sync_cursor::SyncCursor;
 // Trait re-exports
 pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource};
 pub use model::conversation::Conversation;
+pub use model::tagging::{
+    AutoApplied, Confidence, Example, GroupId, LabelMode, LabelSettings, LabelStats, Lesson,
+    ModelStats, Scope, Score, SourceFilter, TagSource, TrainingGroup,
+};
 pub use traits::account_event_source::AccountEventSource;
 pub use traits::contact_index::ContactSearchHit;
 pub use traits::email_provider::{
@@ -48,5 +52,6 @@ pub use traits::search_index::{
     IndexHit, IndexResults, SearchHit, SearchIndex, SearchResults, SuggestScope, Suggestion,
 };
 pub use traits::secret_store::{AccountSecrets, OAuthSecrets, SecretStore};
+pub use traits::tagging_store::TaggingStore;
 pub use value_objects::contact_id::ContactId;
 pub use value_objects::thread_id::ThreadId;

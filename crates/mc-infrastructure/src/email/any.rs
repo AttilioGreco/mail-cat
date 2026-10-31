@@ -120,6 +120,10 @@ impl EmailProvider for AnyProvider {
         delegate!(self, p => p.change_labels(ids, in_mailbox, add, remove).await)
     }
 
+    async fn create_label(&self, name: &str) -> Result<Mailbox, DomainError> {
+        delegate!(self, p => p.create_label(name).await)
+    }
+
     async fn set_subscribed(
         &self,
         mailbox: &MailboxPath,

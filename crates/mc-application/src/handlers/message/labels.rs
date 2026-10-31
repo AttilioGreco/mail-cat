@@ -31,6 +31,54 @@ impl<
         self.apply_labels(plans, true).await
     }
 
+    /// The account's label of that name (case-insensitive), created on the
+    /// server and here first when it has none. Idempotent.
+    pub async fn handle_create_label(
+        &self,
+        account_id: AccountId,
+        name: &str,
+    ) -> Result<CommandResult, ApplicationError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ApplicationError::PreconditionFailed(
+                "label name is empty".into(),
+            ));
+        }
+        let _turn = self.turn(account_id).await;
+        let wanted = name.to_lowercase();
+        let known = self.message_read_repo.list_mailboxes(&account_id).await?;
+        if let Some(have) = known.iter().find(|m| {
+            m.mailbox_type == MailboxType::Custom && m.display_path.to_lowercase() == wanted
+        }) {
+            return Ok(CommandResult::LabelCreated {
+                mailbox_id: have.id,
+            });
+        }
+        let remote = self
+            .provider_registry
+            .get_provider(&account_id)?
+            .create_label(name)
+            .await?;
+        // A sync may have discovered it between the server's answer and now.
+        let known = self.message_read_repo.list_mailboxes(&account_id).await?;
+        if let Some(have) = known.iter().find(|m| m.path == remote.path) {
+            return Ok(CommandResult::LabelCreated {
+                mailbox_id: have.id,
+            });
+        }
+        let (mailbox, event) = Mailbox::discover_as(
+            account_id,
+            remote.path,
+            remote.display_path,
+            MailboxType::Custom,
+        );
+        self.append_and_publish(&mailbox.id, AggregateType::Mailbox, 0, event)
+            .await?;
+        Ok(CommandResult::LabelCreated {
+            mailbox_id: mailbox.id,
+        })
+    }
+
     /// Take the messages out of the Inbox. Folders accounts file them in
     /// Archive (else All Mail), as a move. Labels accounts only drop the Inbox
     /// label, which keeps their other labels; a message whose Inbox was its

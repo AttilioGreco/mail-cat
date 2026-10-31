@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod contacts;
 pub mod conversations;
+pub mod labels;
 pub mod mailboxes;
 pub mod messages;
 pub mod sync;

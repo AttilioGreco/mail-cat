@@ -66,11 +66,13 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                 message_id,
                 restored: quiet,
                 provider_key,
+                list_headers,
                 ..
             } = &mut event
             {
                 *quiet = restored;
                 *provider_key = env.key.clone();
+                list_headers.clone_from(&env.list_headers);
                 let message_id = *message_id;
                 new_messages.push((message_id, env.remote_id.clone()));
                 self.append_and_project(&message_id.to_string(), AggregateType::Message, event)

@@ -198,6 +198,7 @@ async fn new_message_reaches_watch_stream() {
         received_at: chrono::Utc::now(),
         restored: false,
         provider_key: None,
+        list_headers: Default::default(),
     }));
 
     let event = timeout(Duration::from_secs(1), stream.next())
@@ -254,6 +255,7 @@ async fn events_from_other_account_are_filtered() {
         received_at: chrono::Utc::now(),
         restored: false,
         provider_key: None,
+        list_headers: Default::default(),
     }));
     // Correct account → arrives
     bus.publish(envelope(DomainEvent::MessageReceived {
@@ -279,6 +281,7 @@ async fn events_from_other_account_are_filtered() {
         received_at: chrono::Utc::now(),
         restored: false,
         provider_key: None,
+        list_headers: Default::default(),
     }));
 
     let event = timeout(Duration::from_secs(1), stream.next())

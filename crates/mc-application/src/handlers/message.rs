@@ -578,7 +578,7 @@ impl<
 
     async fn append_and_publish(
         &self,
-        message_id: &MessageId,
+        aggregate_id: &impl std::fmt::Display,
         aggregate_type: AggregateType,
         expected_sequence: u64,
         event: DomainEvent,
@@ -586,14 +586,14 @@ impl<
         let new_seq = self
             .event_store
             .append(
-                &message_id.to_string(),
+                &aggregate_id.to_string(),
                 aggregate_type,
                 expected_sequence,
                 vec![event.clone()],
             )
             .await?;
 
-        let envelope = EventEnvelope::new(message_id.to_string(), aggregate_type, new_seq, event);
+        let envelope = EventEnvelope::new(aggregate_id.to_string(), aggregate_type, new_seq, event);
 
         // Project inline so the read model is updated BEFORE we return.
         // This ensures that any re-query after the command sees fresh data.

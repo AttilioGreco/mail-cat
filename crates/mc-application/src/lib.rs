@@ -22,5 +22,5 @@ pub use queries::{Query, QueryResult};
 pub use services::{
     AccountLifecycle, AccountProvisioner, AuthGate, AuthGates, AuthState, AuthStatus, Backoff,
     Credential, OAuthLoginProgress, OAuthLoginTrigger, ProvisionParams, RefreshFn, SyncConfig,
-    SyncProgressEvent, SyncService, SyncState, SyncTrigger,
+    SyncProgressEvent, SyncService, SyncState, SyncTrigger, TaggingService,
 };

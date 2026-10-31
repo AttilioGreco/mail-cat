@@ -125,6 +125,7 @@ impl Mail {
             received_at: at,
             restored: false,
             provider_key: None,
+            list_headers: Default::default(),
         })
         .await;
         message_id

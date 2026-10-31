@@ -103,6 +103,10 @@ pub enum Command {
         remove: Vec<MailboxId>,
     },
 
+    /// Make sure the account has a label of that name, creating it on the
+    /// server when it has none.
+    CreateLabel { account_id: AccountId, name: String },
+
     /// Take messages out of the Inbox; what that means depends on the
     /// account's mailbox model (see `handle_archive`).
     ArchiveMessages { message_ids: Vec<MessageId> },
@@ -211,6 +215,9 @@ pub enum CommandResult {
     },
     MessageMoved,
     MessageDeleted,
+    LabelCreated {
+        mailbox_id: MailboxId,
+    },
     /// Bulk result: `succeeded` messages changed locally, `failed` were skipped
     /// (already gone, no provider UID, stale search index). Partial success is
     /// normal here and must be reported, not swallowed.

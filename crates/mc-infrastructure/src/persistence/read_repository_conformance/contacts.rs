@@ -50,6 +50,7 @@ macro_rules! contacts_conformance {
                 received_at: at(5),
                 restored: false,
                 provider_key: None,
+                list_headers: Default::default(),
             };
             // Sent from another client, then synced from the Sent folder.
             let rare = synced(sent, "me@example.com", "ann.rare@example.com");

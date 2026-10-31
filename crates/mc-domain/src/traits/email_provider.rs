@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::DomainError;
 use crate::model::account::MailboxModel;
 use crate::model::mailbox::Mailbox;
-use crate::model::message::{Envelope, Message, OutgoingMessage};
+use crate::model::message::{Envelope, ListHeaders, Message, OutgoingMessage};
 use crate::value_objects::flag::Flag;
 use crate::value_objects::mailbox_path::MailboxPath;
 use crate::value_objects::message_key::MessageKey;
@@ -128,6 +128,14 @@ pub trait EmailProvider: Send + Sync {
     ) -> Result<(), DomainError> {
         Err(DomainError::NotSupported(
             "this account's mailboxes are folders, not labels".into(),
+        ))
+    }
+
+    /// Create a mailbox a message can be labelled with, subscribed, and report
+    /// it as [`Self::list_mailboxes`] would.
+    async fn create_label(&self, _name: &str) -> Result<Mailbox, DomainError> {
+        Err(DomainError::NotSupported(
+            "this account cannot create labels".into(),
         ))
     }
 
@@ -292,6 +300,8 @@ pub struct MessageEnvelopeSummary {
     pub has_attachments: bool,
     pub internal_date: DateTime<Utc>,
     pub key: Option<MessageKey>,
+    #[serde(default)]
+    pub list_headers: ListHeaders,
 }
 
 /// Result of a bulk body fetch for a single message.

@@ -299,6 +299,7 @@ macro_rules! mailboxes_conformance {
                     received_at: chrono::Utc::now(),
                     restored: false,
                     provider_key: None,
+                    list_headers: Default::default(),
                 },
                 DomainEvent::MailboxCountsUpdated {
                     mailbox_id,

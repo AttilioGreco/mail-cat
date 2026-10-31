@@ -427,6 +427,7 @@ mod tests {
                     received_at: chrono::Utc::now(),
                     restored: false,
                     provider_key: None,
+                    list_headers: Default::default(),
                 },
             )],
         };

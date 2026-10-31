@@ -39,6 +39,7 @@ impl MockEventStore {
             received_at: message.received_at,
             restored: false,
             provider_key: None,
+            list_headers: Default::default(),
         };
         let env = EventEnvelope::new(message.id.to_string(), AggregateType::Message, 1, event);
         self.events

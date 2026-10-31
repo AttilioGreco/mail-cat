@@ -87,7 +87,7 @@ pub(super) fn json<T: Serialize + ?Sized>(value: &T) -> Result<String, DomainErr
     serde_json::to_string(value).map_err(DomainError::from)
 }
 
-fn conversion_err(
+pub(super) fn conversion_err(
     idx: usize,
     ty: Type,
     e: impl Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -95,7 +95,7 @@ fn conversion_err(
     rusqlite::Error::FromSqlConversionFailure(idx, ty, e.into())
 }
 
-fn json_col<T: DeserializeOwned>(row: &Row, idx: usize) -> rusqlite::Result<T> {
+pub(super) fn json_col<T: DeserializeOwned>(row: &Row, idx: usize) -> rusqlite::Result<T> {
     let text: String = row.get(idx)?;
     serde_json::from_str(&text).map_err(|e| conversion_err(idx, Type::Text, e))
 }
@@ -114,7 +114,7 @@ fn compress(body: Option<&str>) -> Result<Option<Vec<u8>>, DomainError> {
         .transpose()
 }
 
-fn body_col(row: &Row, idx: usize) -> rusqlite::Result<Option<String>> {
+pub(super) fn body_col(row: &Row, idx: usize) -> rusqlite::Result<Option<String>> {
     let Some(blob) = row.get::<_, Option<Vec<u8>>>(idx)? else {
         return Ok(None);
     };

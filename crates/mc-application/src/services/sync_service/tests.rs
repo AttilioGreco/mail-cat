@@ -51,6 +51,7 @@ fn make_envelope_summary(uid: u32) -> MessageEnvelopeSummary {
         has_attachments: false,
         internal_date: chrono::Utc::now(),
         key: None,
+        list_headers: Default::default(),
     }
 }
 

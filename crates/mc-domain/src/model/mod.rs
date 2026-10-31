@@ -5,3 +5,4 @@ pub mod conversation;
 pub mod identity;
 pub mod mailbox;
 pub mod message;
+pub mod tagging;

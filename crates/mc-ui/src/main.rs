@@ -142,6 +142,19 @@ async fn main() {
             commands::list_conversations,
             commands::get_thread,
             commands::take_pending_deep_link,
+            commands::tagging::list_training_groups,
+            commands::tagging::create_training_group,
+            commands::tagging::rename_training_group,
+            commands::tagging::delete_training_group,
+            commands::tagging::assign_account_group,
+            commands::tagging::get_label_settings,
+            commands::tagging::set_label_settings,
+            commands::tagging::get_message_tags,
+            commands::tagging::accept_suggestion,
+            commands::tagging::reject_suggestion,
+            commands::tagging::undo_auto_label,
+            commands::tagging::preview_apply,
+            commands::tagging::confirm_apply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

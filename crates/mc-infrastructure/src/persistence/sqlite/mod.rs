@@ -10,6 +10,7 @@ pub mod event_store;
 mod projector;
 mod purge;
 pub mod repository;
+pub mod tagging;
 mod threading;
 
 /// Schema migrations, applied in order; `PRAGMA user_version` counts how many
@@ -183,6 +184,50 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // 7: a body the backfill cut at its size cap; opening the message fetches
     // the rest. Bodies stored before are whole.
     "ALTER TABLE message_bodies ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0;",
+    // 8: label suggestion. Mailing-list headers of messages synced from now
+    // on (older rows have none until the data folder is wiped and resynced),
+    // training groups (the default one has a fixed id; an account with no
+    // row is in it, a NULL group means in none), per-label settings, and a
+    // one-vs-rest naive Bayes: `tag_corpus` counts every trained message,
+    // `tag_label_tokens` those under a label (`positive`) or rejected for it
+    // (`negative`), so a label's negatives are the corpus minus its positives.
+    // `tag_examples` remembers what each message taught, to withdraw it.
+    "ALTER TABLE messages ADD COLUMN list_headers TEXT;
+    CREATE TABLE tag_groups (id BLOB PRIMARY KEY, name TEXT NOT NULL);
+    INSERT INTO tag_groups VALUES (x'00000000000000000000000000000001', 'Tutti');
+    CREATE TABLE tag_members (account_id BLOB PRIMARY KEY, group_id BLOB) WITHOUT ROWID;
+    CREATE TABLE tag_settings (
+        scope TEXT NOT NULL, label TEXT NOT NULL, mode TEXT NOT NULL, threshold REAL NOT NULL,
+        PRIMARY KEY (scope, label)
+    ) WITHOUT ROWID;
+    CREATE TABLE tag_scopes (
+        scope TEXT PRIMARY KEY, documents REAL NOT NULL DEFAULT 0, trained INTEGER NOT NULL DEFAULT 0
+    ) WITHOUT ROWID;
+    CREATE TABLE tag_corpus (
+        scope TEXT NOT NULL, token TEXT NOT NULL, weight REAL NOT NULL,
+        PRIMARY KEY (scope, token)
+    ) WITHOUT ROWID;
+    CREATE TABLE tag_labels (
+        scope TEXT NOT NULL, label TEXT NOT NULL,
+        positive_docs REAL NOT NULL DEFAULT 0, negative_docs REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (scope, label)
+    ) WITHOUT ROWID;
+    CREATE TABLE tag_label_tokens (
+        scope TEXT NOT NULL, label TEXT NOT NULL, token TEXT NOT NULL,
+        positive REAL NOT NULL DEFAULT 0, negative REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (scope, label, token)
+    ) WITHOUT ROWID;
+    CREATE TABLE tag_examples (
+        message_id BLOB PRIMARY KEY, account_id BLOB NOT NULL, scope TEXT NOT NULL,
+        positives TEXT NOT NULL, negatives TEXT NOT NULL, with_body INTEGER NOT NULL,
+        weight REAL NOT NULL
+    );
+    CREATE INDEX tag_examples_account ON tag_examples(account_id);
+    CREATE TABLE tag_auto (
+        message_id BLOB NOT NULL, label TEXT NOT NULL, score REAL NOT NULL,
+        archived INTEGER NOT NULL, at INTEGER NOT NULL,
+        PRIMARY KEY (message_id, label)
+    ) WITHOUT ROWID;",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

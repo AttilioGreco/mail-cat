@@ -17,6 +17,8 @@ mod notifications;
 mod oauth_login;
 mod oauth_reauth;
 mod secret_ingest;
+#[cfg(test)]
+mod tagging_tests;
 mod wiring;
 
 use config::ServerConfig;
@@ -25,7 +27,7 @@ use wiring::AppContext;
 use mc_interfaces::grpc::proto::{
     account_service_server::AccountServiceServer, contact_service_server::ContactServiceServer,
     mailbox_service_server::MailboxServiceServer, message_service_server::MessageServiceServer,
-    search_service_server::SearchServiceServer,
+    search_service_server::SearchServiceServer, tagging_service_server::TaggingServiceServer,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -155,6 +157,7 @@ async fn run() -> anyhow::Result<()> {
                 .max_encoding_message_size(MAX_MESSAGE_BYTES),
         )
         .add_service(SearchServiceServer::new(app_ctx.search_service))
+        .add_service(TaggingServiceServer::new(app_ctx.tagging_service))
         .serve_with_shutdown(addr, async move {
             shutdown_signal().await;
             stopping.cancel();

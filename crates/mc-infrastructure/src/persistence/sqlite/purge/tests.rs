@@ -103,6 +103,7 @@ impl Fixture {
                 received_at: Utc::now(),
                 restored: false,
                 provider_key: None,
+                list_headers: Default::default(),
             },
         )
         .await;

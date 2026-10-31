@@ -336,7 +336,7 @@ fn body_to_dto(b: MessageBody) -> MessageBodyDto {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-async fn get_or_connect(state: &State<'_, AppState>) -> Result<MailCatClient, String> {
+pub(crate) async fn get_or_connect(state: &State<'_, AppState>) -> Result<MailCatClient, String> {
     let mut guard = state.client.lock().await;
     if guard.is_none() {
         let client = MailCatClient::connect(&state.server_url)
@@ -1595,6 +1595,8 @@ pub async fn get_thread(
         .map(|v| v.into_iter().map(thread_message_to_dto).collect())
         .map_err(|e| e.to_string())
 }
+
+pub mod tagging;
 
 #[cfg(test)]
 mod tests;

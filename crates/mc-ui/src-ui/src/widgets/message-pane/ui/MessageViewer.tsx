@@ -15,6 +15,7 @@ import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useComposeStore, type ComposeMode } from '@/features/compose-message';
 import { useShortcuts } from '@/features/keyboard-shortcuts';
 import { MessageLabels } from '@/features/manage-labels';
+import { MessageTags } from '@/features/auto-label';
 import { EmailContent } from './EmailContent';
 
 interface MessageViewerProps {
@@ -227,6 +228,7 @@ export function MessageViewer({ envelope, mailboxId }: MessageViewerProps) {
             viewedId={selectedMailboxId}
           />
         )}
+        <MessageTags messageId={envelope.uid} />
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-5">

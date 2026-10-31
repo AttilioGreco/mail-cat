@@ -28,6 +28,7 @@ use mc_infrastructure::{
 use crate::config::{AccountConfig, ServerConfig, SmtpSecurityConfig};
 use crate::wiring::{
     CommandBusImpl, ProviderRegistryImpl, QueryBusImpl, SearchHandlerImpl, SyncServiceImpl,
+    TaggingServiceInner,
 };
 
 mod supervisor;
@@ -48,6 +49,7 @@ pub struct RuntimeDeps {
     pub query_bus: Arc<QueryBusImpl>,
     pub sync: Arc<SyncServiceImpl>,
     pub search: Arc<SearchHandlerImpl>,
+    pub tagging: Arc<TaggingServiceInner>,
     /// Push watchers off: tests need syncs to happen only when they ask.
     pub idle_enabled: bool,
     pub shutdown: CancellationToken,
@@ -328,6 +330,10 @@ impl AccountRuntime {
             .remove_account(&account_id)
             .await
             .context("removing search documents")?;
+        // The purge emptied the account's group of what it had taught.
+        if let Err(e) = deps.tagging.retrain_pending().await {
+            tracing::warn!("Could not retrain labels after removing {account_id}: {e:#}");
+        }
         tracing::info!("Removed account {account_id} and all of its data");
         Ok(())
     }

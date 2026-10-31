@@ -1,0 +1,138 @@
+syntax = "proto3";
+
+package mail_cat.v1;
+
+// Label suggestion and auto-apply. Labels are named by their lowercased
+// display path; a training group learns them together across its accounts.
+service TaggingService {
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+  rpc CreateGroup(CreateGroupRequest) returns (TrainingGroup);
+  rpc RenameGroup(RenameGroupRequest) returns (RenameGroupResponse);
+  rpc DeleteGroup(DeleteGroupRequest) returns (DeleteGroupResponse);
+  // Move an account to a group, or to none (group_id unset).
+  rpc AssignAccount(AssignAccountRequest) returns (AssignAccountResponse);
+
+  rpc GetLabelSettings(LabelRef) returns (LabelStatus);
+  rpc SetLabelSettings(SetLabelSettingsRequest) returns (LabelStatus);
+
+  // What the classifier suggests for a message and what it applied itself.
+  rpc GetMessageTags(MessageTagsRequest) returns (MessageTagsResponse);
+  rpc AcceptSuggestion(SuggestionRef) returns (TaggingAck);
+  rpc RejectSuggestion(SuggestionRef) returns (TaggingAck);
+  rpc UndoAutoLabel(SuggestionRef) returns (TaggingAck);
+
+  rpc PreviewApply(ApplyRequest) returns (ApplyPreview);
+  // Saves the mode and labels existing mail in the background.
+  rpc ConfirmApply(ApplyRequest) returns (ApplyPreview);
+
+  rpc EvalLabels(EvalRequest) returns (EvalResponse);
+}
+
+message TrainingGroup {
+  string id = 1;
+  string name = 2;
+  repeated string account_ids = 3;
+  bool is_default = 4;
+}
+
+message ListGroupsRequest {}
+message ListGroupsResponse { repeated TrainingGroup groups = 1; }
+message CreateGroupRequest { string name = 1; }
+message RenameGroupRequest { string id = 1; string name = 2; }
+message RenameGroupResponse {}
+message DeleteGroupRequest { string id = 1; }
+message DeleteGroupResponse {}
+message AssignAccountRequest {
+  string account_id = 1;
+  optional string group_id = 2;
+}
+message AssignAccountResponse {}
+
+message LabelRef {
+  string account_id = 1;
+  string label = 2;  // any case
+}
+
+// mode: "off" | "suggest" | "apply" | "apply_archive"
+message LabelStatus {
+  string label = 1;
+  string mode = 2;
+  double threshold = 3;
+  uint32 positives = 4;
+  uint32 min_positives = 5;
+}
+
+message SetLabelSettingsRequest {
+  string account_id = 1;
+  string label = 2;
+  string mode = 3;
+  double threshold = 4;
+}
+
+message MessageTagsRequest { string message_id = 1; }
+
+// confidence: "high" | "medium"
+message TagSuggestion {
+  string label = 1;
+  string mailbox_id = 2;  // empty: a keyword, or no such mailbox yet
+  string name = 3;
+  string confidence = 4;
+}
+
+message AutoLabel {
+  string label = 1;
+  string mailbox_id = 2;
+  string name = 3;
+  bool archived = 4;
+  int64 at = 5;  // Unix seconds
+}
+
+message MessageTagsResponse {
+  repeated TagSuggestion suggestions = 1;
+  repeated AutoLabel auto = 2;
+}
+
+message SuggestionRef {
+  string message_id = 1;
+  string label = 2;
+}
+
+message TaggingAck {}
+
+message ApplyRequest {
+  string account_id = 1;
+  string label = 2;
+  string mode = 3;       // "apply" | "apply_archive"
+  double threshold = 4;
+}
+
+message ApplyPreviewItem {
+  string message_id = 1;
+  string subject = 2;
+  string from = 3;
+}
+
+message ApplyPreview {
+  uint32 to_label = 1;
+  uint32 to_archive = 2;
+  reserved 3;
+  repeated ApplyPreviewItem sample = 4;
+}
+
+message EvalRequest { string account_id = 1; }
+
+message EvalRow {
+  double threshold = 1;
+  uint32 flagged = 2;
+  uint32 correct = 3;
+  double precision = 4;
+  double recall = 5;
+}
+
+message LabelEval {
+  string label = 1;
+  uint32 held_out = 2;
+  repeated EvalRow rows = 3;
+}
+
+message EvalResponse { repeated LabelEval labels = 1; }

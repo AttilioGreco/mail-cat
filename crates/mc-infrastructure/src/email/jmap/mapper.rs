@@ -7,12 +7,12 @@ use serde_json::Value;
 
 use mc_domain::error::DomainError;
 use mc_domain::{
-    Address, EmailAddress, Envelope, Flag, MailboxType, MessageBodyResult, MessageEnvelopeSummary,
-    MessageKey, RemoteId,
+    Address, EmailAddress, Envelope, Flag, ListHeaders, MailboxType, MessageBodyResult,
+    MessageEnvelopeSummary, MessageKey, RemoteId,
 };
 
 /// Email properties a list view needs; no body values.
-pub(super) const ENVELOPE_PROPERTIES: [&str; 15] = [
+pub(super) const ENVELOPE_PROPERTIES: [&str; 19] = [
     "id",
     "messageId",
     "inReplyTo",
@@ -28,7 +28,27 @@ pub(super) const ENVELOPE_PROPERTIES: [&str; 15] = [
     "size",
     "keywords",
     "hasAttachment",
+    "header:List-Unsubscribe:asText",
+    "header:List-Id:asText",
+    "header:Precedence:asText",
+    "header:Auto-Submitted:asText",
 ];
+
+/// The mailing-list headers asked for in [`ENVELOPE_PROPERTIES`].
+fn list_headers(email: &Value) -> ListHeaders {
+    let mut headers = ListHeaders::default();
+    for name in [
+        "List-Unsubscribe",
+        "List-Id",
+        "Precedence",
+        "Auto-Submitted",
+    ] {
+        if let Some(value) = email[format!("header:{name}:asText")].as_str() {
+            headers.note(name, value);
+        }
+    }
+    headers
+}
 
 pub(super) fn mailbox_type(role: Option<&str>) -> MailboxType {
     match role {
@@ -159,6 +179,7 @@ pub(super) fn envelope(email: &Value) -> Result<MessageEnvelopeSummary, DomainEr
         has_attachments: email["hasAttachment"].as_bool().unwrap_or(false),
         internal_date: received,
         key: Some(MessageKey::new(id)),
+        list_headers: list_headers(email),
     })
 }
 

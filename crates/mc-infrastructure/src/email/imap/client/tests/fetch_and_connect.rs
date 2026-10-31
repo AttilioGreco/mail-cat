@@ -474,3 +474,25 @@ async fn counted_stream_adds_what_it_reads_to_the_shared_total() {
 
     assert_eq!(total.load(Ordering::Relaxed), 12, "reads only, not writes");
 }
+
+#[test]
+fn list_headers_are_read_from_the_raw_header_block() {
+    let raw = b"From: a@x.example\r\nList-Unsubscribe: <mailto:u@x.example>,\r\n <https://x.example/u>\r\nPrecedence: bulk\r\nX-Other: a\r\n continued: not a header\r\nSubject: hi\r\n\r\n";
+    let headers = fetch::parse_list_headers(raw);
+    assert!(headers.unsubscribe && headers.bulk && !headers.auto_submitted);
+    assert_eq!(headers.list_id, None);
+    assert!(fetch::parse_list_headers(b"Subject: hi\r\n\r\n").is_empty());
+}
+
+#[test]
+fn list_headers_unfold_and_first_non_empty_wins() {
+    let folded = b"List-Unsubscribe:\r\n <https://x.example/u>\r\nList-Id: <a.x.example>\r\n\tcontinued\r\n\r\nPrecedence: bulk\r\n";
+    let headers = fetch::parse_list_headers(folded);
+    assert!(headers.unsubscribe && !headers.bulk, "stops at the body");
+    assert_eq!(headers.list_id.as_deref(), Some("<a.x.example> continued"));
+
+    let repeated = b"Precedence:\r\nPrecedence: bulk\r\nPrecedence: first\r\nList-Id: <one>\r\nList-Id: <two>\r\n\r\n";
+    let headers = fetch::parse_list_headers(repeated);
+    assert!(headers.bulk);
+    assert_eq!(headers.list_id.as_deref(), Some("<one>"));
+}

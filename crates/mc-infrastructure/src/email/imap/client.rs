@@ -222,6 +222,10 @@ impl EmailProvider for ImapEmailProvider {
         self.keywords.get().copied()
     }
 
+    async fn create_label(&self, name: &str) -> Result<Mailbox, DomainError> {
+        self.create_mailbox(name).await
+    }
+
     async fn set_subscribed(
         &self,
         mailbox: &MailboxPath,

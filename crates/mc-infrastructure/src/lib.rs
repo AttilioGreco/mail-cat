@@ -13,7 +13,9 @@ pub mod secret;
 pub use email::{
     AnyAccountEventSource, AnyProvider, ImapEmailProvider, JmapEmailProvider, SmtpSender,
 };
-pub use persistence::{DownloadMeter, SqliteDb, SqliteEventStore, SqliteRepository};
+pub use persistence::{
+    DownloadMeter, SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore,
+};
 pub use provider_registry::InMemoryProviderRegistry;
 pub use search::TantivySearchIndex;
 pub use secret::KeyringSecretStore;

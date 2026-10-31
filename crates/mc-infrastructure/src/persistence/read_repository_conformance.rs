@@ -113,6 +113,7 @@ macro_rules! read_repository_conformance {
                     received_at,
                     restored: false,
                     provider_key: None,
+                    list_headers: Default::default(),
                 },
             )
         }
@@ -199,6 +200,7 @@ macro_rules! read_repository_conformance {
                 received_at,
                 restored: false,
                 provider_key: None,
+                list_headers: Default::default(),
             };
             (message_id, event)
         }

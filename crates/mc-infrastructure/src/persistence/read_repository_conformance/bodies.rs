@@ -31,6 +31,7 @@ macro_rules! bodies_conformance {
                         received_at: at,
                         restored: false,
                         provider_key: None,
+                        list_headers: Default::default(),
                     },
                 )
             };

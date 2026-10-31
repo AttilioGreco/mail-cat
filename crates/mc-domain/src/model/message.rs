@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+mod content;
+pub use content::{ListHeaders, strip_html};
+
 use crate::events::DomainEvent;
 use crate::model::account::AccountId;
 use crate::model::attachment::Attachment;
@@ -97,6 +100,7 @@ impl Message {
             received_at,
             restored: false,
             provider_key: None,
+            list_headers: Default::default(),
         };
 
         let message = Self {

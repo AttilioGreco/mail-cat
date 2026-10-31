@@ -498,6 +498,16 @@ impl EmailProvider for JmapEmailProvider {
         self.relabel_emails(ids, add, remove).await
     }
 
+    async fn create_label(&self, name: &str) -> Result<Mailbox, DomainError> {
+        let id = self.create_mailbox(name).await?;
+        let path = MailboxPath::new(vec![id], '/')?;
+        self.list_mailboxes()
+            .await?
+            .into_iter()
+            .find(|m| m.path == path)
+            .ok_or_else(|| DomainError::Provider("JMAP did not list the new mailbox".into()))
+    }
+
     async fn set_subscribed(
         &self,
         mailbox: &MailboxPath,

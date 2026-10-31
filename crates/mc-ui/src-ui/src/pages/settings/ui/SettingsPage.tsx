@@ -1,14 +1,16 @@
 import { useState } from 'react';
-import { ArrowLeft, Users, Palette, Keyboard } from 'lucide-react';
+import { ArrowLeft, Users, Palette, Keyboard, Sparkles } from 'lucide-react';
 import { AccountsSection } from '@/features/manage-accounts';
 import { ManageFoldersButton } from '@/features/manage-folders';
+import { TrainingGroupsSection } from '@/features/auto-label';
 import { ShortcutsSection } from '@/features/keyboard-shortcuts';
 import { AppearanceSection } from './AppearanceSection';
 
-type Tab = 'accounts' | 'shortcuts' | 'appearance';
+type Tab = 'accounts' | 'labels' | 'shortcuts' | 'appearance';
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: 'accounts', label: 'Account', icon: <Users size={14} /> },
+  { id: 'labels', label: 'Etichette automatiche', icon: <Sparkles size={14} /> },
   { id: 'shortcuts', label: 'Scorciatoie', icon: <Keyboard size={14} /> },
   { id: 'appearance', label: 'Aspetto', icon: <Palette size={14} /> },
 ];
@@ -58,6 +60,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
               accountActions={(a) => <ManageFoldersButton accountId={a.id} accountName={a.name} />}
             />
           )}
+          {tab === 'labels' && <TrainingGroupsSection />}
           {tab === 'shortcuts' && <ShortcutsSection />}
           {tab === 'appearance' && <AppearanceSection />}
         </div>

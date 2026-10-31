@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use async_imap::imap_proto::types::{BodyStructure, ContentEncoding};
 use tracing::{debug, info, warn};
 
-use mc_domain::MessageKey;
 use mc_domain::error::DomainError;
 use mc_domain::traits::email_provider::{MessageBodyResult, MessageEnvelopeSummary};
 use mc_domain::value_objects::flag::Flag;
 use mc_domain::value_objects::mailbox_path::MailboxPath;
 use mc_domain::value_objects::remote_id::RemoteId;
+use mc_domain::{ListHeaders, MessageKey};
 
 use super::super::mapper;
 use super::commands::{exchange, fetch_checked, uids_of};
@@ -122,6 +122,10 @@ impl ImapEmailProvider {
                         .map(parse_threading_headers)
                         .unwrap_or((None, None, Vec::new()));
 
+                    let list_headers = fetch_data
+                        .header()
+                        .map(parse_list_headers)
+                        .unwrap_or_default();
                     let summary = MessageEnvelopeSummary {
                         remote_id,
                         message_rfc_id,
@@ -135,6 +139,7 @@ impl ImapEmailProvider {
                         key: fetch_data
                             .gmail_msg_id()
                             .map(|id| MessageKey::new(id.to_string())),
+                        list_headers,
                     };
 
                     all_envelopes.push(summary);
@@ -347,6 +352,33 @@ where
         }
     }
     Ok(results)
+}
+
+/// Mailing-list and bulk-mail markers from raw header bytes returned by
+/// `BODY.PEEK[HEADER]`. Folded lines are unfolded first (RFC 5322 3.2.2), as
+/// `List-Unsubscribe` usually wraps; a repeated field counts once, the first
+/// non-empty one winning.
+pub(super) fn parse_list_headers(bytes: &[u8]) -> ListHeaders {
+    let mut fields: Vec<(&str, String)> = Vec::new();
+    let text = String::from_utf8_lossy(bytes);
+    for line in text.lines().take_while(|l| !l.is_empty()) {
+        if line.starts_with([' ', '\t']) {
+            if let Some((_, value)) = fields.last_mut() {
+                value.push(' ');
+                value.push_str(line.trim());
+            }
+        } else if let Some((name, value)) = line.split_once(':') {
+            fields.push((name, value.trim().to_owned()));
+        }
+    }
+    let mut headers = ListHeaders::default();
+    let mut seen = std::collections::HashSet::new();
+    for (name, value) in fields {
+        if !value.is_empty() && seen.insert(name.trim().to_ascii_lowercase()) {
+            headers.note(name, &value);
+        }
+    }
+    headers
 }
 
 /// Parse RFC threading headers (Message-ID, In-Reply-To, References) from raw

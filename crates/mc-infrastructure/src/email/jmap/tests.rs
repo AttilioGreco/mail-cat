@@ -801,3 +801,21 @@ async fn a_rejected_login_pauses_the_watcher() {
     assert!(next.is_err(), "nothing is emitted while paused");
     assert_eq!(gate.failures.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+#[test]
+fn envelope_reads_list_headers() {
+    let envelope = mapper::envelope(&json!({
+        "id": "e1",
+        "header:List-Unsubscribe:asText": "<https://x.example/u>",
+        "header:Precedence:asText": "bulk",
+    }))
+    .unwrap();
+    assert!(envelope.list_headers.unsubscribe && envelope.list_headers.bulk);
+    assert!(!envelope.list_headers.auto_submitted);
+    assert!(
+        mapper::envelope(&json!({"id": "e2"}))
+            .unwrap()
+            .list_headers
+            .is_empty()
+    );
+}

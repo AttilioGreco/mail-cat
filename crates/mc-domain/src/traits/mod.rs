@@ -12,3 +12,4 @@ pub mod read_model_projector;
 pub mod repository;
 pub mod search_index;
 pub mod secret_store;
+pub mod tagging_store;

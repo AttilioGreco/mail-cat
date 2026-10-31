@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -186,7 +185,7 @@ impl TantivySearchIndex {
         );
         doc.add_text(f.to, join(e.to.iter().map(|a| a.email.as_str()).collect()));
         doc.add_text(f.cc, join(e.cc.iter().map(|a| a.email.as_str()).collect()));
-        if let Some(body) = body_of(message) {
+        if let Some(body) = message.plain_body() {
             doc.add_text(f.body, body);
         }
         doc
@@ -303,7 +302,7 @@ impl SearchIndex for TantivySearchIndex {
     // ponytail: parses the query and builds a generator per message; batch it
     // if result pages grow past a few dozen hits.
     fn snippet(&self, query: &str, message: &Message) -> Option<String> {
-        let body = body_of(message)?;
+        let body = message.plain_body()?;
         let parsed = self.parse_query(query, None, None).ok()?;
         let generator =
             SnippetGenerator::create(&self.reader.searcher(), &*parsed, self.fields.body).ok()?;
@@ -318,16 +317,6 @@ impl SearchIndex for TantivySearchIndex {
 
 fn search_err(what: &str, e: impl std::fmt::Display) -> DomainError {
     DomainError::SearchIndex(format!("{what} failed: {e}"))
-}
-
-/// The searchable body: the text part, or the tag-stripped HTML part when the
-/// message has no text part (spec §5: one field instead of two).
-fn body_of(message: &Message) -> Option<Cow<'_, str>> {
-    match (&message.body_text, &message.body_html) {
-        (Some(text), _) => Some(Cow::Borrowed(text)),
-        (None, Some(html)) => Some(Cow::Owned(strip_html_for_index(html))),
-        (None, None) => None,
-    }
 }
 
 /// System flags as bits for the `flags` FAST field (`is:unread`, …). IMAP
@@ -380,21 +369,6 @@ fn rewrite_scoped_query(query: &str) -> String {
 
     // No known prefix — return as-is for full-text across all default fields
     trimmed.to_string()
-}
-
-/// Strip HTML tags for indexing (simple tag removal).
-fn strip_html_for_index(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out
 }
 
 #[cfg(test)]

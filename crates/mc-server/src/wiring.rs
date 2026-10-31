@@ -18,11 +18,11 @@ use mc_domain::{
 };
 use mc_infrastructure::{
     AnyProvider, InMemoryProviderRegistry, SqliteDb, SqliteEventStore, SqliteRepository,
-    TantivySearchIndex,
+    SqliteTaggingStore, TantivySearchIndex,
 };
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl,
-    SearchServiceImpl,
+    SearchServiceImpl, TaggingServiceImpl,
 };
 
 use crate::account_runtime::{AccountRuntime, RuntimeDeps, create_account};
@@ -49,6 +49,8 @@ pub(crate) type QueryBusImpl = InProcessQueryBus<
 >;
 pub(crate) type SyncServiceImpl =
     SyncService<ProviderRegistryImpl, SqliteEventStore, SqliteRepository>;
+pub(crate) type TaggingServiceInner =
+    mc_application::TaggingService<SqliteTaggingStore, SqliteRepository, CommandBusImpl>;
 pub(crate) type SearchHandlerImpl =
     SearchProjectionHandler<Arc<TantivySearchIndex>, SqliteRepository, SqliteRepository>;
 
@@ -59,6 +61,7 @@ pub struct AppContext {
     pub message_service: MessageServiceImpl<CommandBusImpl, QueryBusImpl>,
     pub search_service: SearchServiceImpl<QueryBusImpl>,
     pub contact_service: ContactServiceImpl<QueryBusImpl, CommandBusImpl>,
+    pub tagging_service: TaggingServiceImpl<SqliteTaggingStore, SqliteRepository, CommandBusImpl>,
     #[allow(dead_code)]
     pub sync_service: Arc<SyncServiceImpl>,
     #[allow(dead_code)]
@@ -193,6 +196,11 @@ impl AppContext {
             bare_repository.clone(),
             bare_repository.clone(),
         ));
+        let tagging = Arc::new(TaggingServiceInner::new(
+            SqliteTaggingStore::new(db.clone()),
+            bare_repository.clone(),
+            command_bus.clone(),
+        ));
         let projection_handler =
             ProjectionEventHandler::new(bare_repository.clone(), bare_repository);
         tracing::info!("Initialized projection handlers");
@@ -258,6 +266,7 @@ impl AppContext {
             query_bus: query_bus.clone(),
             sync: sync_service.clone(),
             search: search_handler.clone(),
+            tagging: tagging.clone(),
             idle_enabled: std::env::var_os("MAIL_CAT_NO_IDLE").is_none(),
             shutdown: shutdown.clone(),
         }));
@@ -326,6 +335,9 @@ impl AppContext {
             });
             tracing::info!("Live search subscriber started");
         }
+
+        // ── Label suggestion: learns from label changes, applies by itself ───
+        tagging.spawn(event_bus.subscribe(), shutdown.clone());
 
         // ── Auto-populate contacts from received and sent messages ───────────
         {
@@ -658,6 +670,8 @@ impl AppContext {
 
         let contact_service = ContactServiceImpl::new(query_bus.clone(), command_bus.clone());
 
+        let tagging_service = TaggingServiceImpl::new(tagging);
+
         tracing::info!("All services initialized successfully");
 
         Ok(Self {
@@ -666,6 +680,7 @@ impl AppContext {
             message_service,
             search_service,
             contact_service,
+            tagging_service,
             sync_service,
             provider_registry,
             account_runtime,

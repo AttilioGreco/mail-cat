@@ -4,10 +4,11 @@
 use rusqlite::params;
 use uuid::Uuid;
 
-use mc_domain::{AccountId, DomainError, DomainEvent, EventStore};
+use mc_domain::{AccountId, DomainError, DomainEvent, EventStore, GroupId, Scope};
 
 use super::repo_err;
-use super::repository::{SqliteRepository, exec, query_all};
+use super::repository::{SqliteRepository, exec, query_all, query_one};
+use super::tagging::delete_scope_rows;
 
 impl SqliteRepository {
     /// Accounts with an `AccountRemoved` event still in the log. The purge
@@ -57,6 +58,33 @@ impl SqliteRepository {
             .write(move |conn| {
                 let tx = conn.transaction().map_err(repo_err)?;
                 let id = account_id.as_uuid();
+                exec(
+                    &tx,
+                    "DELETE FROM tag_auto WHERE message_id IN \
+                     (SELECT id FROM messages WHERE account_id = ?1)",
+                    [id],
+                )?;
+                // Its share of the model goes: a group's counts are rebuilt
+                // from the remaining members, a lone account's all go.
+                let scope = match query_one(
+                    &tx,
+                    "SELECT group_id FROM tag_members WHERE account_id = ?1",
+                    [id],
+                    |r| r.get::<_, Option<Uuid>>(0),
+                )? {
+                    None => Scope::Group(GroupId::DEFAULT),
+                    Some(None) => Scope::Alone(account_id),
+                    Some(Some(group)) => Scope::Group(GroupId::from_uuid(group)),
+                };
+                exec(&tx, "DELETE FROM tag_examples WHERE account_id = ?1", [id])?;
+                delete_scope_rows(&tx, &scope.key())?;
+                if matches!(scope, Scope::Alone(_)) {
+                    exec(
+                        &tx,
+                        "DELETE FROM tag_settings WHERE scope = ?1",
+                        [scope.key()],
+                    )?;
+                }
                 // Bodies and memberships follow their message by cascade.
                 for table in [
                     "messages",
@@ -72,6 +100,7 @@ impl SqliteRepository {
                         [id],
                     )?;
                 }
+                exec(&tx, "DELETE FROM tag_members WHERE account_id = ?1", [id])?;
                 exec(&tx, "DELETE FROM accounts WHERE id = ?1", [id])?;
                 if let Some(email) = email {
                     exec(

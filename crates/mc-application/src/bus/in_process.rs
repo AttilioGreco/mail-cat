@@ -181,6 +181,11 @@ where
                     .handle_change_labels(message_ids, add, remove)
                     .await
             }
+            Command::CreateLabel { account_id, name } => {
+                self.message_handler
+                    .handle_create_label(account_id, &name)
+                    .await
+            }
             Command::ArchiveMessages { message_ids } => {
                 let accounts = self.accounts().await?;
                 self.message_handler

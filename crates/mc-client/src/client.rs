@@ -23,6 +23,10 @@ pub struct MailCatClient {
 }
 
 impl MailCatClient {
+    pub(crate) fn channel(&self) -> Channel {
+        self.channel.clone()
+    }
+
     /// Connect to a running mc-server instance.
     pub async fn connect(endpoint: impl Into<String>) -> Result<Self> {
         let endpoint = endpoint.into();

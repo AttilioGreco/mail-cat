@@ -47,6 +47,10 @@ enum Command {
     #[command(subcommand)]
     Mailboxes(commands::mailboxes::MailboxesCmd),
 
+    /// Label suggestion: evaluate the classifier
+    #[command(subcommand)]
+    Labels(commands::labels::LabelsCmd),
+
     /// List and read messages
     #[command(subcommand)]
     Messages(commands::messages::MessagesCmd),
@@ -90,6 +94,7 @@ async fn main() -> Result<()> {
         Command::Accounts(cmd) => commands::accounts::run(cmd, client, cli.json).await,
         Command::Contacts(cmd) => commands::contacts::run(cmd, client).await,
         Command::Mailboxes(cmd) => commands::mailboxes::run(cmd, client, cli.json).await,
+        Command::Labels(cmd) => commands::labels::run(cmd, client, cli.json).await,
         Command::Messages(cmd) => commands::messages::run(cmd, client, cli.json).await,
         Command::Conversations(cmd) => commands::conversations::run(cmd, client, cli.json).await,
         Command::Sync {

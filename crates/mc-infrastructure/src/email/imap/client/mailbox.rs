@@ -376,6 +376,17 @@ where
     exchange(COMMAND_TIMEOUT, "UNSUBSCRIBE", session.unsubscribe(name)).await
 }
 
+/// Whether a listed mailbox is the one created as `wanted` (lowercase): some
+/// servers list it under the personal namespace prefix (`INBOX.name`).
+fn lists_as(display_path: &str, wanted: &str) -> bool {
+    let listed = display_path.to_lowercase();
+    listed == wanted
+        || listed
+            .strip_prefix("inbox")
+            .and_then(|rest| rest.strip_prefix(['.', '/']))
+            == Some(wanted)
+}
+
 impl ImapEmailProvider {
     pub(super) async fn list_all_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
         let mut session = self.session().await?;
@@ -393,6 +404,27 @@ impl ImapEmailProvider {
             }
         }
         Ok(listed.into_iter().map(|l| l.mailbox).collect())
+    }
+
+    /// CREATE and SUBSCRIBE `name`, then find it as the server lists it. A
+    /// mailbox that exists already (a sync or another client got there first)
+    /// is the one wanted.
+    pub(super) async fn create_mailbox(&self, name: &str) -> Result<Mailbox, DomainError> {
+        let mut session = self.session().await?;
+        match exchange(COMMAND_TIMEOUT, "CREATE", session.create(name)).await {
+            Err(DomainError::Provider(reply))
+                if reply.to_ascii_lowercase().contains("alreadyexists")
+                    || reply.to_ascii_lowercase().contains("already exists") => {}
+            created => created?,
+        }
+        set_subscribed_on(&mut session, name, true).await?;
+        self.release(session);
+        let wanted = name.to_lowercase();
+        self.list_all_mailboxes()
+            .await?
+            .into_iter()
+            .find(|m| lists_as(&m.display_path, &wanted))
+            .ok_or_else(|| DomainError::Provider("the server did not list the new mailbox".into()))
     }
 
     pub(super) async fn subscribe(
@@ -471,7 +503,16 @@ impl ImapEmailProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_gmail_prefix;
+    use super::{lists_as, strip_gmail_prefix};
+
+    #[test]
+    fn a_created_mailbox_is_found_under_the_personal_namespace() {
+        assert!(lists_as("News", "news"));
+        assert!(lists_as("INBOX.News", "news"));
+        assert!(lists_as("INBOX/News", "news"));
+        assert!(!lists_as("Work/News", "news"));
+        assert!(!lists_as("INBOX.Work.News", "news"));
+    }
 
     #[test]
     fn gmail_prefix_goes_but_labels_stay() {

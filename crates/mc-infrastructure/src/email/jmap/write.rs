@@ -144,6 +144,25 @@ impl JmapEmailProvider {
         )))
     }
 
+    /// A new top-level mailbox; its id.
+    pub(super) async fn create_mailbox(&self, name: &str) -> Result<String, DomainError> {
+        let reply = self
+            .client
+            .call(vec![(
+                "Mailbox/set",
+                json!({"create": {"new": {"name": name, "isSubscribed": true}}}),
+            )])
+            .await?
+            .remove(0)?;
+        if let Some(id) = reply["created"]["new"]["id"].as_str() {
+            return Ok(id.to_owned());
+        }
+        Err(DomainError::Provider(format!(
+            "JMAP refused: {}",
+            refusals(&reply, "notCreated").join(", ")
+        )))
+    }
+
     pub(super) async fn subscribe(
         &self,
         mailbox: &str,
