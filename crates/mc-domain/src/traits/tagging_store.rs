@@ -6,6 +6,7 @@ use async_trait::async_trait;
 
 use crate::error::DomainError;
 use crate::model::account::AccountId;
+use crate::model::discovery::{DiscoveryPoint, Proposal, ProposalId, ProposalStatus};
 use crate::model::embedding::ModelProfile;
 use crate::model::tagging::{
     AutoApplied, BackgroundSpeed, Example, GroupId, LabelSettings, LabelledVector, Lesson,
@@ -121,4 +122,19 @@ pub trait TaggingStore: Send + Sync {
         before: Option<MessageId>,
         limit: u32,
     ) -> Result<Vec<TagSource>, DomainError>;
+
+    // ── Discovery ──
+    /// Vectors of `model` for the readable, unlabelled mail of `accounts`
+    /// that can take a label: Inbox mail first, then the newest.
+    async fn unlabelled_points(
+        &self,
+        accounts: &[AccountId],
+        model: &str,
+        limit: u32,
+    ) -> Result<Vec<DiscoveryPoint>, DomainError>;
+    async fn proposals(&self, status: ProposalStatus) -> Result<Vec<Proposal>, DomainError>;
+    async fn proposal(&self, id: ProposalId) -> Result<Option<Proposal>, DomainError>;
+    /// Inserts, or replaces the proposal of that id.
+    async fn put_proposal(&self, proposal: &Proposal) -> Result<(), DomainError>;
+    async fn delete_proposal(&self, id: ProposalId) -> Result<(), DomainError>;
 }

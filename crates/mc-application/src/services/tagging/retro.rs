@@ -53,6 +53,26 @@ pub(super) struct Pick {
     place: Placement,
     subject: String,
     from: String,
+    /// The message, when the model is to learn the label from it once put.
+    taught: Option<TagSource>,
+}
+
+impl Pick {
+    /// A message to label on the user's say-so.
+    pub fn new(source: &TagSource, place: Placement, score: f64) -> Self {
+        Self {
+            message_id: source.id,
+            account_id: source.account_id,
+            score,
+            place,
+            subject: source.subject.clone(),
+            from: source
+                .from_name
+                .clone()
+                .unwrap_or_else(|| source.from_email.clone()),
+            taught: Some(source.clone()),
+        }
+    }
 }
 
 /// What a scan decided so far.
@@ -85,6 +105,7 @@ impl Plan {
                 .from_name
                 .clone()
                 .unwrap_or_else(|| source.from_email.clone()),
+            taught: None,
         });
     }
 
@@ -225,11 +246,14 @@ where
         let plan = self.plan(account, &label, mode, threshold).await?;
         let preview = plan.preview();
         let service = Arc::clone(self);
-        tokio::spawn(async move { service.run(plan.picks, label).await });
+        tokio::spawn(async move { service.run(plan.picks, label, false).await });
         Ok(preview)
     }
 
-    async fn run(&self, picks: Vec<Pick>, label: String) {
+    /// Label the picks in batches, each recorded first so it can be undone.
+    /// `confirmed`: the user chose these, so the model learns the label from
+    /// them as it does from any label of theirs.
+    pub(super) async fn run(&self, picks: Vec<Pick>, label: String, confirmed: bool) {
         let mut groups: HashMap<(AccountId, Placement), Vec<Pick>> = HashMap::new();
         for pick in picks {
             groups
@@ -240,6 +264,13 @@ where
         let (mut done, mut total) = (0, 0);
         for ((account, place), group) in groups {
             total += group.len();
+            let scope = match self.store.scope_of(account).await {
+                Ok(scope) => scope,
+                Err(e) => {
+                    warn!(error = %e, "label classifier: bulk apply stopped");
+                    return;
+                }
+            };
             for chunk in group.chunks(BATCH) {
                 for pick in chunk {
                     let record = AutoApplied {
@@ -247,6 +278,7 @@ where
                         label: label.clone(),
                         score: pick.score,
                         archived: place.archives(),
+                        confirmed,
                         at: Utc::now(),
                     };
                     if let Err(e) = self.store.record_auto(&record).await {
@@ -262,6 +294,13 @@ where
                     return;
                 }
                 done += chunk.len();
+                for source in chunk.iter().filter_map(|p| p.taught.as_ref()) {
+                    let mut labelled = source.clone();
+                    labelled.labels.push(label.clone());
+                    if let Err(e) = self.retrain(&labelled, scope, None, false).await {
+                        warn!(error = %e, "label classifier: could not learn from a bulk apply");
+                    }
+                }
                 tokio::time::sleep(BATCH_PAUSE).await;
             }
         }

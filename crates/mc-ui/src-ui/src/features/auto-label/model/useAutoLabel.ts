@@ -1,6 +1,16 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
-import type { ApplyPreview, BackgroundStats, EmbeddingsStatus, LabelMode, LabelStatus, MessageTags, ModelProfile, TrainingGroup } from './types';
+import type {
+  ApplyPreview,
+  BackgroundStats,
+  EmbeddingsStatus,
+  LabelMode,
+  LabelProposal,
+  LabelStatus,
+  MessageTags,
+  ModelProfile,
+  TrainingGroup,
+} from './types';
 
 /** Labels changed behind the views' backs: everything that shows them is re-read. */
 function requery(qc: QueryClient) {
@@ -131,4 +141,38 @@ export function useEmbeddings() {
     onSuccess: (next) => qc.setQueryData(['embeddings'], next),
   });
   return { status: status.data, set, setSpeed, setModel, setTarget };
+}
+
+/** Labels discovery proposes; the folder bar badge is always mounted, so this polls gently. */
+export function useLabelProposals() {
+  return useQuery({
+    queryKey: ['label-proposals'],
+    queryFn: () => invoke<LabelProposal[]>('list_label_proposals'),
+    refetchInterval: 30_000,
+    retry: false,
+  });
+}
+
+/** Starts a search in the background; resolves to false when one was already running. */
+export function useDiscoverLabels() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => invoke<boolean>('discover_labels', { accountId: null }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['background-stats'] }),
+  });
+}
+
+export function useProposalMutations() {
+  const qc = useQueryClient();
+  const done = { onSettled: () => qc.invalidateQueries({ queryKey: ['label-proposals'] }) };
+  return {
+    accept: useMutation({
+      mutationFn: (p: { id: string; name: string; archive: boolean }) => invoke<number>('accept_label_proposal', { ...p }),
+      onSettled: () => {
+        qc.invalidateQueries({ queryKey: ['label-proposals'] });
+        requery(qc);
+      },
+    }),
+    reject: useMutation({ mutationFn: (id: string) => invoke<void>('reject_label_proposal', { id }), ...done }),
+  };
 }

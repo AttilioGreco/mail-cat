@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, RefreshCw, AlertCircle, MailCheck, Sparkles } from 'lucide-react';
 import { ContextMenu } from '@/shared/ui/ContextMenu';
 import { useMailboxes, subscribedOnly, FolderItem, type Mailbox, type MailboxKind } from '@/entities/mailbox';
-import { LabelSettingsDialog } from '@/features/auto-label';
+import { LabelSettingsDialog, ProposalsBadge } from '@/features/auto-label';
 import { useMarkMailboxRead } from '@/features/message-actions';
 import { LabelTree } from './LabelTree';
 
@@ -95,6 +95,7 @@ export function FolderTree({
   return (
     <nav className="flex h-full min-h-0 flex-col gap-0.5 overflow-y-auto">
       {system.map(item)}
+      <ProposalsBadge />
       {other.length > 0 && (
         <>
           <button

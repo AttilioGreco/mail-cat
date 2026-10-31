@@ -157,6 +157,18 @@ pub struct BackgroundStats {
     /// Zero when unknown.
     pub worker_bytes: u64,
     pub retrains: Vec<RetrainProgress>,
+    pub discovery: Option<DiscoveryProgress>,
+}
+
+/// A search for new labels under way. `phase`: `loading`, `clustering` or
+/// `naming`; `total` is zero while the phase has nothing to count.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryProgress {
+    pub scope: String,
+    pub phase: String,
+    pub done: u64,
+    pub total: u64,
 }
 
 fn group(g: pb::TrainingGroup) -> TrainingGroup {
@@ -211,7 +223,7 @@ fn suggestion_ref(message_id: &str, label: &str) -> pb::SuggestionRef {
 }
 
 impl MailCatClient {
-    fn tagging(&self) -> TaggingServiceClient<tonic::transport::Channel> {
+    pub(crate) fn tagging(&self) -> TaggingServiceClient<tonic::transport::Channel> {
         TaggingServiceClient::new(self.channel())
     }
 
@@ -451,6 +463,12 @@ impl MailCatClient {
                     total: r.total,
                 })
                 .collect(),
+            discovery: s.discovery.map(|d| DiscoveryProgress {
+                scope: d.scope,
+                phase: d.phase,
+                done: d.done,
+                total: d.total,
+            }),
         })
     }
 

@@ -1,7 +1,8 @@
 //! Tauri commands for label suggestion; thin wrappers over the gRPC client.
 
 use mc_client::{
-    ApplyPreview, BackgroundStats, EmbeddingsStatus, LabelStatus, MessageTags, TrainingGroup,
+    ApplyPreview, BackgroundStats, EmbeddingsStatus, LabelProposal, LabelStatus, MessageTags,
+    TrainingGroup,
 };
 use tauri::State;
 
@@ -241,6 +242,53 @@ pub async fn get_background_stats(state: State<'_, AppState>) -> Result<Backgrou
     get_or_connect(&state)
         .await?
         .get_background_stats()
+        .await
+        .map_err(err)
+}
+
+/// `false`: a search was already running.
+#[tauri::command]
+pub async fn discover_labels(
+    account_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    get_or_connect(&state)
+        .await?
+        .discover_labels(account_id.as_deref())
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_label_proposals(
+    state: State<'_, AppState>,
+) -> Result<Vec<LabelProposal>, String> {
+    get_or_connect(&state)
+        .await?
+        .list_label_proposals()
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn accept_label_proposal(
+    id: String,
+    name: Option<String>,
+    archive: bool,
+    state: State<'_, AppState>,
+) -> Result<u32, String> {
+    get_or_connect(&state)
+        .await?
+        .accept_label_proposal(&id, name.as_deref(), archive)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn reject_label_proposal(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    get_or_connect(&state)
+        .await?
+        .reject_label_proposal(&id)
         .await
         .map_err(err)
 }

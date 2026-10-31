@@ -2446,6 +2446,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hdbscan"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "466aa8bfaa22c81efcf67c84e6ad046de13a05c6cc9d41a5094361bff464247a"
+dependencies = [
+ "kdtree",
+ "num-traits",
+]
+
+[[package]]
 name = "heck"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3001,6 +3011,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kdtree"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f0a0e9f770b65bac9aad00f97a67ab5c5319effed07f6da385da3c2115e47ba"
+dependencies = [
+ "num-traits",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3268,6 +3288,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures",
+ "hdbscan",
  "mailparse",
  "mc-domain",
  "mc-shared",

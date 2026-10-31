@@ -1,5 +1,7 @@
 //! Names a cluster of similar mail from its distinctive words and senders.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 
 use mc_domain::{ClusterSummary, LabelNamer, ProposedName};
@@ -178,16 +180,19 @@ fn is_topic(term: &str) -> bool {
         && !STOP_WORDS.contains(&term.as_str())
 }
 
-/// The brand of the sender that wrote most of the cluster, if it wrote enough.
+/// The brand that wrote most of the cluster, if it wrote enough: its mail
+/// often comes from several subdomains.
 fn dominant_brand(cluster: &ClusterSummary) -> Option<String> {
-    let (sender, count) = cluster
-        .senders
-        .iter()
-        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))?;
-    if (*count as f64) < BRAND_SHARE * cluster.size as f64 {
-        return None;
+    let mut by_brand: HashMap<String, usize> = HashMap::new();
+    for (sender, count) in &cluster.senders {
+        if let Some(brand) = brand(sender).filter(|b| !FREE_MAIL.contains(&b.as_str())) {
+            *by_brand.entry(brand).or_default() += count;
+        }
     }
-    brand(sender).filter(|b| !FREE_MAIL.contains(&b.as_str()))
+    let (brand, count) = by_brand
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))?;
+    ((count as f64) >= BRAND_SHARE * cluster.size as f64).then_some(brand)
 }
 
 /// "mail.amazon.co.uk" and "orders@amazon.it" are both "amazon".
@@ -281,6 +286,20 @@ mod tests {
         let named = name(&c);
         assert_eq!(named.name, "Fattura");
         assert_eq!(named.keywords, ["fattura"]);
+    }
+
+    #[test]
+    fn a_brand_mailing_from_several_subdomains_still_names_the_cluster() {
+        let c = cluster(
+            10,
+            &[("ordine", 1.0)],
+            &[
+                ("explore.pinterest.com", 4),
+                ("pinterest.com", 3),
+                ("mail.pinterest.it", 2),
+            ],
+        );
+        assert_eq!(name(&c).name, "Pinterest");
     }
 
     #[test]

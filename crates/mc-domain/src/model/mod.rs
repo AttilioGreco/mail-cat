@@ -2,6 +2,7 @@ pub mod account;
 pub mod attachment;
 pub mod contact;
 pub mod conversation;
+pub mod discovery;
 pub mod embedding;
 pub mod identity;
 pub mod mailbox;

@@ -350,6 +350,7 @@ async fn settings_and_auto_records_round_trip() {
         label: "newsletter".into(),
         score: 0.95,
         archived: true,
+        confirmed: false,
         at: Utc::now(),
     };
     f.store.record_auto(&applied).await.unwrap();
@@ -538,4 +539,114 @@ async fn model_and_target_default_to_light_on_cpu_and_are_kept() {
         ModelProfile::Quality
     );
     assert_eq!(f.store.execution_target().await.unwrap(), "gpu-cuda");
+}
+
+#[tokio::test]
+async fn proposals_round_trip_by_status_and_can_be_replaced_and_deleted() {
+    use mc_domain::{Proposal, ProposalId, ProposalSample, ProposalStatus};
+
+    let f = open();
+    let scope = Scope::Group(GroupId::DEFAULT);
+    let members: Vec<MessageId> = (0..40).map(|_| MessageId::new()).collect();
+    let mut proposal = Proposal {
+        id: ProposalId::new(),
+        scope,
+        name: "Amazon".into(),
+        keywords: vec!["amazon".into(), "ordine".into()],
+        members: members.clone(),
+        inbox: 30,
+        samples: vec![ProposalSample {
+            message_id: members[0],
+            subject: "Il tuo ordine".into(),
+            from: "Amazon".into(),
+        }],
+        status: ProposalStatus::Pending,
+        created_at: Utc::now(),
+    };
+    f.store.put_proposal(&proposal).await.unwrap();
+    let mut smaller = proposal.clone();
+    (smaller.id, smaller.inbox, smaller.name) = (ProposalId::new(), 2, "Altro".into());
+    f.store.put_proposal(&smaller).await.unwrap();
+
+    let pending = f.store.proposals(ProposalStatus::Pending).await.unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].name, "Amazon", "Inbox-heavy first");
+    assert_eq!(pending[0].members, members);
+    assert_eq!(pending[0].samples, proposal.samples);
+    assert_eq!(
+        pending[0].created_at.timestamp_nanos_opt(),
+        proposal.created_at.timestamp_nanos_opt()
+    );
+
+    proposal.status = ProposalStatus::Rejected;
+    proposal.name = "Rifiutata".into();
+    f.store.put_proposal(&proposal).await.unwrap();
+    assert_eq!(
+        f.store
+            .proposals(ProposalStatus::Pending)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let rejected = f.store.proposals(ProposalStatus::Rejected).await.unwrap();
+    assert_eq!(
+        (rejected.len(), rejected[0].name.as_str()),
+        (1, "Rifiutata")
+    );
+    assert_eq!(
+        f.store.proposal(proposal.id).await.unwrap().unwrap().status,
+        ProposalStatus::Rejected
+    );
+
+    f.store.delete_proposal(smaller.id).await.unwrap();
+    assert!(f.store.proposal(smaller.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn discovery_points_are_unlabelled_readable_mail_with_a_vector_of_the_model() {
+    let f = open();
+    let a = f.account("a@x.example", MailboxModel::Labels).await;
+    let inbox = f.mailbox(a, "INBOX", MailboxType::Inbox).await;
+    let archive = f.mailbox(a, "Archive", MailboxType::Archive).await;
+    let trash = f.mailbox(a, "Trash", MailboxType::Trash).await;
+    let label = f.mailbox(a, "Newsletter", MailboxType::Custom).await;
+    let none = ListHeaders::default;
+    let ok = f.message(a, inbox, &[], none()).await;
+    let archived = f.message(a, archive, &[], none()).await;
+    let labelled = f.message(a, inbox, &[label], none()).await;
+    let trashed = f.message(a, trash, &[], none()).await;
+    let old_model = f.message(a, inbox, &[], none()).await;
+    let no_vector = f.message(a, inbox, &[], none()).await;
+    for id in [ok, archived, labelled, trashed] {
+        f.store
+            .put_vectors(MODEL, &[(id, vec![1.0, 0.0])])
+            .await
+            .unwrap();
+    }
+    f.store
+        .put_vectors("old@1", &[(old_model, vec![1.0, 0.0])])
+        .await
+        .unwrap();
+    let _ = no_vector;
+
+    let points = f.store.unlabelled_points(&[a], MODEL, 10).await.unwrap();
+    let found: Vec<(MessageId, bool)> = points.iter().map(|p| (p.id, p.in_inbox)).collect();
+    assert_eq!(found, [(ok, true), (archived, false)], "Inbox first");
+    assert_eq!(points[0].vector, [1.0, 0.0]);
+    assert_eq!(
+        f.store
+            .unlabelled_points(&[a], MODEL, 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        f.store
+            .unlabelled_points(&[], MODEL, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

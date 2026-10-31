@@ -28,6 +28,7 @@ pub use value_objects::sync_cursor::SyncCursor;
 // Trait re-exports
 pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource};
 pub use model::conversation::Conversation;
+pub use model::discovery::{DiscoveryPoint, Proposal, ProposalId, ProposalSample, ProposalStatus};
 pub use model::embedding::{EmbedPurpose, ModelId, ModelOption, ModelProfile, TargetOption};
 pub use model::tagging::{
     AutoApplied, BackgroundProfile, BackgroundSpeed, Confidence, Example, GroupId, LabelMode,

@@ -154,7 +154,7 @@ where
 
     /// Whether a scope is being (or still has to be) rebuilt: the backlog
     /// would compete with it for the CPU and the database writer.
-    async fn retraining(&self) -> Result<bool, ApplicationError> {
+    pub(super) async fn retraining(&self) -> Result<bool, ApplicationError> {
         if self.retraining.load(Ordering::Relaxed) > 0 {
             return Ok(true);
         }
@@ -205,6 +205,7 @@ where
             return;
         };
         let mut before = None;
+        let mut embedded_some = false;
         loop {
             let profile = self.profile();
             // How long to rest before looking again; `None`: until woken.
@@ -216,9 +217,16 @@ where
                     .embed_step(embedder.as_ref(), &mut before, profile.batch)
                     .await
                 {
-                    Ok(Step::Embedded) => (worked, rest) = (true, Some(profile.pause)),
+                    Ok(Step::Embedded) => {
+                        (worked, embedded_some, rest) = (true, true, Some(profile.pause));
+                    }
                     Ok(Step::Retraining) => rest = Some(RETRAIN_WAIT),
-                    Ok(Step::Done) => {}
+                    Ok(Step::Done) => {
+                        // The backlog is cleared: time to look for labels in it.
+                        if std::mem::take(&mut embedded_some) {
+                            self.discovery_wake.notify_one();
+                        }
+                    }
                     Err(e) => {
                         warn!(error = %e, "embeddings: batch failed, trying again later");
                         rest = Some(RETRY);

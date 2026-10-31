@@ -339,6 +339,9 @@ pub struct AutoApplied {
     pub label: String,
     pub score: f64,
     pub archived: bool,
+    /// Applied on the user's say-so (an accepted discovery): the model learns
+    /// it as the user's own label, not as something it did by itself.
+    pub confirmed: bool,
     pub at: chrono::DateTime<chrono::Utc>,
 }
 

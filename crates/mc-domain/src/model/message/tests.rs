@@ -473,3 +473,10 @@ fn plain_body_falls_back_to_stripped_html() {
     message.body_text = Some("testo".into());
     assert_eq!(message.plain_body().unwrap(), "testo");
 }
+
+#[test]
+fn strip_html_drops_style_and_script_contents() {
+    let html = "<html><head><STYLE type=\"text/css\">.MsoNormalTable{font-family:Calibri}</style>\
+                </head><body><p>Il tuo ordine è partito</p><script>track()</script> grazie</body></html>";
+    assert_eq!(content::strip_html(html), "Il tuo ordine è partito grazie");
+}

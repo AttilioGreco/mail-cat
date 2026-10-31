@@ -49,7 +49,7 @@ where
 
     /// The writer is shared with sync, and the machine with its user: rest
     /// between pages as long as the background speed asks.
-    async fn breathe(&self) {
+    pub(super) async fn breathe(&self) {
         let pause = self.profile().pause;
         if !pause.is_zero() {
             tokio::time::sleep(pause).await;
@@ -141,7 +141,9 @@ where
         let mut ours = Vec::new();
         for record in self.store.autos(source.id).await? {
             if source.labels.contains(&record.label) {
-                ours.push(record.label);
+                if !record.confirmed {
+                    ours.push(record.label);
+                }
             } else if Utc::now() - record.at > AUTO_SETTLE
                 && self.store.take_auto(source.id, &record.label).await?
                 // A keyword store the server ignored leaves nothing to

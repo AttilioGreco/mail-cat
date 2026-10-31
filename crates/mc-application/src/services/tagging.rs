@@ -7,6 +7,7 @@
 //! elsewhere. Feedback (rejects, undone auto-applies) is a stronger negative.
 
 mod bayes;
+mod discovery;
 mod eval;
 mod features;
 mod knn;
@@ -33,7 +34,7 @@ use tracing::{info, warn};
 
 use mc_domain::{
     AccountId, AutoApplied, BackgroundSpeed, Confidence, DomainEvent, Embedder, EventEnvelope,
-    Flag, GroupId, LabelMode, LabelSettings, Mailbox, MailboxId, MailboxReadRepository,
+    Flag, GroupId, LabelMode, LabelNamer, LabelSettings, Mailbox, MailboxId, MailboxReadRepository,
     MailboxType, MessageId, ModelProfile, Scope, TagSource, TaggingStore, TrainingGroup,
 };
 
@@ -41,6 +42,7 @@ use crate::bus::{CommandBus, EventSubscriber};
 use crate::commands::Command;
 use crate::error::ApplicationError;
 
+pub use discovery::{DiscoveryPhase, DiscoveryProgress, PendingProposal};
 pub use eval::{EvalRow, LabelEval};
 pub use naming::KeywordNamer;
 use placement::{Placement, display_name};
@@ -111,6 +113,11 @@ pub struct TaggingService<S, R, C> {
     embedding_on: AtomicBool,
     /// Rouses the embedding worker: a body arrived, or consent was given.
     wake: Notify,
+    namer: Arc<dyn LabelNamer>,
+    /// A search for new labels is running; one at a time.
+    discovering: AtomicBool,
+    /// Rouses the discovery worker: the embedding backlog was just cleared.
+    discovery_wake: Notify,
     speed: Mutex<BackgroundSpeed>,
     /// The model profile and execution target the user picked.
     model_choice: Mutex<(ModelProfile, String)>,
@@ -174,6 +181,9 @@ where
             embedder: None,
             embedding_on: AtomicBool::new(false),
             wake: Notify::new(),
+            namer: Arc::new(KeywordNamer),
+            discovering: AtomicBool::new(false),
+            discovery_wake: Notify::new(),
             speed: Mutex::new(BackgroundSpeed::default()),
             model_choice: Mutex::new((ModelProfile::default(), "cpu".into())),
             retraining: AtomicUsize::new(0),
@@ -186,6 +196,13 @@ where
     #[must_use]
     pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
+        self
+    }
+
+    /// Name discovered labels with `namer` instead of by keywords.
+    #[must_use]
+    pub fn with_namer(mut self, namer: Arc<dyn LabelNamer>) -> Self {
+        self.namer = namer;
         self
     }
 
@@ -217,6 +234,11 @@ where
             tokio::spawn({
                 let stop = stop.clone();
                 async move { worker.run_embedder(stop).await }
+            });
+            let finder = Arc::clone(&service);
+            tokio::spawn({
+                let stop = stop.clone();
+                async move { finder.run_discovery(stop).await }
             });
             let boot = Arc::clone(&service);
             if let Err(e) = niced(async move { boot.bootstrap().await }).await {
@@ -417,6 +439,7 @@ where
             label: job.label,
             score: job.score,
             archived: job.place.archives(),
+            confirmed: false,
             at: Utc::now(),
         };
         if let Err(e) = self.store.record_auto(&record).await {

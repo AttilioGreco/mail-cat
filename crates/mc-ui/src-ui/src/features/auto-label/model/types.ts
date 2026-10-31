@@ -98,4 +98,29 @@ export interface BackgroundStats {
   /** Zero when unknown. */
   workerBytes: number;
   retrains: { scope: string; done: number; total: number }[];
+  /** Set while a search for new labels runs. */
+  discovery: DiscoveryProgress | null;
+}
+
+export interface DiscoveryProgress {
+  /** Training group being searched; empty while starting. */
+  scope: string;
+  phase: 'loading' | 'clustering' | 'naming';
+  done: number;
+  /** Zero while the phase has nothing to count. */
+  total: number;
+}
+
+export interface LabelProposal {
+  id: string;
+  name: string;
+  keywords: string[];
+  size: number;
+  /** Of `size`, how many are in an Inbox. */
+  inbox: number;
+  samples: { messageId: string; subject: string; from: string }[];
+  /** The training group whose mail it is made of. */
+  group: string;
+  /** Unix seconds. */
+  createdAt: number;
 }

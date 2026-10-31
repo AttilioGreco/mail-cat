@@ -13,11 +13,20 @@ use mc_domain::{
 use super::*;
 
 /// Two directions: mail about discounts ("scont...") and everything else.
-struct Fake(AtomicUsize, std::sync::Mutex<ModelProfile>);
+pub(super) struct Fake(AtomicUsize, std::sync::Mutex<ModelProfile>, Option<ModelId>);
 
 impl Fake {
+    /// Reports a model of the given id, whatever the profile.
+    pub(super) fn real(model: ModelId) -> Self {
+        Self(
+            AtomicUsize::new(0),
+            std::sync::Mutex::default(),
+            Some(model),
+        )
+    }
+
     fn new() -> Self {
-        Self(AtomicUsize::new(0), std::sync::Mutex::default())
+        Self(AtomicUsize::new(0), std::sync::Mutex::default(), None)
     }
 }
 
@@ -25,6 +34,9 @@ impl Fake {
 impl Embedder for Fake {
     /// "fake@1" for Light, "fake@2" for the others.
     fn model(&self) -> ModelId {
+        if let Some(model) = &self.2 {
+            return model.clone();
+        }
         let revision = if *self.1.lock().unwrap() == ModelProfile::Light {
             "1"
         } else {

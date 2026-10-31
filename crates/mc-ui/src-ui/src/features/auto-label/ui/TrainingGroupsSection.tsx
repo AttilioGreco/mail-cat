@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
+import { Plus, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/shared/ui/button';
 import { Input } from '@/shared/ui/input';
@@ -7,7 +7,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useAccounts } from '@/entities/account';
 import { BackgroundStatsCard } from './BackgroundStatsCard';
 import { ModelSettings } from './ModelSettings';
-import { useEmbeddings, useGroupMutations, useTrainingGroups } from '../model/useAutoLabel';
+import { ProposalsList } from './ProposalsList';
+import {
+  useDiscoverLabels,
+  useEmbeddings,
+  useGroupMutations,
+  useLabelProposals,
+  useTrainingGroups,
+} from '../model/useAutoLabel';
 
 const NO_GROUP = '';
 
@@ -24,6 +31,8 @@ export function TrainingGroupsSection() {
   const { data: accounts = [] } = useAccounts();
   const { create, rename, remove, assign } = useGroupMutations();
   const { status: embeddings, set: setEmbeddings, setSpeed } = useEmbeddings();
+  const { data: proposals = [] } = useLabelProposals();
+  const discover = useDiscoverLabels();
   const [name, setName] = useState('');
   const fail = (e: Error) => toast.error(String(e));
 
@@ -90,6 +99,36 @@ export function TrainingGroupsSection() {
         </div>
       )}
       {embeddings && <BackgroundStatsCard />}
+
+      {embeddings?.enabled && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs">
+              <h3 className="font-medium text-muted-foreground">Etichette proposte</h3>
+              <p className="text-muted">
+                Cerca gruppi di messaggi simili senza etichetta e propone un nome. Parte da sola ogni poche ore e
+                quando finisce l&apos;analisi dei messaggi.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="shrink-0"
+              disabled={discover.isPending}
+              onClick={() =>
+                discover.mutate(undefined, {
+                  onSuccess: (started) => started || toast.info('Una ricerca è già in corso'),
+                  onError: fail,
+                })
+              }
+            >
+              <Search />
+              Cerca nuove etichette
+            </Button>
+          </div>
+          {proposals.length > 0 && <ProposalsList proposals={proposals} />}
+        </div>
+      )}
 
       <div className="space-y-2">
         <h3 className="text-xs font-medium text-muted-foreground">Account</h3>

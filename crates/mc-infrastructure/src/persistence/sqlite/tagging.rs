@@ -11,14 +11,16 @@ use rusqlite::{Connection, Row, params, params_from_iter};
 use uuid::Uuid;
 
 use mc_domain::{
-    AccountId, AutoApplied, BackgroundSpeed, DomainError, Example, GroupId, LabelMode,
-    LabelSettings, LabelStats, LabelledVector, Lesson, MessageId, ModelProfile, ModelStats, Scope,
-    SourceFilter, TagSource, TaggingStore, TrainingGroup,
+    AccountId, AutoApplied, BackgroundSpeed, DiscoveryPoint, DomainError, Example, GroupId,
+    LabelMode, LabelSettings, LabelStats, LabelledVector, Lesson, MessageId, ModelProfile,
+    ModelStats, Proposal, ProposalId, ProposalStatus, Scope, SourceFilter, TagSource, TaggingStore,
+    TrainingGroup,
 };
 
 use super::repository::{conversion_err, exec, json, json_col, nanos, query_all, query_one};
 use super::{SqliteDb, repo_err};
 
+mod proposals;
 mod sources;
 mod vectors;
 use sources::placeholders;
@@ -37,7 +39,7 @@ impl SqliteTaggingStore {
 const MAX_TOKENS: usize = 2000;
 /// Bumped when what tokens or labels mean changes, so scopes trained under
 /// the old meaning (stored as 1) retrain on the next start.
-const TRAINING_VERSION: u32 = 2;
+const TRAINING_VERSION: u32 = 3;
 
 fn group_of_row(row: &Row) -> rusqlite::Result<(GroupId, String)> {
     Ok((GroupId::from_uuid(row.get(0)?), row.get(1)?))
@@ -548,14 +550,16 @@ impl TaggingStore for SqliteTaggingStore {
             .write(move |conn| {
                 exec(
                     conn,
-                    "INSERT OR REPLACE INTO tag_auto (message_id, label, score, archived, at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT OR REPLACE INTO tag_auto \
+                     (message_id, label, score, archived, at, confirmed) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![
                         a.message_id.as_uuid(),
                         a.label,
                         a.score,
                         a.archived,
-                        nanos(a.at)
+                        nanos(a.at),
+                        a.confirmed
                     ],
                 )
                 .map(drop)
@@ -568,7 +572,7 @@ impl TaggingStore for SqliteTaggingStore {
             .read(move |conn| {
                 query_all(
                     conn,
-                    "SELECT label, score, archived, at FROM tag_auto WHERE message_id = ?1",
+                    "SELECT label, score, archived, at, confirmed FROM tag_auto WHERE message_id = ?1",
                     [message.as_uuid()],
                     |r| {
                         Ok(AutoApplied {
@@ -577,6 +581,7 @@ impl TaggingStore for SqliteTaggingStore {
                             score: r.get(1)?,
                             archived: r.get(2)?,
                             at: DateTime::from_timestamp_nanos(r.get(3)?),
+                            confirmed: r.get(4)?,
                         })
                     },
                 )
@@ -704,6 +709,41 @@ impl TaggingStore for SqliteTaggingStore {
         self.db
             .read(move |conn| sources::unembedded(conn, &model, before, limit))
             .await
+    }
+
+    async fn unlabelled_points(
+        &self,
+        accounts: &[AccountId],
+        model: &str,
+        limit: u32,
+    ) -> Result<Vec<DiscoveryPoint>, DomainError> {
+        if accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let model = model.to_owned();
+        let accounts: Vec<Uuid> = accounts.iter().map(|a| *a.as_uuid()).collect();
+        self.db
+            .read(move |conn| proposals::points(conn, &accounts, &model, limit))
+            .await
+    }
+
+    async fn proposals(&self, status: ProposalStatus) -> Result<Vec<Proposal>, DomainError> {
+        self.db.read(move |conn| proposals::all(conn, status)).await
+    }
+
+    async fn proposal(&self, id: ProposalId) -> Result<Option<Proposal>, DomainError> {
+        self.db.read(move |conn| proposals::one(conn, id)).await
+    }
+
+    async fn put_proposal(&self, proposal: &Proposal) -> Result<(), DomainError> {
+        let proposal = proposal.clone();
+        self.db
+            .write(move |conn| proposals::put(conn, &proposal))
+            .await
+    }
+
+    async fn delete_proposal(&self, id: ProposalId) -> Result<(), DomainError> {
+        self.db.write(move |conn| proposals::delete(conn, id)).await
     }
 }
 

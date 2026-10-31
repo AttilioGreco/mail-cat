@@ -237,6 +237,18 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         model TEXT NOT NULL, vec BLOB NOT NULL
     );
     CREATE TABLE tag_prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;",
+    // 10: label discovery. A proposal is a cluster of unlabelled mail with a
+    // name to give it; `members` packs the 16-byte ids of its messages and is
+    // what a later run matches against, so a rejected cluster stays rejected.
+    // `confirmed` marks labels applied on the user's say-so (accepted
+    // proposals): the model learns them as the user's own.
+    "CREATE TABLE tag_proposals (
+        id BLOB PRIMARY KEY, scope TEXT NOT NULL, name TEXT NOT NULL,
+        keywords TEXT NOT NULL, members BLOB NOT NULL, inbox INTEGER NOT NULL,
+        samples TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL
+    );
+    CREATE INDEX tag_proposals_status ON tag_proposals(status, scope);
+    ALTER TABLE tag_auto ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

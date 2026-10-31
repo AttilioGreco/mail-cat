@@ -1,6 +1,6 @@
 import { ProgressRow } from '@/shared/ui/progress-row';
 import { useBackgroundStats } from '../model/useAutoLabel';
-import type { EmbedderState } from '../model/types';
+import type { DiscoveryProgress, EmbedderState } from '../model/types';
 
 const STATE_LABEL: Record<EmbedderState, string> = {
   off: 'Spento',
@@ -9,6 +9,27 @@ const STATE_LABEL: Record<EmbedderState, string> = {
   paused_for_retrain: 'In pausa: riaddestramento in corso',
   idle: 'Inattivo',
 };
+
+const PHASE_LABEL: Record<DiscoveryProgress['phase'], string> = {
+  loading: 'lettura dei messaggi',
+  clustering: 'raggruppamento dei messaggi simili',
+  naming: 'scelta dei nomi',
+};
+
+function Discovery({ d }: { d: DiscoveryProgress }) {
+  const label = `Ricerca di nuove etichette${d.scope ? `: ${d.scope}` : ''}`;
+  if (d.total > 0)
+    return <ProgressRow label={label} done={d.done} total={d.total} missingLabel={PHASE_LABEL[d.phase]} />;
+  return (
+    <div>
+      <div className="mb-1 text-muted">{label}</div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-background">
+        <div className="h-full w-1/3 animate-pulse rounded-full bg-accent" />
+      </div>
+      <p className="mt-0.5 text-muted">{PHASE_LABEL[d.phase]}</p>
+    </div>
+  );
+}
 
 function eta(seconds: number): string {
   if (seconds < 90) return 'meno di 2 minuti';
@@ -50,6 +71,7 @@ export function BackgroundStatsCard() {
           }
         />
       )}
+      {s.discovery && <Discovery d={s.discovery} />}
       {s.retrains.map((r) => (
         <ProgressRow
           key={r.scope}

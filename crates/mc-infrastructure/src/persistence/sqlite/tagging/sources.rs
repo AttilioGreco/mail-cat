@@ -53,7 +53,7 @@ const SOURCE_COLUMNS: &str = concat!(
      LEFT JOIN message_bodies b ON b.message_id = m.id"
 );
 
-const LABELLED: &str = concat!(
+pub(super) const LABELLED: &str = concat!(
     "CASE WHEN a.mailbox_model = '\"Folders\"' THEN EXISTS (SELECT 1 FROM ",
     keywords!(),
     ") ELSE EXISTS (SELECT 1 FROM message_mailboxes x \
@@ -61,7 +61,7 @@ const LABELLED: &str = concat!(
      WHERE x.message_id = m.id AND mb.mailbox_type = '\"Custom\"') END"
 );
 
-const UNREADABLE: &str = "NOT EXISTS (SELECT 1 FROM message_mailboxes x \
+pub(super) const UNREADABLE: &str = "NOT EXISTS (SELECT 1 FROM message_mailboxes x \
      JOIN mailboxes mb ON mb.id = x.mailbox_id WHERE x.message_id = m.id \
      AND mb.mailbox_type IN ('\"Trash\"', '\"Spam\"', '\"Drafts\"'))";
 

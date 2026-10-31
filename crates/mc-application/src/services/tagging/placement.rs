@@ -160,7 +160,7 @@ where
         Ok(())
     }
 
-    async fn create_label(
+    pub(super) async fn create_label(
         &self,
         account: AccountId,
         name: &str,

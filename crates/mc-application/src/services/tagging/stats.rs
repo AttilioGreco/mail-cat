@@ -10,6 +10,7 @@ use mc_domain::{
 };
 
 use super::TaggingService;
+use super::discovery::{DiscoveryPhase, DiscoveryProgress};
 use crate::bus::CommandBus;
 use crate::error::ApplicationError;
 
@@ -51,6 +52,7 @@ pub struct BackgroundStats {
     pub eta: Option<Duration>,
     pub worker_bytes: Option<u64>,
     pub retrains: Vec<RetrainProgress>,
+    pub discovery: Option<DiscoveryProgress>,
 }
 
 #[derive(Default)]
@@ -60,6 +62,8 @@ pub(super) struct Activity {
     pub retrains: HashMap<Scope, (u64, u64)>,
     /// Inside a call to the embedder.
     pub embedding: bool,
+    /// The group being searched for labels, how far along: (scope, phase, done, total).
+    pub discovery: Option<(Option<Scope>, DiscoveryPhase, u64, u64)>,
     counts: Option<(Instant, (u64, u64))>,
 }
 
@@ -131,13 +135,7 @@ where
         } else {
             EmbedderState::Active
         };
-        let names: HashMap<_, _> = self
-            .store
-            .list_groups()
-            .await?
-            .into_iter()
-            .map(|g| (Scope::Group(g.id), g.name))
-            .collect();
+        let names = self.scope_names().await?;
         let retrains = retrains
             .into_iter()
             .map(|(scope, (done, total))| RetrainProgress {
@@ -161,10 +159,11 @@ where
             eta: eta(remaining, per_second),
             worker_bytes: self.embedder.as_ref().and_then(|e| e.worker_bytes()),
             retrains,
+            discovery: self.discovery_progress().await?,
         })
     }
 
-    async fn embedding_counts(&self) -> Result<(u64, u64), ApplicationError> {
+    pub(super) async fn embedding_counts(&self) -> Result<(u64, u64), ApplicationError> {
         let Some(embedder) = self.embedder.as_ref() else {
             return Ok((0, 0));
         };

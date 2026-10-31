@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use mc_application::CommandBus;
 use mc_application::services::tagging::{
-    EmbedderState, LabelStatus as AppLabelStatus, TaggingService,
+    DiscoveryPhase, EmbedderState, LabelStatus as AppLabelStatus, TaggingService,
 };
 use mc_domain::{
     AccountId, Confidence, GroupId, LabelMode, LabelSettings, MailboxReadRepository, MessageId,
@@ -71,6 +71,10 @@ where
 
 fn uuid(id: &str) -> Result<Uuid, Status> {
     Uuid::parse_str(id).map_err(|_| Status::invalid_argument(format!("invalid id {id:?}")))
+}
+
+fn proposal(id: &str) -> Result<mc_domain::ProposalId, Status> {
+    uuid(id).map(mc_domain::ProposalId::from_uuid)
 }
 
 fn account(id: &str) -> Result<AccountId, Status> {
@@ -465,6 +469,92 @@ where
                     total: r.total,
                 })
                 .collect(),
+            discovery: s.discovery.map(|d| pb::DiscoveryProgress {
+                scope: d.scope,
+                phase: match d.phase {
+                    DiscoveryPhase::Loading => "loading",
+                    DiscoveryPhase::Clustering => "clustering",
+                    DiscoveryPhase::Naming => "naming",
+                }
+                .into(),
+                done: d.done,
+                total: d.total,
+            }),
         }))
+    }
+
+    async fn discover_labels(
+        &self,
+        request: Request<pb::DiscoverLabelsRequest>,
+    ) -> Result<Response<pb::DiscoverLabelsResponse>, Status> {
+        let account = request
+            .into_inner()
+            .account_id
+            .map(|a| account(&a))
+            .transpose()?;
+        let started = self
+            .service
+            .start_discovery(account)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(pb::DiscoverLabelsResponse { started }))
+    }
+
+    async fn list_label_proposals(
+        &self,
+        _: Request<pb::ListLabelProposalsRequest>,
+    ) -> Result<Response<pb::ListLabelProposalsResponse>, Status> {
+        let proposals = self
+            .service
+            .proposals()
+            .await
+            .map_err(application_error_to_status)?
+            .into_iter()
+            .map(|p| pb::LabelProposal {
+                id: p.proposal.id.as_uuid().to_string(),
+                size: p.proposal.size() as u32,
+                inbox: p.proposal.inbox,
+                group: p.group,
+                created_at: p.proposal.created_at.timestamp(),
+                name: p.proposal.name,
+                keywords: p.proposal.keywords,
+                samples: p
+                    .proposal
+                    .samples
+                    .into_iter()
+                    .map(|s| pb::ProposalSample {
+                        message_id: s.message_id.to_string(),
+                        subject: s.subject,
+                        from: s.from,
+                    })
+                    .collect(),
+            })
+            .collect();
+        Ok(Response::new(pb::ListLabelProposalsResponse { proposals }))
+    }
+
+    async fn accept_label_proposal(
+        &self,
+        request: Request<pb::AcceptLabelProposalRequest>,
+    ) -> Result<Response<pb::AcceptLabelProposalResponse>, Status> {
+        let r = request.into_inner();
+        let name = Some(r.name.as_str()).filter(|n| !n.trim().is_empty());
+        let messages = self
+            .service
+            .accept_proposal(proposal(&r.id)?, name, r.archive)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(pb::AcceptLabelProposalResponse { messages }))
+    }
+
+    async fn reject_label_proposal(
+        &self,
+        request: Request<pb::RejectLabelProposalRequest>,
+    ) -> Result<Response<pb::TaggingAck>, Status> {
+        self.service
+            .reject_proposal(proposal(&request.into_inner().id)?)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(pb::TaggingAck {}))
     }
 }

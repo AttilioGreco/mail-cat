@@ -17,6 +17,7 @@ use mc_domain::{
     GroupId, LabelMode, MailboxId, MailboxModel, MailboxPath, MailboxType, Membership, MessageId,
     ProviderType, ReadModelProjector, RemoteId,
 };
+mod discovery;
 mod embeddings;
 
 use mc_infrastructure::{SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore};

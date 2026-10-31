@@ -9,11 +9,13 @@ mod proto {
 }
 
 pub mod client;
+mod discovery;
 pub mod error;
 mod tagging;
 pub mod types;
 
 pub use client::MailCatClient;
+pub use discovery::*;
 pub use error::{ClientError, Result};
 pub use tagging::*;
 pub use types::*;

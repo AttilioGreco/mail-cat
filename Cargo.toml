@@ -27,6 +27,9 @@ mc-interfaces = { path = "crates/mc-interfaces" }
 mc-shared = { path = "crates/mc-shared" }
 mc-client = { path = "crates/mc-client" }
 
+# Density-based clustering for label discovery (serial: runs on a niced thread)
+hdbscan = "0.12"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

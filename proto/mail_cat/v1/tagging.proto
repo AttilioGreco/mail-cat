@@ -40,7 +40,49 @@ service TaggingService {
   // it runs. A new model re-embeds the mail in the background.
   rpc SetEmbeddingModel(SetEmbeddingModelRequest) returns (EmbeddingsStatus);
   rpc SetExecutionTarget(SetExecutionTargetRequest) returns (EmbeddingsStatus);
+
+  // Label discovery: groups of similar unlabelled mail proposed as new labels.
+  // Starts a search in the background (progress is in GetBackgroundStats);
+  // started is false when one is already running.
+  rpc DiscoverLabels(DiscoverLabelsRequest) returns (DiscoverLabelsResponse);
+  rpc ListLabelProposals(ListLabelProposalsRequest) returns (ListLabelProposalsResponse);
+  // Creates the label, puts it on the cluster's mail in the background and
+  // teaches the model; the label starts in "suggest".
+  rpc AcceptLabelProposal(AcceptLabelProposalRequest) returns (AcceptLabelProposalResponse);
+  rpc RejectLabelProposal(RejectLabelProposalRequest) returns (TaggingAck);
 }
+
+// account_id unset: every training group.
+message DiscoverLabelsRequest { optional string account_id = 1; }
+message DiscoverLabelsResponse { bool started = 1; }
+message ListLabelProposalsRequest {}
+message ProposalSample {
+  string message_id = 1;
+  string subject = 2;
+  string from = 3;
+}
+message LabelProposal {
+  string id = 1;
+  string name = 2;
+  repeated string keywords = 3;
+  uint32 size = 4;
+  // Of those, how many are in an Inbox.
+  uint32 inbox = 5;
+  repeated ProposalSample samples = 6;
+  // Name of the training group whose mail it is made of.
+  string group = 7;
+  int64 created_at = 8;  // Unix seconds
+}
+message ListLabelProposalsResponse { repeated LabelProposal proposals = 1; }
+message AcceptLabelProposalRequest {
+  string id = 1;
+  // The user's name for the label; empty keeps the proposed one.
+  string name = 2;
+  // Also take the mail out of the Inbox.
+  bool archive = 3;
+}
+message AcceptLabelProposalResponse { uint32 messages = 1; }
+message RejectLabelProposalRequest { string id = 1; }
 
 message GetEmbeddingsRequest {}
 message SetEmbeddingsRequest { bool enabled = 1; }
@@ -94,6 +136,17 @@ message BackgroundStats {
   repeated RetrainProgress retrains = 13;
   // Id and revision of the model in use; empty without one.
   string model = 14;
+  // Set while a search for new labels runs.
+  optional DiscoveryProgress discovery = 15;
+}
+message DiscoveryProgress {
+  // Training group being searched; empty while starting.
+  string scope = 1;
+  // "loading", "clustering" or "naming".
+  string phase = 2;
+  // total is 0 while the phase has no steps to count (clustering).
+  uint64 done = 3;
+  uint64 total = 4;
 }
 message RetrainProgress {
   string scope = 1;

@@ -56,17 +56,29 @@ impl Message {
     }
 }
 
-/// Tag removal; entities and scripts are not interpreted.
+/// Tag removal; entities are not interpreted. `<style>` and `<script>`
+/// contents are dropped: newsletter CSS would otherwise read as words.
 pub fn strip_html(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
+    let mut rest = html;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let tag = &rest[open..];
+        let Some(close) = tag.find('>') else {
+            return out;
+        };
+        rest = &tag[close + 1..];
+        let name = tag[1..close].trim_start().to_ascii_lowercase();
+        for hidden in ["style", "script"] {
+            if name.starts_with(hidden) {
+                let end = format!("</{hidden}");
+                rest = match rest.to_ascii_lowercase().find(&end) {
+                    Some(at) => &rest[at..],
+                    None => "",
+                };
+            }
         }
     }
+    out.push_str(rest);
     out
 }
