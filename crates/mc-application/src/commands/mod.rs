@@ -107,6 +107,13 @@ pub enum Command {
     /// server when it has none.
     CreateLabel { account_id: AccountId, name: String },
 
+    /// Delete a user mailbox, first moving its messages to `move_to`. Refused
+    /// for a system mailbox, and for one with messages and no `move_to`.
+    DeleteMailbox {
+        mailbox_id: MailboxId,
+        move_to: Option<MailboxId>,
+    },
+
     /// Take messages out of the Inbox; what that means depends on the
     /// account's mailbox model (see `handle_archive`).
     ArchiveMessages { message_ids: Vec<MessageId> },
@@ -217,6 +224,10 @@ pub enum CommandResult {
     MessageDeleted,
     LabelCreated {
         mailbox_id: MailboxId,
+    },
+    /// Messages moved out of the mailbox before it was deleted.
+    MailboxDeleted {
+        moved: u32,
     },
     /// Bulk result: `succeeded` messages changed locally, `failed` were skipped
     /// (already gone, no provider UID, stale search index). Partial success is

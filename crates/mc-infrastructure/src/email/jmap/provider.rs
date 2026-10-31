@@ -522,6 +522,10 @@ impl EmailProvider for JmapEmailProvider {
         self.subscribe(mailbox_id(mailbox), subscribed).await
     }
 
+    async fn delete_mailbox(&self, mailbox: &MailboxPath) -> Result<(), DomainError> {
+        self.destroy_mailbox(mailbox_id(mailbox)).await
+    }
+
     async fn delete_messages(
         &self,
         mailbox: &MailboxPath,

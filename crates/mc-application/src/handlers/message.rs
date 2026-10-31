@@ -624,6 +624,7 @@ fn require_membership(
 }
 
 mod labels;
+mod mailbox;
 mod outgoing;
 mod relocate;
 

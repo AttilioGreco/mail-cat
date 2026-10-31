@@ -153,6 +153,8 @@ pub(super) struct MockEmailProvider {
     pub(super) moved: RwLock<Vec<RemoteId>>,
     /// Makes `move_messages` fail, as a server refusing it.
     pub(super) refuse: RwLock<bool>,
+    /// Paths `delete_mailbox` was asked to delete.
+    pub(super) deleted_mailboxes: RwLock<Vec<MailboxPath>>,
     /// `move_messages` moves, then times out before the server's answer.
     pub(super) time_out: RwLock<bool>,
     /// Makes `move_messages` fail once this many messages moved.
@@ -292,6 +294,13 @@ impl EmailProvider for MockEmailProvider {
     ) -> Result<(), DomainError> {
         Ok(())
     }
+    async fn delete_mailbox(&self, mailbox: &MailboxPath) -> Result<(), DomainError> {
+        self.deleted_mailboxes
+            .write()
+            .unwrap()
+            .push(mailbox.clone());
+        Ok(())
+    }
     async fn send_message(
         &self,
         message: &OutgoingMessage,
@@ -381,6 +390,9 @@ pub(super) struct MockMessageReadRepo {
     pub(super) held: Vec<RemoteId>,
     /// What `share_bodies` hands out: copies given another's body.
     pub(super) shared: Vec<(MessageId, bool)>,
+    /// What `list_messages` lists, whatever the mailbox; a message leaves it
+    /// when a projected event moves or deletes it.
+    pub(super) listing: std::sync::Mutex<Vec<mc_domain::MessageSummary>>,
 }
 
 impl MockMessageReadRepo {
@@ -447,13 +459,18 @@ impl MessageReadRepository for MockMessageReadRepo {
     async fn list_messages(
         &self,
         _mailbox_id: &MailboxId,
-        _pagination: &mc_shared::pagination::Pagination,
+        pagination: &mc_shared::pagination::Pagination,
     ) -> Result<mc_shared::pagination::PagedResult<mc_domain::MessageSummary>, DomainError> {
+        let listing = self.listing.lock().unwrap();
         Ok(mc_shared::pagination::PagedResult {
-            items: vec![],
-            total_count: 0,
+            items: listing
+                .iter()
+                .take(pagination.page_size as usize)
+                .cloned()
+                .collect(),
+            total_count: listing.len() as u64,
             page: 1,
-            page_size: 20,
+            page_size: pagination.page_size,
         })
     }
     async fn get_thread(&self, _id: &MessageId) -> Result<Vec<Message>, DomainError> {
@@ -526,8 +543,13 @@ impl MessageReadRepository for MockMessageReadRepo {
 
 #[async_trait]
 impl ReadModelProjector for MockMessageReadRepo {
-    async fn project(&self, _envelope: &EventEnvelope) -> Result<(), DomainError> {
-        Ok(()) // no-op in tests
+    async fn project(&self, envelope: &EventEnvelope) -> Result<(), DomainError> {
+        if let DomainEvent::MessageMailboxesChanged { message_id, .. }
+        | DomainEvent::MessageDeleted { message_id, .. } = &envelope.payload
+        {
+            self.listing.lock().unwrap().retain(|m| m.id != *message_id);
+        }
+        Ok(())
     }
 }
 

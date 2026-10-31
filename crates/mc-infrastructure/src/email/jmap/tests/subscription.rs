@@ -61,3 +61,29 @@ async fn a_refused_subscription_is_an_error() {
 
     assert!(err.contains("mb2: forbidden"), "{err}");
 }
+
+#[tokio::test]
+async fn deleting_a_mailbox_destroys_it_without_its_emails() {
+    let (base, calls) = recording(|_, _| json!({"destroyed": ["r"]})).await;
+
+    provider(&base).delete_mailbox(&mailbox("r")).await.unwrap();
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls[0].0, "Mailbox/set");
+    assert_eq!(calls[0].1["destroy"], json!(["r"]));
+    assert_eq!(calls[0].1["onDestroyRemoveEmails"], json!(false));
+}
+
+#[tokio::test]
+async fn a_mailbox_the_server_says_still_has_email_is_an_error() {
+    let (base, _) =
+        recording(|_, _| json!({"notDestroyed": {"r": {"type": "mailboxHasEmail"}}})).await;
+
+    let err = provider(&base)
+        .delete_mailbox(&mailbox("r"))
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("r: mailboxHasEmail"), "{err}");
+}

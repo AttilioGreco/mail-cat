@@ -20,6 +20,7 @@ mod delete;
 mod fetch_body;
 mod flags;
 mod labels;
+mod mailbox;
 mod mocks;
 mod moves;
 mod send_compose;

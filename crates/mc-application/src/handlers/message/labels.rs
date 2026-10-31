@@ -269,7 +269,7 @@ impl<
     }
 }
 
-fn bulk_counts(result: CommandResult) -> (u32, u32) {
+pub(super) fn bulk_counts(result: CommandResult) -> (u32, u32) {
     match result {
         CommandResult::MessagesBulkChanged { succeeded, failed } => (succeeded, failed),
         _ => (0, 0),

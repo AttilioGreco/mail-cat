@@ -229,6 +229,16 @@ where
                 }
                 return;
             }
+            // The row is gone by now, so the event names the account.
+            DomainEvent::MailboxDeleted {
+                mailbox_id,
+                account_id,
+            } => {
+                if let Err(e) = self.relearn_scope_of(*account_id).await {
+                    warn!(%mailbox_id, error = %e, "label classifier: retraining after a mailbox deletion failed");
+                }
+                return;
+            }
             // A keyword is how a folders account labels.
             DomainEvent::MessageFlagged {
                 message_id,
@@ -255,7 +265,11 @@ where
         let Some(mailbox) = self.read.get_mailbox(mailbox).await? else {
             return Ok(());
         };
-        let scope = self.store.scope_of(mailbox.account_id).await?;
+        self.relearn_scope_of(mailbox.account_id).await
+    }
+
+    async fn relearn_scope_of(&self, account: AccountId) -> Result<(), ApplicationError> {
+        let scope = self.store.scope_of(account).await?;
         self.store.mark_untrained(scope).await?;
         self.bootstrap().await
     }

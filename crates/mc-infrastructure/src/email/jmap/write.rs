@@ -186,6 +186,28 @@ impl JmapEmailProvider {
         )))
     }
 
+    /// Destroy an empty mailbox. `onDestroyRemoveEmails` stays false so a
+    /// server that still has mail in it refuses (`mailboxHasEmail`) instead of
+    /// destroying that mail.
+    pub(super) async fn destroy_mailbox(&self, mailbox: &str) -> Result<(), DomainError> {
+        let reply = self
+            .client
+            .call(vec![(
+                "Mailbox/set",
+                json!({"destroy": [mailbox], "onDestroyRemoveEmails": false}),
+            )])
+            .await?
+            .remove(0)?;
+        let refused = refusals(&reply, "notDestroyed");
+        if refused.is_empty() {
+            return Ok(());
+        }
+        Err(DomainError::Provider(format!(
+            "JMAP refused: {}",
+            refused.join(", ")
+        )))
+    }
+
     pub(super) async fn set_flags(
         &self,
         ids: &[RemoteId],

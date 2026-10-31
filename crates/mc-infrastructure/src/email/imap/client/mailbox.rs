@@ -371,6 +371,19 @@ where
     exchange(COMMAND_TIMEOUT, "UNSUBSCRIBE", session.unsubscribe(name)).await
 }
 
+/// UNSUBSCRIBE, then DELETE: some servers keep listing a deleted mailbox that
+/// is still subscribed. On Gmail the DELETE removes the label only.
+pub(super) async fn delete_on<T>(
+    session: &mut async_imap::Session<T>,
+    name: &str,
+) -> Result<(), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    set_subscribed_on(session, name, false).await?;
+    exchange(COMMAND_TIMEOUT, "DELETE", session.delete(name)).await
+}
+
 /// Whether a listed mailbox is the one created as `wanted` (lowercase): some
 /// servers list it under the personal namespace prefix (`INBOX.name`).
 fn lists_as(display_path: &str, wanted: &str) -> bool {
@@ -434,6 +447,13 @@ impl ImapEmailProvider {
     ) -> Result<(), DomainError> {
         let mut session = self.session().await?;
         set_subscribed_on(&mut session, &mailbox_path_to_string(mailbox), subscribed).await?;
+        self.release(session);
+        Ok(())
+    }
+
+    pub(super) async fn remove_mailbox(&self, mailbox: &MailboxPath) -> Result<(), DomainError> {
+        let mut session = self.session().await?;
+        delete_on(&mut session, &mailbox_path_to_string(mailbox)).await?;
         self.release(session);
         Ok(())
     }

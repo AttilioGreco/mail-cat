@@ -97,10 +97,13 @@ message RenameMailboxResponse {
 
 message DeleteMailboxRequest {
   string mailbox_id = 1;
+  // Where the mailbox's messages go first. Required when it holds any.
+  string move_to_mailbox_id = 2;
 }
 
 message DeleteMailboxResponse {
   bool success = 1;
+  uint32 moved = 2;  // messages moved out before the deletion
 }
 
 message SetMailboxSubscribedRequest {

@@ -279,6 +279,22 @@ async fn subscribing_names_the_mailbox_as_the_server_spelled_it() {
 }
 
 #[tokio::test]
+async fn deleting_a_mailbox_unsubscribes_then_deletes_it() {
+    use super::super::mailbox::delete_on;
+    let (mut session, commands) = scripted(server_reply).await;
+
+    delete_on(&mut session, "[Gmail]/Sent Mail").await.unwrap();
+
+    assert_eq!(
+        uid_commands(&commands),
+        [
+            "UNSUBSCRIBE \"[Gmail]/Sent Mail\"",
+            "DELETE \"[Gmail]/Sent Mail\""
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_refused_subscription_is_an_error() {
     use super::super::mailbox::set_subscribed_on;
     let (mut session, _) = scripted(|_| "$T NO [CANNOT] not now\r\n").await;

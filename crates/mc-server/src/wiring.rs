@@ -60,7 +60,7 @@ pub(crate) type SearchHandlerImpl =
 /// Application context with all wired dependencies.
 pub struct AppContext {
     pub account_service: AccountServiceImpl<CommandBusImpl, QueryBusImpl>,
-    pub mailbox_service: MailboxServiceImpl<QueryBusImpl>,
+    pub mailbox_service: MailboxServiceImpl<CommandBusImpl, QueryBusImpl>,
     pub message_service: MessageServiceImpl<CommandBusImpl, QueryBusImpl>,
     pub search_service: SearchServiceImpl<QueryBusImpl>,
     pub contact_service: ContactServiceImpl<QueryBusImpl, CommandBusImpl>,
@@ -670,7 +670,7 @@ impl AppContext {
             .with_lifecycle(account_runtime.clone() as Arc<dyn AccountLifecycle>)
             .with_provisioner(provisioner);
 
-        let mailbox_service = MailboxServiceImpl::new(query_bus.clone())
+        let mailbox_service = MailboxServiceImpl::new(command_bus.clone(), query_bus.clone())
             .with_sync_trigger(sync_service.clone() as Arc<dyn SyncTrigger>);
 
         let message_service =

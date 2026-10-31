@@ -234,6 +234,10 @@ impl EmailProvider for ImapEmailProvider {
         self.subscribe(mailbox, subscribed).await
     }
 
+    async fn delete_mailbox(&self, mailbox: &MailboxPath) -> Result<(), DomainError> {
+        self.remove_mailbox(mailbox).await
+    }
+
     fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
         self.layout()?.backed_by(mailbox)
     }

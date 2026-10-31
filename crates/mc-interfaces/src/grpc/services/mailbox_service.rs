@@ -8,18 +8,25 @@ use crate::grpc::proto::{
     RenameMailboxRequest, RenameMailboxResponse, SetMailboxSubscribedRequest,
     SetMailboxSubscribedResponse, mailbox_service_server::MailboxService,
 };
-use mc_application::{SyncTrigger, bus::QueryBus, queries::Query};
+use mc_application::{
+    SyncTrigger,
+    bus::{CommandBus, QueryBus},
+    commands::{Command, CommandResult},
+    queries::Query,
+};
 use mc_domain::MailboxId;
 
 /// Mailbox service implementation with QueryBus integration.
-pub struct MailboxServiceImpl<Q: QueryBus + 'static> {
+pub struct MailboxServiceImpl<C: CommandBus + 'static, Q: QueryBus + 'static> {
+    command_bus: Arc<C>,
     query_bus: Arc<Q>,
     sync_trigger: Option<Arc<dyn SyncTrigger>>,
 }
 
-impl<Q: QueryBus + 'static> MailboxServiceImpl<Q> {
-    pub fn new(query_bus: Arc<Q>) -> Self {
+impl<C: CommandBus + 'static, Q: QueryBus + 'static> MailboxServiceImpl<C, Q> {
+    pub fn new(command_bus: Arc<C>, query_bus: Arc<Q>) -> Self {
         Self {
+            command_bus,
             query_bus,
             sync_trigger: None,
         }
@@ -33,7 +40,7 @@ impl<Q: QueryBus + 'static> MailboxServiceImpl<Q> {
 }
 
 #[tonic::async_trait]
-impl<Q: QueryBus + 'static> MailboxService for MailboxServiceImpl<Q> {
+impl<C: CommandBus + 'static, Q: QueryBus + 'static> MailboxService for MailboxServiceImpl<C, Q> {
     async fn list_mailboxes(
         &self,
         request: Request<ListMailboxesRequest>,
@@ -109,10 +116,31 @@ impl<Q: QueryBus + 'static> MailboxService for MailboxServiceImpl<Q> {
 
     async fn delete_mailbox(
         &self,
-        _request: Request<DeleteMailboxRequest>,
+        request: Request<DeleteMailboxRequest>,
     ) -> Result<Response<DeleteMailboxResponse>, Status> {
-        // TODO: Implement when DeleteMailbox command is added
-        Err(Status::unimplemented("delete_mailbox not yet implemented"))
+        let req = request.into_inner();
+        let parse = |id: &str| {
+            uuid::Uuid::parse_str(id)
+                .map(MailboxId::from_uuid)
+                .map_err(|e| Status::invalid_argument(e.to_string()))
+        };
+        let result = self
+            .command_bus
+            .dispatch(Command::DeleteMailbox {
+                mailbox_id: parse(&req.mailbox_id)?,
+                move_to: (!req.move_to_mailbox_id.is_empty())
+                    .then(|| parse(&req.move_to_mailbox_id))
+                    .transpose()?,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        let CommandResult::MailboxDeleted { moved } = result else {
+            return Err(Status::internal("unexpected command result"));
+        };
+        Ok(Response::new(DeleteMailboxResponse {
+            success: true,
+            moved,
+        }))
     }
 
     async fn set_mailbox_subscribed(

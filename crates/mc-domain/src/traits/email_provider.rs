@@ -152,6 +152,16 @@ pub trait EmailProvider: Send + Sync {
         ))
     }
 
+    /// Remove `mailbox` from the server. The caller has emptied it: a server
+    /// that still holds messages in it refuses (JMAP `mailboxHasEmail`) and
+    /// that refusal is the error. Where mailboxes are labels (Gmail, JMAP)
+    /// only the label goes, never a message.
+    async fn delete_mailbox(&self, _mailbox: &MailboxPath) -> Result<(), DomainError> {
+        Err(DomainError::NotSupported(
+            "this server cannot delete mailboxes".into(),
+        ))
+    }
+
     /// The mailbox whose sync carries `mailbox`'s messages, when `mailbox` is
     /// only a view over it (a Gmail label over All Mail). Views are never
     /// synced themselves, and their memberships hold the backing mailbox's ids.

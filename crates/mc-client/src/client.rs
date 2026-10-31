@@ -255,6 +255,19 @@ impl MailCatClient {
         Ok((!resp.warning.is_empty()).then_some(resp.warning))
     }
 
+    /// Delete a user mailbox on the server, first moving its messages to
+    /// `move_to`. Returns how many were moved.
+    pub async fn delete_mailbox(&self, mailbox_id: &str, move_to: Option<&str>) -> Result<u32> {
+        let resp = MailboxServiceClient::new(self.channel.clone())
+            .delete_mailbox(pb::DeleteMailboxRequest {
+                mailbox_id: mailbox_id.to_owned(),
+                move_to_mailbox_id: move_to.unwrap_or_default().to_owned(),
+            })
+            .await?
+            .into_inner();
+        Ok(resp.moved)
+    }
+
     // ── Messages ──────────────────────────────────────────────────────────────
 
     pub async fn list_messages(

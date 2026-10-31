@@ -186,6 +186,14 @@ where
                     .handle_create_label(account_id, &name)
                     .await
             }
+            Command::DeleteMailbox {
+                mailbox_id,
+                move_to,
+            } => {
+                self.message_handler
+                    .handle_delete_mailbox(mailbox_id, move_to)
+                    .await
+            }
             Command::ArchiveMessages { message_ids } => {
                 let accounts = self.accounts().await?;
                 self.message_handler

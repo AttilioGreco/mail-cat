@@ -132,6 +132,10 @@ impl EmailProvider for AnyProvider {
         delegate!(self, p => p.set_subscribed(mailbox, subscribed).await)
     }
 
+    async fn delete_mailbox(&self, mailbox: &MailboxPath) -> Result<(), DomainError> {
+        delegate!(self, p => p.delete_mailbox(mailbox).await)
+    }
+
     fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
         delegate!(self, p => p.backed_by(mailbox))
     }
