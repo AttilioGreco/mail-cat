@@ -55,6 +55,7 @@ export type ShortcutAction =
   | 'toggleRead'
   | 'toggleFlag'
   | 'archiveMessage'
+  | 'labelMessage'
   | 'markSpam'
   | 'deleteMessage'
   | 'deletePermanently'
@@ -97,6 +98,7 @@ export const ACTION_META: Record<
   toggleRead: { label: 'Letto / non letto', category: 'Messaggio' },
   toggleFlag: { label: 'Stella', category: 'Messaggio' },
   archiveMessage: { label: 'Archivia', category: 'Messaggio' },
+  labelMessage: { label: 'Etichette', category: 'Messaggio' },
   markSpam: { label: 'Segna come spam', category: 'Messaggio' },
   deleteMessage: { label: 'Sposta nel cestino', category: 'Messaggio' },
   deletePermanently: { label: 'Elimina definitivamente', category: 'Messaggio' },
@@ -134,6 +136,7 @@ const VIM: Keymap = {
   toggleRead: 'U',
   toggleFlag: 'S',
   archiveMessage: 'E',
+  labelMessage: 'L',
   markSpam: 'Shift+1', // '!' on both US and IT layouts
   deleteMessage: ['Delete', 'Shift+3'], // Gmail's '#' is US-only; Delete always works
   deletePermanently: 'Shift+Delete',
@@ -166,6 +169,7 @@ const OUTLOOK: Keymap = {
   toggleRead: 'Mod+Q',
   toggleFlag: 'Mod+Shift+G',
   archiveMessage: 'Backspace',
+  labelMessage: 'Mod+Shift+L',
   markSpam: 'Mod+Alt+J',
   deleteMessage: 'Delete',
   deletePermanently: 'Shift+Delete',

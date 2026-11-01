@@ -47,7 +47,12 @@ async fn setup() -> Setup {
     }
 }
 
-async fn mailbox(world: &World, account: AccountId, name: &str, kind: MailboxType) -> MailboxId {
+pub(super) async fn mailbox(
+    world: &World,
+    account: AccountId,
+    name: &str,
+    kind: MailboxType,
+) -> MailboxId {
     let id = MailboxId::new();
     let segments = name.split('/').map(str::to_owned).collect();
     world

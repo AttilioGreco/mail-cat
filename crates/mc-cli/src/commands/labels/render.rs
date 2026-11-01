@@ -2,8 +2,8 @@
 //! Field names are those of the JSON.
 
 use mc_client::{
-    AccountCount, BackgroundStats, LabelChange, LabelDetail, LabelProposal, LabelScope, PlanReport,
-    ProposalDetail, ProposalMessage, UndoReport,
+    AccountCount, ApplyAllReport, BackgroundStats, LabelChange, LabelDetail, LabelProposal,
+    LabelScope, MatchReport, PlanReport, ProposalDetail, ProposalMessage, UndoReport,
 };
 
 use crate::toon::{Toon, l, n, s};
@@ -268,6 +268,79 @@ pub fn label_change(c: &LabelChange) -> Toon {
         "mailboxes",
         &["accountId", "label", "into", "how", "messages"],
         &steps,
+    );
+    t
+}
+
+fn preview_items(t: &mut Toon, name: &str, items: &[mc_client::ApplyPreviewItem]) {
+    let rows: Vec<_> = items
+        .iter()
+        .map(|i| vec![s(&i.message_id), s(&i.from), s(&i.subject)])
+        .collect();
+    t.table(name, &["messageId", "from", "subject"], &rows);
+}
+
+pub fn match_report(r: &MatchReport) -> Toon {
+    let mut t = Toon::default();
+    t.field("dryRun", n(r.dry_run))
+        .field("label", s(&r.label))
+        .field("toLabel", n(r.to_label))
+        .field("toArchive", n(r.to_archive))
+        .field("already", n(r.already))
+        .field("creates", n(r.creates));
+    let rows: Vec<_> = r
+        .accounts
+        .iter()
+        .map(|a| {
+            vec![
+                s(&a.account_id),
+                n(a.messages),
+                n(a.archived),
+                n(a.already),
+                n(a.creates),
+            ]
+        })
+        .collect();
+    t.table(
+        "accounts",
+        &["accountId", "messages", "archived", "already", "creates"],
+        &rows,
+    );
+    preview_items(&mut t, "sample", &r.sample);
+    t
+}
+
+pub fn apply_all(r: &ApplyAllReport) -> Toon {
+    let mut t = Toon::default();
+    t.field("dryRun", n(r.dry_run))
+        .field("toLabel", n(r.to_label));
+    let rows: Vec<_> = r
+        .labels
+        .iter()
+        .map(|x| {
+            vec![
+                s(&x.name),
+                s(&x.label),
+                s(&x.mode),
+                n(x.threshold),
+                n(x.positives),
+                n(x.to_label),
+                s(&x.scope),
+            ]
+        })
+        .collect();
+    t.table(
+        "labels",
+        &[
+            "name",
+            "label",
+            "mode",
+            "threshold",
+            "positives",
+            "toLabel",
+            "scope",
+        ],
+        &rows,
     );
     t
 }

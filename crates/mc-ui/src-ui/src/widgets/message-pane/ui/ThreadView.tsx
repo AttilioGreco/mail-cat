@@ -8,6 +8,8 @@ import { useSetFlags, useDeleteMessage, useMoveMessage, useArchiveMessages, useT
 import { useMailboxes } from '@/entities/mailbox';
 import { useShortcuts } from '@/features/keyboard-shortcuts';
 import { useComposeStore, type ComposeMode } from '@/features/compose-message';
+import { LabelMenuItems, MessageLabels, useLabelDialogs } from '@/features/manage-labels';
+import { ContextMenu } from '@/shared/ui/ContextMenu';
 import { EmailContent } from './EmailContent';
 
 // ── Main component ─────────────────────────────────────────────────────────
@@ -30,6 +32,8 @@ export function ThreadView() {
   const toggleStar = useToggleStar();
   const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
   const qc = useQueryClient();
+  const openLabelPicker = useLabelDialogs((s) => s.openPicker);
+  const [menu, setMenu] = useState<{ x: number; y: number; message: ThreadMessage } | null>(null);
 
   const mailboxCacheKey = mailboxKey(selectedAccountId, selectedMailboxId) ?? undefined;
 
@@ -122,6 +126,9 @@ export function ThreadView() {
   useShortcuts({
     deleteMessage: multiSelected ? undefined : () => void deleteMessages(thread),
     deletePermanently: multiSelected ? undefined : () => void deleteMessages(thread, true),
+    // The thread does not carry keywords: a keyword account starts from none.
+    labelMessage: multiSelected || !selectedAccountId ? undefined : () =>
+      openLabelPicker(selectedAccountId, thread.map((m) => ({ id: m.id, mailboxIds: m.mailboxIds, tags: [] }))),
     archiveMessage: () => void archiveThread(),
     markSpam: () => void moveThreadToSpam(),
     toggleRead: () => void markConversation(hasUnread),
@@ -258,7 +265,14 @@ export function ThreadView() {
             const isLast = idx === messages.length - 1;
 
             return (
-              <div key={message.id} ref={isLast ? expandedRef : undefined}>
+              <div
+                key={message.id}
+                ref={isLast ? expandedRef : undefined}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setMenu({ x: e.clientX, y: e.clientY, message });
+                }}
+              >
                 {/* Separator between messages (not before first) */}
                 {idx > 0 && (
                   <div className="mx-6 border-t border-border/60" />
@@ -288,6 +302,17 @@ export function ThreadView() {
           <div className="h-12" />
         </div>
       </div>
+
+      {menu && selectedAccountId && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+          <LabelMenuItems
+            accountId={selectedAccountId}
+            messages={[{ id: menu.message.id, mailboxIds: menu.message.mailboxIds, tags: [] }]}
+            senderEmail={menu.message.fromEmail}
+            onDone={() => setMenu(null)}
+          />
+        </ContextMenu>
+      )}
     </div>
   );
 }
@@ -356,6 +381,7 @@ function ExpandedMessage({
   onForward,
   onDelete,
 }: ExpandedProps) {
+  const { selectedAccountId, selectedMailboxId } = useSessionStore();
   return (
     <div className="px-6 py-3">
       {/* Message header — click collapses */}
@@ -387,6 +413,17 @@ function ExpandedMessage({
           </div>
         </div>
       </button>
+
+      {selectedAccountId && (
+        <div className="ml-11">
+          <MessageLabels
+            accountId={selectedAccountId}
+            messageId={message.id}
+            mailboxIds={message.mailboxIds}
+            viewedId={selectedMailboxId}
+          />
+        </div>
+      )}
 
       {/* Email body */}
       <div className="ml-11 mt-4">

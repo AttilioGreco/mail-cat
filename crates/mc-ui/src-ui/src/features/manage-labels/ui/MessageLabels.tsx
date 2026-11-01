@@ -1,83 +1,45 @@
 import { useState } from 'react';
 import { Tag } from 'lucide-react';
 import { LabelChip } from '@/shared/ui/label-chip';
-import { Popover, PopoverContent, PopoverTrigger } from '@/shared/ui/popover';
 import { useAccounts } from '@/entities/account';
-import { useMailboxes, labelNames, subscribedOnly, type Mailbox } from '@/entities/mailbox';
-import { useChangeLabels, useModifyTags } from '../model/useLabelMutations';
+import { useMailboxes, labelNames } from '@/entities/mailbox';
+import { useLabelDialogs } from '../model/dialogStore';
+import { useModifyTags } from '../model/useLabelMutations';
+import { labelMode } from './LabelPickerDialog';
 
 interface MessageLabelsProps {
   accountId: string;
   messageId: string;
   mailboxIds: string[];
-  tags: string[];
+  /** Absent where keywords are not known (the conversation view): the tag editor is then left out. */
+  tags?: string[];
   /** The mailbox on screen: not repeated as a chip. */
   viewedId: string | null;
 }
 
-/** Label chips, the label picker and (when the server takes keywords) the tag
- *  editor of one message. Renders nothing on a Folders account. */
+/** Label chips, the button that opens the label picker and (when the server
+ *  takes keywords) the tag editor of one message. */
 export function MessageLabels({ accountId, messageId, mailboxIds, tags, viewedId }: MessageLabelsProps) {
   const account = useAccounts().data?.find((a) => a.id === accountId);
   const { data: mailboxes = [] } = useMailboxes(accountId);
-  if (account?.mailboxModel !== 'labels') return null;
+  const openPicker = useLabelDialogs((s) => s.openPicker);
+  if (!labelMode(account)) return null;
 
-  const chips = labelNames(mailboxes, mailboxIds, viewedId);
+  const chips = account?.mailboxModel === 'labels' ? labelNames(mailboxes, mailboxIds, viewedId) : [];
   return (
     <div className="mt-3 flex flex-wrap items-center gap-1.5">
       {chips.map((name) => <LabelChip key={name} name={name} />)}
-      <LabelPicker messageId={messageId} mailboxes={mailboxes} mailboxIds={mailboxIds} />
-      {account.supportsTags === true && <TagEditor messageId={messageId} tags={tags} />}
-    </div>
-  );
-}
-
-/** The gRPC status text of a refused last-label removal is not for display. */
-function pickerError(e: Error): string {
-  return /precondition/i.test(e.message) ? 'Un messaggio deve avere almeno un’etichetta.' : e.message;
-}
-
-function LabelPicker({ messageId, mailboxes, mailboxIds }: { messageId: string; mailboxes: Mailbox[]; mailboxIds: string[] }) {
-  const change = useChangeLabels();
-  const toggle = (id: string, on: boolean) =>
-    change.mutate({ messageId, add: on ? [id] : [], remove: on ? [] : [id] });
-
-  // A label the message already carries stays listed, so it can still be removed.
-  const pickable = subscribedOnly(mailboxes).concat(
-    mailboxes.filter((m) => !m.subscribed && mailboxIds.includes(m.id)),
-  );
-
-  return (
-    <Popover onOpenChange={(open) => open && change.reset()}>
-      <PopoverTrigger
+      <button
+        type="button"
         aria-label="Modifica etichette"
+        onClick={() => openPicker(accountId, [{ id: messageId, mailboxIds, tags: tags ?? [] }])}
         className="inline-flex items-center gap-1 rounded-full border border-dashed border-border px-1.5 py-px text-[10px] leading-4 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
       >
         <Tag size={10} />
         Etichette
-      </PopoverTrigger>
-      <PopoverContent>
-        <ul aria-label="Etichette" className="max-h-64 overflow-y-auto">
-          {pickable.map((m) => (
-            <li key={m.id}>
-              <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-surface-hover">
-                <input
-                  type="checkbox"
-                  checked={mailboxIds.includes(m.id)}
-                  onChange={(e) => toggle(m.id, e.target.checked)}
-                />
-                <span className="truncate">{m.name}</span>
-              </label>
-            </li>
-          ))}
-        </ul>
-        {change.error && (
-          <p role="alert" className="px-2 py-1.5 text-[11px] text-destructive">
-            {pickerError(change.error)}
-          </p>
-        )}
-      </PopoverContent>
-    </Popover>
+      </button>
+      {tags && account?.supportsTags === true && <TagEditor messageId={messageId} tags={tags} />}
+    </div>
   );
 }
 
@@ -88,13 +50,13 @@ function TagEditor({ messageId, tags }: { messageId: string; tags: string[] }) {
   const add = () => {
     const tag = draft.trim();
     if (!tag || tags.includes(tag)) return;
-    modify.mutate({ messageId, add: [tag] }, { onSuccess: () => setDraft('') });
+    modify.mutate({ messageIds: [messageId], add: [tag] }, { onSuccess: () => setDraft('') });
   };
 
   return (
     <>
       {tags.map((t) => (
-        <LabelChip key={t} name={t} tag onRemove={() => modify.mutate({ messageId, remove: [t] })} />
+        <LabelChip key={t} name={t} tag onRemove={() => modify.mutate({ messageIds: [messageId], remove: [t] })} />
       ))}
       <input
         value={draft}

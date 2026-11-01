@@ -5,6 +5,7 @@
 
 mod cluster;
 mod curate;
+mod matching;
 mod plan;
 mod relabel;
 #[cfg(test)]
@@ -21,8 +22,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use mc_domain::{
-    AccountId, ClusterSummary, LabelMode, LabelSettings, MailboxReadRepository, MessageId,
-    Proposal, ProposalId, ProposalSample, ProposalStatus, Scope, TagSource, TaggingStore,
+    AccountId, ClusterSummary, LabelMode, MailboxReadRepository, MessageId, Proposal, ProposalId,
+    ProposalSample, ProposalStatus, Scope, TagSource, TaggingStore,
 };
 
 use super::placement::Home;
@@ -73,6 +74,7 @@ pub struct ProposalView {
 }
 
 pub use curate::{LabelDetail, LabelEntry, LabelHome, LabelPresence, LabelScope, ProposalMessage};
+pub use matching::{MatchAccount, MatchReport};
 pub use plan::{AccountCount, OpResult, OpStatus, PlanOp, PlanReport, PlanSummary};
 pub use relabel::{AccountChange, ChangeKind, LabelChange, MailboxStep, StepKind};
 pub use undo::UndoReport;
@@ -440,6 +442,31 @@ where
         self.label_with(proposal, name, archive).await
     }
 
+    /// Point `place` at the label's mailbox on `account`, creating it there the
+    /// first time. Created, the label takes the user's spelling (it is keyed
+    /// in lowercase).
+    async fn create_home(
+        &self,
+        created: &mut HashMap<AccountId, mc_domain::MailboxId>,
+        account: AccountId,
+        place: &mut Placement,
+        name: &str,
+    ) -> Result<(), ApplicationError> {
+        if !matches!(place.home, Home::Create(_)) {
+            return Ok(());
+        }
+        let mailbox = match created.get(&account) {
+            Some(&mailbox) => mailbox,
+            None => {
+                let mailbox = self.create_label(account, name).await?;
+                created.insert(account, mailbox);
+                mailbox
+            }
+        };
+        place.home = Home::Mailbox(mailbox);
+        Ok(())
+    }
+
     /// Put `name` on the proposal's mail, creating it where an account lacks it.
     async fn label_with(
         self: &Arc<Self>,
@@ -455,7 +482,7 @@ where
             LabelMode::Apply
         };
 
-        let mut created: HashMap<AccountId, mc_domain::MailboxId> = HashMap::new();
+        let mut created = HashMap::new();
         let mut picks = Vec::new();
         for page in proposal.members.chunks(SCAN_PAGE) {
             for source in self.store.sources(page).await? {
@@ -464,35 +491,15 @@ where
                     continue;
                 }
                 let mut place = Placement::of(&source, &group, &label, mode);
-                // The label is keyed in lowercase; created, it takes the user's spelling.
-                if matches!(place.home, Home::Create(_)) {
-                    let mailbox = match created.get(&source.account_id) {
-                        Some(&mailbox) => mailbox,
-                        None => {
-                            let mailbox = self.create_label(source.account_id, &name).await?;
-                            created.insert(source.account_id, mailbox);
-                            mailbox
-                        }
-                    };
-                    place.home = Home::Mailbox(mailbox);
-                }
+                self.create_home(&mut created, source.account_id, &mut place, &name)
+                    .await?;
                 picks.push(Pick::new(&source, place, 1.0));
             }
         }
 
         let queued = picks.len() as u32;
         let created = created.into_values().collect();
-        let settings = self.store.settings(proposal.scope).await?;
-        if settings
-            .iter()
-            .all(|s| s.label != label || s.mode == LabelMode::Off)
-        {
-            let suggest = LabelSettings {
-                mode: LabelMode::Suggest,
-                ..LabelSettings::off(&label)
-            };
-            self.store.put_settings(proposal.scope, &suggest).await?;
-        }
+        self.start_suggesting(proposal.scope, &label).await?;
         self.store
             .put_proposal(&Proposal {
                 name,

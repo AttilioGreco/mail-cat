@@ -44,13 +44,14 @@ use crate::error::ApplicationError;
 
 pub use discovery::{
     AccountChange, AccountCount, ChangeKind, DiscoveryPhase, DiscoveryProgress, LabelChange,
-    LabelDetail, LabelEntry, LabelHome, LabelPresence, LabelScope, MailboxStep, OpResult, OpStatus,
-    PlanOp, PlanReport, PlanSummary, ProposalMessage, ProposalView, StepKind, UndoReport,
+    LabelDetail, LabelEntry, LabelHome, LabelPresence, LabelScope, MailboxStep, MatchAccount,
+    MatchReport, OpResult, OpStatus, PlanOp, PlanReport, PlanSummary, ProposalMessage,
+    ProposalView, StepKind, UndoReport,
 };
 pub use eval::{EvalRow, LabelEval};
 pub use naming::KeywordNamer;
 use placement::{Placement, display_name};
-pub use retro::{Preview, PreviewItem};
+pub use retro::{LabelApply, Preview, PreviewItem};
 pub use stats::{ApplyKind, ApplyProgress, BackgroundStats, EmbedderState, RetrainProgress};
 
 /// Live auto-apply only touches recent mail: an initial sync delivers years

@@ -2,7 +2,7 @@
 //! once confirmed, batches through the ordinary label commands so every change
 //! reaches the provider through its queue and throttling.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,13 +10,13 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use mc_domain::{
-    AccountId, AutoApplied, LabelMode, MailboxReadRepository, MessageId, ModelStats, ProposalId,
-    Scope, SourceFilter, TagSource, TaggingStore,
+    AccountId, AutoApplied, LabelMode, LabelSettings, MailboxReadRepository, MessageId, ModelStats,
+    ProposalId, Scope, SourceFilter, TagSource, TaggingStore,
 };
 
 use super::placement::{GroupMailboxes, Placement};
 use super::stats::ApplyKind;
-use super::{TaggingService, bayes, features, label_key};
+use super::{TaggingService, bayes, display_name, features, label_key};
 use crate::bus::CommandBus;
 use crate::error::ApplicationError;
 
@@ -41,6 +41,21 @@ pub struct Preview {
     pub to_label: u32,
     /// Of those, how many would also leave the Inbox.
     pub to_archive: u32,
+    /// The surest ones.
+    pub sample: Vec<PreviewItem>,
+}
+
+/// What labelling the existing mail with one label would do.
+#[derive(Debug, Clone)]
+pub struct LabelApply {
+    pub scope: String,
+    /// As the group spells it.
+    pub name: String,
+    pub label: String,
+    pub mode: LabelMode,
+    pub threshold: f64,
+    pub positives: u32,
+    pub to_label: u32,
     /// The surest ones.
     pub sample: Vec<PreviewItem>,
 }
@@ -249,6 +264,136 @@ where
         let service = Arc::clone(self);
         tokio::spawn(async move { service.run(plan.picks, label, false, None).await });
         Ok(preview)
+    }
+
+    /// What the classifier would label among the existing mail, for every label
+    /// of the group with enough examples, in one pass over the mail: a page's
+    /// words and neighbours are read once and scored for all the labels.
+    /// Without `only`, a dry run covers every such label and a run those whose
+    /// mode is not off. A run queues one throttled job per label; modes stay as
+    /// they are and nothing leaves the Inbox.
+    pub async fn apply_all(
+        self: &Arc<Self>,
+        account: Option<AccountId>,
+        only: &[String],
+        dry_run: bool,
+    ) -> Result<Vec<LabelApply>, ApplicationError> {
+        let only: HashSet<String> = only.iter().map(|l| label_key(l)).collect();
+        let scopes = match account {
+            Some(a) => vec![self.store.scope_of(a).await?],
+            None => self.store.scopes().await?,
+        };
+        let mut found = HashSet::new();
+        let (mut out, mut jobs) = (Vec::new(), Vec::new());
+        for scope in scopes {
+            let settings = self.store.settings(scope).await?;
+            let mut chosen = Vec::new();
+            for (label, positives) in self.store.positives(scope).await? {
+                let set = settings
+                    .iter()
+                    .find(|s| s.label == label)
+                    .cloned()
+                    .unwrap_or_else(|| LabelSettings::off(&label));
+                let wanted = if only.is_empty() {
+                    dry_run || set.mode != LabelMode::Off
+                } else {
+                    only.contains(&label)
+                };
+                if !wanted || positives < LabelSettings::MIN_POSITIVES {
+                    continue;
+                }
+                if !dry_run && self.is_applying(&label) {
+                    return Err(ApplicationError::PreconditionFailed(format!(
+                        "{label:?} is still being applied or undone: wait for it to finish"
+                    )));
+                }
+                found.insert(label.clone());
+                chosen.push((label, set, positives));
+            }
+            if chosen.is_empty() {
+                continue;
+            }
+            let group = self.group_mailboxes(scope).await?;
+            let plans = self.plan_all(scope, &chosen, &group).await?;
+            for ((label, set, positives), plan) in chosen.into_iter().zip(plans) {
+                let preview = plan.preview();
+                out.push(LabelApply {
+                    scope: scope.key(),
+                    name: display_name(&group, &label),
+                    label: label.clone(),
+                    mode: set.mode,
+                    threshold: set.threshold,
+                    positives,
+                    to_label: preview.to_label,
+                    sample: preview.sample,
+                });
+                jobs.push((label, plan.picks));
+            }
+        }
+        if let Some(missing) = only.iter().find(|l| !found.contains(*l)) {
+            return Err(ApplicationError::PreconditionFailed(format!(
+                "{missing:?} is not a label with at least {} examples",
+                LabelSettings::MIN_POSITIVES
+            )));
+        }
+        if !dry_run {
+            for (label, picks) in jobs.into_iter().filter(|(_, p)| !p.is_empty()) {
+                let service = Arc::clone(self);
+                tokio::spawn(async move { service.run(picks, label, false, None).await });
+            }
+        }
+        out.sort_by(|a, b| {
+            b.to_label
+                .cmp(&a.to_label)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(out)
+    }
+
+    /// `plan` for several labels of one scope at once, in the order given.
+    async fn plan_all(
+        &self,
+        scope: Scope,
+        labels: &[(String, LabelSettings, u32)],
+        group: &GroupMailboxes,
+    ) -> Result<Vec<Plan>, ApplicationError> {
+        let accounts = self.store.scope_accounts(scope).await?;
+        let mut plans: Vec<Plan> = labels.iter().map(|_| Plan::default()).collect();
+        let mut cursor = None;
+        loop {
+            let page = self
+                .store
+                .source_page(&accounts, SourceFilter::Any, cursor, false, self.page)
+                .await?;
+            let Some(last) = page.last().map(|s| s.id) else {
+                return Ok(plans);
+            };
+            cursor = Some(last);
+            let candidates: Vec<(&TagSource, Vec<String>)> = page
+                .iter()
+                .filter(|s| s.can_label())
+                .map(|s| (s, features::tokens(s, true)))
+                .collect();
+            let wanted = candidates.iter().flat_map(|(_, t)| t.iter().cloned());
+            let stats = self.stats_for(scope, wanted.collect()).await?;
+            let ids: Vec<MessageId> = candidates.iter().map(|(s, _)| s.id).collect();
+            let nearest = self.nearest(scope, &ids).await?;
+            for (source, tokens) in candidates {
+                for ((label, set, _), plan) in labels.iter().zip(&mut plans) {
+                    let Some(score) = bayes::score(&stats, label, &tokens, nearest.get(&source.id))
+                    else {
+                        continue;
+                    };
+                    if score < set.threshold
+                        || source.labels.contains(label)
+                        || self.rejected(source.id, label).await?
+                    {
+                        continue;
+                    }
+                    plan.consider(source, score, set.threshold, LabelMode::Apply, group, label);
+                }
+            }
+        }
     }
 
     /// Label the picks in batches, each recorded first so it can be undone.

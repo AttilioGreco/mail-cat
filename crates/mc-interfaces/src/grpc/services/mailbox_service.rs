@@ -100,10 +100,34 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> MailboxService for MailboxS
 
     async fn create_mailbox(
         &self,
-        _request: Request<CreateMailboxRequest>,
+        request: Request<CreateMailboxRequest>,
     ) -> Result<Response<CreateMailboxResponse>, Status> {
-        // TODO: Implement when CreateMailbox command is added
-        Err(Status::unimplemented("create_mailbox not yet implemented"))
+        let req = request.into_inner();
+        let account_id = mc_domain::AccountId::from_uuid(
+            uuid::Uuid::parse_str(&req.account_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
+        );
+        let result = self
+            .command_bus
+            .dispatch(Command::CreateLabel {
+                account_id,
+                name: req.path,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        let CommandResult::LabelCreated { mailbox_id } = result else {
+            return Err(Status::internal("unexpected command result"));
+        };
+        let mailbox = self
+            .query_bus
+            .dispatch(Query::GetMailbox { mailbox_id })
+            .await
+            .map_err(application_error_to_status)?
+            .into_mailbox()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(CreateMailboxResponse {
+            mailbox: mailbox.as_ref().map(domain_mailbox_to_proto),
+        }))
     }
 
     async fn rename_mailbox(

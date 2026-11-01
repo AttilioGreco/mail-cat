@@ -14,12 +14,13 @@ use mc_application::{
 };
 use mc_domain::{
     AccountId, Address, AggregateType, DomainEvent, EmailAddress, Envelope, EventStore, Flag,
-    GroupId, LabelMode, MailboxId, MailboxModel, MailboxPath, MailboxType, Membership, MessageId,
-    ProviderType, ReadModelProjector, RemoteId,
+    GroupId, LabelMode, ListHeaders, MailboxId, MailboxModel, MailboxPath, MailboxType, Membership,
+    MessageId, ProviderType, ReadModelProjector, RemoteId,
 };
 mod curation;
 mod discovery;
 mod embeddings;
+mod matching;
 mod relabel;
 
 use mc_infrastructure::{SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore};
@@ -53,6 +54,8 @@ struct World {
     account: AccountId,
     inbox: MailboxId,
     label: MailboxId,
+    /// The List-Id of the messages made from now on.
+    list_id: Mutex<Option<String>>,
 }
 
 impl World {
@@ -88,6 +91,7 @@ impl World {
             account: AccountId::new(),
             inbox: MailboxId::new(),
             label: MailboxId::new(),
+            list_id: Mutex::default(),
             _dir: dir,
         };
         let account = world.account;
@@ -213,6 +217,7 @@ impl World {
         received_at: chrono::DateTime<Utc>,
     ) -> (MessageId, mc_domain::EventEnvelope) {
         let id = MessageId::new();
+        let list_id = self.list_id.lock().unwrap().clone();
         let arrival = self
             .record(
                 id.to_string(),
@@ -243,7 +248,10 @@ impl World {
                     received_at,
                     restored: false,
                     provider_key: None,
-                    list_headers: Default::default(),
+                    list_headers: ListHeaders {
+                        list_id,
+                        ..Default::default()
+                    },
                 },
             )
             .await;

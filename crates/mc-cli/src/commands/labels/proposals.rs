@@ -146,7 +146,8 @@ pub struct ModeArgs {
     /// Confidence from which apply modes act, 0.5 to 1.0 (default: the label's)
     #[arg(long)]
     threshold: Option<f64>,
-    /// Account ID, name or email (needed when there is more than one)
+    /// Account ID, name or email; selects the training group (needed only when
+    /// several groups have the label)
     #[arg(long)]
     account: Option<String>,
     /// Also label the mail already there (apply modes)
@@ -193,16 +194,33 @@ pub async fn run(args: ProposalsArgs, client: MailCatClient, fmt: Format) -> Res
     }
 }
 
-/// `account` as an ID: the one given (ID, name or email), else the only account.
-async fn account_id(client: &MailCatClient, account: Option<&str>) -> Result<String> {
+/// An account of the training group the label is in: the one asked for, else
+/// the only group that has the label.
+async fn label_account(
+    client: &MailCatClient,
+    label: &str,
+    account: Option<&str>,
+) -> Result<String> {
     if let Some(wanted) = account {
         return Ok(find_account(client, wanted).await?.id);
     }
-    let mut accounts = client.list_accounts().await?;
-    if accounts.len() != 1 {
-        bail!("there are {} accounts: pass --account", accounts.len());
+    let key = label.trim().to_lowercase();
+    let mut groups: Vec<_> = client
+        .list_labels(None)
+        .await?
+        .into_iter()
+        .filter(|g| g.labels.iter().any(|l| l.status.label == key))
+        .collect();
+    match groups.len() {
+        0 => bail!("no label named {label:?} (see `mc labels list`)"),
+        1 => groups
+            .remove(0)
+            .account_ids
+            .into_iter()
+            .next()
+            .with_context(|| format!("the group of {label:?} has no account")),
+        n => bail!("{label:?} is in {n} groups: pass --account"),
     }
-    Ok(accounts.remove(0).id)
 }
 
 pub(super) async fn optional_account_id(
@@ -449,8 +467,8 @@ pub async fn mode(args: ModeArgs, client: MailCatClient, json: bool) -> Result<(
     if args.existing && !args.mode.applies() {
         bail!("--existing only goes with apply or apply_archive");
     }
-    let account = account_id(&client, args.account.as_deref()).await?;
     let label = &args.label;
+    let account = label_account(&client, label, args.account.as_deref()).await?;
     let threshold = match args.threshold {
         Some(t) => t,
         None => client.get_label_settings(&account, label).await?.threshold,

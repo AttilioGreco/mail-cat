@@ -3,6 +3,7 @@ import { FolderBar } from '@/widgets/folder-bar';
 import { MessageList } from '@/widgets/message-list';
 import { MessagePane } from '@/widgets/message-pane';
 import { ComposeWindow } from '@/features/compose-message';
+import { LabelDialogs } from '@/features/manage-labels';
 import { useDeepLink } from '@/features/open-deep-link';
 import { useResizableWidth } from '@/shared/lib/useResizableWidth';
 import { ResizeHandle } from '@/shared/ui/resize-handle';
@@ -46,6 +47,7 @@ export function MainPage() {
       </div>
 
       <ComposeWindow />
+      <LabelDialogs />
     </div>
   );
 }

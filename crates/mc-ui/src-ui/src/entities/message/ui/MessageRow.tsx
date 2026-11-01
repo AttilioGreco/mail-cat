@@ -8,12 +8,13 @@ interface MessageRowProps {
   isSelected: boolean;
   onSelect: (e: React.MouseEvent) => void;
   onOpen?: () => void;
+  onContextMenu?: (x: number, y: number) => void;
   /** Label display names; shown only on Labels accounts. */
   labels?: string[];
   style?: React.CSSProperties;
 }
 
-export function MessageRow({ message, isSelected, onSelect, onOpen, labels, style }: MessageRowProps) {
+export function MessageRow({ message, isSelected, onSelect, onOpen, onContextMenu, labels, style }: MessageRowProps) {
   return (
     <div
       style={style}
@@ -23,6 +24,11 @@ export function MessageRow({ message, isSelected, onSelect, onOpen, labels, styl
         if (e.button === 0) onSelect(e);
       }}
       onDoubleClick={onOpen}
+      onContextMenu={(e) => {
+        if (!onContextMenu) return;
+        e.preventDefault();
+        onContextMenu(e.clientX, e.clientY);
+      }}
       className={cn(
         'flex cursor-pointer select-none flex-col gap-0.5 overflow-hidden border-b border-border-subtle px-4 py-3 transition-colors',
         isSelected

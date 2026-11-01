@@ -1,3 +1,4 @@
+mod matching;
 mod plan;
 mod proposals;
 mod relabel;
@@ -63,6 +64,14 @@ pub enum LabelsCmd {
     /// Take a label off all its mail and delete it on every account of its
     /// group; the mail is kept. Prints what it would do until --yes
     Delete(relabel::DeleteArgs),
+    /// Put a label on all the mail from some senders, domains or mailing lists
+    /// in its group (creating the label where missing); the model learns it
+    /// as yours. Prints what it would do until --yes
+    AssignMatching(matching::AssignArgs),
+    /// Label the existing mail the classifier is sure of, for many labels at
+    /// once. Modes are not changed and nothing is archived. Prints what it
+    /// would do until --yes
+    ApplyAll(matching::ApplyAllArgs),
 }
 
 pub async fn run(cmd: LabelsCmd, client: MailCatClient, fmt: Format) -> Result<()> {
@@ -81,6 +90,8 @@ pub async fn run(cmd: LabelsCmd, client: MailCatClient, fmt: Format) -> Result<(
         LabelsCmd::Mode(args) => proposals::mode(args, client, json).await,
         LabelsCmd::Rename(args) => relabel::rename(args, client, fmt).await,
         LabelsCmd::Delete(args) => relabel::delete(args, client, fmt).await,
+        LabelsCmd::AssignMatching(args) => matching::assign(args, client, fmt).await,
+        LabelsCmd::ApplyAll(args) => matching::apply_all(args, client, fmt).await,
     }
 }
 

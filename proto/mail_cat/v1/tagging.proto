@@ -79,6 +79,15 @@ service TaggingService {
   // Takes an existing label off all its mail and deletes it on every account
   // of its group (the mail stays), in the background unless dry_run.
   rpc DeleteLabel(DeleteLabelRequest) returns (LabelChangeReport);
+  // Puts a label on all the mail from some senders, domains or mailing lists
+  // in the label's training group, creating the label on the accounts that
+  // lack it. The model learns it as the user's own. In the background unless
+  // dry_run.
+  rpc AssignMatchingMail(AssignMatchingRequest) returns (AssignMatchingReport);
+  // Labels the existing mail the classifier is sure of, for many labels at
+  // once, in the background unless dry_run. Modes are not changed and nothing
+  // is archived.
+  rpc ApplyAllLabels(ApplyAllRequest) returns (ApplyAllReport);
 }
 
 // account_id unset: every training group.
@@ -321,6 +330,61 @@ message LabelChangeReport {
   uint32 messages = 5;
   repeated LabelChangeAccount accounts = 6;
   bool mail_only = 7;
+}
+
+message AssignMatchingRequest {
+  string label = 1;  // a path ("Shopping/Facile"); created where missing
+  // Sender addresses ("a@facile.it") or domains ("facile.it", which also
+  // covers "remind.facile.it").
+  repeated string from = 2;
+  // List-Id values, with or without the angle brackets.
+  repeated string list_id = 3;
+  // Selects the training group; needed when the label is new and there are
+  // several groups, or the label is in several.
+  optional string account_id = 4;
+  // Also take the mail out of the Inbox.
+  bool archive = 5;
+  bool dry_run = 6;
+}
+message MatchAccount {
+  string account_id = 1;
+  uint32 messages = 2;   // to label
+  uint32 archived = 3;   // of those, leaving the Inbox
+  uint32 already = 4;    // matching mail that has the label
+  bool creates = 5;      // the account gets the label created
+}
+message AssignMatchingReport {
+  bool dry_run = 1;
+  string label = 2;      // as it is or will be spelled
+  uint32 to_label = 3;
+  uint32 to_archive = 4;
+  uint32 already = 5;    // skipped
+  bool creates = 6;
+  repeated MatchAccount accounts = 7;
+  repeated ApplyPreviewItem sample = 8;
+}
+
+// labels empty: every label with enough examples on a dry run, those whose
+// mode is not off on a run.
+message ApplyAllRequest {
+  repeated string labels = 1;
+  optional string account_id = 2;  // unset: every training group
+  bool dry_run = 3;
+}
+message LabelApply {
+  string scope = 1;
+  string name = 2;       // as the group spells it
+  string label = 3;      // lowercase key
+  string mode = 4;
+  double threshold = 5;
+  uint32 positives = 6;
+  uint32 to_label = 7;   // existing mail the classifier would label
+  repeated ApplyPreviewItem sample = 8;
+}
+message ApplyAllReport {
+  bool dry_run = 1;
+  repeated LabelApply labels = 2;
+  uint32 to_label = 3;
 }
 
 message GetEmbeddingsRequest {}

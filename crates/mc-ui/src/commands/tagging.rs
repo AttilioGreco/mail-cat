@@ -1,8 +1,8 @@
 //! Tauri commands for label suggestion; thin wrappers over the gRPC client.
 
 use mc_client::{
-    ApplyPreview, BackgroundStats, EmbeddingsStatus, LabelProposal, LabelStatus, MessageTags,
-    TrainingGroup,
+    ApplyAllReport, ApplyPreview, BackgroundStats, EmbeddingsStatus, LabelProposal, LabelScope,
+    LabelStatus, MatchReport, MessageTags, TrainingGroup,
 };
 use tauri::State;
 
@@ -289,6 +289,59 @@ pub async fn reject_label_proposal(id: String, state: State<'_, AppState>) -> Re
     get_or_connect(&state)
         .await?
         .reject_label_proposal(&id)
+        .await
+        .map_err(err)
+}
+
+/// Labels per training scope; with `account_id`, the scope of that account.
+#[tauri::command]
+pub async fn list_labels(
+    account_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<LabelScope>, String> {
+    get_or_connect(&state)
+        .await?
+        .list_labels(account_id.as_deref())
+        .await
+        .map_err(err)
+}
+
+/// Labels the mail from `from` (addresses or domains) and `list_id`; a dry run
+/// only counts.
+#[tauri::command]
+pub async fn assign_matching_mail(
+    label: String,
+    from: Vec<String>,
+    list_id: Vec<String>,
+    account_id: Option<String>,
+    archive: bool,
+    dry_run: bool,
+    state: State<'_, AppState>,
+) -> Result<MatchReport, String> {
+    get_or_connect(&state)
+        .await?
+        .assign_matching_mail(
+            &label,
+            &from,
+            &list_id,
+            account_id.as_deref(),
+            archive,
+            dry_run,
+        )
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn apply_all_labels(
+    labels: Vec<String>,
+    account_id: Option<String>,
+    dry_run: bool,
+    state: State<'_, AppState>,
+) -> Result<ApplyAllReport, String> {
+    get_or_connect(&state)
+        .await?
+        .apply_all_labels(&labels, account_id.as_deref(), dry_run)
         .await
         .map_err(err)
 }

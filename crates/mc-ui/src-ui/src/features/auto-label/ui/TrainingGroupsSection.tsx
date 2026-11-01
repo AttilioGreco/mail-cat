@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Plus, Search, Trash2 } from 'lucide-react';
+import { Plus, Search, Tags, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/shared/ui/button';
 import { Input } from '@/shared/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/shared/ui/select';
 import { useAccounts } from '@/entities/account';
+import { AutoLabelAllDialog } from './AutoLabelAllDialog';
 import { BackgroundStatsCard } from './BackgroundStatsCard';
 import { ModelSettings } from './ModelSettings';
 import { ProposalsList } from './ProposalsList';
@@ -34,6 +35,7 @@ export function TrainingGroupsSection() {
   const { data: proposals = [] } = useLabelProposals();
   const discover = useDiscoverLabels();
   const [name, setName] = useState('');
+  const [applyAllOpen, setApplyAllOpen] = useState(false);
   const fail = (e: Error) => toast.error(String(e));
 
   const downloadMb = Math.round(
@@ -99,6 +101,18 @@ export function TrainingGroupsSection() {
         </div>
       )}
       {embeddings && <BackgroundStatsCard />}
+
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs">
+          <h3 className="font-medium text-muted-foreground">Posta esistente</h3>
+          <p className="text-muted">Applica le etichette già imparate ai messaggi che ancora non le hanno.</p>
+        </div>
+        <Button size="sm" variant="outline" className="shrink-0" onClick={() => setApplyAllOpen(true)}>
+          <Tags />
+          Auto-etichetta tutta la posta…
+        </Button>
+      </div>
+      {applyAllOpen && <AutoLabelAllDialog onClose={() => setApplyAllOpen(false)} />}
 
       {embeddings?.enabled && (
         <div className="space-y-2">

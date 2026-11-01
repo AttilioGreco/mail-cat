@@ -776,6 +776,22 @@ pub async fn list_mailboxes(
         .map_err(|e| e.to_string())
 }
 
+/// Creates the label `path` (nested with `/`) on the account, or returns it
+/// when it already exists.
+#[tauri::command]
+pub async fn create_label(
+    account_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<MailboxDto, String> {
+    let client = get_or_connect(&state).await?;
+    client
+        .create_mailbox(&account_id, &path)
+        .await
+        .map(mailbox_to_dto)
+        .map_err(|e| e.to_string())
+}
+
 /// Subscribe or unsubscribe a mailbox. `Some` is a warning to show: the server
 /// could not be told, so the choice holds on this machine only.
 #[tauri::command]

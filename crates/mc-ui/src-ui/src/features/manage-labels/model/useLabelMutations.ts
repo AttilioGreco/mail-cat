@@ -5,18 +5,18 @@ import type { MessageEnvelope } from '@/entities/message';
 /** Every cached view that shows labels or tags. Label changes arrive on the
  *  bus but WatchMailbox doesn't carry them, so the views are re-queried. */
 function requery(qc: QueryClient) {
-  for (const key of ['messages', 'conversations', 'thread', 'search', 'mailboxes'])
+  for (const key of ['messages', 'conversations', 'thread', 'search', 'mailboxes', 'background-stats'])
     qc.invalidateQueries({ queryKey: [key] });
 }
 
-function patchMessage(qc: QueryClient, id: string, patch: (m: MessageEnvelope) => Partial<MessageEnvelope>) {
+function patchMessages(qc: QueryClient, ids: string[], patch: (m: MessageEnvelope) => Partial<MessageEnvelope>) {
   qc.setQueriesData<MessageEnvelope[]>({ queryKey: ['messages'] }, (list) =>
-    list?.map((m) => (m.uid === id ? { ...m, ...patch(m) } : m)),
+    list?.map((m) => (ids.includes(m.uid) ? { ...m, ...patch(m) } : m)),
   );
 }
 
 interface ChangeLabelsParams {
-  messageId: string;
+  messageIds: string[];
   add?: string[];
   remove?: string[];
 }
@@ -25,16 +25,16 @@ interface ChangeLabelsParams {
 export function useChangeLabels() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ messageId, add = [], remove = [] }: ChangeLabelsParams) => {
+    mutationFn: async ({ messageIds, add = [], remove = [] }: ChangeLabelsParams) => {
       const [, failed] = await invoke<[number, number]>('change_labels', {
-        messageIds: [messageId],
+        messageIds,
         addMailboxIds: add,
         removeMailboxIds: remove,
       });
       if (failed > 0) throw new Error('Modifica etichette non riuscita');
     },
-    onMutate: ({ messageId, add = [], remove = [] }) =>
-      patchMessage(qc, messageId, (m) => ({
+    onMutate: ({ messageIds, add = [], remove = [] }) =>
+      patchMessages(qc, messageIds, (m) => ({
         mailboxIds: [...m.mailboxIds.filter((id) => !remove.includes(id)), ...add.filter((id) => !m.mailboxIds.includes(id))],
       })),
     onSettled: () => requery(qc),
@@ -44,15 +44,25 @@ export function useChangeLabels() {
 export function useModifyTags() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ messageId, add = [], remove = [] }: ChangeLabelsParams) =>
-      invoke('modify_tags', { messageId, add, remove }),
-    onMutate: ({ messageId, add = [], remove = [] }) =>
-      patchMessage(qc, messageId, (m) => ({
+    mutationFn: ({ messageIds, add = [], remove = [] }: ChangeLabelsParams) =>
+      Promise.all(messageIds.map((messageId) => invoke('modify_tags', { messageId, add, remove }))),
+    onMutate: ({ messageIds, add = [], remove = [] }) =>
+      patchMessages(qc, messageIds, (m) => ({
         tags: [...m.tags.filter((t) => !remove.includes(t)), ...add.filter((t) => !m.tags.includes(t))],
       })),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['body'] });
       requery(qc);
     },
+  });
+}
+
+/** Creates (or finds) the label `path` on the account; resolves to its mailbox id. */
+export function useCreateLabel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ accountId, path }: { accountId: string; path: string }) =>
+      (await invoke<{ id: string }>('create_label', { accountId, path })).id,
+    onSettled: () => qc.invalidateQueries({ queryKey: ['mailboxes'] }),
   });
 }

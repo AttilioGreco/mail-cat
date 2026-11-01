@@ -5,7 +5,7 @@
 
 use chrono::DateTime;
 use rusqlite::types::Type;
-use rusqlite::{Connection, Row, params_from_iter};
+use rusqlite::{Connection, Row, ToSql, params_from_iter};
 use uuid::Uuid;
 
 use mc_domain::model::message::strip_html;
@@ -125,6 +125,65 @@ pub(super) fn by_ids(conn: &Connection, ids: &[Uuid]) -> Result<Vec<TagSource>, 
         placeholders(1, ids.len())
     );
     query_all(conn, &sql, params_from_iter(ids.iter()), source_from_row)
+}
+
+/// `%`, `_` and `\` in user input mean themselves in a `LIKE ... ESCAPE '\'`.
+fn like_literal(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// The mail of `accounts` whose sender or `List-Id` may be one of the given:
+/// an address is exact, anything else is a domain and its subdomains. The
+/// list match is a superset (any `list_headers` text), the caller checks it.
+pub(super) fn candidates(
+    conn: &Connection,
+    accounts: &[Uuid],
+    senders: &[String],
+    list_ids: &[String],
+) -> Result<Vec<MessageId>, DomainError> {
+    let mut args: Vec<String> = Vec::new();
+    let mut any = Vec::new();
+    let mut bind = |value: String| {
+        args.push(value);
+        accounts.len() + args.len()
+    };
+    for sender in senders {
+        if sender.contains('@') {
+            any.push(format!("m.from_email = ?{}", bind(sender.clone())));
+            continue;
+        }
+        let domain = like_literal(sender);
+        let (at, dot) = (bind(format!("%@{domain}")), bind(format!("%.{domain}")));
+        any.push(format!(
+            "m.from_email = ?{} OR m.from_email LIKE ?{at} ESCAPE '\\' \
+             OR m.from_email LIKE ?{dot} ESCAPE '\\'",
+            bind(sender.clone())
+        ));
+    }
+    for id in list_ids {
+        any.push(format!(
+            "m.list_headers LIKE ?{} ESCAPE '\\'",
+            bind(format!("%{}%", like_literal(id)))
+        ));
+    }
+    let sql = format!(
+        "SELECT m.id FROM messages m WHERE m.account_id IN ({}) AND ({}) ORDER BY m.id",
+        placeholders(1, accounts.len()),
+        any.join(" OR ")
+    );
+    query_all(
+        conn,
+        &sql,
+        params_from_iter(
+            accounts
+                .iter()
+                .map(|a| a as &dyn ToSql)
+                .chain(args.iter().map(|a| a as &dyn ToSql)),
+        ),
+        |r| r.get::<_, Uuid>(0).map(MessageId::from_uuid),
+    )
 }
 
 /// Keyset page: ids are time-ordered, so `cursor` is a position, not an offset.

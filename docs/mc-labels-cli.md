@@ -33,6 +33,8 @@ group.
 | `mc labels rename <from> <to> [--mail-only] [--account A] [--yes]` | Rename a label (and its children) on every account of its group, or merge it into one that exists; `--mail-only` moves just its own mail |
 | `mc labels delete <label> [--account A] [--yes]` | Take a label off all its mail and delete it (an empty container too); the mail stays |
 | `mc labels mode <label> <off\|suggest\|apply\|apply_archive> [--threshold T] [--account A] [--existing] [--yes]` | Set a label's mode |
+| `mc labels assign-matching <label> [--from ADDR\|DOMAIN]... [--list-id ID]... [--account A] [--archive] [--yes]` | Put a label on all the mail from some senders, domains or lists |
+| `mc labels apply-all [--label L]... [--account A] [--yes]` | Label the existing mail the classifier is sure of, for many labels at once |
 
 Notes:
 
@@ -58,7 +60,8 @@ Notes:
   print what they would do until `--yes`. `--existing` (apply modes) also labels
   the mail already there: it prints the counts first, and with `--yes` runs.
   Without `--existing` an apply mode affects new mail only. A label needs 5
-  examples before it can leave `off`; `--threshold` is 0.5 to 1.0.
+  examples before it can leave `off`; `--threshold` is 0.5 to 1.0. `--account`
+  is needed only when several training groups have the label.
 
 ## JSON (field names are stable; camelCase)
 
@@ -118,6 +121,13 @@ the same entries.
 and `mailboxes` lists, parents first, every mailbox of the label's tree the
 account changes. See Renaming and deleting labels.
 
+`labels assign-matching` -> `{"dryRun", "label", "toLabel", "toArchive",
+"already", "creates", "accounts": [{"accountId", "messages", "archived",
+"already", "creates"}], "sample": [{"messageId", "subject", "from"}]}`;
+`apply-all` -> `{"dryRun", "toLabel", "labels": [{"scope", "name", "label",
+"mode", "threshold", "positives", "toLabel", "sample": [...]}]}`. See Labelling
+in bulk.
+
 `proposals plan` -> `{"dryRun", "summary", "results"}`, see Plans.
 `proposals undo` -> `{"dryRun", "toUnlabel", "toUnarchive", "accounts":
 [{"accountId", "messages", "archived"}], "labelsToDelete": [], "status"}`.
@@ -146,7 +156,9 @@ fields, `keywords[N]`, `senders[N]` and a `samples[N]{messageId,receivedAt,from,
 subject,excerpt}` table), `labels list` (table `labels`, one row per label with
 its scope), `labels show` (header, `accounts[N]` and `samples[N]`), `labels
 stats` (fields plus `retrains` and `applying` tables), the `plan` / `undo`
-summaries and `rename` / `delete` (header fields plus `accounts` and `mailboxes` tables).
+summaries, `rename` / `delete` (header fields plus `accounts` and `mailboxes` tables),
+`assign-matching` (header fields plus `accounts` and `sample` tables) and `apply-all`
+(header fields plus a `labels` table).
 
 ## Hierarchy
 
@@ -224,6 +236,36 @@ step: `index` (1-based), `kind`, `status` (`planned`, `done`, `failed`,
 `skipped`), `detail`, `proposalId` (the proposal a merge made) and `queued`
 (messages queued by an accept, assign or `existing` mode). Counts only include
 mail that is still unlabelled and can take a label.
+
+## Labelling in bulk
+
+`assign-matching <label>` is for mail discovery never grouped (it sat in a
+mixed cluster, so the model cannot learn it). It takes the mail of the label's
+group whose sender is `--from` (an address, or a domain: `facile.it` also
+matches `preventivo@remind.facile.it`, not `notfacile.it`) or that came through
+the list `--list-id` (with or without `Name <...>`). At least one filter is
+needed. Mail in the Trash, Spam or Drafts and mail that already has the label
+are left out (the latter is counted as `already`). `<label>` is a path; each
+account that holds matching mail and lacks the label gets it created (`creates`),
+or uses a keyword on a folders account. The label goes on through the same
+throttled queue as `assign` (an `apply` job in `labels stats`), the model
+learns the mail as your own examples (like `assign`, so `undo` and retraining
+treat them as yours), and `--archive` also takes it out of the Inbox. A label
+that was off starts in `suggest`. Without `--yes` it prints the counts per
+account, the skipped ones and a few samples. `--account` is needed only for a
+new label when there are several groups. gRPC: `AssignMatchingMail`
+(`{label, from[], listId[], accountId?, archive, dryRun}`).
+
+`apply-all` is `mode <label> apply --existing` for many labels. The preview
+lists every label of the group with at least 5 examples: `mode`, `threshold`,
+`positives` and `toLabel`, the existing mail (unlabelled or not, as for
+`--existing`) the classifier would label at that threshold, computed in one
+pass over the mail for all labels. With `--yes` it queues one `apply` job per
+label (default: labels whose mode is not `off`; `--label` names others
+explicitly, repeatable), never archives, and leaves modes alone. These are
+auto-applied labels: they can be undone and the model does not count them as
+your examples. A label that is being applied, undone or relabelled is refused.
+gRPC: `ApplyAllLabels` (`{labels[], accountId?, dryRun}`).
 
 ## Undoing an acceptance
 

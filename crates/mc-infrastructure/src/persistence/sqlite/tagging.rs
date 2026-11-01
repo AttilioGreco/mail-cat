@@ -643,6 +643,22 @@ impl TaggingStore for SqliteTaggingStore {
             .await
     }
 
+    async fn candidates(
+        &self,
+        accounts: &[AccountId],
+        senders: &[String],
+        list_ids: &[String],
+    ) -> Result<Vec<MessageId>, DomainError> {
+        if accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let accounts: Vec<Uuid> = accounts.iter().map(|a| *a.as_uuid()).collect();
+        let (senders, list_ids) = (senders.to_vec(), list_ids.to_vec());
+        self.db
+            .read(move |conn| sources::candidates(conn, &accounts, &senders, &list_ids))
+            .await
+    }
+
     async fn record_auto(&self, applied: &AutoApplied) -> Result<(), DomainError> {
         let a = applied.clone();
         self.db

@@ -89,6 +89,16 @@ pub trait TaggingStore: Send + Sync {
         limit: u32,
     ) -> Result<Vec<TagSource>, DomainError>;
 
+    /// Ids of the mail of `accounts` that may come from one of `senders`
+    /// (lowercase addresses, or domains with their subdomains) or belong to
+    /// one of `list_ids`: a superset to check exactly with [`Self::sources`].
+    async fn candidates(
+        &self,
+        accounts: &[AccountId],
+        senders: &[String],
+        list_ids: &[String],
+    ) -> Result<Vec<MessageId>, DomainError>;
+
     // ── Auto-applied labels ──
     async fn record_auto(&self, applied: &AutoApplied) -> Result<(), DomainError>;
     async fn autos(&self, message: MessageId) -> Result<Vec<AutoApplied>, DomainError>;

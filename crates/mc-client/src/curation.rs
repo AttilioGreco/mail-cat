@@ -4,7 +4,7 @@ use crate::client::MailCatClient;
 use crate::discovery::{ProposalMessage, message};
 use crate::error::Result;
 use crate::proto::mail_cat::v1 as pb;
-use crate::tagging::{LabelStatus, status};
+use crate::tagging::{ApplyPreviewItem, LabelStatus, status};
 
 /// One step of a plan. `kind` is `merge`, `rename`, `assign`, `accept`,
 /// `reject` or `mode`; the fields a kind does not use stay empty.
@@ -188,6 +188,66 @@ pub struct LabelDetail {
     pub status: LabelStatus,
     pub accounts: Vec<LabelPresence>,
     pub samples: Vec<ProposalMessage>,
+}
+
+/// What assigning would do (or, not a dry run, is doing) on one account.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchAccount {
+    pub account_id: String,
+    pub messages: u32,
+    pub archived: u32,
+    /// Matching mail that has the label already.
+    pub already: u32,
+    /// The account gets the label created.
+    pub creates: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchReport {
+    pub dry_run: bool,
+    pub label: String,
+    pub to_label: u32,
+    pub to_archive: u32,
+    pub already: u32,
+    pub creates: bool,
+    pub accounts: Vec<MatchAccount>,
+    pub sample: Vec<ApplyPreviewItem>,
+}
+
+/// One label of `apply_all_labels`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelApply {
+    pub scope: String,
+    pub name: String,
+    pub label: String,
+    pub mode: String,
+    pub threshold: f64,
+    pub positives: u32,
+    /// Existing mail the classifier would label at the threshold.
+    pub to_label: u32,
+    pub sample: Vec<ApplyPreviewItem>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyAllReport {
+    pub dry_run: bool,
+    pub to_label: u32,
+    pub labels: Vec<LabelApply>,
+}
+
+fn items(sample: Vec<pb::ApplyPreviewItem>) -> Vec<ApplyPreviewItem> {
+    sample
+        .into_iter()
+        .map(|i| ApplyPreviewItem {
+            message_id: i.message_id,
+            subject: i.subject,
+            from: i.from,
+        })
+        .collect()
 }
 
 fn account_count(a: pb::AccountCount) -> AccountCount {
@@ -378,5 +438,88 @@ impl MailCatClient {
                 samples: d.samples.into_iter().map(message).collect(),
             })
             .collect())
+    }
+
+    /// Put `label` on the mail from `from` (addresses or domains) and
+    /// `list_id` in the label's group, creating it where missing (in the
+    /// background unless `dry_run`).
+    pub async fn assign_matching_mail(
+        &self,
+        label: &str,
+        from: &[String],
+        list_id: &[String],
+        account_id: Option<&str>,
+        archive: bool,
+        dry_run: bool,
+    ) -> Result<MatchReport> {
+        let r = self
+            .tagging()
+            .assign_matching_mail(pb::AssignMatchingRequest {
+                label: label.into(),
+                from: from.to_vec(),
+                list_id: list_id.to_vec(),
+                account_id: account_id.map(str::to_owned),
+                archive,
+                dry_run,
+            })
+            .await?
+            .into_inner();
+        Ok(MatchReport {
+            dry_run: r.dry_run,
+            label: r.label,
+            to_label: r.to_label,
+            to_archive: r.to_archive,
+            already: r.already,
+            creates: r.creates,
+            accounts: r
+                .accounts
+                .into_iter()
+                .map(|a| MatchAccount {
+                    account_id: a.account_id,
+                    messages: a.messages,
+                    archived: a.archived,
+                    already: a.already,
+                    creates: a.creates,
+                })
+                .collect(),
+            sample: items(r.sample),
+        })
+    }
+
+    /// Label the existing mail the classifier is sure of, for `labels` (empty:
+    /// all that have enough examples on a dry run, those not off on a run).
+    pub async fn apply_all_labels(
+        &self,
+        labels: &[String],
+        account_id: Option<&str>,
+        dry_run: bool,
+    ) -> Result<ApplyAllReport> {
+        let r = self
+            .tagging()
+            .apply_all_labels(pb::ApplyAllRequest {
+                labels: labels.to_vec(),
+                account_id: account_id.map(str::to_owned),
+                dry_run,
+            })
+            .await?
+            .into_inner();
+        Ok(ApplyAllReport {
+            dry_run: r.dry_run,
+            to_label: r.to_label,
+            labels: r
+                .labels
+                .into_iter()
+                .map(|l| LabelApply {
+                    scope: l.scope,
+                    name: l.name,
+                    label: l.label,
+                    mode: l.mode,
+                    threshold: l.threshold,
+                    positives: l.positives,
+                    to_label: l.to_label,
+                    sample: items(l.sample),
+                })
+                .collect(),
+        })
     }
 }

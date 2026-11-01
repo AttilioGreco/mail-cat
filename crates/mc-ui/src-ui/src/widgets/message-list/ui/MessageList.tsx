@@ -1,6 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { List, type RowComponentProps } from 'react-window';
-import { RefreshCw, Inbox, MailOpen, MessageSquare, List as ListIcon, Trash2, X } from 'lucide-react';
+import { Archive, RefreshCw, Inbox, MailOpen, MessageSquare, List as ListIcon, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useMessages, MessageRow, type MessageEnvelope } from '@/entities/message';
@@ -11,6 +11,8 @@ import { useMailboxWatcher } from '@/features/watch-mailbox';
 import { SearchBar, SearchResults, useSearchStore } from '@/features/search-messages';
 import { useShortcuts } from '@/features/keyboard-shortcuts';
 import { useComposeStore } from '@/features/compose-message';
+import { LabelMenuItems, useLabelDialogs, type LabelTarget } from '@/features/manage-labels';
+import { ContextMenu } from '@/shared/ui/ContextMenu';
 import { useHotkey } from '@tanstack/react-hotkeys';
 import {
   useMarkAsRead,
@@ -93,6 +95,8 @@ export function MessageList() {
   const trashThreads = useTrashThreads();
 
   const selected = messages.find((m) => m.uid === selectedMessageId) ?? null;
+  const openLabelPicker = useLabelDialogs((s) => s.openPicker);
+  const [menu, setMenu] = useState<{ x: number; y: number; ids: string[] } | null>(null);
 
   // ── Multi-selection ───────────────────────────────────────────────────
   // Shift-click spans from the last row clicked without Shift, so a second
@@ -172,6 +176,15 @@ export function MessageList() {
     );
   };
   const multiSelected = multiIds.length > 1;
+
+  /** Right-click acts on the whole selection when the row belongs to it, else on that row alone. */
+  const openMenu = (id: string, x: number, y: number) => {
+    const inSelection = multiSelected && multiIds.includes(id);
+    if (!inSelection) openRow(id);
+    setMenu({ x, y, ids: inSelection ? multiIds : [id] });
+  };
+  const menuMessages = messages.filter((m) => menu?.ids.includes(m.uid));
+  const labelTargets = (list: MessageEnvelope[]): LabelTarget[] => list.map((m) => ({ id: m.uid, mailboxIds: m.mailboxIds, tags: m.tags }));
   const confirmPermanent = () => {
     if (window.confirm(`Elimini definitivamente ${multiIds.length} ${conversationMode ? 'conversazioni' : 'messaggi'}?`)) {
       trashSelection(true);
@@ -269,6 +282,10 @@ export function MessageList() {
       if (!selected || !spam || !selectedMailboxId) return;
       selectNeighbour(selected.uid, messages);
       moveMessage.mutate({ messageId: selected.uid, fromMailboxId: selectedMailboxId, toMailboxId: spam.id });
+    },
+    labelMessage: conversationMode || !selectedAccountId ? undefined : () => {
+      const targets = multiSelected ? messages.filter((m) => multiIds.includes(m.uid)) : selected ? [selected] : [];
+      openLabelPicker(selectedAccountId, labelTargets(targets));
     },
     archiveMessage: conversationMode ? undefined : () => {
       if (!selected) return;
@@ -386,14 +403,42 @@ export function MessageList() {
               rowComponent={MsgRow}
               rowCount={messages.length}
               rowHeight={showLabels ? MESSAGE_ROW_HEIGHT + LABEL_ROW_EXTRA : MESSAGE_ROW_HEIGHT}
-              rowProps={{ messages, selectedMessageId, selectedMessageIds, clickRow, openDraft, mailboxes: showLabels ? mailboxes : null, viewedId: selectedMailboxId }}
+              rowProps={{ messages, selectedMessageId, selectedMessageIds, clickRow, openMenu, openDraft, mailboxes: showLabels ? mailboxes : null, viewedId: selectedMailboxId }}
             />
           </div>
         )
       )}
+      {menu && selectedAccountId && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+          <LabelMenuItems
+            accountId={selectedAccountId}
+            messages={labelTargets(menuMessages)}
+            senderEmail={menuMessages.length === 1 ? menuMessages[0].fromEmail : undefined}
+            onDone={() => setMenu(null)}
+          />
+          <button type="button" className={MENU_ITEM} onClick={() => {
+            archiveMessages.mutate(menu.ids);
+            setMenu(null);
+          }}>
+            <Archive size={14} className="shrink-0" />
+            Archivia
+          </button>
+          <button type="button" className={MENU_ITEM} onClick={() => {
+            const allRead = menuMessages.every((m) => m.isRead);
+            for (const m of menuMessages) (allRead ? markAsUnread : markAsRead).mutate(m.uid, key ?? undefined);
+            setMenu(null);
+          }}>
+            <MailOpen size={14} className="shrink-0" />
+            {menuMessages.every((m) => m.isRead) ? 'Segna come non letto' : 'Segna come letto'}
+          </button>
+        </ContextMenu>
+      )}
     </div>
   );
 }
+
+const MENU_ITEM =
+  'flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-hover';
 
 // ── Conversation virtual row ──────────────────────────────────────────────────
 
@@ -424,13 +469,14 @@ interface MsgRowData {
   selectedMessageId: string | null;
   selectedMessageIds: string[];
   clickRow: (id: string, e: React.MouseEvent | React.KeyboardEvent) => void;
+  openMenu: (id: string, x: number, y: number) => void;
   openDraft?: (id: string) => void;
   /** Set on Labels accounts only. */
   mailboxes: Mailbox[] | null;
   viewedId: string | null;
 }
 
-function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds, clickRow, openDraft, mailboxes, viewedId }: RowComponentProps<MsgRowData>) {
+function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds, clickRow, openMenu, openDraft, mailboxes, viewedId }: RowComponentProps<MsgRowData>) {
   const message = messages[index];
   return (
     <MessageRow
@@ -438,6 +484,7 @@ function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds,
       isSelected={selectedMessageId === message.uid || selectedMessageIds.includes(message.uid)}
       onSelect={(e) => clickRow(message.uid, e)}
       onOpen={openDraft && (() => openDraft(message.uid))}
+      onContextMenu={(x, y) => openMenu(message.uid, x, y)}
       labels={mailboxes ? labelNames(mailboxes, message.mailboxIds, viewedId) : undefined}
       style={style}
     />

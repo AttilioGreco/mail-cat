@@ -116,6 +116,7 @@ async fn main() {
             commands::restart_server,
             commands::list_mailboxes,
             commands::set_mailbox_subscribed,
+            commands::create_label,
             commands::list_messages,
             commands::get_message,
             commands::start_watching,
@@ -165,6 +166,9 @@ async fn main() {
             commands::tagging::list_label_proposals,
             commands::tagging::accept_label_proposal,
             commands::tagging::reject_label_proposal,
+            commands::tagging::list_labels,
+            commands::tagging::assign_matching_mail,
+            commands::tagging::apply_all_labels,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

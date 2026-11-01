@@ -3,8 +3,9 @@
 
 use clap::{CommandFactory, Parser};
 use mc_client::{
-    LabelEntry, LabelProposal, LabelScope, LabelStatus, ProposalDetail, ProposalMessage,
-    ProposalSample, SenderCount,
+    ApplyAllReport, ApplyPreviewItem, LabelApply, LabelEntry, LabelProposal, LabelScope,
+    LabelStatus, MatchAccount, MatchReport, ProposalDetail, ProposalMessage, ProposalSample,
+    SenderCount,
 };
 use serde_json::json;
 
@@ -180,6 +181,7 @@ fn the_command_line_is_well_formed() {
         "--yes"
     ]));
     assert!(!parses(&["mode", "news", "sometimes"]));
+    assert!(parses(&["mode", "news", "suggest"]));
 }
 
 #[test]
@@ -224,4 +226,109 @@ fn the_new_commands_parse() {
         "--samples",
         "3"
     ]));
+}
+
+fn item() -> ApplyPreviewItem {
+    ApplyPreviewItem {
+        message_id: "m1".into(),
+        subject: "Il tuo preventivo".into(),
+        from: "Facile".into(),
+    }
+}
+
+#[test]
+fn bulk_labelling_commands_parse() {
+    assert!(parses(&[
+        "assign-matching",
+        "Casa/Facile",
+        "--from",
+        "facile.it",
+        "--from",
+        "a@b.it",
+        "--list-id",
+        "news.example",
+        "--archive",
+        "--yes"
+    ]));
+    assert!(parses(&["assign-matching", "Casa"]));
+    assert!(parses(&[
+        "apply-all",
+        "--label",
+        "a",
+        "--label",
+        "b",
+        "--yes"
+    ]));
+    assert!(parses(&["apply-all"]));
+    assert!(!parses(&["assign-matching"]));
+}
+
+#[test]
+fn assign_matching_json_and_toon() {
+    let report = MatchReport {
+        dry_run: true,
+        label: "Casa/Facile".into(),
+        to_label: 93,
+        to_archive: 10,
+        already: 2,
+        creates: true,
+        accounts: vec![MatchAccount {
+            account_id: "a1".into(),
+            messages: 93,
+            archived: 10,
+            already: 2,
+            creates: true,
+        }],
+        sample: vec![item()],
+    };
+    assert_eq!(
+        serde_json::to_value(&report).unwrap(),
+        json!({
+            "dryRun": true, "label": "Casa/Facile", "toLabel": 93, "toArchive": 10,
+            "already": 2, "creates": true,
+            "accounts": [{"accountId": "a1", "messages": 93, "archived": 10, "already": 2, "creates": true}],
+            "sample": [{"messageId": "m1", "subject": "Il tuo preventivo", "from": "Facile"}],
+        })
+    );
+    assert_eq!(
+        super::render::match_report(&report).as_str(),
+        "dryRun: true\nlabel: Casa/Facile\ntoLabel: 93\ntoArchive: 10\nalready: 2\ncreates: true\n\
+         accounts[1]{accountId,messages,archived,already,creates}:\n\x20 a1,93,10,2,true\n\
+         sample[1]{messageId,from,subject}:\n\x20 m1,Facile,Il tuo preventivo\n"
+    );
+}
+
+#[test]
+fn apply_all_json_and_toon() {
+    let report = ApplyAllReport {
+        dry_run: false,
+        to_label: 40,
+        labels: vec![LabelApply {
+            scope: "g:1".into(),
+            name: "Banca".into(),
+            label: "banca".into(),
+            mode: "suggest".into(),
+            threshold: 0.9,
+            positives: 12,
+            to_label: 40,
+            sample: vec![item()],
+        }],
+    };
+    assert_eq!(
+        serde_json::to_value(&report).unwrap(),
+        json!({
+            "dryRun": false, "toLabel": 40,
+            "labels": [{
+                "scope": "g:1", "name": "Banca", "label": "banca", "mode": "suggest",
+                "threshold": 0.9, "positives": 12, "toLabel": 40,
+                "sample": [{"messageId": "m1", "subject": "Il tuo preventivo", "from": "Facile"}],
+            }],
+        })
+    );
+    assert_eq!(
+        super::render::apply_all(&report).as_str(),
+        "dryRun: false\ntoLabel: 40\n\
+         labels[1]{name,label,mode,threshold,positives,toLabel,scope}:\n\
+         \x20 Banca,banca,suggest,0.9,12,40,\"g:1\"\n"
+    );
 }

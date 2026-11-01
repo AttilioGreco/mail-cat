@@ -143,3 +143,23 @@ export interface LabelProposal {
   /** Renamed or merged by hand: discovery keeps it. */
   curated: boolean;
 }
+
+export interface LabelApply {
+  scope: string;
+  /** As the group spells it. */
+  name: string;
+  /** Lowercase key, what a run is asked for. */
+  label: string;
+  mode: LabelMode;
+  threshold: number;
+  positives: number;
+  /** Existing mail the classifier would label at the threshold. */
+  toLabel: number;
+  sample: { messageId: string; subject: string; from: string }[];
+}
+
+export interface ApplyAllReport {
+  dryRun: boolean;
+  toLabel: number;
+  labels: LabelApply[];
+}

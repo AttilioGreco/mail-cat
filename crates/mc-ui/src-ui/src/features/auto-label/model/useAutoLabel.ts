@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  ApplyAllReport,
   ApplyPreview,
   BackgroundStats,
   EmbeddingsStatus,
@@ -14,7 +15,7 @@ import type {
 
 /** Labels changed behind the views' backs: everything that shows them is re-read. */
 function requery(qc: QueryClient) {
-  for (const key of ['tags', 'messages', 'conversations', 'thread', 'search', 'mailboxes'])
+  for (const key of ['tags', 'messages', 'conversations', 'thread', 'search', 'mailboxes', 'background-stats'])
     qc.invalidateQueries({ queryKey: [key] });
 }
 
@@ -175,4 +176,34 @@ export function useProposalMutations() {
     }),
     reject: useMutation({ mutationFn: (id: string) => invoke<void>('reject_label_proposal', { id }), ...done }),
   };
+}
+
+/** What labelling the existing mail would do, for every label with enough examples.
+ *  Never cached: the counts are read when the dialog opens. */
+export function useApplyAllPreview() {
+  return useQuery({
+    queryKey: ['apply-all-preview'],
+    gcTime: 0,
+    queryFn: () => invoke<ApplyAllReport>('apply_all_labels', { labels: [], accountId: null, dryRun: true }),
+  });
+}
+
+/** Queues the labelling of the chosen labels; progress shows in the background stats. */
+export function useApplyAll() {
+  const qc = useQueryClient();
+  return useMutation({
+    // A label key can exist in several training groups: run each group on its own so an
+    // unticked row in one group is not labelled because the same key is ticked in another.
+    mutationFn: async (chosen: { scope: string; label: string }[]) => {
+      const scopes = await invoke<{ scope: string; accountIds: string[] }[]>('list_labels', { accountId: null });
+      const byScope = new Map<string, string[]>();
+      for (const c of chosen) byScope.set(c.scope, [...(byScope.get(c.scope) ?? []), c.label]);
+      for (const [scope, labels] of byScope) {
+        const accountId = scopes.find((s) => s.scope === scope)?.accountIds[0];
+        if (!accountId) throw new Error(`Gruppo ${scope} non trovato`);
+        await invoke<ApplyAllReport>('apply_all_labels', { labels, accountId, dryRun: false });
+      }
+    },
+    onSettled: () => requery(qc),
+  });
 }

@@ -1,9 +1,9 @@
 use chrono::Utc;
 use mc_domain::{
-    AccountId, AggregateType, BackgroundSpeed, DomainEvent, EmailAddress, Envelope, EventStore,
-    Flag, GroupId, LabelMode, LabelSettings, Lesson, ListHeaders, MailboxId, MailboxModel,
-    MailboxPath, MailboxType, Membership, MessageId, ProviderType, ReadModelProjector, RemoteId,
-    Scope, SourceFilter, TaggingStore,
+    AccountId, Address, AggregateType, BackgroundSpeed, DomainEvent, EmailAddress, Envelope,
+    EventStore, Flag, GroupId, LabelMode, LabelSettings, Lesson, ListHeaders, MailboxId,
+    MailboxModel, MailboxPath, MailboxType, Membership, MessageId, ProviderType,
+    ReadModelProjector, RemoteId, Scope, SourceFilter, TaggingStore,
 };
 
 use super::*;
@@ -95,6 +95,18 @@ impl Fixture {
         labels: &[MailboxId],
         list_headers: ListHeaders,
     ) -> MessageId {
+        self.message_from(account, inbox, "", labels, list_headers)
+            .await
+    }
+
+    async fn message_from(
+        &self,
+        account: AccountId,
+        inbox: MailboxId,
+        from: &str,
+        labels: &[MailboxId],
+        list_headers: ListHeaders,
+    ) -> MessageId {
         let id = MessageId::new();
         self.record(
             id.to_string(),
@@ -108,7 +120,14 @@ impl Fixture {
                 in_reply_to: None,
                 references: vec![],
                 envelope: Envelope {
-                    from: vec![],
+                    from: Some(from)
+                        .filter(|f| !f.is_empty())
+                        .map(|f| Address {
+                            name: None,
+                            email: EmailAddress::new(f).unwrap(),
+                        })
+                        .into_iter()
+                        .collect(),
                     to: vec![],
                     cc: vec![],
                     bcc: vec![],
@@ -299,6 +318,55 @@ async fn a_folders_accounts_labels_are_its_keywords() {
     let labelled = page(SourceFilter::Labelled).await.unwrap();
     assert_eq!(labelled.iter().map(|s| s.id).collect::<Vec<_>>(), [tagged]);
     assert_eq!(page(SourceFilter::Unlabelled).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn candidates_are_the_mail_of_the_senders_and_lists() {
+    let f = open();
+    let a = f.account("a@x.example", MailboxModel::Labels).await;
+    let inbox = f.mailbox(a, "INBOX", MailboxType::Inbox).await;
+    let from = |sender: &'static str| (sender, ListHeaders::default());
+    let list = ListHeaders {
+        list_id: Some("<Dev.List.example.com>".into()),
+        ..ListHeaders::default()
+    };
+    let mut ids = Vec::new();
+    for (sender, headers) in [
+        from("bob@shop.com"),
+        from("amy@mail.shop.com"),
+        from("amy@shop.com"),
+        from("amy@notshop.com"),
+        from("amy@shop.com.evil.io"),
+        from("a_b@x.io"),
+        from("axb@x.io"),
+        from("p%@y.io"),
+        from("pzz@y.io"),
+        ("who@z.io", list),
+    ] {
+        ids.push(f.message_from(a, inbox, sender, &[], headers).await);
+    }
+    let found = |senders: &[&str], lists: &[&str]| {
+        let to_owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (senders, lists) = (to_owned(senders), to_owned(lists));
+        let store = &f.store;
+        async move { store.candidates(&[a], &senders, &lists).await.unwrap() }
+    };
+
+    assert_eq!(found(&["shop.com"], &[]).await, [ids[0], ids[1], ids[2]]);
+    assert_eq!(found(&["amy@shop.com"], &[]).await, [ids[2]]);
+    assert_eq!(found(&["a_b@x.io"], &[]).await, [ids[5]]);
+    assert_eq!(found(&["x_.io"], &[]).await, []);
+    assert_eq!(found(&["p%@y.io"], &[]).await, [ids[7]]);
+    assert_eq!(found(&["%.io"], &[]).await, []);
+    assert_eq!(found(&[], &["dev.list.example.com"]).await, [ids[9]]);
+    assert_eq!(found(&["nobody.io"], &["other.list"]).await, []);
+    assert_eq!(
+        f.store
+            .candidates(&[], &["shop.com".into()], &[])
+            .await
+            .unwrap(),
+        []
+    );
 }
 
 #[tokio::test]

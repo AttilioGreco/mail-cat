@@ -238,6 +238,20 @@ impl MailCatClient {
         Ok(resp.mailboxes.into_iter().map(mailbox_from_proto).collect())
     }
 
+    /// Create the label `path` (nested with `/`), or return it when it exists.
+    pub async fn create_mailbox(&self, account_id: &str, path: &str) -> Result<Mailbox> {
+        let resp = MailboxServiceClient::new(self.channel.clone())
+            .create_mailbox(pb::CreateMailboxRequest {
+                account_id: account_id.to_owned(),
+                path: path.to_owned(),
+            })
+            .await?
+            .into_inner();
+        resp.mailbox
+            .map(mailbox_from_proto)
+            .ok_or_else(|| crate::ClientError::InvalidResponse("no mailbox".into()))
+    }
+
     /// Subscribe or unsubscribe a mailbox. `Some` is a warning: the server could
     /// not be told, so the choice holds here only.
     pub async fn set_mailbox_subscribed(

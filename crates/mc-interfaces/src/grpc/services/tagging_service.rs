@@ -5,9 +5,9 @@ use uuid::Uuid;
 
 use mc_application::CommandBus;
 use mc_application::services::tagging::{
-    AccountCount, ApplyKind, DiscoveryPhase, EmbedderState, LabelChange, LabelHome, LabelPresence,
-    LabelStatus as AppLabelStatus, OpResult, OpStatus, PlanOp, PlanSummary, ProposalMessage,
-    ProposalView, TaggingService,
+    AccountCount, ApplyKind, DiscoveryPhase, EmbedderState, LabelApply, LabelChange, LabelHome,
+    LabelPresence, LabelStatus as AppLabelStatus, MatchReport, OpResult, OpStatus, PlanOp,
+    PlanSummary, PreviewItem, ProposalMessage, ProposalView, TaggingService,
 };
 use mc_domain::{
     AccountId, Confidence, GroupId, LabelMode, LabelSettings, MailboxReadRepository, MessageId,
@@ -287,17 +287,63 @@ fn group(g: mc_domain::TrainingGroup) -> pb::TrainingGroup {
     }
 }
 
+fn preview_items(items: Vec<PreviewItem>) -> Vec<pb::ApplyPreviewItem> {
+    items
+        .into_iter()
+        .map(|i| pb::ApplyPreviewItem {
+            message_id: i.message_id.to_string(),
+            subject: i.subject,
+            from: i.from,
+        })
+        .collect()
+}
+
 fn preview(p: mc_application::services::tagging::Preview) -> pb::ApplyPreview {
     pb::ApplyPreview {
         to_label: p.to_label,
         to_archive: p.to_archive,
-        sample: p
-            .sample
+        sample: preview_items(p.sample),
+    }
+}
+
+fn match_report(r: MatchReport) -> pb::AssignMatchingReport {
+    pb::AssignMatchingReport {
+        dry_run: r.dry_run,
+        label: r.label,
+        to_label: r.to_label,
+        to_archive: r.to_archive,
+        already: r.already,
+        creates: r.creates,
+        accounts: r
+            .accounts
             .into_iter()
-            .map(|i| pb::ApplyPreviewItem {
-                message_id: i.message_id.to_string(),
-                subject: i.subject,
-                from: i.from,
+            .map(|a| pb::MatchAccount {
+                account_id: a.account.to_string(),
+                messages: a.messages,
+                archived: a.archived,
+                already: a.already,
+                creates: a.creates,
+            })
+            .collect(),
+        sample: preview_items(r.sample),
+    }
+}
+
+fn apply_all_report(dry_run: bool, labels: Vec<LabelApply>) -> pb::ApplyAllReport {
+    pb::ApplyAllReport {
+        dry_run,
+        to_label: labels.iter().map(|l| l.to_label).sum(),
+        labels: labels
+            .into_iter()
+            .map(|l| pb::LabelApply {
+                scope: l.scope,
+                name: l.name,
+                label: l.label,
+                mode: l.mode.as_str().into(),
+                threshold: l.threshold,
+                positives: l.positives,
+                to_label: l.to_label,
+                sample: preview_items(l.sample),
             })
             .collect(),
     }
@@ -909,6 +955,41 @@ where
             .await
             .map_err(application_error_to_status)?;
         Ok(Response::new(label_change(report)))
+    }
+
+    async fn assign_matching_mail(
+        &self,
+        request: Request<pb::AssignMatchingRequest>,
+    ) -> Result<Response<pb::AssignMatchingReport>, Status> {
+        let req = request.into_inner();
+        let account = req.account_id.as_deref().map(account).transpose()?;
+        let report = self
+            .service
+            .assign_matching(
+                &req.label,
+                &req.from,
+                &req.list_id,
+                account,
+                req.archive,
+                req.dry_run,
+            )
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(match_report(report)))
+    }
+
+    async fn apply_all_labels(
+        &self,
+        request: Request<pb::ApplyAllRequest>,
+    ) -> Result<Response<pb::ApplyAllReport>, Status> {
+        let req = request.into_inner();
+        let account = req.account_id.as_deref().map(account).transpose()?;
+        let labels = self
+            .service
+            .apply_all(account, &req.labels, req.dry_run)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(apply_all_report(req.dry_run, labels)))
     }
 
     async fn accept_label_proposal(
