@@ -506,3 +506,32 @@ async fn a_pending_rename_is_kept_per_account_until_cleared() {
     assert!(repo.pending_renames(&account).await.unwrap().is_empty());
     assert_eq!(repo.pending_renames(&other).await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn message_ids_page_in_id_order_and_the_list_id_comes_from_the_headers() {
+    let (_dir, repo) = open();
+    let mailbox = MailboxId::new();
+    let mut ids = Vec::new();
+    for (i, rfc) in ["<a@x>", "<b@x>", "<c@x>"].into_iter().enumerate() {
+        let (id, mut event) = received(AccountId::new(), mailbox, rfc);
+        if let DomainEvent::MessageReceived { list_headers, .. } = &mut event {
+            list_headers.list_id = (i == 1).then(|| "<digest.example.org>".to_owned());
+        }
+        repo.project(&at_position(i as u64 + 1, event))
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    ids.sort_by_key(|id| *id.as_uuid());
+
+    let first = repo.message_ids_after(None, 2).await.unwrap();
+    assert_eq!(first, ids[..2]);
+    let rest = repo.message_ids_after(first.last(), 2).await.unwrap();
+    assert_eq!(rest, ids[2..]);
+
+    let mut found = Vec::new();
+    for id in &ids {
+        found.extend(repo.list_id_of(id).await.unwrap());
+    }
+    assert_eq!(found, ["<digest.example.org>"]);
+}

@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Search, X, Mail, User, FileText, AtSign } from 'lucide-react';
+import { Search, X, Mail, User, FileText, AtSign, CircleHelp } from 'lucide-react';
 import { useSearchStore } from '../model/search-store';
-import { useSuggestions } from '../model/useSearch';
+import { useSuggestions, useLabelNames } from '../model/useSearch';
+import { OPERATORS, completionsFor, type Completion } from '../model/operators';
+import { Popover, PopoverTrigger, PopoverContent } from '@/shared/ui/popover';
 import { cn } from '@/shared/lib/utils';
 import type { Suggestion } from '../model/types';
 
@@ -93,7 +95,13 @@ export function SearchBar() {
     scope,
   );
 
-  const { groups, total } = useMemo(() => buildGroups(suggestions), [suggestions]);
+  const { groups, total: suggestionCount } = useMemo(() => buildGroups(suggestions), [suggestions]);
+
+  // Operator and value completions come first in the list, then the suggestions.
+  const { data: labelNames = [] } = useLabelNames(/label:/i.test(input));
+  const completion = useMemo(() => completionsFor(input, labelNames), [input, labelNames]);
+  const completions = completion.items;
+  const total = completions.length + suggestionCount;
 
   // Sync external clear (e.g. selecting a mailbox clears query)
   useEffect(() => {
@@ -153,6 +161,14 @@ export function SearchBar() {
     }
   }, []);
 
+  const handleComplete = useCallback((c: Completion) => {
+    const next = input.slice(0, completion.start) + c.insert;
+    setInput(next);
+    setDebouncedInput(next);
+    setHighlightIndex(-1);
+    inputRef.current?.focus();
+  }, [input, completion.start]);
+
   const handleSelect = useCallback((s: Suggestion) => {
     const query = buildQueryFromSuggestion(s);
     setInput(query);
@@ -163,14 +179,18 @@ export function SearchBar() {
   const getSuggestionByIndex = useCallback((idx: number): Suggestion | null => {
     for (const group of groups) {
       for (const item of group.items) {
-        if (item.flatIndex === idx) return item.suggestion;
+        if (item.flatIndex + completions.length === idx) return item.suggestion;
       }
     }
     return null;
-  }, [groups]);
+  }, [groups, completions.length]);
 
   const handleSubmit = (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (highlightIndex >= 0 && highlightIndex < completions.length) {
+      handleComplete(completions[highlightIndex]);
+      return;
+    }
     if (highlightIndex >= 0) {
       const s = getSuggestionByIndex(highlightIndex);
       if (s) {
@@ -201,6 +221,11 @@ export function SearchBar() {
         e.preventDefault();
         setHighlightIndex((prev) => (prev > 0 ? prev - 1 : total - 1));
         break;
+      case 'Tab':
+        if (completions.length === 0) break;
+        e.preventDefault();
+        handleComplete(completions[Math.max(highlightIndex, 0)] ?? completions[0]);
+        break;
       case 'Escape':
         setShowDropdown(false);
         setHighlightIndex(-1);
@@ -208,7 +233,8 @@ export function SearchBar() {
     }
   };
 
-  const shouldShowDropdown = showDropdown && total > 0 && prefix.length >= 2;
+  const shouldShowSuggestions = suggestionCount > 0 && prefix.length >= 2;
+  const shouldShowDropdown = showDropdown && (completions.length > 0 || shouldShowSuggestions);
 
   return (
     <div className="relative">
@@ -221,9 +247,10 @@ export function SearchBar() {
           onChange={(e) => handleChange(e.target.value)}
           onFocus={() => setShowDropdown(true)}
           onKeyDown={handleKeyDown}
-          placeholder="Search… (sbj: from: to:)"
+          placeholder="Cerca… (from: label: in: is:)"
           className="h-8 w-full rounded-md border border-border bg-background pl-8 pr-8 text-xs text-foreground placeholder:text-muted outline-none focus:border-accent focus:ring-1 focus:ring-accent/30"
         />
+        <SearchHelp hasClear={input.length > 0} />
         {input.length > 0 && (
           <button
             type="button"
@@ -240,7 +267,23 @@ export function SearchBar() {
           ref={dropdownRef}
           className="absolute left-0 right-0 top-full z-50 mt-1 max-h-72 overflow-y-auto rounded-md border border-border bg-background shadow-lg"
         >
-          {groups.map((group) => (
+          {completions.map((c, i) => (
+            <button
+              key={c.insert}
+              type="button"
+              // Keeps the input focused, so the list does not close under the click.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => handleComplete(c)}
+              className={cn(
+                'flex w-full items-center justify-between gap-3 px-3 py-1.5 text-xs text-foreground transition-colors',
+                i === highlightIndex ? 'bg-accent/15 text-accent' : 'hover:bg-surface-hover',
+              )}
+            >
+              <span className="truncate font-mono">{c.label}</span>
+              {c.hint && <span className="truncate text-[10px] text-muted">{c.hint}</span>}
+            </button>
+          ))}
+          {shouldShowSuggestions && groups.map((group) => (
             <div key={group.field}>
               <div className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
                 <FieldIcon field={group.field} />
@@ -253,7 +296,7 @@ export function SearchBar() {
                   onClick={() => handleSelect(suggestion)}
                   className={cn(
                     'flex w-full items-center justify-between px-3 py-1.5 text-xs text-foreground transition-colors',
-                    flatIndex === highlightIndex
+                    flatIndex + completions.length === highlightIndex
                       ? 'bg-accent/15 text-accent'
                       : 'hover:bg-surface-hover',
                   )}
@@ -269,5 +312,35 @@ export function SearchBar() {
         </div>
       )}
     </div>
+  );
+}
+
+function SearchHelp({ hasClear }: { hasClear: boolean }) {
+  return (
+    <Popover>
+      <PopoverTrigger
+        aria-label="Operatori di ricerca"
+        className={cn('absolute text-muted hover:text-foreground', hasClear ? 'right-7' : 'right-2')}
+      >
+        <CircleHelp size={13} />
+      </PopoverTrigger>
+      <PopoverContent align="end" className="max-h-96 w-96 overflow-y-auto p-3">
+        <div className="mb-2 text-xs font-semibold">Operatori di ricerca</div>
+        <dl className="space-y-1.5 text-xs">
+          {OPERATORS.map((o) => (
+            <div key={o.name}>
+              <dt className="font-mono text-accent">{o.example}</dt>
+              <dd className="text-muted">{o.hint}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-3 text-[11px] leading-snug text-muted">
+          Più parole si combinano (AND); <span className="font-mono">OR</span> tra due termini,{' '}
+          <span className="font-mono">-</span> davanti per escludere, <span className="font-mono">&quot;frase&quot;</span> tra
+          virgolette, parentesi per raggruppare. Esempio:{' '}
+          <span className="font-mono">label:Dev -is:read after:2026-01-01</span>
+        </p>
+      </PopoverContent>
+    </Popover>
   );
 }

@@ -1211,6 +1211,39 @@ impl MessageReadRepository for SqliteRepository {
             .await
     }
 
+    async fn list_id_of(&self, id: &MessageId) -> Result<Option<String>, DomainError> {
+        let id = *id.as_uuid();
+        self.db
+            .read(move |conn| {
+                query_one(
+                    conn,
+                    "SELECT json_extract(list_headers, '$.list_id') FROM messages WHERE id = ?1",
+                    [id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .map(Option::flatten)
+            })
+            .await
+    }
+
+    async fn message_ids_after(
+        &self,
+        after: Option<&MessageId>,
+        limit: usize,
+    ) -> Result<Vec<MessageId>, DomainError> {
+        let (after, limit) = (after.map(|a| *a.as_uuid()), sql_int(limit as u64));
+        self.db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    "SELECT id FROM messages WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2",
+                    params![after, limit],
+                    |r| r.get::<_, Uuid>(0).map(MessageId::from_uuid),
+                )
+            })
+            .await
+    }
+
     // ponytail: full scan of `messages` per keystroke (a few ms per 10k rows);
     // add an FTS5 prefix table if it shows up in latency.
     async fn suggest(

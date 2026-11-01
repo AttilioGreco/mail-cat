@@ -76,3 +76,16 @@ export function useSuggestions(prefix: string | null, scope?: string | null) {
     staleTime: 60_000,
   });
 }
+
+/** Label names across accounts, for completing `label:`. */
+export function useLabelNames(enabled: boolean) {
+  return useQuery({
+    queryKey: ['label-names', 'all'],
+    enabled,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const scopes = await invoke<{ labels: { name: string }[] }[]>('list_labels', { accountId: null });
+      return [...new Set(scopes.flatMap((s) => s.labels.map((l) => l.name)))].sort((a, b) => a.localeCompare(b));
+    },
+  });
+}

@@ -220,7 +220,11 @@ struct MockSearchIndex {
 
 #[async_trait]
 impl SearchIndex for MockSearchIndex {
-    async fn index_message(&self, _message: &Message) -> Result<(), DomainError> {
+    async fn index_message(
+        &self,
+        _message: &Message,
+        _extras: &mc_domain::IndexExtras,
+    ) -> Result<(), DomainError> {
         Ok(())
     }
 
@@ -237,6 +241,7 @@ impl SearchIndex for MockSearchIndex {
         _query: &str,
         _account_id: Option<&AccountId>,
         _mailbox_id: Option<&MailboxId>,
+        _directory: &mc_domain::SearchDirectory,
         _pagination: &Pagination,
     ) -> Result<mc_domain::IndexResults, DomainError> {
         Ok(mc_domain::IndexResults {

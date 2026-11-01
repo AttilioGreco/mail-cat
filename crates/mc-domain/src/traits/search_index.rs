@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
 use crate::model::account::AccountId;
-use crate::model::mailbox::MailboxId;
+use crate::model::mailbox::{Mailbox, MailboxId};
 use crate::model::message::Message;
+use crate::traits::repository::AccountSummary;
 use crate::value_objects::message_id::MessageId;
 
 /// Full-text search index for email messages.
@@ -17,7 +18,11 @@ use crate::value_objects::message_id::MessageId;
 pub trait SearchIndex: Send + Sync {
     /// Index a message for full-text search.
     /// Idempotent: re-indexing the same message_id updates the existing document.
-    async fn index_message(&self, message: &Message) -> Result<(), DomainError>;
+    async fn index_message(
+        &self,
+        message: &Message,
+        extras: &IndexExtras,
+    ) -> Result<(), DomainError>;
 
     /// Remove a message from the index.
     async fn remove_message(&self, message_id: &MessageId) -> Result<(), DomainError>;
@@ -25,12 +30,15 @@ pub trait SearchIndex: Send + Sync {
     /// Remove every message of an account from the index.
     async fn remove_account(&self, account_id: &AccountId) -> Result<(), DomainError>;
 
-    /// Full-text search across indexed messages, best match first.
+    /// Search with the Gmail-style operators of `docs/search.md`; best match
+    /// first, newest first when the query has no free text. `directory` turns
+    /// the names in `in:` and `account:` into ids.
     async fn search(
         &self,
         query: &str,
         account_id: Option<&AccountId>,
         mailbox_id: Option<&MailboxId>,
+        directory: &SearchDirectory,
         pagination: &Pagination,
     ) -> Result<IndexResults, DomainError>;
 
@@ -48,8 +56,12 @@ pub trait SearchIndex: Send + Sync {
 /// generic `SI: SearchIndex` bound (e.g. in the search-index projection).
 #[async_trait]
 impl<T: SearchIndex + ?Sized> SearchIndex for std::sync::Arc<T> {
-    async fn index_message(&self, message: &Message) -> Result<(), DomainError> {
-        (**self).index_message(message).await
+    async fn index_message(
+        &self,
+        message: &Message,
+        extras: &IndexExtras,
+    ) -> Result<(), DomainError> {
+        (**self).index_message(message, extras).await
     }
     async fn remove_message(&self, message_id: &MessageId) -> Result<(), DomainError> {
         (**self).remove_message(message_id).await
@@ -62,10 +74,11 @@ impl<T: SearchIndex + ?Sized> SearchIndex for std::sync::Arc<T> {
         query: &str,
         account_id: Option<&AccountId>,
         mailbox_id: Option<&MailboxId>,
+        directory: &SearchDirectory,
         pagination: &Pagination,
     ) -> Result<IndexResults, DomainError> {
         (**self)
-            .search(query, account_id, mailbox_id, pagination)
+            .search(query, account_id, mailbox_id, directory, pagination)
             .await
     }
     fn snippet(&self, query: &str, message: &Message) -> Option<String> {
@@ -74,6 +87,22 @@ impl<T: SearchIndex + ?Sized> SearchIndex for std::sync::Arc<T> {
     async fn flush(&self) -> Result<(), DomainError> {
         (**self).flush().await
     }
+}
+
+/// What the read model knows about a message that the `Message` does not carry.
+#[derive(Debug, Clone, Default)]
+pub struct IndexExtras {
+    /// The message's labels as written (display paths, or keywords on folder
+    /// accounts); the index derives the case-insensitive keys and parents.
+    pub labels: Vec<String>,
+    pub list_id: Option<String>,
+}
+
+/// The accounts and mailboxes a query's names (`in:`, `account:`) resolve against.
+#[derive(Debug, Clone, Default)]
+pub struct SearchDirectory {
+    pub accounts: Vec<AccountSummary>,
+    pub mailboxes: Vec<Mailbox>,
 }
 
 /// What the index returns: ids only, the read model has the content.

@@ -55,7 +55,8 @@ pub use traits::repository::{
     SyncCursorStore,
 };
 pub use traits::search_index::{
-    IndexHit, IndexResults, SearchHit, SearchIndex, SearchResults, SuggestScope, Suggestion,
+    IndexExtras, IndexHit, IndexResults, SearchDirectory, SearchHit, SearchIndex, SearchResults,
+    SuggestScope, Suggestion,
 };
 pub use traits::secret_store::{AccountSecrets, OAuthSecrets, SecretStore};
 pub use traits::tagging_store::TaggingStore;

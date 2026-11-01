@@ -8,7 +8,7 @@ use std::sync::Arc;
 use mc_domain::{
     AccountId, AccountReadRepository, ContactReadRepository, ContactSearchHit,
     ConversationReadRepository, IndexHit, MailboxReadRepository, Message, MessageReadRepository,
-    SearchHit, SearchIndex, SearchResults,
+    SearchDirectory, SearchHit, SearchIndex, SearchResults,
 };
 
 use crate::error::ApplicationError;
@@ -110,12 +110,14 @@ where
                 mailbox_id,
                 pagination,
             } => {
+                let directory = self.search_directory().await?;
                 let found = self
                     .search_index
                     .search(
                         &query,
                         account_id.as_ref(),
                         mailbox_id.as_ref(),
+                        &directory,
                         &pagination,
                     )
                     .await?;
@@ -193,6 +195,19 @@ where
                 Ok(QueryResult::IndexRebuilt(count))
             }
         }
+    }
+
+    /// The names `in:` and `account:` can refer to.
+    async fn search_directory(&self) -> Result<SearchDirectory, ApplicationError> {
+        let accounts = self.account_repo.list_accounts().await?;
+        let mut mailboxes = Vec::new();
+        for account in &accounts {
+            mailboxes.extend(self.mailbox_repo.list_mailboxes(&account.id).await?);
+        }
+        Ok(SearchDirectory {
+            accounts,
+            mailboxes,
+        })
     }
 
     /// Own-account addresses first; others only fill the remaining slots, and

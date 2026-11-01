@@ -228,15 +228,28 @@ impl AppContext {
             .await
             .context("failed to catch up projections")?;
         if search_index.was_recreated() {
+            // A new schema means an empty index. Refill it from the read model
+            // in the background (searches see a partial index meanwhile) rather
+            // than replaying the whole event log before the app opens.
             search_handler
                 .reset()
                 .await
                 .context("failed to reset search index checkpoint")?;
+            let (search, store) = (search_handler.clone(), event_store.clone());
+            tokio::spawn(async move {
+                tracing::info!("Rebuilding the search index from the read model");
+                if let Err(err) = search.rebuild(store.as_ref()).await {
+                    tracing::error!(
+                        "search index rebuild failed, the next start replays the event log instead: {err}"
+                    );
+                }
+            });
+        } else {
+            search_handler
+                .catch_up(event_store.as_ref())
+                .await
+                .context("failed to catch up search index")?;
         }
-        search_handler
-            .catch_up(event_store.as_ref())
-            .await
-            .context("failed to catch up search index")?;
         tracing::info!("Projections caught up successfully");
 
         // ── Accounts ────────────────────────────────────────────────────────

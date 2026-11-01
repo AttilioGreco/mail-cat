@@ -128,7 +128,7 @@ pub enum MessagesCmd {
     },
     /// Search messages by full-text query
     Search {
-        /// Search query (supports from:, to:, sbj: prefixes)
+        /// Search query, Gmail-style: free text plus from:, to:, label:, in:, is:, has:, after:… (docs/search.md)
         query: String,
         /// Limit to a specific account
         #[arg(long)]

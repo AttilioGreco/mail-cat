@@ -14,7 +14,7 @@ export function SearchResults({ deleteMany }: {
 }) {
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const { selectedAccountId, selectedMailboxId, selectedMessageId, selectMessage } = useSessionStore();
-  const { data: hits = [], isLoading } = useSearchMessages(searchQuery, selectedAccountId);
+  const { data: hits = [], isLoading, error } = useSearchMessages(searchQuery, selectedAccountId);
   const [outcome, setOutcome] = useState<string | null>(null);
 
   // Group action over the whole result set: the query *is* the selection.
@@ -52,6 +52,15 @@ export function SearchResults({ deleteMany }: {
       <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
         <RefreshCw size={20} className="animate-spin text-muted" />
         <span className="text-sm">Searching...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-muted-foreground">
+        <SearchX size={32} className="text-muted" />
+        <span className="text-sm">{String(error)}</span>
       </div>
     );
   }

@@ -184,6 +184,22 @@ pub trait MessageReadRepository: Send + Sync {
         account_id: Option<&AccountId>,
     ) -> Result<Vec<Message>, DomainError>;
 
+    /// `List-Id` of a message, kept outside `Message` because only the search
+    /// index and the classifier read it.
+    async fn list_id_of(&self, _id: &MessageId) -> Result<Option<String>, DomainError> {
+        Ok(None)
+    }
+
+    /// Up to `limit` message ids after `after`, in id order: a cursor over the
+    /// whole read model that never holds more than a page in memory.
+    async fn message_ids_after(
+        &self,
+        _after: Option<&MessageId>,
+        _limit: usize,
+    ) -> Result<Vec<MessageId>, DomainError> {
+        Ok(Vec::new())
+    }
+
     /// Search-as-you-type: sender, recipient and subject values containing
     /// `prefix` (case-insensitive), most frequent first, at most
     /// `max_per_field` per field, grouped in the order from_email, from_name,
