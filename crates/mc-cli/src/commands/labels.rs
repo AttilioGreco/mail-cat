@@ -1,4 +1,6 @@
+mod plan;
 mod proposals;
+mod render;
 #[cfg(test)]
 mod tests;
 
@@ -7,6 +9,8 @@ use clap::Subcommand;
 use colored::Colorize;
 use mc_client::MailCatClient;
 use tabled::{Table, Tabled};
+
+use super::{Format, print_json};
 
 #[derive(Subcommand)]
 pub enum LabelsCmd {
@@ -35,18 +39,37 @@ pub enum LabelsCmd {
         #[arg(long)]
         account: Option<String>,
     },
+    /// One existing label: group scope, mode, threshold, examples, where
+    /// each account keeps it, and recent mail under it
+    Show {
+        /// Label name, any case
+        label: String,
+        /// Account ID, name or email; only its training group (all that have
+        /// the label when left out)
+        #[arg(long)]
+        account: Option<String>,
+        /// How many recent messages to print
+        #[arg(long, default_value_t = 10)]
+        samples: u32,
+    },
     /// Set what happens to mail the classifier is sure about. Apply modes
     /// only print what they would do until --yes
     Mode(proposals::ModeArgs),
 }
 
-pub async fn run(cmd: LabelsCmd, client: MailCatClient, json: bool) -> Result<()> {
+pub async fn run(cmd: LabelsCmd, client: MailCatClient, fmt: Format) -> Result<()> {
+    let json = fmt == Format::Json;
     match cmd {
         LabelsCmd::Eval { account } => eval(&account, client, json).await,
-        LabelsCmd::Stats => stats(client, json).await,
-        LabelsCmd::Discover { account } => discover(account.as_deref(), client, json).await,
-        LabelsCmd::Proposals(args) => proposals::run(args, client, json).await,
-        LabelsCmd::List { account } => proposals::list(account.as_deref(), client, json).await,
+        LabelsCmd::Stats => stats(client, fmt).await,
+        LabelsCmd::Discover { account } => discover(account.as_deref(), client, fmt).await,
+        LabelsCmd::Proposals(args) => proposals::run(args, client, fmt).await,
+        LabelsCmd::List { account } => proposals::list(account.as_deref(), client, fmt).await,
+        LabelsCmd::Show {
+            label,
+            account,
+            samples,
+        } => proposals::show_label(&label, account.as_deref(), samples, client, fmt).await,
         LabelsCmd::Mode(args) => proposals::mode(args, client, json).await,
     }
 }
@@ -111,11 +134,15 @@ async fn eval(account: &str, client: MailCatClient, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn stats(client: MailCatClient, json: bool) -> Result<()> {
+async fn stats(client: MailCatClient, fmt: Format) -> Result<()> {
     let s = client.get_background_stats().await?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&s)?);
-        return Ok(());
+    match fmt {
+        Format::Json => return print_json(&s),
+        Format::Toon => {
+            render::stats(&s).print();
+            return Ok(());
+        }
+        Format::Table => {}
     }
     println!(
         "Speed: {} ({} workers x {} threads, batch {}, pause {} ms)",
@@ -149,10 +176,22 @@ async fn stats(client: MailCatClient, json: bool) -> Result<()> {
     for r in &s.retrains {
         println!("Retraining {}: {} / {}", r.scope, r.done, r.total);
     }
+    for a in &s.applying {
+        let verb = if a.kind == "undo" {
+            "Undoing"
+        } else {
+            "Applying"
+        };
+        println!(
+            "{verb} {}: {} / {} (archived {})",
+            a.label, a.done, a.total, a.archived
+        );
+    }
     Ok(())
 }
 
-async fn discover(account: Option<&str>, client: MailCatClient, json: bool) -> Result<()> {
+async fn discover(account: Option<&str>, client: MailCatClient, fmt: Format) -> Result<()> {
+    let json = fmt == Format::Json;
     if !client.discover_labels(account).await? {
         eprintln!(
             "{}",
@@ -173,5 +212,5 @@ async fn discover(account: Option<&str>, client: MailCatClient, json: bool) -> R
     if !json {
         eprintln!();
     }
-    proposals::list_proposals(None, proposals::StatusArg::Pending, client, json).await
+    proposals::list_proposals(None, proposals::StatusArg::Pending, client, fmt).await
 }

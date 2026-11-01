@@ -72,6 +72,19 @@ export function BackgroundStatsCard() {
         />
       )}
       {s.discovery && <Discovery d={s.discovery} />}
+      {s.applying.map((a) => (
+        <ProgressRow
+          key={`${a.kind}:${a.label}`}
+          label={`${a.kind === 'undo' ? 'Annullamento' : 'Applicazione'}: ${a.label}`}
+          done={a.done}
+          total={a.total}
+          missingLabel={`${Math.max(0, a.total - a.done).toLocaleString()} messaggi da elaborare${
+            a.archived > 0
+              ? ` · ${a.archived.toLocaleString()} ${a.kind === 'undo' ? 'rimessi in' : 'tolti dalla'} posta in arrivo`
+              : ''
+          }`}
+        />
+      ))}
       {s.retrains.map((r) => (
         <ProgressRow
           key={r.scope}

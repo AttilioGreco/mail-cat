@@ -351,10 +351,25 @@ async fn settings_and_auto_records_round_trip() {
         score: 0.95,
         archived: true,
         confirmed: false,
+        proposal_id: None,
         at: Utc::now(),
     };
     f.store.record_auto(&applied).await.unwrap();
     assert_eq!(f.store.autos(message).await.unwrap().len(), 1);
+    let proposal = mc_domain::ProposalId::new();
+    let tied = AutoApplied {
+        message_id: MessageId::new(),
+        proposal_id: Some(proposal),
+        confirmed: true,
+        ..applied.clone()
+    };
+    f.store.record_auto(&tied).await.unwrap();
+    let found = f.store.proposal_autos(proposal).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        (found[0].message_id, found[0].proposal_id),
+        (tied.message_id, Some(proposal))
+    );
     assert!(f.store.take_auto(message, "newsletter").await.unwrap());
     assert!(!f.store.take_auto(message, "newsletter").await.unwrap());
 }
@@ -562,6 +577,8 @@ async fn proposals_round_trip_by_status_and_can_be_replaced_and_deleted() {
         }],
         status: ProposalStatus::Pending,
         created_at: Utc::now(),
+        curated: true,
+        created: vec![mc_domain::MailboxId::new()],
     };
     f.store.put_proposal(&proposal).await.unwrap();
     let mut smaller = proposal.clone();
@@ -573,6 +590,7 @@ async fn proposals_round_trip_by_status_and_can_be_replaced_and_deleted() {
     assert_eq!(pending[0].name, "Amazon", "Inbox-heavy first");
     assert_eq!(pending[0].members, members);
     assert_eq!(pending[0].samples, proposal.samples);
+    assert!(pending[0].curated && pending[0].created == proposal.created);
     assert_eq!(
         pending[0].created_at.timestamp_nanos_opt(),
         proposal.created_at.timestamp_nanos_opt()

@@ -1,4 +1,5 @@
 mod commands;
+mod toon;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -25,9 +26,14 @@ struct Cli {
     )]
     server: String,
 
-    /// Print list/show results as JSON instead of tables
+    /// Print list/show results as JSON instead of tables (same as --format json)
     #[arg(long, global = true)]
     json: bool,
+
+    /// Output format: table, json or toon (compact, for assistants; only the
+    /// `labels` commands have it, the others print tables)
+    #[arg(long, global = true, value_enum)]
+    format: Option<commands::Format>,
 
     #[command(subcommand)]
     command: Command,
@@ -81,6 +87,12 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let format = if cli.json {
+        commands::Format::Json
+    } else {
+        cli.format.unwrap_or(commands::Format::Table)
+    };
+    let json = format == commands::Format::Json;
 
     let client = MailCatClient::connect(&cli.server).await.map_err(|e| {
         anyhow::anyhow!(
@@ -91,12 +103,12 @@ async fn main() -> Result<()> {
     })?;
 
     match cli.command {
-        Command::Accounts(cmd) => commands::accounts::run(cmd, client, cli.json).await,
+        Command::Accounts(cmd) => commands::accounts::run(cmd, client, json).await,
         Command::Contacts(cmd) => commands::contacts::run(cmd, client).await,
-        Command::Mailboxes(cmd) => commands::mailboxes::run(cmd, client, cli.json).await,
-        Command::Labels(cmd) => commands::labels::run(cmd, client, cli.json).await,
-        Command::Messages(cmd) => commands::messages::run(cmd, client, cli.json).await,
-        Command::Conversations(cmd) => commands::conversations::run(cmd, client, cli.json).await,
+        Command::Mailboxes(cmd) => commands::mailboxes::run(cmd, client, json).await,
+        Command::Labels(cmd) => commands::labels::run(cmd, client, format).await,
+        Command::Messages(cmd) => commands::messages::run(cmd, client, json).await,
+        Command::Conversations(cmd) => commands::conversations::run(cmd, client, json).await,
         Command::Sync {
             account_id,
             full,

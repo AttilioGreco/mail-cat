@@ -33,6 +33,7 @@ fn proposal() -> LabelProposal {
             domain: "github.com".into(),
             count: 118,
         }],
+        curated: true,
     }
 }
 
@@ -52,6 +53,7 @@ fn proposals_json_shape() {
             "status": "pending",
             "scope": "g:00000000-0000-0000-0000-000000000001",
             "senders": [{"domain": "github.com", "count": 118}],
+            "curated": true,
         }])
     );
 }
@@ -178,4 +180,37 @@ fn the_command_line_is_well_formed() {
         "--yes"
     ]));
     assert!(!parses(&["mode", "news", "sometimes"]));
+}
+
+#[test]
+fn proposals_toon_snapshot() {
+    let mut other = proposal();
+    other.id = "0198d1a2-0000-7000-8000-000000000002".into();
+    other.name = "Shop, \"Ebay\"".into();
+    other.keywords = vec!["ebay".into()];
+    other.senders.clear();
+    other.curated = false;
+    assert_eq!(
+        super::render::proposals(&[proposal(), other]).as_str(),
+        "proposals[2]{id,name,size,inbox,curated,status,group,keywords,senders}:\n\
+         \x20 0198d1a2-0000-7000-8000-000000000001,GitHub,120,100,true,pending,Tutti,github|pull,github.com(118)\n\
+         \x20 0198d1a2-0000-7000-8000-000000000002,\"Shop, \\\"Ebay\\\"\",120,100,false,pending,Tutti,ebay,\"\"\n"
+    );
+}
+
+#[test]
+fn the_new_commands_parse() {
+    assert!(parses(&["proposals", "plan", "plan.json"]));
+    assert!(parses(&["proposals", "plan", "plan.json", "--dry-run"]));
+    assert!(parses(&["proposals", "plan", "plan.json", "--yes"]));
+    assert!(!parses(&["proposals", "plan"]));
+    assert!(parses(&["proposals", "undo", ID, "--yes", "--reject"]));
+    assert!(parses(&[
+        "show",
+        "Shopping/Ebay",
+        "--account",
+        "a",
+        "--samples",
+        "3"
+    ]));
 }

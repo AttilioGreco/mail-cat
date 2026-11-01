@@ -6,10 +6,11 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::model::mailbox::MailboxId;
 use crate::model::tagging::Scope;
 use crate::value_objects::message_id::MessageId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProposalId(Uuid);
 
 impl ProposalId {
@@ -84,6 +85,12 @@ pub struct Proposal {
     pub samples: Vec<ProposalSample>,
     pub status: ProposalStatus,
     pub created_at: DateTime<Utc>,
+    /// Renamed or merged by a person (or an assistant): discovery leaves it
+    /// alone instead of replacing it with a fresh cluster.
+    pub curated: bool,
+    /// Labels (mailboxes) that accepting it created, so that undoing the
+    /// acceptance can remove them again, but never one that was already there.
+    pub created: Vec<MailboxId>,
 }
 
 impl Proposal {

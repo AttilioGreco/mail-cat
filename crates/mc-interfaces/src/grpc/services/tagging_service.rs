@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use mc_application::CommandBus;
 use mc_application::services::tagging::{
-    DiscoveryPhase, EmbedderState, LabelStatus as AppLabelStatus, ProposalView, TaggingService,
+    AccountCount, ApplyKind, DiscoveryPhase, EmbedderState, LabelHome, LabelPresence,
+    LabelStatus as AppLabelStatus, OpResult, OpStatus, PlanOp, PlanSummary, ProposalMessage,
+    ProposalView, TaggingService,
 };
 use mc_domain::{
     AccountId, Confidence, GroupId, LabelMode, LabelSettings, MailboxReadRepository, MessageId,
@@ -109,6 +111,7 @@ fn proposal_view(p: ProposalView) -> pb::LabelProposal {
             .into_iter()
             .map(|(domain, count)| pb::SenderCount { domain, count })
             .collect(),
+        curated: p.proposal.curated,
         name: p.proposal.name,
         keywords: p.proposal.keywords,
         samples: p
@@ -121,6 +124,124 @@ fn proposal_view(p: ProposalView) -> pb::LabelProposal {
                 from: s.from,
             })
             .collect(),
+    }
+}
+
+fn proposal_message(m: ProposalMessage) -> pb::ProposalMessage {
+    pb::ProposalMessage {
+        message_id: m.message_id.to_string(),
+        received_at: m.received_at.to_rfc3339(),
+        from: m.from,
+        subject: m.subject,
+        excerpt: m.excerpt,
+    }
+}
+
+fn account_count(a: AccountCount) -> pb::AccountCount {
+    pb::AccountCount {
+        account_id: a.account.to_string(),
+        messages: a.messages,
+        archived: a.archived,
+    }
+}
+
+fn plan_op(op: pb::CurationOp) -> Result<PlanOp, Status> {
+    let named = |v: String| Some(v).filter(|v| !v.trim().is_empty());
+    Ok(match op.kind.as_str() {
+        "merge" => PlanOp::Merge {
+            ids: op.ids,
+            name: named(op.name),
+            alias: named(op.alias),
+        },
+        "rename" => PlanOp::Rename {
+            id: op.id,
+            name: op.name,
+        },
+        "assign" => PlanOp::Assign {
+            id: op.id,
+            label: op.label,
+            archive: op.archive,
+        },
+        "accept" => PlanOp::Accept {
+            id: op.id,
+            name: named(op.name),
+            archive: op.archive,
+        },
+        "reject" => PlanOp::Reject { id: op.id },
+        "mode" => PlanOp::Mode {
+            mode: mode(&op.mode)?,
+            label: op.label,
+            threshold: op.threshold,
+            existing: op.existing,
+            account: op.account_id.as_deref().map(account).transpose()?,
+        },
+        other => {
+            return Err(Status::invalid_argument(format!(
+                "unknown operation {other:?}"
+            )));
+        }
+    })
+}
+
+fn op_result(r: OpResult) -> pb::OpResult {
+    pb::OpResult {
+        index: r.index as u32,
+        kind: r.kind.into(),
+        status: match r.status {
+            OpStatus::Planned => "planned",
+            OpStatus::Done => "done",
+            OpStatus::Failed => "failed",
+            OpStatus::Skipped => "skipped",
+        }
+        .into(),
+        detail: r.detail,
+        proposal_id: r
+            .proposal
+            .map(|p| p.as_uuid().to_string())
+            .unwrap_or_default(),
+        queued: r.queued,
+    }
+}
+
+fn plan_summary(s: PlanSummary) -> pb::PlanSummary {
+    pb::PlanSummary {
+        merged: s.merged,
+        renamed: s.renamed,
+        accepted: s.accepted,
+        assigned: s.assigned,
+        rejected: s.rejected,
+        modes: s.modes,
+        labels_to_create: s
+            .labels_to_create
+            .into_iter()
+            .map(|(name, accounts)| pb::LabelCreation {
+                name,
+                account_ids: accounts.iter().map(ToString::to_string).collect(),
+            })
+            .collect(),
+        labels_touched: s.labels_touched,
+        to_label: s.to_label,
+        to_archive: s.to_archive,
+        accounts: s.accounts.into_iter().map(account_count).collect(),
+    }
+}
+
+fn presence(p: LabelPresence) -> pb::LabelPresence {
+    let (kind, mailbox_id, path, messages, keyword) = match p.home {
+        LabelHome::Mailbox { id, path, messages } => {
+            ("mailbox", id.to_string(), path, messages, String::new())
+        }
+        LabelHome::Keyword(k) => ("keyword", String::new(), String::new(), 0, k),
+        LabelHome::Missing => ("missing", String::new(), String::new(), 0, String::new()),
+    };
+    pb::LabelPresence {
+        account_id: p.account.to_string(),
+        kind: kind.into(),
+        mailbox_id,
+        path,
+        messages,
+        keyword,
+        examples: p.examples,
     }
 }
 
@@ -498,6 +619,21 @@ where
                     total: r.total,
                 })
                 .collect(),
+            applying: s
+                .applying
+                .into_iter()
+                .map(|a| pb::ApplyProgress {
+                    label: a.label,
+                    kind: match a.kind {
+                        ApplyKind::Apply => "apply",
+                        ApplyKind::Undo => "undo",
+                    }
+                    .into(),
+                    done: a.done,
+                    total: a.total,
+                    archived: a.archived,
+                })
+                .collect(),
             discovery: s.discovery.map(|d| pb::DiscoveryProgress {
                 scope: d.scope,
                 phase: match d.phase {
@@ -563,16 +699,7 @@ where
             .map_err(application_error_to_status)?;
         Ok(Response::new(pb::LabelProposalDetail {
             proposal: Some(proposal_view(view)),
-            messages: messages
-                .into_iter()
-                .map(|m| pb::ProposalMessage {
-                    message_id: m.message_id.to_string(),
-                    received_at: m.received_at.to_rfc3339(),
-                    from: m.from,
-                    subject: m.subject,
-                    excerpt: m.excerpt,
-                })
-                .collect(),
+            messages: messages.into_iter().map(proposal_message).collect(),
         }))
     }
 
@@ -652,6 +779,73 @@ where
             })
             .collect();
         Ok(Response::new(pb::ListLabelsResponse { scopes }))
+    }
+
+    async fn get_label(
+        &self,
+        request: Request<pb::GetLabelRequest>,
+    ) -> Result<Response<pb::GetLabelResponse>, Status> {
+        let req = request.into_inner();
+        let account = req.account_id.as_deref().map(account).transpose()?;
+        let labels = self
+            .service
+            .label_detail(&req.label, account, req.samples as usize)
+            .await
+            .map_err(application_error_to_status)?
+            .into_iter()
+            .map(|d| pb::LabelDetail {
+                scope: d.scope.scope,
+                group: d.scope.group,
+                account_ids: d.scope.accounts.iter().map(ToString::to_string).collect(),
+                name: d.entry.name,
+                status: Some(status(d.entry.status)),
+                accounts: d.presence.into_iter().map(presence).collect(),
+                samples: d.samples.into_iter().map(proposal_message).collect(),
+            })
+            .collect();
+        Ok(Response::new(pb::GetLabelResponse { labels }))
+    }
+
+    async fn apply_curation_plan(
+        &self,
+        request: Request<pb::ApplyCurationPlanRequest>,
+    ) -> Result<Response<pb::ApplyCurationPlanResponse>, Status> {
+        let req = request.into_inner();
+        let ops = req
+            .ops
+            .into_iter()
+            .map(plan_op)
+            .collect::<Result<Vec<_>, _>>()?;
+        let report = self
+            .service
+            .apply_plan(&ops, req.dry_run)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(pb::ApplyCurationPlanResponse {
+            dry_run: report.dry_run,
+            summary: Some(plan_summary(report.summary)),
+            results: report.results.into_iter().map(op_result).collect(),
+        }))
+    }
+
+    async fn undo_label_proposal(
+        &self,
+        request: Request<pb::UndoLabelProposalRequest>,
+    ) -> Result<Response<pb::UndoLabelProposalResponse>, Status> {
+        let req = request.into_inner();
+        let report = self
+            .service
+            .undo_proposal(proposal(&req.id)?, req.reject, req.dry_run)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(pb::UndoLabelProposalResponse {
+            dry_run: report.dry_run,
+            to_unlabel: report.to_unlabel,
+            to_unarchive: report.to_unarchive,
+            accounts: report.accounts.into_iter().map(account_count).collect(),
+            labels_to_delete: report.labels_to_delete,
+            status: report.status.as_str().into(),
+        }))
     }
 
     async fn accept_label_proposal(

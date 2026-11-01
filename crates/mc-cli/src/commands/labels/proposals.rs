@@ -9,7 +9,8 @@ use serde_json::json;
 use tabled::{Table, Tabled};
 
 use super::super::accounts::find_account;
-use super::super::print_json;
+use super::super::{Format, print_json};
+use super::{plan, render};
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum StatusArg {
@@ -99,6 +100,31 @@ enum ProposalsCmd {
     },
     /// Refuse the proposal; the same cluster is not proposed again
     Reject { id: String },
+    /// Check a curation plan (a JSON file of ordered steps) and, with --yes,
+    /// do it. Nothing is applied unless the whole plan validates
+    Plan {
+        /// JSON file; see docs/mc-labels-cli.md for the schema
+        file: std::path::PathBuf,
+        /// Only check it and print what it would do (also the default
+        /// without --yes)
+        #[arg(long)]
+        dry_run: bool,
+        /// Do it
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Take an accepted proposal's label off its mail again, move archived
+    /// mail back to the Inbox and delete the label if it created it and it
+    /// is empty. Prints what it would do until --yes
+    Undo {
+        id: String,
+        /// Do it (in the background)
+        #[arg(long)]
+        yes: bool,
+        /// The proposal becomes rejected instead of pending again
+        #[arg(long)]
+        reject: bool,
+    },
     /// Put a label the group already has on the proposal's mail instead of
     /// creating a new one
     Assign {
@@ -131,12 +157,17 @@ pub struct ModeArgs {
     yes: bool,
 }
 
-pub async fn run(args: ProposalsArgs, client: MailCatClient, json: bool) -> Result<()> {
+pub async fn run(args: ProposalsArgs, client: MailCatClient, fmt: Format) -> Result<()> {
+    let json = fmt == Format::Json;
     let Some(cmd) = args.cmd else {
-        return list_proposals(args.account.as_deref(), args.status, client, json).await;
+        return list_proposals(args.account.as_deref(), args.status, client, fmt).await;
     };
     match cmd {
-        ProposalsCmd::Show { id, samples } => show(&id, samples, client, json).await,
+        ProposalsCmd::Show { id, samples } => show(&id, samples, client, fmt).await,
+        ProposalsCmd::Plan { file, dry_run, yes } => {
+            plan::run(&file, dry_run || !yes, client, fmt).await
+        }
+        ProposalsCmd::Undo { id, yes, reject } => plan::undo(&id, !yes, reject, client, fmt).await,
         ProposalsCmd::Rename { id, name } => {
             let renamed = client.rename_label_proposal(&id, &name).await?;
             report(&renamed, "Renamed", json)
@@ -217,14 +248,19 @@ pub async fn list_proposals(
     account: Option<&str>,
     status: StatusArg,
     client: MailCatClient,
-    json: bool,
+    fmt: Format,
 ) -> Result<()> {
     let account = optional_account_id(&client, account).await?;
     let found = client
         .find_label_proposals(account.as_deref(), status.as_str(), true)
         .await?;
-    if json {
-        return print_json(&found);
+    match fmt {
+        Format::Json => return print_json(&found),
+        Format::Toon => {
+            render::proposals(&found).print();
+            return Ok(());
+        }
+        Format::Table => {}
     }
     if found.is_empty() {
         println!("{}", "No labels proposed.".yellow());
@@ -244,16 +280,25 @@ pub async fn list_proposals(
             .join(" · "),
         senders: senders_line(p, 3),
         group: p.group.clone(),
-        status: p.status.clone(),
+        status: if p.curated {
+            format!("{} (curated)", p.status)
+        } else {
+            p.status.clone()
+        },
     });
     println!("{}", Table::new(rows));
     Ok(())
 }
 
-async fn show(id: &str, samples: u32, client: MailCatClient, json: bool) -> Result<()> {
+async fn show(id: &str, samples: u32, client: MailCatClient, fmt: Format) -> Result<()> {
     let detail = client.get_label_proposal(id, samples).await?;
-    if json {
-        return print_json(&detail);
+    match fmt {
+        Format::Json => return print_json(&detail),
+        Format::Toon => {
+            render::proposal(&detail).print();
+            return Ok(());
+        }
+        Format::Table => {}
     }
     let p = &detail.proposal;
     println!("{} ({}) {}", p.name.bold(), p.status, p.id);
@@ -304,11 +349,16 @@ fn answered(id: &str, status: &str, queued: Option<u32>, json: bool) -> Result<(
     Ok(())
 }
 
-pub async fn list(account: Option<&str>, client: MailCatClient, json: bool) -> Result<()> {
+pub async fn list(account: Option<&str>, client: MailCatClient, fmt: Format) -> Result<()> {
     let account = optional_account_id(&client, account).await?;
     let scopes = client.list_labels(account.as_deref()).await?;
-    if json {
-        return print_json(&scopes);
+    match fmt {
+        Format::Json => return print_json(&scopes),
+        Format::Toon => {
+            render::labels(&scopes).print();
+            return Ok(());
+        }
+        Format::Table => {}
     }
     #[derive(Tabled)]
     struct Row {
@@ -335,6 +385,56 @@ pub async fn list(account: Option<&str>, client: MailCatClient, json: bool) -> R
             threshold: format!("{:.2}", l.status.threshold),
         });
         println!("{}", Table::new(rows));
+    }
+    Ok(())
+}
+
+/// One existing label: settings, where each account keeps it, recent mail.
+pub async fn show_label(
+    label: &str,
+    account: Option<&str>,
+    samples: u32,
+    client: MailCatClient,
+    fmt: Format,
+) -> Result<()> {
+    let account = optional_account_id(&client, account).await?;
+    let found = client.get_label(label, account.as_deref(), samples).await?;
+    match fmt {
+        Format::Json => return print_json(&found),
+        Format::Toon => {
+            for d in &found {
+                render::label(d).print();
+            }
+            return Ok(());
+        }
+        Format::Table => {}
+    }
+    for d in &found {
+        println!("{} ({}) {}", d.name.bold(), d.status.mode, d.group);
+        println!(
+            "{} examples (needs {}), threshold {:.2}",
+            d.status.positives, d.status.min_positives, d.status.threshold
+        );
+        for a in &d.accounts {
+            match a.kind.as_str() {
+                "mailbox" => println!(
+                    "  {}: mailbox {} ({} messages), {} examples",
+                    a.account_id, a.path, a.messages, a.examples
+                ),
+                "keyword" => println!(
+                    "  {}: keyword {}, {} examples",
+                    a.account_id, a.keyword, a.examples
+                ),
+                _ => println!("  {}: not there yet", a.account_id),
+            }
+        }
+        for m in &d.samples {
+            let day = m.received_at.get(..10).unwrap_or(&m.received_at);
+            println!("\n{day}  {}  {}", m.from, m.subject.bold());
+            if !m.excerpt.is_empty() {
+                println!("    {}", m.excerpt.dimmed());
+            }
+        }
     }
     Ok(())
 }

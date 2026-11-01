@@ -249,6 +249,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX tag_proposals_status ON tag_proposals(status, scope);
     ALTER TABLE tag_auto ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0;",
+    // 11: curating proposals. `curated` proposals (renamed or merged by a
+    // person) survive discovery's refresh; `created` lists the label mailboxes
+    // accepting one made (JSON), and `proposal_id` ties the labels an
+    // acceptance applied to it, so the acceptance can be undone.
+    "ALTER TABLE tag_proposals ADD COLUMN curated INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tag_proposals ADD COLUMN created TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE tag_auto ADD COLUMN proposal_id BLOB;
+    CREATE INDEX tag_auto_proposal ON tag_auto(proposal_id) WHERE proposal_id IS NOT NULL;",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

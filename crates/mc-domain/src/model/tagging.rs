@@ -321,6 +321,14 @@ pub struct LabelStats {
     pub tokens: HashMap<String, (f64, f64)>,
 }
 
+/// What a label was taught from.
+#[derive(Debug, Clone, Default)]
+pub struct LabelExamples {
+    /// Newest first.
+    pub recent: Vec<MessageId>,
+    pub per_account: Vec<(AccountId, u32)>,
+}
+
 /// A trained message's embedding with what the model was taught about it.
 #[derive(Debug, Clone)]
 pub struct LabelledVector {
@@ -342,6 +350,8 @@ pub struct AutoApplied {
     /// Applied on the user's say-so (an accepted discovery): the model learns
     /// it as the user's own label, not as something it did by itself.
     pub confirmed: bool,
+    /// The accepted proposal that put it, so the acceptance can be undone.
+    pub proposal_id: Option<crate::model::discovery::ProposalId>,
     pub at: chrono::DateTime<chrono::Utc>,
 }
 

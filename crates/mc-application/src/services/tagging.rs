@@ -43,13 +43,15 @@ use crate::commands::Command;
 use crate::error::ApplicationError;
 
 pub use discovery::{
-    DiscoveryPhase, DiscoveryProgress, LabelEntry, LabelScope, ProposalMessage, ProposalView,
+    AccountCount, DiscoveryPhase, DiscoveryProgress, LabelDetail, LabelEntry, LabelHome,
+    LabelPresence, LabelScope, OpResult, OpStatus, PlanOp, PlanReport, PlanSummary,
+    ProposalMessage, ProposalView, UndoReport,
 };
 pub use eval::{EvalRow, LabelEval};
 pub use naming::KeywordNamer;
 use placement::{Placement, display_name};
 pub use retro::{Preview, PreviewItem};
-pub use stats::{BackgroundStats, EmbedderState, RetrainProgress};
+pub use stats::{ApplyKind, ApplyProgress, BackgroundStats, EmbedderState, RetrainProgress};
 
 /// Live auto-apply only touches recent mail: an initial sync delivers years
 /// of "new" messages, and old mail is for the previewed bulk apply.
@@ -126,6 +128,9 @@ pub struct TaggingService<S, R, C> {
     /// Scopes being retrained right now: the embedding backlog gives way.
     retraining: AtomicUsize,
     activity: Mutex<stats::Activity>,
+    /// Labelling jobs take turns, so a plan accepting dozens of proposals does
+    /// not hammer the providers with all of them at once.
+    apply_turn: tokio::sync::Mutex<()>,
     pools: Mutex<Pools>,
 }
 
@@ -150,6 +155,18 @@ async fn niced<T: Send + 'static>(
 
 pub(crate) fn label_key(name: &str) -> String {
     name.trim().to_lowercase()
+}
+
+/// A label name as a `/`-separated path: segments trimmed, none empty.
+pub(crate) fn label_path(name: &str) -> Result<String, ApplicationError> {
+    let segments: Vec<&str> = name.split('/').map(str::trim).collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        return Err(ApplicationError::PreconditionFailed(format!(
+            "{:?} is not a label name: empty name or empty path segment",
+            name.trim()
+        )));
+    }
+    Ok(segments.join("/"))
 }
 
 /// The account's own label of that name (case-insensitive).
@@ -190,6 +207,7 @@ where
             model_choice: Mutex::new((ModelProfile::default(), "cpu".into())),
             retraining: AtomicUsize::new(0),
             activity: Mutex::default(),
+            apply_turn: tokio::sync::Mutex::new(()),
             pools: Mutex::new(HashMap::new()),
         }
     }
@@ -442,6 +460,7 @@ where
             score: job.score,
             archived: job.place.archives(),
             confirmed: false,
+            proposal_id: None,
             at: Utc::now(),
         };
         if let Err(e) = self.store.record_auto(&record).await {
@@ -713,24 +732,7 @@ where
         let mailboxes = self.read.list_mailboxes(&source.account_id).await?;
         let inbox = inbox_of(&mailboxes).filter(|_| record.archived);
         if source.keywords {
-            self.commands
-                .dispatch(Command::SetMessageFlags {
-                    message_id: id,
-                    flags_to_add: vec![],
-                    flags_to_remove: vec![Flag::Custom(placement::keyword_of(&label))],
-                })
-                .await?;
-            // A folders account archives by moving; moving back is the undo.
-            if let (Some(inbox), Some(folder)) = (inbox, source.folder) {
-                self.commands
-                    .dispatch(Command::MoveMessage {
-                        message_id: id,
-                        from_mailbox_id: folder,
-                        to_mailbox_id: inbox.id,
-                        to_mailbox_path: inbox.path.clone(),
-                    })
-                    .await?;
-            }
+            self.drop_keyword(&source, &label, inbox).await?;
         } else {
             let target = label_mailbox(&mailboxes, &label)
                 .ok_or_else(|| ApplicationError::NotFound("Label", label.clone()))?;
@@ -744,6 +746,34 @@ where
         self.store.take_auto(id, &label).await?;
         let scope = self.store.scope_of(source.account_id).await?;
         self.retrain(&source, scope, Some(&label), false).await
+    }
+
+    /// Take a keyword label off a message of a folders account; archiving
+    /// there is a move, so moving back to the Inbox is the undo.
+    pub(super) async fn drop_keyword(
+        &self,
+        source: &TagSource,
+        label: &str,
+        inbox: Option<&Mailbox>,
+    ) -> Result<(), ApplicationError> {
+        self.commands
+            .dispatch(Command::SetMessageFlags {
+                message_id: source.id,
+                flags_to_add: vec![],
+                flags_to_remove: vec![Flag::Custom(placement::keyword_of(label))],
+            })
+            .await?;
+        if let (Some(inbox), Some(folder)) = (inbox, source.folder) {
+            self.commands
+                .dispatch(Command::MoveMessage {
+                    message_id: source.id,
+                    from_mailbox_id: folder,
+                    to_mailbox_id: inbox.id,
+                    to_mailbox_path: inbox.path.clone(),
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     async fn source(&self, id: MessageId) -> Result<TagSource, ApplicationError> {

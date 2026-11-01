@@ -421,3 +421,50 @@ fn initial_subscription_rules() {
     assert!(!is_subscribed(&container, None, true));
     assert!(is_subscribed(&container, None, false));
 }
+
+#[tokio::test]
+async fn creating_a_path_creates_and_subscribes_every_level() {
+    use super::super::mailbox::create_on;
+    let (mut session, commands) = scripted(server_reply).await;
+
+    create_on(&mut session, "Shopping/Ebay").await.unwrap();
+
+    assert_eq!(
+        uid_commands(&commands),
+        [
+            "CREATE \"Shopping\"",
+            "SUBSCRIBE \"Shopping\"",
+            "CREATE \"Shopping/Ebay\"",
+            "SUBSCRIBE \"Shopping/Ebay\""
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_level_that_exists_already_is_not_an_error() {
+    use super::super::mailbox::create_on;
+    let (mut session, commands) = scripted(|command| {
+        if command == "CREATE \"Shopping\"" {
+            "$T NO [ALREADYEXISTS] Duplicate folder name Shopping\r\n"
+        } else {
+            "$T OK Done\r\n"
+        }
+    })
+    .await;
+
+    create_on(&mut session, "Shopping/Ebay").await.unwrap();
+
+    assert_eq!(
+        uid_commands(&commands).len(),
+        4,
+        "the child was made all the same"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_creation_is_an_error() {
+    use super::super::mailbox::create_on;
+    let (mut session, _) = scripted(|_| "$T NO [CANNOT] not now\r\n").await;
+
+    assert!(create_on(&mut session, "Work").await.is_err());
+}

@@ -39,6 +39,25 @@ pub struct RetrainProgress {
     pub total: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyKind {
+    /// Putting a label on mail (an accepted proposal, a bulk apply).
+    Apply,
+    /// Taking an accepted proposal's label off again.
+    Undo,
+}
+
+/// A throttled labelling job, queued or running.
+#[derive(Debug, Clone)]
+pub struct ApplyProgress {
+    pub label: String,
+    pub kind: ApplyKind,
+    pub done: u64,
+    pub total: u64,
+    /// Of `done` (or `Undo`: moved back), the messages that left the Inbox.
+    pub archived: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct BackgroundStats {
     pub speed: BackgroundSpeed,
@@ -53,6 +72,7 @@ pub struct BackgroundStats {
     pub worker_bytes: Option<u64>,
     pub retrains: Vec<RetrainProgress>,
     pub discovery: Option<DiscoveryProgress>,
+    pub applying: Vec<ApplyProgress>,
 }
 
 #[derive(Default)]
@@ -65,6 +85,9 @@ pub(super) struct Activity {
     /// The group being searched for labels, how far along: (scope, phase, done, total).
     pub discovery: Option<(Option<Scope>, DiscoveryPhase, u64, u64)>,
     counts: Option<(Instant, (u64, u64))>,
+    /// Labelling jobs by the number they were given, oldest first.
+    applying: Vec<(u64, ApplyProgress)>,
+    jobs_started: u64,
 }
 
 impl Activity {
@@ -160,7 +183,51 @@ where
             worker_bytes: self.embedder.as_ref().and_then(|e| e.worker_bytes()),
             retrains,
             discovery: self.discovery_progress().await?,
+            applying: self
+                .lock_activity()
+                .applying
+                .iter()
+                .map(|(_, p)| p.clone())
+                .collect(),
         })
+    }
+
+    /// Register a job so the stats show it, from the moment it is queued.
+    pub(super) fn begin_job(&self, label: &str, kind: ApplyKind, total: u64) -> u64 {
+        let mut activity = self.lock_activity();
+        activity.jobs_started += 1;
+        let job = activity.jobs_started;
+        activity.applying.push((
+            job,
+            ApplyProgress {
+                label: label.to_owned(),
+                kind,
+                done: 0,
+                total,
+                archived: 0,
+            },
+        ));
+        job
+    }
+
+    pub(super) fn advance_job(&self, job: u64, done: u64, archived: u64) {
+        let mut activity = self.lock_activity();
+        if let Some((_, p)) = activity.applying.iter_mut().find(|(j, _)| *j == job) {
+            p.done += done;
+            p.archived += archived;
+        }
+    }
+
+    pub(super) fn end_job(&self, job: u64) {
+        self.lock_activity().applying.retain(|(j, _)| *j != job);
+    }
+
+    /// Whether a labelling job for `label` is queued or running.
+    pub(super) fn is_applying(&self, label: &str) -> bool {
+        self.lock_activity()
+            .applying
+            .iter()
+            .any(|(_, p)| p.label == label)
     }
 
     pub(super) async fn embedding_counts(&self) -> Result<(u64, u64), ApplicationError> {

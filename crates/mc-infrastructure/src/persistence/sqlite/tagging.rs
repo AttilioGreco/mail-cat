@@ -12,9 +12,9 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AutoApplied, BackgroundSpeed, DiscoveryPoint, DomainError, Example, GroupId,
-    LabelMode, LabelSettings, LabelStats, LabelledVector, Lesson, MessageId, ModelProfile,
-    ModelStats, Proposal, ProposalId, ProposalStatus, Scope, SourceFilter, TagSource, TaggingStore,
-    TrainingGroup,
+    LabelExamples, LabelMode, LabelSettings, LabelStats, LabelledVector, Lesson, MessageId,
+    ModelProfile, ModelStats, Proposal, ProposalId, ProposalStatus, Scope, SourceFilter, TagSource,
+    TaggingStore, TrainingGroup,
 };
 
 use super::repository::{conversion_err, exec, json, json_col, nanos, query_all, query_one};
@@ -40,6 +40,21 @@ const MAX_TOKENS: usize = 2000;
 /// Bumped when what tokens or labels mean changes, so scopes trained under
 /// the old meaning (stored as 1) retrain on the next start.
 const TRAINING_VERSION: u32 = 3;
+
+const AUTO_COLUMNS: &str =
+    "SELECT message_id, label, score, archived, at, confirmed, proposal_id FROM tag_auto";
+
+fn auto_of_row(r: &Row) -> rusqlite::Result<AutoApplied> {
+    Ok(AutoApplied {
+        message_id: MessageId::from_uuid(r.get(0)?),
+        label: r.get(1)?,
+        score: r.get(2)?,
+        archived: r.get(3)?,
+        at: DateTime::from_timestamp_nanos(r.get(4)?),
+        confirmed: r.get(5)?,
+        proposal_id: r.get::<_, Option<Uuid>>(6)?.map(ProposalId::from_uuid),
+    })
+}
 
 fn group_of_row(row: &Row) -> rusqlite::Result<(GroupId, String)> {
     Ok((GroupId::from_uuid(row.get(0)?), row.get(1)?))
@@ -395,6 +410,37 @@ impl TaggingStore for SqliteTaggingStore {
             .await
     }
 
+    async fn label_examples(
+        &self,
+        scope: Scope,
+        label: &str,
+        limit: u32,
+    ) -> Result<LabelExamples, DomainError> {
+        let (key, label) = (scope.key(), label.to_owned());
+        self.db
+            .read(move |conn| {
+                let from = "FROM tag_examples WHERE scope = ?1 AND weight > 0 AND EXISTS \
+                     (SELECT 1 FROM json_each(positives) WHERE value = ?2)";
+                let recent = query_all(
+                    conn,
+                    &format!("SELECT message_id {from} ORDER BY message_id DESC LIMIT {limit}"),
+                    params![key, label],
+                    |r| Ok(MessageId::from_uuid(r.get(0)?)),
+                )?;
+                let per_account = query_all(
+                    conn,
+                    &format!("SELECT account_id, COUNT(*) {from} GROUP BY account_id"),
+                    params![key, label],
+                    |r| Ok((AccountId::from_uuid(r.get(0)?), r.get(1)?)),
+                )?;
+                Ok(LabelExamples {
+                    recent,
+                    per_account,
+                })
+            })
+            .await
+    }
+
     async fn positives(&self, scope: Scope) -> Result<Vec<(String, u32)>, DomainError> {
         let key = scope.key();
         self.db
@@ -551,15 +597,16 @@ impl TaggingStore for SqliteTaggingStore {
                 exec(
                     conn,
                     "INSERT OR REPLACE INTO tag_auto \
-                     (message_id, label, score, archived, at, confirmed) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (message_id, label, score, archived, at, confirmed, proposal_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         a.message_id.as_uuid(),
                         a.label,
                         a.score,
                         a.archived,
                         nanos(a.at),
-                        a.confirmed
+                        a.confirmed,
+                        a.proposal_id.map(|p| *p.as_uuid()),
                     ],
                 )
                 .map(drop)
@@ -572,18 +619,22 @@ impl TaggingStore for SqliteTaggingStore {
             .read(move |conn| {
                 query_all(
                     conn,
-                    "SELECT label, score, archived, at, confirmed FROM tag_auto WHERE message_id = ?1",
+                    &format!("{AUTO_COLUMNS} WHERE message_id = ?1"),
                     [message.as_uuid()],
-                    |r| {
-                        Ok(AutoApplied {
-                            message_id: message,
-                            label: r.get(0)?,
-                            score: r.get(1)?,
-                            archived: r.get(2)?,
-                            at: DateTime::from_timestamp_nanos(r.get(3)?),
-                            confirmed: r.get(4)?,
-                        })
-                    },
+                    auto_of_row,
+                )
+            })
+            .await
+    }
+
+    async fn proposal_autos(&self, proposal: ProposalId) -> Result<Vec<AutoApplied>, DomainError> {
+        self.db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    &format!("{AUTO_COLUMNS} WHERE proposal_id = ?1"),
+                    [proposal.as_uuid()],
+                    auto_of_row,
                 )
             })
             .await

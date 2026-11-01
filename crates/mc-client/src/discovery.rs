@@ -33,6 +33,9 @@ pub struct LabelProposal {
     pub scope: String,
     /// Dominant sender domains, most frequent first; empty unless asked for.
     pub senders: Vec<SenderCount>,
+    /// Renamed or merged by hand: discovery keeps it and drops clusters that
+    /// overlap it.
+    pub curated: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -60,6 +63,16 @@ pub struct ProposalDetail {
     #[serde(flatten)]
     pub proposal: LabelProposal,
     pub messages: Vec<ProposalMessage>,
+}
+
+pub(crate) fn message(m: pb::ProposalMessage) -> ProposalMessage {
+    ProposalMessage {
+        message_id: m.message_id,
+        received_at: m.received_at,
+        from: m.from,
+        subject: m.subject,
+        excerpt: m.excerpt,
+    }
 }
 
 fn proposal(p: pb::LabelProposal) -> LabelProposal {
@@ -90,6 +103,7 @@ fn proposal(p: pb::LabelProposal) -> LabelProposal {
                 count: s.count,
             })
             .collect(),
+        curated: p.curated,
     }
 }
 
@@ -174,17 +188,7 @@ impl MailCatClient {
             .into_inner();
         Ok(ProposalDetail {
             proposal: proposal(resp.proposal.unwrap_or_default()),
-            messages: resp
-                .messages
-                .into_iter()
-                .map(|m| ProposalMessage {
-                    message_id: m.message_id,
-                    received_at: m.received_at,
-                    from: m.from,
-                    subject: m.subject,
-                    excerpt: m.excerpt,
-                })
-                .collect(),
+            messages: resp.messages.into_iter().map(message).collect(),
         })
     }
 

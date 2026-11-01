@@ -178,6 +178,20 @@ pub struct BackgroundStats {
     pub worker_bytes: u64,
     pub retrains: Vec<RetrainProgress>,
     pub discovery: Option<DiscoveryProgress>,
+    /// Labelling jobs, queued or running.
+    pub applying: Vec<ApplyProgress>,
+}
+
+/// `kind`: `apply` or `undo`. `archived`: of `done`, the messages that left
+/// (undo: returned to) the Inbox.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyProgress {
+    pub label: String,
+    pub kind: String,
+    pub done: u64,
+    pub total: u64,
+    pub archived: u64,
 }
 
 /// A search for new labels under way. `phase`: `loading`, `clustering` or
@@ -200,7 +214,7 @@ fn group(g: pb::TrainingGroup) -> TrainingGroup {
     }
 }
 
-fn status(s: pb::LabelStatus) -> LabelStatus {
+pub(crate) fn status(s: pb::LabelStatus) -> LabelStatus {
     LabelStatus {
         label: s.label,
         mode: s.mode,
@@ -517,6 +531,17 @@ impl MailCatClient {
                 done: d.done,
                 total: d.total,
             }),
+            applying: s
+                .applying
+                .into_iter()
+                .map(|a| ApplyProgress {
+                    label: a.label,
+                    kind: a.kind,
+                    done: a.done,
+                    total: a.total,
+                    archived: a.archived,
+                })
+                .collect(),
         })
     }
 

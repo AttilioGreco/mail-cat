@@ -17,13 +17,15 @@ use mc_domain::{
     GroupId, LabelMode, MailboxId, MailboxModel, MailboxPath, MailboxType, Membership, MessageId,
     ProviderType, ReadModelProjector, RemoteId,
 };
+mod curation;
 mod discovery;
 mod embeddings;
 
 use mc_infrastructure::{SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore};
 
 #[derive(Default)]
-struct Recording(Mutex<Vec<Command>>);
+/// The commands seen, and the mailbox to answer label creations with.
+struct Recording(Mutex<Vec<Command>>, Mutex<Option<MailboxId>>);
 
 #[async_trait]
 impl CommandBus for Recording {
@@ -32,7 +34,7 @@ impl CommandBus for Recording {
         self.0.lock().unwrap().push(command);
         if created {
             return Ok(CommandResult::LabelCreated {
-                mailbox_id: MailboxId::new(),
+                mailbox_id: self.1.lock().unwrap().unwrap_or_default(),
             });
         }
         Ok(CommandResult::MessagesBulkChanged {

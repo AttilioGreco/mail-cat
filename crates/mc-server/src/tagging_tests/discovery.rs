@@ -31,12 +31,12 @@ fn near(group: usize, seed: &mut u32) -> Vec<f32> {
     v
 }
 
-struct Found {
-    world: World,
-    service: Arc<Service>,
-    commands: Arc<Recording>,
+pub(super) struct Found {
+    pub(super) world: World,
+    pub(super) service: Arc<Service>,
+    pub(super) commands: Arc<Recording>,
     /// Members of each planted group, as discovery should find them.
-    groups: [Vec<MessageId>; 2],
+    pub(super) groups: [Vec<MessageId>; 2],
     labelled: MessageId,
     trashed: MessageId,
     bare: MessageId,
@@ -53,7 +53,7 @@ async fn put_vector(world: &World, id: MessageId, vector: Vec<f32>) {
 /// Two groups of 40 unlabelled messages (orders from Amazon, offers from a
 /// shop), plus three that look like the first group but must be left out: one
 /// carrying a label, one in the Trash and one without a vector.
-async fn found() -> Found {
+pub(super) async fn found() -> Found {
     let world = World::open().await;
     let commands = Arc::new(Recording::default());
     let service = Arc::new(
@@ -137,7 +137,7 @@ async fn found() -> Found {
 
 impl Found {
     /// Run a search and wait for it to end.
-    async fn discover(&self) {
+    pub(super) async fn discover(&self) {
         assert!(self.service.start_discovery(None).await.unwrap());
         for _ in 0..200 {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -155,7 +155,7 @@ impl Found {
         panic!("discovery never ended");
     }
 
-    fn sent(&self) -> Vec<(Vec<MessageId>, Vec<MailboxId>, Vec<MailboxId>)> {
+    pub(super) fn sent(&self) -> Vec<(Vec<MessageId>, Vec<MailboxId>, Vec<MailboxId>)> {
         self.commands
             .0
             .lock()
@@ -172,7 +172,7 @@ impl Found {
             .collect()
     }
 
-    async fn pending(&self) -> Vec<mc_application::services::tagging::ProposalView> {
+    pub(super) async fn pending(&self) -> Vec<mc_application::services::tagging::ProposalView> {
         self.service
             .list_proposals(None, Some(ProposalStatus::Pending), false)
             .await
@@ -180,7 +180,7 @@ impl Found {
     }
 
     /// The pending proposal about orders.
-    async fn orders(&self) -> mc_domain::Proposal {
+    pub(super) async fn orders(&self) -> mc_domain::Proposal {
         let pending = self.pending().await;
         pending
             .into_iter()
@@ -190,7 +190,7 @@ impl Found {
     }
 }
 
-async fn until_sent(found: &Found, messages: usize) {
+pub(super) async fn until_sent(found: &Found, messages: usize) {
     for _ in 0..200 {
         if found.sent().iter().map(|s| s.0.len()).sum::<usize>() >= messages {
             return;
@@ -381,7 +381,7 @@ async fn accepting_and_archiving_takes_the_mail_out_of_the_inbox() {
     assert!(record.archived && record.confirmed);
     assert_eq!(record.label, "amazon");
 }
-async fn offers(f: &Found) -> mc_domain::Proposal {
+pub(super) async fn offers(f: &Found) -> mc_domain::Proposal {
     f.pending()
         .await
         .into_iter()

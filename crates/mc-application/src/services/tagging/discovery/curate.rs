@@ -8,16 +8,16 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use mc_domain::{
-    AccountId, ClusterSummary, MailboxReadRepository, MessageId, Proposal, ProposalId,
+    AccountId, ClusterSummary, MailboxId, MailboxReadRepository, MessageId, Proposal, ProposalId,
     ProposalSample, ProposalStatus, Scope, TaggingStore,
 };
 
 use super::{ProposalView, REST_SAMPLE, SCAN_PAGE, cluster, domain_of, sample_of};
 use crate::bus::CommandBus;
 use crate::error::ApplicationError;
-use crate::services::tagging::placement::display_name;
+use crate::services::tagging::placement::{self, display_name};
 use crate::services::tagging::{
-    LabelStatus, TaggingService, features, label_key, label_mailbox, non_empty,
+    LabelStatus, TaggingService, features, label_key, label_mailbox, label_path,
 };
 
 /// Dominant sender domains kept per proposal.
@@ -52,6 +52,39 @@ pub struct LabelScope {
     pub group: String,
     pub accounts: Vec<AccountId>,
     pub labels: Vec<LabelEntry>,
+}
+
+/// Where a label sits on one account of its scope.
+#[derive(Debug, Clone)]
+pub enum LabelHome {
+    /// The account has a mailbox of that name.
+    Mailbox {
+        id: MailboxId,
+        path: String,
+        messages: u32,
+    },
+    /// No mailbox, but its mail carries the label: it is a keyword (tag).
+    Keyword(String),
+    /// Neither: the account has not got the label yet.
+    Missing,
+}
+
+#[derive(Debug, Clone)]
+pub struct LabelPresence {
+    pub account: AccountId,
+    pub home: LabelHome,
+    /// Mail of this account the model learnt the label from.
+    pub examples: u32,
+}
+
+/// One existing label, closely.
+#[derive(Debug, Clone)]
+pub struct LabelDetail {
+    pub scope: LabelScope,
+    pub entry: LabelEntry,
+    pub presence: Vec<LabelPresence>,
+    /// The newest mail the model learnt the label from.
+    pub samples: Vec<ProposalMessage>,
 }
 
 /// What reading a set of messages came to.
@@ -161,24 +194,7 @@ where
         wanted.extend(proposal.members.iter().filter(|m| !shown.contains(m)));
         wanted.truncate(samples);
 
-        let mut found: HashMap<MessageId, _> = self
-            .store
-            .sources(&wanted)
-            .await?
-            .into_iter()
-            .map(|s| (s.id, s))
-            .collect();
-        let messages = wanted
-            .iter()
-            .filter_map(|id| found.remove(id))
-            .map(|s| ProposalMessage {
-                message_id: s.id,
-                received_at: s.received_at,
-                excerpt: excerpt(s.body.as_deref()),
-                from: sample_of(&s).from,
-                subject: s.subject,
-            })
-            .collect();
+        let messages = self.messages(&wanted).await?;
         let group = self
             .scope_names()
             .await?
@@ -195,13 +211,36 @@ where
         ))
     }
 
+    /// `ids` read closely, in that order; the ones that are gone are left out.
+    async fn messages(&self, ids: &[MessageId]) -> Result<Vec<ProposalMessage>, ApplicationError> {
+        let mut found: HashMap<MessageId, _> = self
+            .store
+            .sources(ids)
+            .await?
+            .into_iter()
+            .map(|s| (s.id, s))
+            .collect();
+        Ok(ids
+            .iter()
+            .filter_map(|id| found.remove(id))
+            .map(|s| ProposalMessage {
+                message_id: s.id,
+                received_at: s.received_at,
+                excerpt: excerpt(s.body.as_deref()),
+                from: sample_of(&s).from,
+                subject: s.subject,
+            })
+            .collect())
+    }
+
     pub async fn rename_proposal(
         &self,
         id: ProposalId,
         name: &str,
     ) -> Result<ProposalView, ApplicationError> {
         let proposal = Proposal {
-            name: non_empty(name)?.to_owned(),
+            name: label_path(name)?,
+            curated: true,
             ..self.pending(id).await?
         };
         self.store.put_proposal(&proposal).await?;
@@ -267,7 +306,7 @@ where
         let reading = self.read(&members, &rest, &shown).await?;
         let named = self.namer.name(&reading.summary).await;
         let name = match name {
-            Some(name) => non_empty(name)?.to_owned(),
+            Some(name) => label_path(name)?,
             None => named.name,
         };
         let merged = Proposal {
@@ -280,6 +319,8 @@ where
             samples: reading.samples,
             status: ProposalStatus::Pending,
             created_at: Utc::now(),
+            curated: true,
+            created: Vec::new(),
         };
         self.store.put_proposal(&merged).await?;
         for old in &sources {
@@ -348,20 +389,30 @@ where
         let proposal = self.pending(id).await?;
         let key = label_key(label);
         let group = self.group_mailboxes(proposal.scope).await?;
-        let known = group
-            .values()
-            .any(|boxes| label_mailbox(boxes, &key).is_some())
-            || self
-                .store
-                .positives(proposal.scope)
-                .await?
-                .iter()
-                .any(|(l, _)| *l == key);
-        if !known {
+        if !self.label_known(proposal.scope, &key, &group).await? {
             return Err(ApplicationError::NotFound("Label", label.trim().to_owned()));
         }
         let name = display_name(&group, &key);
         self.label_with(proposal, name, archive).await
+    }
+
+    /// Whether the scope has the label: a mailbox of an account, or mail the
+    /// model learnt it from.
+    pub(super) async fn label_known(
+        &self,
+        scope: Scope,
+        key: &str,
+        group: &placement::GroupMailboxes,
+    ) -> Result<bool, ApplicationError> {
+        Ok(group
+            .values()
+            .any(|boxes| label_mailbox(boxes, key).is_some())
+            || self
+                .store
+                .positives(scope)
+                .await?
+                .iter()
+                .any(|(l, _)| l == key))
     }
 
     /// Every label of the account's scope (of every scope without one) with
@@ -383,6 +434,100 @@ where
             out.push(self.label_scope(scope, &names).await?);
         }
         Ok(out)
+    }
+
+    /// The label in the account's scope (in every scope that has it without
+    /// one): its settings, where each account keeps it, and recent mail
+    /// under it.
+    pub async fn label_detail(
+        &self,
+        label: &str,
+        account: Option<AccountId>,
+        samples: usize,
+    ) -> Result<Vec<LabelDetail>, ApplicationError> {
+        let key = label_key(label);
+        let only = match account {
+            Some(a) => Some(self.store.scope_of(a).await?),
+            None => None,
+        };
+        let names = self.scope_names().await?;
+        let mut out = Vec::new();
+        for scope in self.store.scopes().await? {
+            if only.is_some_and(|o| o != scope) {
+                continue;
+            }
+            let group = self.group_mailboxes(scope).await?;
+            let mut shown = self.label_scope(scope, &names).await?;
+            let found = shown
+                .labels
+                .iter()
+                .position(|l| l.status.settings.label == key);
+            let entry = match found {
+                Some(i) => shown.labels.swap_remove(i),
+                // A mailbox no mail was learnt from yet.
+                None if group.values().any(|b| label_mailbox(b, &key).is_some()) => LabelEntry {
+                    name: display_name(&group, &key),
+                    status: self.label_status_in(scope, &key).await?,
+                },
+                None => continue,
+            };
+            let examples = self
+                .store
+                .label_examples(scope, &key, samples as u32)
+                .await?;
+            let presence = shown
+                .accounts
+                .iter()
+                .map(|&a| {
+                    let own = group.get(&a).map_or(&[][..], Vec::as_slice);
+                    let learnt = examples
+                        .per_account
+                        .iter()
+                        .find_map(|(id, n)| (*id == a).then_some(*n))
+                        .unwrap_or_default();
+                    let home = match label_mailbox(own, &key) {
+                        Some(m) => LabelHome::Mailbox {
+                            id: m.id,
+                            path: m.display_path.clone(),
+                            messages: m.total_messages,
+                        },
+                        None if learnt > 0 => LabelHome::Keyword(placement::keyword_of(&key)),
+                        None => LabelHome::Missing,
+                    };
+                    LabelPresence {
+                        account: a,
+                        home,
+                        examples: learnt,
+                    }
+                })
+                .collect();
+            shown.labels.clear();
+            out.push(LabelDetail {
+                scope: shown,
+                entry,
+                presence,
+                samples: self.messages(&examples.recent).await?,
+            });
+        }
+        if out.is_empty() {
+            return Err(ApplicationError::NotFound("Label", label.trim().to_owned()));
+        }
+        Ok(out)
+    }
+
+    async fn label_status_in(
+        &self,
+        scope: Scope,
+        key: &str,
+    ) -> Result<LabelStatus, ApplicationError> {
+        let settings = self.store.settings(scope).await?;
+        Ok(LabelStatus {
+            settings: settings
+                .into_iter()
+                .find(|s| s.label == key)
+                .unwrap_or_else(|| mc_domain::LabelSettings::off(key)),
+            positives: 0,
+        })
     }
 
     async fn label_scope(

@@ -5,8 +5,10 @@
 
 mod cluster;
 mod curate;
+mod plan;
 #[cfg(test)]
 mod tests;
+mod undo;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -24,7 +26,7 @@ use mc_domain::{
 
 use super::placement::Home;
 use super::retro::Pick;
-use super::{Placement, TaggingService, features, label_key, non_empty};
+use super::{Placement, TaggingService, features, label_key, label_path};
 use crate::bus::CommandBus;
 use crate::error::ApplicationError;
 
@@ -69,7 +71,9 @@ pub struct ProposalView {
     pub senders: Vec<(String, u32)>,
 }
 
-pub use curate::{LabelEntry, LabelScope, ProposalMessage};
+pub use curate::{LabelDetail, LabelEntry, LabelHome, LabelPresence, LabelScope, ProposalMessage};
+pub use plan::{AccountCount, OpResult, OpStatus, PlanOp, PlanReport, PlanSummary};
+pub use undo::UndoReport;
 
 /// Marks a discovery as over when dropped, however it ends.
 struct Discovering<'a, S, R, C>(&'a TaggingService<S, R, C>)
@@ -339,6 +343,8 @@ where
                 samples,
                 status: ProposalStatus::Pending,
                 created_at: Utc::now(),
+                curated: false,
+                created: Vec::new(),
             });
         }
         Ok(made)
@@ -346,22 +352,35 @@ where
 
     /// Replace the scope's pending proposals with `made`. A proposal that
     /// matches a pending one keeps its id, so what the user is looking at
-    /// does not change under them.
+    /// does not change under them. Curated proposals are never replaced or
+    /// deleted, and a new cluster that overlaps one is dropped: the curated
+    /// proposal is the answer to it.
     async fn refresh(&self, scope: Scope, made: Vec<Proposal>) -> Result<usize, ApplicationError> {
-        let mut stale: Vec<(Proposal, HashSet<MessageId>)> = self
+        let pending = self
             .store
             .proposals(ProposalStatus::Pending)
             .await?
             .into_iter()
-            .filter(|p| p.scope == scope)
+            .filter(|p| p.scope == scope);
+        let (curated, plain): (Vec<_>, Vec<_>) = pending.partition(|p| p.curated);
+        let curated: Vec<HashSet<MessageId>> = curated
+            .into_iter()
+            .map(|p| p.members.into_iter().collect())
+            .collect();
+        let mut stale: Vec<(Proposal, HashSet<MessageId>)> = plain
+            .into_iter()
             .map(|p| {
                 let members = p.members.iter().copied().collect();
                 (p, members)
             })
             .collect();
-        let found = made.len();
+        let mut found = curated.len();
         for mut proposal in made {
             let members: HashSet<MessageId> = proposal.members.iter().copied().collect();
+            if curated.iter().any(|c| jaccard(&members, c) >= SAME_CLUSTER) {
+                continue;
+            }
+            found += 1;
             let same = stale
                 .iter()
                 .map(|(_, old)| jaccard(&members, old))
@@ -415,7 +434,7 @@ where
         archive: bool,
     ) -> Result<u32, ApplicationError> {
         let proposal = self.pending(id).await?;
-        let name = non_empty(name.unwrap_or(&proposal.name))?.to_owned();
+        let name = label_path(name.unwrap_or(&proposal.name))?;
         self.label_with(proposal, name, archive).await
     }
 
@@ -426,7 +445,7 @@ where
         name: String,
         archive: bool,
     ) -> Result<u32, ApplicationError> {
-        let label = label_key(&name);
+        let (id, label) = (proposal.id, label_key(&name));
         let group = self.group_mailboxes(proposal.scope).await?;
         let mode = if archive {
             LabelMode::ApplyArchive
@@ -460,6 +479,7 @@ where
         }
 
         let queued = picks.len() as u32;
+        let created = created.into_values().collect();
         let settings = self.store.settings(proposal.scope).await?;
         if settings
             .iter()
@@ -475,11 +495,12 @@ where
             .put_proposal(&Proposal {
                 name,
                 status: ProposalStatus::Accepted,
+                created,
                 ..proposal
             })
             .await?;
         let service = Arc::clone(self);
-        tokio::spawn(async move { service.run(picks, label, true).await });
+        tokio::spawn(async move { service.run(picks, label, true, Some(id)).await });
         Ok(queued)
     }
 }

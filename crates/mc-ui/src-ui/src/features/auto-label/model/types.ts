@@ -100,6 +100,18 @@ export interface BackgroundStats {
   retrains: { scope: string; done: number; total: number }[];
   /** Set while a search for new labels runs. */
   discovery: DiscoveryProgress | null;
+  /** Labelling jobs, queued or running. */
+  applying: ApplyProgress[];
+}
+
+export interface ApplyProgress {
+  label: string;
+  /** `undo` takes an accepted proposal's label off again. */
+  kind: 'apply' | 'undo';
+  done: number;
+  total: number;
+  /** Of `done`, the messages that left (undo: returned to) the Inbox. */
+  archived: number;
 }
 
 export interface DiscoveryProgress {
@@ -123,4 +135,11 @@ export interface LabelProposal {
   group: string;
   /** Unix seconds. */
   createdAt: number;
+  status: 'pending' | 'accepted' | 'rejected';
+  /** The training scope: `g:<group id>`, or `a:<account id>` for an account that learns alone. */
+  scope: string;
+  /** Dominant sender domains, most frequent first; empty unless asked for. */
+  senders: { domain: string; count: number }[];
+  /** Renamed or merged by hand: discovery keeps it. */
+  curated: boolean;
 }

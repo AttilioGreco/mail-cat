@@ -30,8 +30,8 @@ fn unpack(blob: &[u8]) -> Vec<MessageId> {
         .collect()
 }
 
-const COLUMNS: &str =
-    "id, scope, name, keywords, members, inbox, samples, status, created_at FROM tag_proposals";
+const COLUMNS: &str = "id, scope, name, keywords, members, inbox, samples, status, created_at, curated, created \
+     FROM tag_proposals";
 
 fn proposal_of_row(row: &Row) -> rusqlite::Result<Proposal> {
     let scope: String = row.get(1)?;
@@ -48,6 +48,8 @@ fn proposal_of_row(row: &Row) -> rusqlite::Result<Proposal> {
             .parse()
             .map_err(|e: String| conversion_err(7, Type::Text, e))?,
         created_at: DateTime::from_timestamp_nanos(row.get(8)?),
+        curated: row.get(9)?,
+        created: json_col(row, 10)?,
     })
 }
 
@@ -73,8 +75,8 @@ pub(super) fn put(conn: &Connection, p: &Proposal) -> Result<(), DomainError> {
     exec(
         conn,
         "INSERT OR REPLACE INTO tag_proposals \
-         (id, scope, name, keywords, members, inbox, samples, status, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (id, scope, name, keywords, members, inbox, samples, status, created_at, curated, created) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             p.id.as_uuid(),
             p.scope.key(),
@@ -85,6 +87,8 @@ pub(super) fn put(conn: &Connection, p: &Proposal) -> Result<(), DomainError> {
             json(&p.samples)?,
             p.status.as_str(),
             nanos(p.created_at),
+            p.curated,
+            json(&p.created)?,
         ],
     )
     .map(drop)

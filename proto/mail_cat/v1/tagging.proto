@@ -63,6 +63,16 @@ service TaggingService {
   rpc AssignLabelProposal(AssignLabelProposalRequest) returns (AcceptLabelProposalResponse);
   // Existing labels with their settings, per training scope.
   rpc ListLabels(ListLabelsRequest) returns (ListLabelsResponse);
+  // One existing label in closer view: where each account keeps it and
+  // recent mail under it. One entry per scope that has it.
+  rpc GetLabel(GetLabelRequest) returns (GetLabelResponse);
+  // Many curation steps as one: everything is checked first and nothing is
+  // done unless all of it can be. A plan that fails validation is a
+  // FAILED_PRECONDITION error listing every problem, one per line.
+  rpc ApplyCurationPlan(ApplyCurationPlanRequest) returns (ApplyCurationPlanResponse);
+  // Takes an accepted proposal's label off the mail it was put on, in the
+  // background (progress in GetBackgroundStats), unless dry_run.
+  rpc UndoLabelProposal(UndoLabelProposalRequest) returns (UndoLabelProposalResponse);
 }
 
 // account_id unset: every training group.
@@ -101,6 +111,9 @@ message LabelProposal {
   string scope = 10;
   // Dominant sender domains, most frequent first.
   repeated SenderCount senders = 11;
+  // Renamed or merged by hand: discovery keeps it and drops clusters that
+  // overlap it.
+  bool curated = 12;
 }
 message ListLabelProposalsResponse { repeated LabelProposal proposals = 1; }
 message AcceptLabelProposalRequest {
@@ -157,6 +170,105 @@ message LabelScope {
 }
 message ListLabelsResponse { repeated LabelScope scopes = 1; }
 
+message GetLabelRequest {
+  string label = 1;  // any case
+  // Only this account's scope; unset: every scope that has the label.
+  optional string account_id = 2;
+  uint32 samples = 3;
+}
+message LabelPresence {
+  string account_id = 1;
+  // "mailbox", "keyword" (no mailbox, its mail carries the keyword) or "missing".
+  string kind = 2;
+  string mailbox_id = 3;
+  string path = 4;
+  uint32 messages = 5;      // in the mailbox
+  string keyword = 6;
+  uint32 examples = 7;      // mail of this account the model learnt it from
+}
+message LabelDetail {
+  string scope = 1;
+  string group = 2;
+  repeated string account_ids = 3;
+  string name = 4;
+  LabelStatus status = 5;
+  repeated LabelPresence accounts = 6;
+  repeated ProposalMessage samples = 7;
+}
+message GetLabelResponse { repeated LabelDetail labels = 1; }
+
+// kind: "merge" (ids, name, alias), "rename" (id, name), "assign" (id,
+// label, archive), "accept" (id, name, archive), "reject" (id), "mode"
+// (label, mode, threshold, existing, account_id). An id may be "@alias".
+message CurationOp {
+  string kind = 1;
+  repeated string ids = 2;
+  string id = 3;
+  string name = 4;
+  string label = 5;
+  string alias = 6;
+  bool archive = 7;
+  string mode = 8;
+  optional double threshold = 9;
+  bool existing = 10;
+  optional string account_id = 11;
+}
+message ApplyCurationPlanRequest {
+  repeated CurationOp ops = 1;
+  bool dry_run = 2;
+}
+message AccountCount {
+  string account_id = 1;
+  uint32 messages = 2;
+  uint32 archived = 3;
+}
+message LabelCreation {
+  string name = 1;
+  repeated string account_ids = 2;
+}
+message PlanSummary {
+  uint32 merged = 1;
+  uint32 renamed = 2;
+  uint32 accepted = 3;
+  uint32 assigned = 4;
+  uint32 rejected = 5;
+  uint32 modes = 6;
+  repeated LabelCreation labels_to_create = 7;
+  repeated string labels_touched = 8;
+  uint32 to_label = 9;
+  uint32 to_archive = 10;
+  repeated AccountCount accounts = 11;
+}
+message OpResult {
+  uint32 index = 1;  // 1-based
+  string kind = 2;
+  // "planned" (dry run), "done", "failed" or "skipped" (after a failure).
+  string status = 3;
+  string detail = 4;
+  string proposal_id = 5;  // the proposal a merge made
+  optional uint32 queued = 6;
+}
+message ApplyCurationPlanResponse {
+  bool dry_run = 1;
+  PlanSummary summary = 2;
+  repeated OpResult results = 3;
+}
+
+message UndoLabelProposalRequest {
+  string id = 1;
+  bool dry_run = 2;
+  // The proposal ends up rejected instead of pending.
+  bool reject = 3;
+}
+message UndoLabelProposalResponse {
+  bool dry_run = 1;
+  uint32 to_unlabel = 2;
+  uint32 to_unarchive = 3;
+  repeated AccountCount accounts = 4;
+  repeated string labels_to_delete = 5;
+  string status = 6;  // what the proposal becomes
+}
+
 message GetEmbeddingsRequest {}
 message SetEmbeddingsRequest { bool enabled = 1; }
 message EmbeddingsStatus {
@@ -211,6 +323,16 @@ message BackgroundStats {
   string model = 14;
   // Set while a search for new labels runs.
   optional DiscoveryProgress discovery = 15;
+  // Labelling jobs, queued or running (accepted proposals, bulk applies, undos).
+  repeated ApplyProgress applying = 16;
+}
+message ApplyProgress {
+  string label = 1;
+  string kind = 2;  // "apply" | "undo"
+  uint64 done = 3;
+  uint64 total = 4;
+  // Of done, the messages that left (undo: returned to) the Inbox.
+  uint64 archived = 5;
 }
 message DiscoveryProgress {
   // Training group being searched; empty while starting.

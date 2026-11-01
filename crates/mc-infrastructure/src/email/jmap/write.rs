@@ -144,17 +144,55 @@ impl JmapEmailProvider {
         )))
     }
 
-    /// A new top-level mailbox; its id.
+    /// The mailbox at `name` (`A/B/C`: `C` inside `B` inside `A`), made with
+    /// the parents it lacks in one request; its id. An existing one is the
+    /// one wanted.
     pub(super) async fn create_mailbox(&self, name: &str) -> Result<String, DomainError> {
-        let reply = self
+        let existing = self
             .client
             .call(vec![(
-                "Mailbox/set",
-                json!({"create": {"new": {"name": name, "isSubscribed": true}}}),
+                "Mailbox/get",
+                json!({"ids": null, "properties": ["id", "name", "parentId"]}),
             )])
             .await?
             .remove(0)?;
-        if let Some(id) = reply["created"]["new"]["id"].as_str() {
+        let existing = existing["list"].as_array().map_or(&[][..], Vec::as_slice);
+        let segments: Vec<&str> = name.split('/').collect();
+        let mut parent: Option<&str> = None;
+        let mut found = 0;
+        for segment in &segments {
+            let next = existing.iter().find(|m| {
+                m["parentId"].as_str() == parent
+                    && m["name"]
+                        .as_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(segment))
+            });
+            match next.and_then(|m| m["id"].as_str()) {
+                Some(id) => (parent, found) = (Some(id), found + 1),
+                None => break,
+            }
+        }
+        if found == segments.len() {
+            return Ok(parent.unwrap_or_default().to_owned());
+        }
+        let mut create = Map::new();
+        for (i, segment) in segments.iter().enumerate().skip(found) {
+            let parent_id = match i {
+                0 => Value::Null,
+                _ if i == found => json!(parent),
+                _ => json!(format!("#m{}", i - 1)),
+            };
+            create.insert(
+                format!("m{i}"),
+                json!({"name": segment, "parentId": parent_id, "isSubscribed": true}),
+            );
+        }
+        let reply = self
+            .client
+            .call(vec![("Mailbox/set", json!({"create": create}))])
+            .await?
+            .remove(0)?;
+        if let Some(id) = reply["created"][format!("m{}", segments.len() - 1)]["id"].as_str() {
             return Ok(id.to_owned());
         }
         Err(DomainError::Provider(format!(

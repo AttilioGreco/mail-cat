@@ -217,6 +217,46 @@ fn labels_match_by_name_regardless_of_case() {
     );
 }
 
+#[test]
+fn a_nested_label_is_keyed_by_its_whole_path() {
+    let nested = Mailbox::discover(
+        AccountId::new(),
+        MailboxPath::new(vec!["Shopping".into(), "Ebay".into()], '/').unwrap(),
+        MailboxType::Custom,
+    )
+    .0;
+    let boxes = vec![mailbox("Shopping", MailboxType::Custom), nested];
+    assert_eq!(
+        label_mailbox(&boxes, &label_key("Shopping/Ebay")).map(|m| m.display_name.as_str()),
+        Some("Ebay")
+    );
+    assert_eq!(
+        label_mailbox(&boxes, "shopping").map(|m| m.display_path.as_str()),
+        Some("Shopping"),
+        "the parent is a label of its own, not the child"
+    );
+}
+
+#[test]
+fn a_keyword_keeps_the_slash_of_a_nested_label_and_swaps_what_atoms_cannot_hold() {
+    use super::placement::keyword_of;
+    // `/` is a valid IMAP atom and JMAP keyword character, and the store
+    // reads the keyword back as it is (only `_` becomes a space).
+    assert_eq!(keyword_of("shopping/ebay"), "shopping/ebay");
+    assert_eq!(keyword_of("shopping/ebay 2026"), "shopping/ebay_2026");
+    assert_eq!(keyword_of("a(b)"), "a_b_");
+}
+
+#[test]
+fn label_paths_are_trimmed_per_segment_and_refuse_empty_ones() {
+    use super::label_path;
+    assert_eq!(label_path(" Shopping / Ebay ").unwrap(), "Shopping/Ebay");
+    assert_eq!(label_path("Newsletter").unwrap(), "Newsletter");
+    for bad in ["", "  ", "/Ebay", "Shopping/", "A//B"] {
+        assert!(label_path(bad).is_err(), "{bad:?}");
+    }
+}
+
 fn group_of(account: AccountId, boxes: Vec<Mailbox>) -> GroupMailboxes {
     GroupMailboxes::from([(account, boxes)])
 }

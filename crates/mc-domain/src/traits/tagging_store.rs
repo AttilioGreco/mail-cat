@@ -9,8 +9,8 @@ use crate::model::account::AccountId;
 use crate::model::discovery::{DiscoveryPoint, Proposal, ProposalId, ProposalStatus};
 use crate::model::embedding::ModelProfile;
 use crate::model::tagging::{
-    AutoApplied, BackgroundSpeed, Example, GroupId, LabelSettings, LabelledVector, Lesson,
-    ModelStats, Scope, SourceFilter, TagSource, TrainingGroup,
+    AutoApplied, BackgroundSpeed, Example, GroupId, LabelExamples, LabelSettings, LabelledVector,
+    Lesson, ModelStats, Scope, SourceFilter, TagSource, TrainingGroup,
 };
 use crate::value_objects::message_id::MessageId;
 
@@ -43,6 +43,14 @@ pub trait TaggingStore: Send + Sync {
     /// Counts for `tokens` of every label of the scope.
     async fn stats(&self, scope: Scope, tokens: &[String]) -> Result<ModelStats, DomainError>;
     async fn teach(&self, scope: Scope, lesson: Lesson<'_>) -> Result<(), DomainError>;
+    /// The newest messages the scope's model was taught `label` from, and
+    /// how many it has per account.
+    async fn label_examples(
+        &self,
+        scope: Scope,
+        label: &str,
+        limit: u32,
+    ) -> Result<LabelExamples, DomainError>;
     /// Positive examples per label of the scope.
     async fn positives(&self, scope: Scope) -> Result<Vec<(String, u32)>, DomainError>;
     /// Forget the scope's counts and examples (not its settings).
@@ -73,6 +81,8 @@ pub trait TaggingStore: Send + Sync {
     // ── Auto-applied labels ──
     async fn record_auto(&self, applied: &AutoApplied) -> Result<(), DomainError>;
     async fn autos(&self, message: MessageId) -> Result<Vec<AutoApplied>, DomainError>;
+    /// The records an accepted proposal made, to undo that acceptance.
+    async fn proposal_autos(&self, proposal: ProposalId) -> Result<Vec<AutoApplied>, DomainError>;
     /// Forget the record; `true` when there was one.
     async fn take_auto(&self, message: MessageId, label: &str) -> Result<bool, DomainError>;
 

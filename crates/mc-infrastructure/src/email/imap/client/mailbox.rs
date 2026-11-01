@@ -371,6 +371,34 @@ where
     exchange(COMMAND_TIMEOUT, "UNSUBSCRIBE", session.unsubscribe(name)).await
 }
 
+/// CREATE and SUBSCRIBE each level of `name`: `A/B/C` makes `A`, `A/B` and
+/// `A/B/C`, as a server may not make the parents itself (Gmail shows a label
+/// under a parent only when it exists). A level that exists already is the
+/// one wanted: a sync or another client got there first.
+pub(super) async fn create_on<T>(
+    session: &mut async_imap::Session<T>,
+    name: &str,
+) -> Result<(), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    let mut level = String::new();
+    for segment in name.split('/') {
+        if !level.is_empty() {
+            level.push('/');
+        }
+        level.push_str(segment);
+        match exchange(COMMAND_TIMEOUT, "CREATE", session.create(&level)).await {
+            Err(DomainError::Provider(reply))
+                if reply.to_ascii_lowercase().contains("alreadyexists")
+                    || reply.to_ascii_lowercase().contains("already exists") => {}
+            created => created?,
+        }
+        set_subscribed_on(session, &level, true).await?;
+    }
+    Ok(())
+}
+
 /// UNSUBSCRIBE, then DELETE: some servers keep listing a deleted mailbox that
 /// is still subscribed. On Gmail the DELETE removes the label only.
 pub(super) async fn delete_on<T>(
@@ -419,18 +447,11 @@ impl ImapEmailProvider {
         Ok(listed.into_iter().map(|l| l.mailbox).collect())
     }
 
-    /// CREATE and SUBSCRIBE `name`, then find it as the server lists it. A
-    /// mailbox that exists already (a sync or another client got there first)
-    /// is the one wanted.
+    /// CREATE and SUBSCRIBE `name` (and its parents), then find it as the
+    /// server lists it.
     pub(super) async fn create_mailbox(&self, name: &str) -> Result<Mailbox, DomainError> {
         let mut session = self.session().await?;
-        match exchange(COMMAND_TIMEOUT, "CREATE", session.create(name)).await {
-            Err(DomainError::Provider(reply))
-                if reply.to_ascii_lowercase().contains("alreadyexists")
-                    || reply.to_ascii_lowercase().contains("already exists") => {}
-            created => created?,
-        }
-        set_subscribed_on(&mut session, name, true).await?;
+        create_on(&mut session, name).await?;
         self.release(session);
         let wanted = name.to_lowercase();
         self.list_all_mailboxes()

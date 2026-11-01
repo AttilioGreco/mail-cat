@@ -10,11 +10,12 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use mc_domain::{
-    AccountId, AutoApplied, LabelMode, MailboxReadRepository, MessageId, ModelStats, Scope,
-    SourceFilter, TagSource, TaggingStore,
+    AccountId, AutoApplied, LabelMode, MailboxReadRepository, MessageId, ModelStats, ProposalId,
+    Scope, SourceFilter, TagSource, TaggingStore,
 };
 
 use super::placement::{GroupMailboxes, Placement};
+use super::stats::ApplyKind;
 use super::{TaggingService, bayes, features, label_key};
 use crate::bus::CommandBus;
 use crate::error::ApplicationError;
@@ -24,8 +25,8 @@ pub(super) const PAGE: u32 = 500;
 /// Tokens asked of the store at once, under its own cap.
 const TOKEN_CHUNK: usize = 1000;
 /// Messages per provider request, and the pause after each.
-const BATCH: usize = 25;
-const BATCH_PAUSE: Duration = Duration::from_secs(1);
+pub(super) const BATCH: usize = 25;
+pub(super) const BATCH_PAUSE: Duration = Duration::from_secs(1);
 const SAMPLE: usize = 5;
 
 #[derive(Debug, Clone)]
@@ -246,14 +247,38 @@ where
         let plan = self.plan(account, &label, mode, threshold).await?;
         let preview = plan.preview();
         let service = Arc::clone(self);
-        tokio::spawn(async move { service.run(plan.picks, label, false).await });
+        tokio::spawn(async move { service.run(plan.picks, label, false, None).await });
         Ok(preview)
     }
 
     /// Label the picks in batches, each recorded first so it can be undone.
     /// `confirmed`: the user chose these, so the model learns the label from
     /// them as it does from any label of theirs.
-    pub(super) async fn run(&self, picks: Vec<Pick>, label: String, confirmed: bool) {
+    ///
+    /// Jobs take turns and show in the background stats from the moment they
+    /// are queued. `proposal` is the acceptance the labels belong to.
+    pub(super) async fn run(
+        &self,
+        picks: Vec<Pick>,
+        label: String,
+        confirmed: bool,
+        proposal: Option<ProposalId>,
+    ) {
+        let job = self.begin_job(&label, ApplyKind::Apply, picks.len() as u64);
+        let _turn = self.apply_turn.lock().await;
+        self.apply_picks(picks, &label, confirmed, proposal, job)
+            .await;
+        self.end_job(job);
+    }
+
+    async fn apply_picks(
+        &self,
+        picks: Vec<Pick>,
+        label: &str,
+        confirmed: bool,
+        proposal: Option<ProposalId>,
+        job: u64,
+    ) {
         let mut groups: HashMap<(AccountId, Placement), Vec<Pick>> = HashMap::new();
         for pick in picks {
             groups
@@ -275,10 +300,11 @@ where
                 for pick in chunk {
                     let record = AutoApplied {
                         message_id: pick.message_id,
-                        label: label.clone(),
+                        label: label.to_owned(),
                         score: pick.score,
                         archived: place.archives(),
                         confirmed,
+                        proposal_id: proposal,
                         at: Utc::now(),
                     };
                     if let Err(e) = self.store.record_auto(&record).await {
@@ -290,13 +316,15 @@ where
                 let change = self.put(account, ids.clone(), &place).await;
                 if let Err(e) = change {
                     warn!(error = %e, done, total, "label classifier: bulk apply stopped");
-                    self.forget_unapplied(&ids, &label).await;
+                    self.forget_unapplied(&ids, label).await;
                     return;
                 }
                 done += chunk.len();
+                let archived = if place.archives() { chunk.len() } else { 0 };
+                self.advance_job(job, chunk.len() as u64, archived as u64);
                 for source in chunk.iter().filter_map(|p| p.taught.as_ref()) {
                     let mut labelled = source.clone();
-                    labelled.labels.push(label.clone());
+                    labelled.labels.push(label.to_owned());
                     if let Err(e) = self.retrain(&labelled, scope, None, false).await {
                         warn!(error = %e, "label classifier: could not learn from a bulk apply");
                     }
