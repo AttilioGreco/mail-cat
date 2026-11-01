@@ -25,6 +25,26 @@ pub struct LabelStatus {
     pub min_positives: u32,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelEntry {
+    /// As the scope spells it.
+    pub name: String,
+    #[serde(flatten)]
+    pub status: LabelStatus,
+}
+
+/// The labels one model learns. `scope` is `g:<group id>`, or `a:<account id>`
+/// for an account that learns alone (then `group` is empty).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelScope {
+    pub scope: String,
+    pub group: String,
+    pub account_ids: Vec<String>,
+    pub labels: Vec<LabelEntry>,
+}
+
 /// `confidence`: `high` or `medium`.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -300,6 +320,34 @@ impl MailCatClient {
             })
             .await?;
         Ok(status(resp.into_inner()))
+    }
+
+    /// Labels with their settings per training scope; one scope with an account.
+    pub async fn list_labels(&self, account_id: Option<&str>) -> Result<Vec<LabelScope>> {
+        let resp = self
+            .tagging()
+            .list_labels(pb::ListLabelsRequest {
+                account_id: account_id.map(str::to_owned),
+            })
+            .await?;
+        Ok(resp
+            .into_inner()
+            .scopes
+            .into_iter()
+            .map(|s| LabelScope {
+                scope: s.scope,
+                group: s.group,
+                account_ids: s.account_ids,
+                labels: s
+                    .labels
+                    .into_iter()
+                    .map(|l| LabelEntry {
+                        name: l.name,
+                        status: status(l.status.unwrap_or_default()),
+                    })
+                    .collect(),
+            })
+            .collect())
     }
 
     pub async fn get_message_tags(&self, message_id: &str) -> Result<MessageTags> {

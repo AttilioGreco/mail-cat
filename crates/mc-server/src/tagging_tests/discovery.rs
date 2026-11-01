@@ -172,8 +172,11 @@ impl Found {
             .collect()
     }
 
-    async fn pending(&self) -> Vec<mc_application::services::tagging::PendingProposal> {
-        self.service.proposals().await.unwrap()
+    async fn pending(&self) -> Vec<mc_application::services::tagging::ProposalView> {
+        self.service
+            .list_proposals(None, Some(ProposalStatus::Pending), false)
+            .await
+            .unwrap()
     }
 
     /// The pending proposal about orders.
@@ -378,6 +381,245 @@ async fn accepting_and_archiving_takes_the_mail_out_of_the_inbox() {
     assert!(record.archived && record.confirmed);
     assert_eq!(record.label, "amazon");
 }
+async fn offers(f: &Found) -> mc_domain::Proposal {
+    f.pending()
+        .await
+        .into_iter()
+        .map(|p| p.proposal)
+        .find(|p| p.members.contains(&f.groups[1][0]))
+        .expect("the offers cluster")
+}
+
+#[tokio::test]
+async fn merging_joins_the_members_rereads_the_keywords_and_removes_the_sources() {
+    let f = found().await;
+    f.discover().await;
+    let (orders, offers) = (f.orders().await, offers(&f).await);
+
+    let merged = f
+        .service
+        .merge_proposals(&[orders.id, offers.id], None)
+        .await
+        .unwrap();
+
+    let p = &merged.proposal;
+    assert_eq!((p.size(), p.inbox), (80, 80));
+    assert_eq!(p.status, ProposalStatus::Pending);
+    assert!(p.id != orders.id && p.id != offers.id);
+    let mut union: Vec<_> = f.groups.iter().flatten().copied().collect();
+    let mut members = p.members.clone();
+    union.sort_by_key(|m| *m.as_uuid());
+    members.sort_by_key(|m| *m.as_uuid());
+    assert_eq!(members, union);
+    assert_ne!(p.keywords, orders.keywords);
+    assert_ne!(p.keywords, offers.keywords);
+    assert!(!p.samples.is_empty() && p.samples.len() <= 5);
+    assert!(p.samples.iter().any(|s| orders.samples.contains(s)));
+    assert!(p.samples.iter().any(|s| offers.samples.contains(s)));
+    let domains: Vec<_> = merged
+        .senders
+        .iter()
+        .map(|(d, n)| (d.as_str(), *n))
+        .collect();
+    assert_eq!(domains, [("amazon.example", 40), ("shop.example", 40)]);
+
+    let store = SqliteTaggingStore::new(f.world.db.clone());
+    assert_eq!(f.pending().await.len(), 1);
+    assert!(store.proposal(orders.id).await.unwrap().is_none());
+    assert!(
+        store
+            .proposals(ProposalStatus::Rejected)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn merging_takes_a_name_and_refuses_other_scopes_and_answered_proposals() {
+    let f = found().await;
+    f.discover().await;
+    let (orders, offers) = (f.orders().await, offers(&f).await);
+    let store = SqliteTaggingStore::new(f.world.db.clone());
+
+    let stranger = mc_domain::Proposal {
+        id: mc_domain::ProposalId::new(),
+        scope: mc_domain::Scope::Alone(AccountId::new()),
+        ..offers.clone()
+    };
+    store.put_proposal(&stranger).await.unwrap();
+    let refused = f
+        .service
+        .merge_proposals(&[orders.id, stranger.id], None)
+        .await;
+    assert!(
+        matches!(refused, Err(ApplicationError::PreconditionFailed(m)) if m.contains("groups"))
+    );
+    assert!(f.service.merge_proposals(&[orders.id], None).await.is_err());
+    assert!(
+        f.service
+            .merge_proposals(&[orders.id, orders.id], None)
+            .await
+            .is_err()
+    );
+    assert!(
+        store.proposal(orders.id).await.unwrap().is_some(),
+        "nothing was lost"
+    );
+
+    f.service.reject_proposal(offers.id).await.unwrap();
+    assert!(
+        f.service
+            .merge_proposals(&[orders.id, offers.id], None)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_merge_takes_the_name_it_is_given() {
+    let f = found().await;
+    f.discover().await;
+    let (orders, offers) = (f.orders().await, offers(&f).await);
+    let merged = f
+        .service
+        .merge_proposals(&[offers.id, orders.id], Some(" Acquisti "))
+        .await
+        .unwrap();
+    assert_eq!(merged.proposal.name, "Acquisti");
+    assert_eq!(merged.group, "Tutti");
+}
+
+#[tokio::test]
+async fn renaming_changes_a_pending_proposal_only() {
+    let f = found().await;
+    f.discover().await;
+    let orders = f.orders().await;
+
+    let renamed = f
+        .service
+        .rename_proposal(orders.id, " Ordini ")
+        .await
+        .unwrap();
+    assert_eq!(renamed.proposal.name, "Ordini");
+    assert_eq!(f.orders().await.name, "Ordini");
+    assert!(f.service.rename_proposal(orders.id, "  ").await.is_err());
+    f.service.reject_proposal(orders.id).await.unwrap();
+    assert!(f.service.rename_proposal(orders.id, "Altro").await.is_err());
+}
+
+#[tokio::test]
+async fn assigning_puts_the_existing_label_instead_of_creating_one() {
+    let f = found().await;
+    f.discover().await;
+    let orders = f.orders().await;
+
+    let missing = f
+        .service
+        .assign_proposal(orders.id, "Non esiste", false)
+        .await;
+    assert!(matches!(
+        missing,
+        Err(ApplicationError::NotFound("Label", _))
+    ));
+    assert_eq!(f.pending().await.len(), 2, "still waiting");
+
+    let queued = f
+        .service
+        .assign_proposal(orders.id, " newsletter ", false)
+        .await
+        .unwrap();
+    assert_eq!(queued, 40);
+    until_sent(&f, 40).await;
+
+    let created = f
+        .commands
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| matches!(c, Command::CreateLabel { .. }))
+        .count();
+    assert_eq!(created, 0);
+    assert!(f.sent().iter().all(|(_, add, _)| add == &[f.world.label]));
+    let store = SqliteTaggingStore::new(f.world.db.clone());
+    let accepted = store.proposals(ProposalStatus::Accepted).await.unwrap();
+    assert_eq!(
+        (accepted[0].id, accepted[0].name.as_str()),
+        (orders.id, "Newsletter")
+    );
+    let record = store.autos(f.groups[0][0]).await.unwrap().remove(0);
+    assert!((record.label.as_str(), record.confirmed) == ("newsletter", true));
+}
+
+#[tokio::test]
+async fn listing_filters_by_status_and_account_and_shows_the_senders() {
+    let f = found().await;
+    f.discover().await;
+    let orders = f.orders().await;
+    f.service.reject_proposal(orders.id).await.unwrap();
+
+    let count = |views: Vec<mc_application::services::tagging::ProposalView>| views.len();
+    let list = |account, status, senders| f.service.list_proposals(account, status, senders);
+    assert_eq!(
+        count(
+            list(None, Some(ProposalStatus::Pending), false)
+                .await
+                .unwrap()
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            list(None, Some(ProposalStatus::Rejected), false)
+                .await
+                .unwrap()
+        ),
+        1
+    );
+    assert_eq!(count(list(None, None, false).await.unwrap()), 2);
+    assert_eq!(
+        count(list(Some(f.world.account), None, false).await.unwrap()),
+        2
+    );
+    let with = list(None, Some(ProposalStatus::Rejected), true)
+        .await
+        .unwrap();
+    assert_eq!(with[0].senders, [("amazon.example".to_owned(), 40)]);
+    assert!(
+        list(None, None, false)
+            .await
+            .unwrap()
+            .iter()
+            .all(|v| v.senders.is_empty())
+    );
+
+    let (detail, messages) = f.service.proposal_detail(orders.id, 7).await.unwrap();
+    assert_eq!(detail.proposal.status, ProposalStatus::Rejected);
+    assert_eq!(messages.len(), 7);
+    assert!(messages.iter().all(|m| m.from == "orders@amazon.example"));
+    let first: Vec<_> = messages
+        .iter()
+        .take(orders.samples.len())
+        .map(|m| m.message_id)
+        .collect();
+    let samples: Vec<_> = orders.samples.iter().map(|s| s.message_id).collect();
+    assert_eq!(first, samples, "the central ones come first");
+}
+
+#[tokio::test]
+async fn labels_are_listed_with_their_settings_per_scope() {
+    let (world, service, _) = group_with_taught_label().await;
+    let scopes = service.list_labels(Some(world.account)).await.unwrap();
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(scopes[0].group, "Tutti");
+    let label = &scopes[0].labels[0];
+    assert_eq!(label.name, "Newsletter");
+    assert_eq!(label.status.positives, 8);
+    assert_eq!(label.status.settings.mode, LabelMode::Off);
+    assert_eq!(service.list_labels(None).await.unwrap().len(), 1);
+}
+
 /// Not a regression test: run it by hand on a copy of a real database to see
 /// what discovery makes of the mail (`MC_REAL_DB=/path/to/copy`).
 #[tokio::test]
@@ -411,7 +653,10 @@ async fn real_mail() {
         }
     }
     eprintln!("discovery took {:?}", started.elapsed());
-    let proposals = service.proposals().await.unwrap();
+    let proposals = service
+        .list_proposals(None, Some(ProposalStatus::Pending), false)
+        .await
+        .unwrap();
     eprintln!("{} proposals", proposals.len());
     for p in &proposals {
         let p = &p.proposal;

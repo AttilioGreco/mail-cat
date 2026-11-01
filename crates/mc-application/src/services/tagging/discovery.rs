@@ -4,6 +4,7 @@
 //! being proposed again.
 
 mod cluster;
+mod curate;
 #[cfg(test)]
 mod tests;
 
@@ -61,10 +62,14 @@ pub struct DiscoveryProgress {
 
 /// A proposal and the group whose mail it is made of.
 #[derive(Debug, Clone)]
-pub struct PendingProposal {
+pub struct ProposalView {
     pub proposal: Proposal,
     pub group: String,
+    /// Dominant sender domains, most frequent first; empty unless asked for.
+    pub senders: Vec<(String, u32)>,
 }
+
+pub use curate::{LabelEntry, LabelScope, ProposalMessage};
 
 /// Marks a discovery as over when dropped, however it ends.
 struct Discovering<'a, S, R, C>(&'a TaggingService<S, R, C>)
@@ -379,21 +384,6 @@ where
 
     // ── The user's answer ──
 
-    /// What is waiting for an answer, Inbox-heavy first.
-    pub async fn proposals(&self) -> Result<Vec<PendingProposal>, ApplicationError> {
-        let names = self.scope_names().await?;
-        Ok(self
-            .store
-            .proposals(ProposalStatus::Pending)
-            .await?
-            .into_iter()
-            .map(|proposal| PendingProposal {
-                group: names.get(&proposal.scope).cloned().unwrap_or_default(),
-                proposal,
-            })
-            .collect())
-    }
-
     async fn pending(&self, id: ProposalId) -> Result<Proposal, ApplicationError> {
         self.store
             .proposal(id)
@@ -426,6 +416,16 @@ where
     ) -> Result<u32, ApplicationError> {
         let proposal = self.pending(id).await?;
         let name = non_empty(name.unwrap_or(&proposal.name))?.to_owned();
+        self.label_with(proposal, name, archive).await
+    }
+
+    /// Put `name` on the proposal's mail, creating it where an account lacks it.
+    async fn label_with(
+        self: &Arc<Self>,
+        proposal: Proposal,
+        name: String,
+        archive: bool,
+    ) -> Result<u32, ApplicationError> {
         let label = label_key(&name);
         let group = self.group_mailboxes(proposal.scope).await?;
         let mode = if archive {

@@ -196,7 +196,10 @@ fn read_password(from_stdin: bool) -> Result<String> {
     Ok(password)
 }
 
-async fn find_account(client: &MailCatClient, wanted: &str) -> Result<mc_client::Account> {
+pub(super) async fn find_account(
+    client: &MailCatClient,
+    wanted: &str,
+) -> Result<mc_client::Account> {
     client
         .list_accounts()
         .await?

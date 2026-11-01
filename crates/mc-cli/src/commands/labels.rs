@@ -1,3 +1,7 @@
+mod proposals;
+#[cfg(test)]
+mod tests;
+
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
@@ -23,8 +27,17 @@ pub enum LabelsCmd {
         #[arg(long)]
         account: Option<String>,
     },
-    /// List the labels discovery proposes
-    Proposals,
+    /// Review, curate and answer the labels discovery proposes
+    Proposals(proposals::ProposalsArgs),
+    /// List the existing labels with their mode, threshold and example count
+    List {
+        /// Account ID, name or email; only its training group (all when left out)
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Set what happens to mail the classifier is sure about. Apply modes
+    /// only print what they would do until --yes
+    Mode(proposals::ModeArgs),
 }
 
 pub async fn run(cmd: LabelsCmd, client: MailCatClient, json: bool) -> Result<()> {
@@ -32,7 +45,9 @@ pub async fn run(cmd: LabelsCmd, client: MailCatClient, json: bool) -> Result<()
         LabelsCmd::Eval { account } => eval(&account, client, json).await,
         LabelsCmd::Stats => stats(client, json).await,
         LabelsCmd::Discover { account } => discover(account.as_deref(), client, json).await,
-        LabelsCmd::Proposals => proposals(client, json).await,
+        LabelsCmd::Proposals(args) => proposals::run(args, client, json).await,
+        LabelsCmd::List { account } => proposals::list(account.as_deref(), client, json).await,
+        LabelsCmd::Mode(args) => proposals::mode(args, client, json).await,
     }
 }
 
@@ -158,49 +173,5 @@ async fn discover(account: Option<&str>, client: MailCatClient, json: bool) -> R
     if !json {
         eprintln!();
     }
-    proposals(client, json).await
-}
-
-#[derive(Tabled)]
-struct ProposalRow {
-    #[tabled(rename = "Name")]
-    name: String,
-    #[tabled(rename = "Messages")]
-    size: u32,
-    #[tabled(rename = "In Inbox")]
-    inbox: u32,
-    #[tabled(rename = "Keywords")]
-    keywords: String,
-    #[tabled(rename = "Example")]
-    example: String,
-    #[tabled(rename = "ID")]
-    id: String,
-}
-
-async fn proposals(client: MailCatClient, json: bool) -> Result<()> {
-    let found = client.list_label_proposals().await?;
-    if json {
-        return super::print_json(&found);
-    }
-    if found.is_empty() {
-        println!("{}", "No labels proposed.".yellow());
-        return Ok(());
-    }
-    let rows: Vec<ProposalRow> = found
-        .into_iter()
-        .map(|p| ProposalRow {
-            example: p
-                .samples
-                .first()
-                .map(|s| s.subject.clone())
-                .unwrap_or_default(),
-            keywords: p.keywords.join(" · "),
-            name: p.name,
-            size: p.size,
-            inbox: p.inbox,
-            id: p.id,
-        })
-        .collect();
-    println!("{}", Table::new(rows));
-    Ok(())
+    proposals::list_proposals(None, proposals::StatusArg::Pending, client, json).await
 }

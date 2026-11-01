@@ -50,12 +50,36 @@ service TaggingService {
   // teaches the model; the label starts in "suggest".
   rpc AcceptLabelProposal(AcceptLabelProposalRequest) returns (AcceptLabelProposalResponse);
   rpc RejectLabelProposal(RejectLabelProposalRequest) returns (TaggingAck);
+
+  // Curating proposals (for people or assistants driving the CLI).
+  // One proposal with sample messages, whatever its status.
+  rpc GetLabelProposal(GetLabelProposalRequest) returns (LabelProposalDetail);
+  rpc RenameLabelProposal(RenameLabelProposalRequest) returns (LabelProposal);
+  // Replaces pending proposals of one scope by one: members are the union,
+  // samples and keywords are recomputed. The sources are deleted, not rejected.
+  rpc MergeLabelProposals(MergeLabelProposalsRequest) returns (LabelProposal);
+  // Like AcceptLabelProposal, but puts a label that already exists in the
+  // proposal's group instead of creating one.
+  rpc AssignLabelProposal(AssignLabelProposalRequest) returns (AcceptLabelProposalResponse);
+  // Existing labels with their settings, per training scope.
+  rpc ListLabels(ListLabelsRequest) returns (ListLabelsResponse);
 }
 
 // account_id unset: every training group.
 message DiscoverLabelsRequest { optional string account_id = 1; }
 message DiscoverLabelsResponse { bool started = 1; }
-message ListLabelProposalsRequest {}
+message ListLabelProposalsRequest {
+  // Only the proposals of this account's scope; unset: every scope.
+  optional string account_id = 1;
+  // "pending" (also when empty), "accepted", "rejected" or "all".
+  string status = 2;
+  // Fill LabelProposal.senders; reads every member, so costs on large lists.
+  bool with_senders = 3;
+}
+message SenderCount {
+  string domain = 1;
+  uint32 count = 2;
+}
 message ProposalSample {
   string message_id = 1;
   string subject = 2;
@@ -72,6 +96,11 @@ message LabelProposal {
   // Name of the training group whose mail it is made of.
   string group = 7;
   int64 created_at = 8;  // Unix seconds
+  string status = 9;     // "pending" | "accepted" | "rejected"
+  // The training scope ("g:<group id>" or "a:<account id>").
+  string scope = 10;
+  // Dominant sender domains, most frequent first.
+  repeated SenderCount senders = 11;
 }
 message ListLabelProposalsResponse { repeated LabelProposal proposals = 1; }
 message AcceptLabelProposalRequest {
@@ -83,6 +112,50 @@ message AcceptLabelProposalRequest {
 }
 message AcceptLabelProposalResponse { uint32 messages = 1; }
 message RejectLabelProposalRequest { string id = 1; }
+message GetLabelProposalRequest {
+  string id = 1;
+  uint32 samples = 2;
+}
+message ProposalMessage {
+  string message_id = 1;
+  string received_at = 2;  // RFC 3339
+  string from = 3;
+  string subject = 4;
+  // First ~200 characters of the plain text; empty until the body is downloaded.
+  string excerpt = 5;
+}
+message LabelProposalDetail {
+  LabelProposal proposal = 1;
+  repeated ProposalMessage messages = 2;
+}
+message RenameLabelProposalRequest {
+  string id = 1;
+  string name = 2;
+}
+message MergeLabelProposalsRequest {
+  repeated string ids = 1;
+  // Empty: named from the merged cluster's keywords.
+  string name = 2;
+}
+message AssignLabelProposalRequest {
+  string id = 1;
+  string label = 2;  // any case
+  bool archive = 3;
+}
+message ListLabelsRequest {
+  optional string account_id = 1;
+}
+message LabelEntry {
+  string name = 1;  // as the group spells it
+  LabelStatus status = 2;
+}
+message LabelScope {
+  string scope = 1;
+  string group = 2;  // empty for an account that learns alone
+  repeated string account_ids = 3;
+  repeated LabelEntry labels = 4;
+}
+message ListLabelsResponse { repeated LabelScope scopes = 1; }
 
 message GetEmbeddingsRequest {}
 message SetEmbeddingsRequest { bool enabled = 1; }

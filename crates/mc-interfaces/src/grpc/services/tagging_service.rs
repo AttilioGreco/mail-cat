@@ -5,11 +5,11 @@ use uuid::Uuid;
 
 use mc_application::CommandBus;
 use mc_application::services::tagging::{
-    DiscoveryPhase, EmbedderState, LabelStatus as AppLabelStatus, TaggingService,
+    DiscoveryPhase, EmbedderState, LabelStatus as AppLabelStatus, ProposalView, TaggingService,
 };
 use mc_domain::{
     AccountId, Confidence, GroupId, LabelMode, LabelSettings, MailboxReadRepository, MessageId,
-    TaggingStore,
+    ProposalStatus, TaggingStore,
 };
 
 use crate::grpc::mappers::application_error_to_status;
@@ -92,6 +92,35 @@ fn status(s: AppLabelStatus) -> pb::LabelStatus {
         threshold: s.settings.threshold,
         positives: s.positives,
         min_positives: LabelSettings::MIN_POSITIVES,
+    }
+}
+
+fn proposal_view(p: ProposalView) -> pb::LabelProposal {
+    pb::LabelProposal {
+        id: p.proposal.id.as_uuid().to_string(),
+        size: p.proposal.size() as u32,
+        inbox: p.proposal.inbox,
+        group: p.group,
+        created_at: p.proposal.created_at.timestamp(),
+        status: p.proposal.status.as_str().into(),
+        scope: p.proposal.scope.key(),
+        senders: p
+            .senders
+            .into_iter()
+            .map(|(domain, count)| pb::SenderCount { domain, count })
+            .collect(),
+        name: p.proposal.name,
+        keywords: p.proposal.keywords,
+        samples: p
+            .proposal
+            .samples
+            .into_iter()
+            .map(|s| pb::ProposalSample {
+                message_id: s.message_id.to_string(),
+                subject: s.subject,
+                from: s.from,
+            })
+            .collect(),
     }
 }
 
@@ -502,35 +531,127 @@ where
 
     async fn list_label_proposals(
         &self,
-        _: Request<pb::ListLabelProposalsRequest>,
+        request: Request<pb::ListLabelProposalsRequest>,
     ) -> Result<Response<pb::ListLabelProposalsResponse>, Status> {
+        let req = request.into_inner();
+        let account = req.account_id.as_deref().map(account).transpose()?;
+        let status = match req.status.as_str() {
+            "" => Some(ProposalStatus::Pending),
+            "all" => None,
+            other => Some(other.parse().map_err(Status::invalid_argument)?),
+        };
         let proposals = self
             .service
-            .proposals()
+            .list_proposals(account, status, req.with_senders)
             .await
             .map_err(application_error_to_status)?
             .into_iter()
-            .map(|p| pb::LabelProposal {
-                id: p.proposal.id.as_uuid().to_string(),
-                size: p.proposal.size() as u32,
-                inbox: p.proposal.inbox,
-                group: p.group,
-                created_at: p.proposal.created_at.timestamp(),
-                name: p.proposal.name,
-                keywords: p.proposal.keywords,
-                samples: p
-                    .proposal
-                    .samples
+            .map(proposal_view)
+            .collect();
+        Ok(Response::new(pb::ListLabelProposalsResponse { proposals }))
+    }
+
+    async fn get_label_proposal(
+        &self,
+        request: Request<pb::GetLabelProposalRequest>,
+    ) -> Result<Response<pb::LabelProposalDetail>, Status> {
+        let req = request.into_inner();
+        let (view, messages) = self
+            .service
+            .proposal_detail(proposal(&req.id)?, req.samples as usize)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(pb::LabelProposalDetail {
+            proposal: Some(proposal_view(view)),
+            messages: messages
+                .into_iter()
+                .map(|m| pb::ProposalMessage {
+                    message_id: m.message_id.to_string(),
+                    received_at: m.received_at.to_rfc3339(),
+                    from: m.from,
+                    subject: m.subject,
+                    excerpt: m.excerpt,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn rename_label_proposal(
+        &self,
+        request: Request<pb::RenameLabelProposalRequest>,
+    ) -> Result<Response<pb::LabelProposal>, Status> {
+        let req = request.into_inner();
+        let renamed = self
+            .service
+            .rename_proposal(proposal(&req.id)?, &req.name)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(proposal_view(renamed)))
+    }
+
+    async fn merge_label_proposals(
+        &self,
+        request: Request<pb::MergeLabelProposalsRequest>,
+    ) -> Result<Response<pb::LabelProposal>, Status> {
+        let req = request.into_inner();
+        let ids = req
+            .ids
+            .iter()
+            .map(|id| proposal(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let name = Some(req.name.as_str()).filter(|n| !n.trim().is_empty());
+        let merged = self
+            .service
+            .merge_proposals(&ids, name)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(proposal_view(merged)))
+    }
+
+    async fn assign_label_proposal(
+        &self,
+        request: Request<pb::AssignLabelProposalRequest>,
+    ) -> Result<Response<pb::AcceptLabelProposalResponse>, Status> {
+        let req = request.into_inner();
+        let messages = self
+            .service
+            .assign_proposal(proposal(&req.id)?, &req.label, req.archive)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(pb::AcceptLabelProposalResponse { messages }))
+    }
+
+    async fn list_labels(
+        &self,
+        request: Request<pb::ListLabelsRequest>,
+    ) -> Result<Response<pb::ListLabelsResponse>, Status> {
+        let account = request
+            .into_inner()
+            .account_id
+            .as_deref()
+            .map(account)
+            .transpose()?;
+        let scopes = self
+            .service
+            .list_labels(account)
+            .await
+            .map_err(application_error_to_status)?
+            .into_iter()
+            .map(|s| pb::LabelScope {
+                scope: s.scope,
+                group: s.group,
+                account_ids: s.accounts.iter().map(ToString::to_string).collect(),
+                labels: s
+                    .labels
                     .into_iter()
-                    .map(|s| pb::ProposalSample {
-                        message_id: s.message_id.to_string(),
-                        subject: s.subject,
-                        from: s.from,
+                    .map(|l| pb::LabelEntry {
+                        name: l.name,
+                        status: Some(status(l.status)),
                     })
                     .collect(),
             })
             .collect();
-        Ok(Response::new(pb::ListLabelProposalsResponse { proposals }))
+        Ok(Response::new(pb::ListLabelsResponse { scopes }))
     }
 
     async fn accept_label_proposal(

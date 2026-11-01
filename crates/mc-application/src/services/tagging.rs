@@ -42,7 +42,9 @@ use crate::bus::{CommandBus, EventSubscriber};
 use crate::commands::Command;
 use crate::error::ApplicationError;
 
-pub use discovery::{DiscoveryPhase, DiscoveryProgress, PendingProposal};
+pub use discovery::{
+    DiscoveryPhase, DiscoveryProgress, LabelEntry, LabelScope, ProposalMessage, ProposalView,
+};
 pub use eval::{EvalRow, LabelEval};
 pub use naming::KeywordNamer;
 use placement::{Placement, display_name};
