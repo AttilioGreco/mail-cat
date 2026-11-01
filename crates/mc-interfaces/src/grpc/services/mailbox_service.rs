@@ -108,10 +108,35 @@ impl<C: CommandBus + 'static, Q: QueryBus + 'static> MailboxService for MailboxS
 
     async fn rename_mailbox(
         &self,
-        _request: Request<RenameMailboxRequest>,
+        request: Request<RenameMailboxRequest>,
     ) -> Result<Response<RenameMailboxResponse>, Status> {
-        // TODO: Implement when RenameMailbox command is added
-        Err(Status::unimplemented("rename_mailbox not yet implemented"))
+        let req = request.into_inner();
+        let mailbox_id = MailboxId::from_uuid(
+            uuid::Uuid::parse_str(&req.mailbox_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?,
+        );
+        let result = self
+            .command_bus
+            .dispatch(Command::RenameMailbox {
+                mailbox_id,
+                new_name: req.new_path,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        let CommandResult::MailboxRenamed { renamed } = result else {
+            return Err(Status::internal("unexpected command result"));
+        };
+        let mailbox = self
+            .query_bus
+            .dispatch(Query::GetMailbox { mailbox_id })
+            .await
+            .map_err(application_error_to_status)?
+            .into_mailbox()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(RenameMailboxResponse {
+            mailbox: mailbox.as_ref().map(domain_mailbox_to_proto),
+            renamed,
+        }))
     }
 
     async fn delete_mailbox(

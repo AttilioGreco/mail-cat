@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use mc_application::CommandBus;
 use mc_application::services::tagging::{
-    AccountCount, ApplyKind, DiscoveryPhase, EmbedderState, LabelHome, LabelPresence,
+    AccountCount, ApplyKind, DiscoveryPhase, EmbedderState, LabelChange, LabelHome, LabelPresence,
     LabelStatus as AppLabelStatus, OpResult, OpStatus, PlanOp, PlanSummary, ProposalMessage,
     ProposalView, TaggingService,
 };
@@ -142,6 +142,39 @@ fn account_count(a: AccountCount) -> pb::AccountCount {
         account_id: a.account.to_string(),
         messages: a.messages,
         archived: a.archived,
+    }
+}
+
+fn label_change(r: LabelChange) -> pb::LabelChangeReport {
+    pb::LabelChangeReport {
+        dry_run: r.dry_run,
+        label: r.label,
+        into: r.into.unwrap_or_default(),
+        merge: r.merge,
+        mail_only: r.mail_only,
+        messages: r.messages,
+        accounts: r
+            .accounts
+            .into_iter()
+            .map(|a| pb::LabelChangeAccount {
+                account_id: a.account.to_string(),
+                kind: a.kind.as_str().into(),
+                messages: a.messages,
+                merges: a.merges,
+                deletes_mailbox: a.deletes_mailbox,
+                rehomed: a.rehomed,
+                mailboxes: a
+                    .mailboxes
+                    .into_iter()
+                    .map(|m| pb::LabelChangeMailbox {
+                        label: m.label,
+                        into: m.into.unwrap_or_default(),
+                        how: m.how.as_str().into(),
+                        messages: m.messages,
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 
@@ -627,6 +660,8 @@ where
                     kind: match a.kind {
                         ApplyKind::Apply => "apply",
                         ApplyKind::Undo => "undo",
+                        ApplyKind::Relabel => "relabel",
+                        ApplyKind::Delete => "delete",
                     }
                     .into(),
                     done: a.done,
@@ -846,6 +881,34 @@ where
             labels_to_delete: report.labels_to_delete,
             status: report.status.as_str().into(),
         }))
+    }
+
+    async fn rename_label(
+        &self,
+        request: Request<pb::RenameLabelRequest>,
+    ) -> Result<Response<pb::LabelChangeReport>, Status> {
+        let req = request.into_inner();
+        let account = req.account_id.as_deref().map(account).transpose()?;
+        let report = self
+            .service
+            .rename_label(&req.from, &req.to, account, req.mail_only, req.dry_run)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(label_change(report)))
+    }
+
+    async fn delete_label(
+        &self,
+        request: Request<pb::DeleteLabelRequest>,
+    ) -> Result<Response<pb::LabelChangeReport>, Status> {
+        let req = request.into_inner();
+        let account = req.account_id.as_deref().map(account).transpose()?;
+        let report = self
+            .service
+            .delete_label(&req.label, account, req.dry_run)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(label_change(report)))
     }
 
     async fn accept_label_proposal(

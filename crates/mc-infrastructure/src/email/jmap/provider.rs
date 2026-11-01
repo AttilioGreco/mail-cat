@@ -526,6 +526,15 @@ impl EmailProvider for JmapEmailProvider {
         self.destroy_mailbox(mailbox_id(mailbox)).await
     }
 
+    async fn rename_mailbox(
+        &self,
+        mailbox: &MailboxPath,
+        new_name: &str,
+    ) -> Result<MailboxPath, DomainError> {
+        self.move_mailbox(mailbox_id(mailbox), new_name).await?;
+        Ok(mailbox.clone())
+    }
+
     async fn delete_messages(
         &self,
         mailbox: &MailboxPath,

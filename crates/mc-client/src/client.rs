@@ -268,6 +268,19 @@ impl MailCatClient {
         Ok(resp.moved)
     }
 
+    /// Rename a user mailbox on the server to the label path `new_name`.
+    /// Returns how many mailboxes changed (its children follow).
+    pub async fn rename_mailbox(&self, mailbox_id: &str, new_name: &str) -> Result<u32> {
+        let resp = MailboxServiceClient::new(self.channel.clone())
+            .rename_mailbox(pb::RenameMailboxRequest {
+                mailbox_id: mailbox_id.to_owned(),
+                new_path: new_name.to_owned(),
+            })
+            .await?
+            .into_inner();
+        Ok(resp.renamed)
+    }
+
     // ── Messages ──────────────────────────────────────────────────────────────
 
     pub async fn list_messages(

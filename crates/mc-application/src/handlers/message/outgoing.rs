@@ -5,7 +5,12 @@ use super::*;
 impl<
     ES: EventStore + 'static,
     PR: ProviderRegistry + 'static,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    MR: MessageReadRepository
+        + ReadModelProjector
+        + MailboxReadRepository
+        + MessageBodyStore
+        + PendingRenameStore
+        + 'static,
     B: EventPublisher + 'static,
 > MessageCommandHandler<ES, PR, MR, B>
 {

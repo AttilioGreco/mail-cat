@@ -136,6 +136,14 @@ impl EmailProvider for AnyProvider {
         delegate!(self, p => p.delete_mailbox(mailbox).await)
     }
 
+    async fn rename_mailbox(
+        &self,
+        mailbox: &MailboxPath,
+        new_name: &str,
+    ) -> Result<MailboxPath, DomainError> {
+        delegate!(self, p => p.rename_mailbox(mailbox, new_name).await)
+    }
+
     fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
         delegate!(self, p => p.backed_by(mailbox))
     }

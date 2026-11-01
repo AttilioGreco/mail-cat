@@ -238,6 +238,14 @@ impl EmailProvider for ImapEmailProvider {
         self.remove_mailbox(mailbox).await
     }
 
+    async fn rename_mailbox(
+        &self,
+        mailbox: &MailboxPath,
+        new_name: &str,
+    ) -> Result<MailboxPath, DomainError> {
+        self.rename(mailbox, new_name).await
+    }
+
     fn backed_by(&self, mailbox: &MailboxPath) -> Option<MailboxPath> {
         self.layout()?.backed_by(mailbox)
     }
@@ -497,6 +505,7 @@ mod commands;
 mod fetch;
 mod gmail;
 mod mailbox;
+mod rename;
 mod session;
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ use mc_domain::DomainError;
 use rusqlite::{Connection, OpenFlags};
 
 pub mod event_store;
+mod pending_rename;
 mod projector;
 mod purge;
 pub mod repository;
@@ -257,6 +258,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE tag_proposals ADD COLUMN created TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE tag_auto ADD COLUMN proposal_id BLOB;
     CREATE INDEX tag_auto_proposal ON tag_auto(proposal_id) WHERE proposal_id IS NOT NULL;",
+    // 12: mailbox renames sent to the server before the local record follows;
+    // sync settles what a crash left. Not event-sourced: it is how the
+    // events get written, and holds nothing once they are.
+    "CREATE TABLE pending_renames (
+        mailbox_id  BLOB PRIMARY KEY,
+        account_id  BLOB NOT NULL,
+        old_display TEXT NOT NULL,
+        new_display TEXT NOT NULL
+    );
+    CREATE INDEX pending_renames_account ON pending_renames(account_id);",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

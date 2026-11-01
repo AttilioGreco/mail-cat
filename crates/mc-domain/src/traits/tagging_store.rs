@@ -29,6 +29,8 @@ pub trait TaggingStore: Send + Sync {
         account: AccountId,
         group: Option<GroupId>,
     ) -> Result<(), DomainError>;
+    /// The account labels with keywords (it has folders), not with mailboxes.
+    async fn labels_with_keywords(&self, account: AccountId) -> Result<bool, DomainError>;
     async fn scope_of(&self, account: AccountId) -> Result<Scope, DomainError>;
     async fn scope_accounts(&self, scope: Scope) -> Result<Vec<AccountId>, DomainError>;
     /// Every scope that has at least one account, for startup training.
@@ -53,6 +55,15 @@ pub trait TaggingStore: Send + Sync {
     ) -> Result<LabelExamples, DomainError>;
     /// Positive examples per label of the scope.
     async fn positives(&self, scope: Scope) -> Result<Vec<(String, u32)>, DomainError>;
+    /// A label of the scope was renamed to `into`, or deleted (`None`): its
+    /// settings follow (`into`'s own win), its counts are dropped (they are
+    /// taught again from the mail), and the rejections that name it follow.
+    async fn move_label_rows(
+        &self,
+        scope: Scope,
+        label: &str,
+        into: Option<&str>,
+    ) -> Result<(), DomainError>;
     /// Forget the scope's counts and examples (not its settings).
     async fn reset(&self, scope: Scope) -> Result<(), DomainError>;
     /// Whether the scope was trained from existing labels yet.

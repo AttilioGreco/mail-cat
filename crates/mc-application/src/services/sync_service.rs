@@ -22,12 +22,14 @@ use tokio::sync::{Notify, broadcast};
 use mc_domain::{
     AccountId, AggregateType, BodyBackfillQueue, DomainError, DomainEvent, EmailProvider,
     EventStore, Mailbox, MailboxId, MailboxPath, MailboxReadRepository, MessageBodyStore,
-    MessageReadRepository, ProviderRegistry, ReadModelProjector, SyncCursorStore,
+    MessageReadRepository, PendingRenameStore, ProviderRegistry, ReadModelProjector,
+    SyncCursorStore,
 };
 use tracing::{error, info, instrument, warn};
 
 use crate::bus::EventPublisher;
 use crate::error::ApplicationError;
+use crate::services::account_locks::AccountLocks;
 use crate::services::sync_trigger::SyncTrigger;
 
 /// Everything sync needs from the read side and storage; implemented by the
@@ -39,6 +41,7 @@ pub trait SyncStore:
     + SyncCursorStore
     + BodyBackfillQueue
     + MessageBodyStore
+    + PendingRenameStore
 {
 }
 
@@ -49,6 +52,7 @@ impl<T> SyncStore for T where
         + SyncCursorStore
         + BodyBackfillQueue
         + MessageBodyStore
+        + PendingRenameStore
 {
 }
 
@@ -132,8 +136,9 @@ pub struct SyncService<PR: ProviderRegistry, ES: EventStore, P: SyncStore> {
     progress_tx: broadcast::Sender<SyncProgressEvent>,
     /// Last published (phase, percent, message) per account — the debounce gate.
     last_progress: Mutex<HashMap<AccountId, ProgressKey>>,
-    /// One sync at a time per account (see [`Self::exclusive`]).
-    account_locks: Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>,
+    /// One sync at a time per account (see [`Self::exclusive`]); shared with
+    /// whatever else must not run beside one, a mailbox rename.
+    account_locks: Arc<AccountLocks>,
     /// Wakes an idle backfill worker when new messages (pending bodies) land.
     /// `notify_one` stores a permit, so a wakeup between the worker's
     /// empty-queue check and its wait is not lost.
@@ -208,7 +213,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
             // intermediate percentage costs nothing since the next one supersedes it.
             progress_tx: broadcast::channel(64).0,
             last_progress: Mutex::new(HashMap::new()),
-            account_locks: Mutex::new(HashMap::new()),
+            account_locks: Arc::default(),
             backfill_wake: Notify::new(),
             subscription_jobs,
             subscription_jobs_rx: Mutex::new(Some(jobs_rx)),
@@ -219,19 +224,19 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
     /// full `start_sync` running side by side would ingest the same envelopes
     /// twice and race each other's cursors.
     pub async fn exclusive(&self, account_id: &AccountId) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = Arc::clone(
-            self.account_locks
-                .lock()
-                .unwrap()
-                .entry(*account_id)
-                .or_default(),
-        );
-        lock.lock_owned().await
+        self.account_locks.lock(account_id).await
+    }
+
+    /// Use `locks` as the per-account sync slots.
+    #[must_use]
+    pub fn with_account_locks(mut self, locks: Arc<AccountLocks>) -> Self {
+        self.account_locks = locks;
+        self
     }
 
     /// Drops the per-account bookkeeping of a removed account.
     pub fn forget(&self, account_id: &AccountId) {
-        self.account_locks.lock().unwrap().remove(account_id);
+        self.account_locks.forget(account_id);
         self.last_progress
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -331,6 +336,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
 
         // Resolve the provider for this account
         let provider = self.provider_registry.get_provider(account_id)?;
+        self.settle_renames(&provider, account_id).await?;
 
         let mut progress = vec![];
         let mut mailboxes_synced = 0u32;
@@ -565,6 +571,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
     ) -> Result<u32, ApplicationError> {
         let _exclusive = self.exclusive(account_id).await;
         let provider = self.provider_registry.get_provider(account_id)?;
+        self.settle_renames(&provider, account_id).await?;
         let backing = provider.backed_by(mailbox_path);
         let mailbox_path = backing.as_ref().unwrap_or(mailbox_path);
 

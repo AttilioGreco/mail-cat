@@ -229,5 +229,6 @@ mod cursor;
 mod lifecycle;
 mod pending;
 mod reconcile;
+mod renames;
 mod subscription;
 mod views;

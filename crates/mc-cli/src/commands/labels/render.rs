@@ -2,7 +2,7 @@
 //! Field names are those of the JSON.
 
 use mc_client::{
-    AccountCount, BackgroundStats, LabelDetail, LabelProposal, LabelScope, PlanReport,
+    AccountCount, BackgroundStats, LabelChange, LabelDetail, LabelProposal, LabelScope, PlanReport,
     ProposalDetail, ProposalMessage, UndoReport,
 };
 
@@ -212,6 +212,63 @@ pub fn undo(r: &UndoReport) -> Toon {
         .field("status", s(&r.status))
         .list("labelsToDelete", &r.labels_to_delete);
     counts(&mut t, &r.accounts);
+    t
+}
+
+pub fn label_change(c: &LabelChange) -> Toon {
+    let mut t = Toon::default();
+    t.field("dryRun", n(c.dry_run))
+        .field("label", s(&c.label))
+        .field("into", s(c.into.as_deref().unwrap_or_default()))
+        .field("merge", n(c.merge))
+        .field("mailOnly", n(c.mail_only))
+        .field("messages", n(c.messages));
+    let rows: Vec<_> = c
+        .accounts
+        .iter()
+        .map(|a| {
+            vec![
+                s(&a.account_id),
+                s(&a.kind),
+                n(a.messages),
+                n(a.merges),
+                n(a.deletes_mailbox),
+                n(a.rehomed),
+            ]
+        })
+        .collect();
+    t.table(
+        "accounts",
+        &[
+            "accountId",
+            "kind",
+            "messages",
+            "merges",
+            "deletesMailbox",
+            "rehomed",
+        ],
+        &rows,
+    );
+    let steps: Vec<_> = c
+        .accounts
+        .iter()
+        .flat_map(|a| {
+            a.mailboxes.iter().map(|m| {
+                vec![
+                    s(&a.account_id),
+                    s(&m.label),
+                    s(m.into.as_deref().unwrap_or_default()),
+                    s(&m.how),
+                    n(m.messages),
+                ]
+            })
+        })
+        .collect();
+    t.table(
+        "mailboxes",
+        &["accountId", "label", "into", "how", "messages"],
+        &steps,
+    );
     t
 }
 

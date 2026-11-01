@@ -51,7 +51,8 @@ pub use traits::repository::{
     AccountReadRepository, AccountSummary, AccountSyncStats, AccountWriteRepository, BackfillEntry,
     BodyBackfillQueue, ContactReadRepository, ContactSummary, ContactWriteRepository,
     ConversationReadRepository, ConversationSummary, MailboxReadRepository, MessageBodyStore,
-    MessageReadRepository, MessageSummary, ProjectionCheckpoint, SyncCursorStore,
+    MessageReadRepository, MessageSummary, PendingRename, PendingRenameStore, ProjectionCheckpoint,
+    SyncCursorStore,
 };
 pub use traits::search_index::{
     IndexHit, IndexResults, SearchHit, SearchIndex, SearchResults, SuggestScope, Suggestion,

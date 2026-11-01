@@ -230,6 +230,29 @@ pub trait SyncCursorStore: Send + Sync {
     ) -> Result<(), DomainError>;
 }
 
+/// A mailbox rename sent, or about to be sent, to the server whose local
+/// record is not yet written. Display paths, as the server lists them, are
+/// what tells afterwards whether it went through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRename {
+    pub mailbox_id: MailboxId,
+    pub account_id: AccountId,
+    pub old_display: String,
+    pub new_display: String,
+}
+
+/// Renames the server may have made without the local store following (a
+/// crash, a failed listing); sync settles them before it looks at mailboxes.
+#[async_trait]
+pub trait PendingRenameStore: Send + Sync {
+    async fn put_pending_rename(&self, rename: &PendingRename) -> Result<(), DomainError>;
+    async fn pending_renames(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Vec<PendingRename>, DomainError>;
+    async fn clear_pending_rename(&self, mailbox_id: &MailboxId) -> Result<(), DomainError>;
+}
+
 /// A message whose body still needs downloading, drained by the background
 /// backfill worker, with the membership to fetch it through.
 #[derive(Debug, Clone)]

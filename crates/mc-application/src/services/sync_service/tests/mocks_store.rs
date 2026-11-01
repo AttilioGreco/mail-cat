@@ -94,6 +94,7 @@ pub(super) struct MockProjector {
     /// Message-IDs of `stored` rows; a row without one matches any lookup.
     pub(super) rfc_ids: Mutex<HashMap<MessageId, String>>,
     pub(super) keys: Mutex<HashMap<mc_domain::MessageKey, MessageId>>,
+    pub(super) renames: Mutex<Vec<mc_domain::PendingRename>>,
 }
 
 impl MockProjector {
@@ -106,6 +107,7 @@ impl MockProjector {
             stored: Mutex::new(vec![]),
             rfc_ids: Mutex::new(HashMap::new()),
             keys: Mutex::new(HashMap::new()),
+            renames: Mutex::new(vec![]),
         }
     }
 
@@ -546,5 +548,38 @@ pub(super) struct RecordingPublisher(pub(super) Mutex<Vec<DomainEvent>>);
 impl EventPublisher for RecordingPublisher {
     fn publish(&self, envelope: EventEnvelope) {
         self.0.lock().unwrap().push(envelope.payload);
+    }
+}
+
+#[async_trait]
+impl mc_domain::PendingRenameStore for MockProjector {
+    async fn put_pending_rename(
+        &self,
+        rename: &mc_domain::PendingRename,
+    ) -> Result<(), DomainError> {
+        self.renames.lock().unwrap().push(rename.clone());
+        Ok(())
+    }
+
+    async fn pending_renames(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Vec<mc_domain::PendingRename>, DomainError> {
+        Ok(self
+            .renames
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.account_id == *account_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn clear_pending_rename(&self, mailbox_id: &MailboxId) -> Result<(), DomainError> {
+        self.renames
+            .lock()
+            .unwrap()
+            .retain(|r| r.mailbox_id != *mailbox_id);
+        Ok(())
     }
 }

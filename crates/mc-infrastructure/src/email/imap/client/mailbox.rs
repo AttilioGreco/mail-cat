@@ -374,10 +374,12 @@ where
 /// CREATE and SUBSCRIBE each level of `name`: `A/B/C` makes `A`, `A/B` and
 /// `A/B/C`, as a server may not make the parents itself (Gmail shows a label
 /// under a parent only when it exists). A level that exists already is the
-/// one wanted: a sync or another client got there first.
+/// one wanted: a sync or another client got there first. `name` is written
+/// with `/`; the server's levels are joined by `delimiter`.
 pub(super) async fn create_on<T>(
     session: &mut async_imap::Session<T>,
     name: &str,
+    delimiter: char,
 ) -> Result<(), DomainError>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
@@ -385,7 +387,7 @@ where
     let mut level = String::new();
     for segment in name.split('/') {
         if !level.is_empty() {
-            level.push('/');
+            level.push(delimiter);
         }
         level.push_str(segment);
         match exchange(COMMAND_TIMEOUT, "CREATE", session.create(&level)).await {
@@ -451,7 +453,7 @@ impl ImapEmailProvider {
     /// server lists it.
     pub(super) async fn create_mailbox(&self, name: &str) -> Result<Mailbox, DomainError> {
         let mut session = self.session().await?;
-        create_on(&mut session, name).await?;
+        create_on(&mut session, name, '/').await?;
         self.release(session);
         let wanted = name.to_lowercase();
         self.list_all_mailboxes()

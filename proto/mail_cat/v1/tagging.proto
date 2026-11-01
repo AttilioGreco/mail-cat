@@ -73,6 +73,12 @@ service TaggingService {
   // Takes an accepted proposal's label off the mail it was put on, in the
   // background (progress in GetBackgroundStats), unless dry_run.
   rpc UndoLabelProposal(UndoLabelProposalRequest) returns (UndoLabelProposalResponse);
+  // Renames an existing label on every account of its group, or merges it
+  // into another that exists, in the background unless dry_run.
+  rpc RenameLabel(RenameLabelRequest) returns (LabelChangeReport);
+  // Takes an existing label off all its mail and deletes it on every account
+  // of its group (the mail stays), in the background unless dry_run.
+  rpc DeleteLabel(DeleteLabelRequest) returns (LabelChangeReport);
 }
 
 // account_id unset: every training group.
@@ -267,6 +273,54 @@ message UndoLabelProposalResponse {
   repeated AccountCount accounts = 4;
   repeated string labels_to_delete = 5;
   string status = 6;  // what the proposal becomes
+}
+
+message RenameLabelRequest {
+  string from = 1;
+  // A label path ("Dev/GitHub"). One that exists makes this a merge.
+  string to = 2;
+  // Selects the training group; needed when several have the label.
+  optional string account_id = 3;
+  bool dry_run = 4;
+  // Move only the mail of `from` itself into `to`; `from` and its children
+  // stay (`from` goes once empty and childless). `to` may be inside `from`.
+  bool mail_only = 5;
+}
+message DeleteLabelRequest {
+  string label = 1;
+  optional string account_id = 2;
+  bool dry_run = 3;
+}
+message LabelChangeAccount {
+  string account_id = 1;
+  // "mailbox", "folder" or "keyword".
+  string kind = 2;
+  uint32 messages = 3;
+  // Rename: some mailbox joins a label the account has already.
+  bool merges = 4;
+  bool deletes_mailbox = 5;
+  // Delete: messages in no other mailbox, filed in the Archive (else Inbox).
+  uint32 rehomed = 6;
+  // Every mailbox of the label's tree this account changes, parents first.
+  repeated LabelChangeMailbox mailboxes = 7;
+}
+message LabelChangeMailbox {
+  string label = 1;
+  // Empty when deleting.
+  string into = 2;
+  // "rename", "merge", "create+move" or "delete".
+  string how = 3;
+  uint32 messages = 4;
+}
+message LabelChangeReport {
+  bool dry_run = 1;
+  string label = 2;
+  // Empty when deleting.
+  string into = 3;
+  bool merge = 4;
+  uint32 messages = 5;
+  repeated LabelChangeAccount accounts = 6;
+  bool mail_only = 7;
 }
 
 message GetEmbeddingsRequest {}

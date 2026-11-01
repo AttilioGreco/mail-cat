@@ -155,6 +155,10 @@ pub(super) struct MockEmailProvider {
     pub(super) refuse: RwLock<bool>,
     /// Paths `delete_mailbox` was asked to delete.
     pub(super) deleted_mailboxes: RwLock<Vec<MailboxPath>>,
+    /// `(path, new name)` of each `rename_mailbox` call.
+    pub(super) renamed_mailboxes: RwLock<Vec<(MailboxPath, String)>>,
+    /// What `list_mailboxes` answers.
+    pub(super) listed: RwLock<Vec<Mailbox>>,
     /// `move_messages` moves, then times out before the server's answer.
     pub(super) time_out: RwLock<bool>,
     /// Makes `move_messages` fail once this many messages moved.
@@ -184,7 +188,7 @@ pub(super) type Relabel = (Vec<RemoteId>, Vec<MailboxPath>, Vec<MailboxPath>);
 #[async_trait]
 impl EmailProvider for MockEmailProvider {
     async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, DomainError> {
-        Ok(vec![])
+        Ok(self.listed.read().unwrap().clone())
     }
     async fn mailbox_changes(
         &self,
@@ -301,6 +305,17 @@ impl EmailProvider for MockEmailProvider {
             .push(mailbox.clone());
         Ok(())
     }
+    async fn rename_mailbox(
+        &self,
+        mailbox: &MailboxPath,
+        new_name: &str,
+    ) -> Result<MailboxPath, DomainError> {
+        self.renamed_mailboxes
+            .write()
+            .unwrap()
+            .push((mailbox.clone(), new_name.to_owned()));
+        MailboxPath::parse(new_name, '/')
+    }
     async fn send_message(
         &self,
         message: &OutgoingMessage,
@@ -393,6 +408,8 @@ pub(super) struct MockMessageReadRepo {
     /// What `list_messages` lists, whatever the mailbox; a message leaves it
     /// when a projected event moves or deletes it.
     pub(super) listing: std::sync::Mutex<Vec<mc_domain::MessageSummary>>,
+    /// Renames recorded before the server was asked, until cleared.
+    pub(super) renames: std::sync::Mutex<Vec<mc_domain::PendingRename>>,
 }
 
 impl MockMessageReadRepo {
@@ -578,5 +595,38 @@ impl MockEventBus {
 impl EventPublisher for MockEventBus {
     fn publish(&self, envelope: EventEnvelope) {
         self.published.write().unwrap().push(envelope);
+    }
+}
+
+#[async_trait]
+impl mc_domain::PendingRenameStore for MockMessageReadRepo {
+    async fn put_pending_rename(
+        &self,
+        rename: &mc_domain::PendingRename,
+    ) -> Result<(), DomainError> {
+        self.renames.lock().unwrap().push(rename.clone());
+        Ok(())
+    }
+
+    async fn pending_renames(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Vec<mc_domain::PendingRename>, DomainError> {
+        Ok(self
+            .renames
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.account_id == *account_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn clear_pending_rename(&self, mailbox_id: &MailboxId) -> Result<(), DomainError> {
+        self.renames
+            .lock()
+            .unwrap()
+            .retain(|r| r.mailbox_id != *mailbox_id);
+        Ok(())
     }
 }

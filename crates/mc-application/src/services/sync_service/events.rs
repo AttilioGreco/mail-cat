@@ -1,13 +1,16 @@
 //! Writing sync's results: events appended to the log and projected, and the
 //! transient server-reported state that is projected only.
 
+use std::sync::Arc;
+
 use mc_domain::{
-    AggregateType, Attachment, DomainError, DomainEvent, EventEnvelope, EventStore, Mailbox,
-    Message, MessageId, ProviderRegistry,
+    AccountId, AggregateType, Attachment, DomainError, DomainEvent, EventEnvelope, EventStore,
+    Mailbox, Message, MessageId, ProviderRegistry,
 };
 
 use super::{SyncService, SyncStore};
 use crate::error::ApplicationError;
+use crate::services::mailbox_rename;
 
 /// Maps a storage failure to a sync error saying which step failed.
 pub(super) fn sync_failed(step: &'static str) -> impl FnOnce(DomainError) -> ApplicationError {
@@ -37,6 +40,30 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
         self.append_at(&aggregate_id, AggregateType::Message, seq, event)
             .await?;
         Ok(true)
+    }
+
+    /// Write down the mailbox renames a crash or a failed listing left the
+    /// server ahead of us on, before anything matches mailboxes by path: a
+    /// renamed one would be found as new, and the old one left as a ghost.
+    pub(super) async fn settle_renames(
+        &self,
+        provider: &Arc<PR::Provider>,
+        account_id: &AccountId,
+    ) -> Result<(), ApplicationError> {
+        let settled = mailbox_rename::settle(&*self.projector, &**provider, account_id)
+            .await
+            .map_err(|e| ApplicationError::SyncFailed(format!("pending renames: {e}")))?;
+        for (pending, events) in settled {
+            for (id, event) in events {
+                self.append_and_project(&id.to_string(), AggregateType::Mailbox, event)
+                    .await?;
+            }
+            self.projector
+                .clear_pending_rename(&pending)
+                .await
+                .map_err(sync_failed("clear_pending_rename"))?;
+        }
+        Ok(())
     }
 
     /// Body first, then the event: if the append fails, the backfill queue (drained

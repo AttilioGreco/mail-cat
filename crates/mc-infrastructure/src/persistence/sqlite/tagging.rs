@@ -203,6 +203,20 @@ impl TaggingStore for SqliteTaggingStore {
             .await
     }
 
+    async fn labels_with_keywords(&self, account: AccountId) -> Result<bool, DomainError> {
+        self.db
+            .read(move |conn| {
+                query_one(
+                    conn,
+                    "SELECT mailbox_model = '\"Folders\"' FROM accounts WHERE id = ?1",
+                    [account.as_uuid()],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map(Option::unwrap_or_default)
+            })
+            .await
+    }
+
     async fn scope_accounts(&self, scope: Scope) -> Result<Vec<AccountId>, DomainError> {
         match scope {
             Scope::Alone(account) => Ok(vec![account]),
@@ -451,6 +465,45 @@ impl TaggingStore for SqliteTaggingStore {
                     [key],
                     |r| Ok((r.get(0)?, r.get::<_, f64>(1)?.round() as u32)),
                 )
+            })
+            .await
+    }
+
+    async fn move_label_rows(
+        &self,
+        scope: Scope,
+        label: &str,
+        into: Option<&str>,
+    ) -> Result<(), DomainError> {
+        let (key, label, into) = (scope.key(), label.to_owned(), into.map(str::to_owned));
+        self.db
+            .write(move |conn| {
+                let tx = conn.transaction().map_err(repo_err)?;
+                if let Some(into) = &into {
+                    exec(
+                        &tx,
+                        "INSERT OR IGNORE INTO tag_settings (scope, label, mode, threshold) \
+                         SELECT scope, ?3, mode, threshold FROM tag_settings \
+                         WHERE scope = ?1 AND label = ?2",
+                        params![key, label, into],
+                    )?;
+                }
+                for table in ["tag_settings", "tag_labels", "tag_label_tokens"] {
+                    exec(
+                        &tx,
+                        &format!("DELETE FROM {table} WHERE scope = ?1 AND label = ?2"),
+                        params![key, label],
+                    )?;
+                }
+                exec(
+                    &tx,
+                    "UPDATE tag_examples SET negatives = (SELECT COALESCE(json_group_array(v), '[]') \
+                         FROM (SELECT DISTINCT CASE WHEN value = ?2 THEN ?3 ELSE value END AS v \
+                               FROM json_each(negatives) WHERE ?3 IS NOT NULL OR value <> ?2 ORDER BY v)) \
+                     WHERE scope = ?1 AND EXISTS (SELECT 1 FROM json_each(negatives) WHERE value = ?2)",
+                    params![key, label, into],
+                )?;
+                tx.commit().map_err(repo_err)
             })
             .await
     }

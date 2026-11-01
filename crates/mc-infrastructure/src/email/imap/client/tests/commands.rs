@@ -427,7 +427,7 @@ async fn creating_a_path_creates_and_subscribes_every_level() {
     use super::super::mailbox::create_on;
     let (mut session, commands) = scripted(server_reply).await;
 
-    create_on(&mut session, "Shopping/Ebay").await.unwrap();
+    create_on(&mut session, "Shopping/Ebay", '/').await.unwrap();
 
     assert_eq!(
         uid_commands(&commands),
@@ -452,7 +452,7 @@ async fn a_level_that_exists_already_is_not_an_error() {
     })
     .await;
 
-    create_on(&mut session, "Shopping/Ebay").await.unwrap();
+    create_on(&mut session, "Shopping/Ebay", '/').await.unwrap();
 
     assert_eq!(
         uid_commands(&commands).len(),
@@ -466,5 +466,102 @@ async fn a_refused_creation_is_an_error() {
     use super::super::mailbox::create_on;
     let (mut session, _) = scripted(|_| "$T NO [CANNOT] not now\r\n").await;
 
-    assert!(create_on(&mut session, "Work").await.is_err());
+    assert!(create_on(&mut session, "Work", '/').await.is_err());
+}
+
+/// A rename on a server that answers LSUB with `subscribed` and refuses the
+/// commands starting with `refuse`.
+async fn renamed(
+    from: &str,
+    to: &str,
+    subscribed: &'static str,
+    refuse: &'static str,
+) -> (
+    Result<mc_domain::MailboxPath, mc_domain::DomainError>,
+    Vec<String>,
+) {
+    use super::super::rename::rename_on;
+    let (mut session, commands) = serving(move |command| {
+        if command.starts_with("LSUB") {
+            format!("{subscribed}$T OK Done\r\n")
+        } else if command.starts_with(refuse) {
+            "$T NO [CANNOT] not now\r\n".to_owned()
+        } else {
+            "$T OK Done\r\n".to_owned()
+        }
+    })
+    .await;
+    let from = mc_domain::MailboxPath::new(vec![from.to_owned()], '/').unwrap();
+    let result = rename_on(&mut session, &from, to).await;
+    (result, uid_commands(&commands))
+}
+
+#[tokio::test]
+async fn a_rename_moves_the_subscription_to_the_new_name() {
+    let (result, commands) = renamed("Old", "New", "* LSUB () \"/\" \"Old\"\r\n", "NOTHING").await;
+
+    result.unwrap();
+    assert_eq!(
+        commands,
+        [
+            "LSUB \"\" \"*\"",
+            "RENAME \"Old\" \"New\"",
+            "SUBSCRIBE \"New\"",
+            "UNSUBSCRIBE \"Old\""
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_old_subscription_stays_when_the_new_one_cannot_be_made() {
+    let (result, commands) =
+        renamed("Old", "New", "* LSUB () \"/\" \"Old\"\r\n", "SUBSCRIBE").await;
+
+    result.unwrap();
+    assert!(!commands.iter().any(|c| c.starts_with("UNSUBSCRIBE")));
+}
+
+#[tokio::test]
+async fn a_case_only_rename_never_unsubscribes_the_name_it_keeps() {
+    let (result, commands) =
+        renamed("Work", "work", "* LSUB () \"/\" \"Work\"\r\n", "NOTHING").await;
+
+    result.unwrap();
+    assert!(commands[1].starts_with("RENAME \"Work\" \"mc-rename-"));
+    assert!(commands.last().unwrap() == "SUBSCRIBE \"work\"");
+    assert!(!commands.iter().any(|c| c.starts_with("UNSUBSCRIBE")));
+}
+
+#[tokio::test]
+async fn a_server_without_lsub_answers_still_gets_the_new_name_subscribed() {
+    let (result, commands) = renamed("Old", "New", "", "NOTHING").await;
+
+    result.unwrap();
+    assert_eq!(commands.last().unwrap(), "SUBSCRIBE \"New\"");
+    assert!(!commands.iter().any(|c| c.starts_with("UNSUBSCRIBE")));
+}
+
+#[tokio::test]
+async fn a_failed_case_only_rename_that_cannot_restore_names_the_leftover() {
+    // Both the second step and the way back are refused: only the first
+    // RENAME goes through.
+    let renames = std::sync::atomic::AtomicUsize::new(0);
+    let (mut session, _) = serving(move |command| {
+        let refused = command.starts_with("RENAME")
+            && renames.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0;
+        if refused {
+            "$T NO [CANNOT] no\r\n"
+        } else {
+            "$T OK Done\r\n"
+        }
+        .to_owned()
+    })
+    .await;
+    let from = mc_domain::MailboxPath::new(vec!["Work".to_owned()], '/').unwrap();
+
+    let err = super::super::rename::rename_on(&mut session, &from, "work")
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("mc-rename-"), "got {err}");
 }

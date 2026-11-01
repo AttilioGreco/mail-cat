@@ -206,6 +206,17 @@ fn the_new_commands_parse() {
     assert!(!parses(&["proposals", "plan"]));
     assert!(parses(&["proposals", "undo", ID, "--yes", "--reject"]));
     assert!(parses(&[
+        "rename",
+        "Github",
+        "Dev/GitHub",
+        "--account",
+        "a",
+        "--yes"
+    ]));
+    assert!(!parses(&["rename", "Github"]));
+    assert!(parses(&["delete", "medium", "--yes"]));
+    assert!(!parses(&["delete"]));
+    assert!(parses(&[
         "show",
         "Shopping/Ebay",
         "--account",

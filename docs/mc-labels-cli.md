@@ -30,6 +30,8 @@ group.
 | `mc labels list [--account A]` | Existing labels with mode, threshold and example count |
 | `mc labels show <label> [--account A] [--samples N]` | One existing label: scope, mode, where each account keeps it, recent mail |
 | `mc labels stats` | Background work, including the labelling jobs (`applying`) |
+| `mc labels rename <from> <to> [--mail-only] [--account A] [--yes]` | Rename a label (and its children) on every account of its group, or merge it into one that exists; `--mail-only` moves just its own mail |
+| `mc labels delete <label> [--account A] [--yes]` | Take a label off all its mail and delete it (an empty container too); the mail stays |
 | `mc labels mode <label> <off\|suggest\|apply\|apply_archive> [--threshold T] [--account A] [--existing] [--yes]` | Set a label's mode |
 
 Notes:
@@ -103,10 +105,18 @@ messages the model learnt the label from; `samples` are the newest of them.
 "existingMail": null | {"toLabel", "toArchive", "sample": [...]}}`.
 
 `labels stats` -> besides the embedding fields, `"applying": [{"label",
-"kind": "apply"|"undo", "done", "total", "archived"}]`: one entry per
+"kind": "apply"|"undo"|"relabel"|"delete", "done", "total", "archived"}]`: one entry per
 labelling job from the moment it is queued (`done` is 0 while it waits; jobs
 run one at a time, a few messages per second). The UI's background card shows
 the same entries.
+
+`labels rename` / `labels delete` -> `{"dryRun", "label", "into", "merge",
+"mailOnly", "messages", "accounts": [{"accountId", "kind", "messages",
+"merges", "deletesMailbox", "rehomed", "mailboxes": [{"label", "into", "how",
+"messages"}]}]}`; `into` is `null` for a delete, `kind` is `mailbox`,
+`folder` or `keyword`, `how` is `rename`, `merge`, `create+move` or `delete`
+and `mailboxes` lists, parents first, every mailbox of the label's tree the
+account changes. See Renaming and deleting labels.
 
 `proposals plan` -> `{"dryRun", "summary", "results"}`, see Plans.
 `proposals undo` -> `{"dryRun", "toUnlabel", "toUnarchive", "accounts":
@@ -135,8 +145,8 @@ Available for `labels proposals` (table `proposals`), `proposals show` (header
 fields, `keywords[N]`, `senders[N]` and a `samples[N]{messageId,receivedAt,from,
 subject,excerpt}` table), `labels list` (table `labels`, one row per label with
 its scope), `labels show` (header, `accounts[N]` and `samples[N]`), `labels
-stats` (fields plus `retrains` and `applying` tables) and the `plan` / `undo`
-summaries.
+stats` (fields plus `retrains` and `applying` tables), the `plan` / `undo`
+summaries and `rename` / `delete` (header fields plus `accounts` and `mailboxes` tables).
 
 ## Hierarchy
 
@@ -229,6 +239,77 @@ undone. Undoing runs in the background, throttled like accepting, and shows in
 `mc labels stats` as an `undo` job; the proposal changes status when it is
 done, and if it stops halfway it stays `accepted` and the command can be run
 again.
+
+## Renaming and deleting labels
+
+`labels rename <from> <to>` and `labels delete <label>` change a label that
+already exists, on every account of one training group (`--account` picks the
+group, and is needed only when several groups have the label). Nothing is
+done without `--yes`: the dry run prints, per account, every mailbox of the
+label's tree that changes, how (`rename`, `merge`, `create+move`, `delete`) and
+how many messages it holds. With `--yes` the work is queued like an
+acceptance: throttled, one job at a time, listed in `mc labels stats` as a
+`relabel` or `delete` job, and refused while either label is being applied or
+undone. If it stops halfway, run it again: the steps can be repeated.
+
+`rename` moves the whole tree, level by level, on each account:
+
+- `to` (or `to/c` for a child `from/c`) does not exist there and nothing is
+  below it: the mailbox is **renamed on the server** with `RENAME` (IMAP, Gmail
+  included) or `Mailbox/set` (JMAP), missing parent levels of `to` are made,
+  and its children follow. No message is touched, the mailbox keeps its id, and
+  the next sync finds it under its new name. A change of case alone
+  (`Dev/news` to `Dev/News`) is a rename too: classifier keys do not change,
+  only the spelling is updated.
+- `to` exists: a **merge**. The mail of `from` gets `to` and loses `from`
+  (other labels and the Inbox are kept), then each child `from/c` goes to
+  `to/c` by the same rule, and `from` is deleted once it is empty and
+  childless. If only `to`'s children exist, `to` is made first (`create+move`).
+- `--mail-only`: just the mail of `from` itself goes to `to` (made when
+  missing, merged into when it exists); `from` and its children stay, and
+  `from` is deleted only if it ends empty and childless. `to` may be inside
+  `from`: `rename 4sigma "4sigma/Buste paga" --mail-only` files the direct mail
+  of `4sigma` under its child and keeps the other children where they are. On a
+  folders account a folder with children is refused, as moving its mail would
+  delete it.
+
+| Account | Rename | Delete |
+|---|---|---|
+| Gmail (IMAP), JMAP | As above; a merge puts `to` on every message that has `from` and takes `from` off | Takes `from` off, deletes the mailbox. A message in no other mailbox is filed in the Archive (else All Mail, else the Inbox): JMAP refuses mail in no mailbox |
+| Folders, label is a real folder | Renamed; a merge moves the mail into the folder `to` and deletes `from` | Refused: say where the mail goes with `mc mailboxes delete --move-to` |
+| Folders, label is a keyword | Replaces the keyword on each message, for the label and every child | Removes the keyword |
+
+`delete` works on an empty container too (no mail, no tagging data), found by
+its mailbox name. A label with child labels is refused: rename or delete the
+children first, or rename the label to move the tree.
+
+Refused: a system mailbox or Inbox as `from` or `to`, `to` spelled exactly like
+`from`, `to` inside `from` without `--mail-only`, and a label no account of
+the group has. Mail in the Trash, Spam or Drafts is relabelled like the rest
+(it stays where it is, and on delete it just loses the label; only mail in no
+other mailbox is filed in the Archive). If the mailbox still holds mail the
+job could not move off it, it is kept, the error says so and the job is
+finished by running the command again.
+
+`mc mailboxes rename <account> <mailbox> <new name>` is the plain mailbox
+rename (no classifier), with the same server behaviour. Names with non-ASCII
+characters are sent as they are (no modified UTF-7 encoding), like label
+creation.
+
+What the classifier keeps follows, for the label and every label below it
+(`from/x` becomes `to/x`). The settings move to the new key (the settings `to`
+has win in a merge), the rejections that name it follow it, and its counts are
+dropped and learnt again from the mail (deleting a mailbox makes the group
+retrain, keyword changes retrain message by message). A rename that keeps the
+keys (case only) leaves all of this alone. Accepted proposals keep working:
+their records move to the new key and their names to the new spelling, so
+`proposals undo` still takes the label off exactly the mail it put it on. A
+renamed mailbox keeps its id, so the label an acceptance created is still the
+one an undo deletes; after a merge the undo deletes nothing for the merged
+level, since that label was not the acceptance's. Deleting a label turns the
+accepted proposals of that name into `rejected` (the cluster is not proposed
+again) and forgets their records; the examples are withdrawn, not turned into
+negatives.
 
 ## Recommended workflow
 

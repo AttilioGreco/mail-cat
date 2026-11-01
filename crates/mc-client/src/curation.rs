@@ -88,6 +88,80 @@ pub struct UndoReport {
     pub status: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelChangeAccount {
+    pub account_id: String,
+    /// `mailbox`, `folder` or `keyword`.
+    pub kind: String,
+    pub messages: u32,
+    /// Renaming: the account has the new label already.
+    pub merges: bool,
+    pub deletes_mailbox: bool,
+    /// Deleting: messages in no other mailbox, filed in the Archive.
+    pub rehomed: u32,
+    /// Every mailbox of the label's tree the account changes, parents first.
+    pub mailboxes: Vec<LabelChangeMailbox>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelChangeMailbox {
+    pub label: String,
+    /// `None` when deleting.
+    pub into: Option<String>,
+    /// `rename`, `merge`, `create+move` or `delete`.
+    pub how: String,
+    pub messages: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelChange {
+    pub dry_run: bool,
+    pub label: String,
+    /// The new name; `None` when deleting.
+    pub into: Option<String>,
+    pub merge: bool,
+    /// Only the label's own mail moves; it and its children stay.
+    pub mail_only: bool,
+    pub messages: u32,
+    pub accounts: Vec<LabelChangeAccount>,
+}
+
+fn label_change(r: pb::LabelChangeReport) -> LabelChange {
+    LabelChange {
+        dry_run: r.dry_run,
+        label: r.label,
+        into: Some(r.into).filter(|t| !t.is_empty()),
+        merge: r.merge,
+        mail_only: r.mail_only,
+        messages: r.messages,
+        accounts: r
+            .accounts
+            .into_iter()
+            .map(|a| LabelChangeAccount {
+                account_id: a.account_id,
+                kind: a.kind,
+                messages: a.messages,
+                merges: a.merges,
+                deletes_mailbox: a.deletes_mailbox,
+                rehomed: a.rehomed,
+                mailboxes: a
+                    .mailboxes
+                    .into_iter()
+                    .map(|m| LabelChangeMailbox {
+                        label: m.label,
+                        into: Some(m.into).filter(|t| !t.is_empty()),
+                        how: m.how,
+                        messages: m.messages,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 /// `kind`: `mailbox`, `keyword` (no mailbox; its mail carries the keyword)
 /// or `missing`.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -217,6 +291,50 @@ impl MailCatClient {
             labels_to_delete: r.labels_to_delete,
             status: r.status,
         })
+    }
+
+    /// Rename `from` to `to` on every account of its group, or merge it into
+    /// `to` when that exists (in the background unless `dry_run`).
+    pub async fn rename_label(
+        &self,
+        from: &str,
+        to: &str,
+        account_id: Option<&str>,
+        mail_only: bool,
+        dry_run: bool,
+    ) -> Result<LabelChange> {
+        let r = self
+            .tagging()
+            .rename_label(pb::RenameLabelRequest {
+                from: from.into(),
+                to: to.into(),
+                account_id: account_id.map(str::to_owned),
+                dry_run,
+                mail_only,
+            })
+            .await?
+            .into_inner();
+        Ok(label_change(r))
+    }
+
+    /// Take a label off all its mail and delete it on every account of its
+    /// group (in the background unless `dry_run`).
+    pub async fn delete_label(
+        &self,
+        label: &str,
+        account_id: Option<&str>,
+        dry_run: bool,
+    ) -> Result<LabelChange> {
+        let r = self
+            .tagging()
+            .delete_label(pb::DeleteLabelRequest {
+                label: label.into(),
+                account_id: account_id.map(str::to_owned),
+                dry_run,
+            })
+            .await?
+            .into_inner();
+        Ok(label_change(r))
     }
 
     /// An existing label, closely: one entry per training scope that has it.

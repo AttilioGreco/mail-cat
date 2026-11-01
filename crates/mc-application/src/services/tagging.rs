@@ -43,9 +43,9 @@ use crate::commands::Command;
 use crate::error::ApplicationError;
 
 pub use discovery::{
-    AccountCount, DiscoveryPhase, DiscoveryProgress, LabelDetail, LabelEntry, LabelHome,
-    LabelPresence, LabelScope, OpResult, OpStatus, PlanOp, PlanReport, PlanSummary,
-    ProposalMessage, ProposalView, UndoReport,
+    AccountChange, AccountCount, ChangeKind, DiscoveryPhase, DiscoveryProgress, LabelChange,
+    LabelDetail, LabelEntry, LabelHome, LabelPresence, LabelScope, MailboxStep, OpResult, OpStatus,
+    PlanOp, PlanReport, PlanSummary, ProposalMessage, ProposalView, StepKind, UndoReport,
 };
 pub use eval::{EvalRow, LabelEval};
 pub use naming::KeywordNamer;
@@ -300,11 +300,15 @@ where
             DomainEvent::MessageMailboxesChanged { message_id, .. } => (*message_id, false),
             // The labels of a labels account are its Custom mailboxes: a
             // mailbox gaining or losing that type changes what was taught.
-            DomainEvent::MailboxTypeChanged { mailbox_id, .. } => {
+            // A renamed label keeps its mail but its examples still carry the
+            // old key until the scope learns again.
+            // ponytail: one relearn per renamed descendant; coalesce if trees get big.
+            DomainEvent::MailboxTypeChanged { mailbox_id, .. }
+            | DomainEvent::MailboxRenamed { mailbox_id, .. } => {
                 let (this, mailbox_id) = (Arc::clone(self), *mailbox_id);
                 if let Err(e) = niced(async move { this.relearn_mailbox(&mailbox_id).await }).await
                 {
-                    warn!(%mailbox_id, error = %e, "label classifier: retraining after a type change failed");
+                    warn!(%mailbox_id, error = %e, "label classifier: retraining after a mailbox change failed");
                 }
                 return;
             }
@@ -760,7 +764,7 @@ where
             .dispatch(Command::SetMessageFlags {
                 message_id: source.id,
                 flags_to_add: vec![],
-                flags_to_remove: vec![Flag::Custom(placement::keyword_of(label))],
+                flags_to_remove: placement::stored_keywords(source, label),
             })
             .await?;
         if let (Some(inbox), Some(folder)) = (inbox, source.folder) {

@@ -1,5 +1,6 @@
 mod plan;
 mod proposals;
+mod relabel;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -55,6 +56,13 @@ pub enum LabelsCmd {
     /// Set what happens to mail the classifier is sure about. Apply modes
     /// only print what they would do until --yes
     Mode(proposals::ModeArgs),
+    /// Rename an existing label on every account of its group, or move it
+    /// under another path. A label that exists already is merged into. Prints
+    /// what it would do until --yes
+    Rename(relabel::RenameArgs),
+    /// Take a label off all its mail and delete it on every account of its
+    /// group; the mail is kept. Prints what it would do until --yes
+    Delete(relabel::DeleteArgs),
 }
 
 pub async fn run(cmd: LabelsCmd, client: MailCatClient, fmt: Format) -> Result<()> {
@@ -71,6 +79,8 @@ pub async fn run(cmd: LabelsCmd, client: MailCatClient, fmt: Format) -> Result<(
             samples,
         } => proposals::show_label(&label, account.as_deref(), samples, client, fmt).await,
         LabelsCmd::Mode(args) => proposals::mode(args, client, json).await,
+        LabelsCmd::Rename(args) => relabel::rename(args, client, fmt).await,
+        LabelsCmd::Delete(args) => relabel::delete(args, client, fmt).await,
     }
 }
 
@@ -177,10 +187,11 @@ async fn stats(client: MailCatClient, fmt: Format) -> Result<()> {
         println!("Retraining {}: {} / {}", r.scope, r.done, r.total);
     }
     for a in &s.applying {
-        let verb = if a.kind == "undo" {
-            "Undoing"
-        } else {
-            "Applying"
+        let verb = match a.kind.as_str() {
+            "undo" => "Undoing",
+            "relabel" => "Renaming",
+            "delete" => "Deleting",
+            _ => "Applying",
         };
         println!(
             "{verb} {}: {} / {} (archived {})",

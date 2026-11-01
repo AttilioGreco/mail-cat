@@ -51,6 +51,23 @@ pub(super) fn keyword_of(label: &str) -> String {
         .collect()
 }
 
+/// Every spelling the message holds of the label's keyword: keywords are
+/// matched in lowercase, but other clients may have set `Work` for `work`,
+/// and flags compare exactly. The canonical spelling when none is stored.
+pub(super) fn stored_keywords(source: &TagSource, label: &str) -> Vec<Flag> {
+    let mut found: Vec<_> = source
+        .spellings
+        .iter()
+        .filter(|k| k.replace('_', " ").to_ascii_lowercase() == label)
+        .cloned()
+        .map(Flag::Custom)
+        .collect();
+    if found.is_empty() {
+        found.push(Flag::Custom(keyword_of(label)));
+    }
+    found
+}
+
 impl Placement {
     pub fn of(source: &TagSource, group: &GroupMailboxes, label: &str, mode: LabelMode) -> Self {
         let archive = mode == LabelMode::ApplyArchive && source.in_inbox;

@@ -9,7 +9,8 @@ use std::sync::Arc;
 use mc_domain::{
     Account, AccountReadRepository, AccountStatus, AccountWriteRepository, ContactReadRepository,
     ContactWriteRepository, ConversationReadRepository, EventStore, MailboxReadRepository,
-    MessageBodyStore, MessageReadRepository, ProviderRegistry, ReadModelProjector, SearchIndex,
+    MessageBodyStore, MessageReadRepository, PendingRenameStore, ProviderRegistry,
+    ReadModelProjector, SearchIndex,
 };
 use std::collections::HashSet;
 
@@ -32,7 +33,11 @@ where
     CW: ContactWriteRepository + ContactReadRepository,
     ES: EventStore,
     PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
+    MR: MessageReadRepository
+        + ReadModelProjector
+        + MailboxReadRepository
+        + MessageBodyStore
+        + PendingRenameStore,
     B: EventPublisher,
 {
     account_handler: AccountCommandHandler<AW, B>,
@@ -54,6 +59,7 @@ where
         + ReadModelProjector
         + MailboxReadRepository
         + MessageBodyStore
+        + PendingRenameStore
         + 'static,
     B: EventPublisher + 'static,
 {
@@ -93,6 +99,14 @@ where
         self
     }
 
+    /// The per-account locks syncs run under, for commands that must not
+    /// overlap one.
+    #[must_use]
+    pub fn with_sync_locks(mut self, locks: Arc<crate::services::AccountLocks>) -> Self {
+        self.message_handler = self.message_handler.with_sync_locks(locks);
+        self
+    }
+
     /// Full aggregates of the active accounts, in listing order.
     async fn accounts(&self) -> Result<Vec<Account>, ApplicationError> {
         let mut accounts = Vec::new();
@@ -117,6 +131,7 @@ where
         + ReadModelProjector
         + MailboxReadRepository
         + MessageBodyStore
+        + PendingRenameStore
         + 'static,
     B: EventPublisher + 'static,
 {
@@ -192,6 +207,14 @@ where
             } => {
                 self.message_handler
                     .handle_delete_mailbox(mailbox_id, move_to)
+                    .await
+            }
+            Command::RenameMailbox {
+                mailbox_id,
+                new_name,
+            } => {
+                self.message_handler
+                    .handle_rename_mailbox(mailbox_id, &new_name)
                     .await
             }
             Command::ArchiveMessages { message_ids } => {

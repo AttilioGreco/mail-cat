@@ -205,7 +205,7 @@ async fn account_id(client: &MailCatClient, account: Option<&str>) -> Result<Str
     Ok(accounts.remove(0).id)
 }
 
-async fn optional_account_id(
+pub(super) async fn optional_account_id(
     client: &MailCatClient,
     account: Option<&str>,
 ) -> Result<Option<String>> {

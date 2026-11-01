@@ -16,7 +16,15 @@ struct Deleting {
 
 /// A role-less `Sent` holding `count` messages, next to the real `Sent Items`.
 fn deleting(count: usize, provider: MockEmailProvider) -> Deleting {
-    let account = AccountId::new();
+    deleting_with(count, provider, AccountId::new(), vec![])
+}
+
+fn deleting_with(
+    count: usize,
+    provider: MockEmailProvider,
+    account: AccountId,
+    more: Vec<mc_domain::Mailbox>,
+) -> Deleting {
     let junk = test_mailbox(account, "Sent", MailboxType::Custom);
     let sent = test_mailbox(account, "Sent Items", MailboxType::Sent);
     let es = Arc::new(MockEventStore::new());
@@ -56,7 +64,10 @@ fn deleting(count: usize, provider: MockEmailProvider) -> Deleting {
             junk.clone(),
             sent.clone(),
             test_mailbox(account, "INBOX", MailboxType::Inbox),
-        ],
+        ]
+        .into_iter()
+        .chain(more)
+        .collect(),
         listing: std::sync::Mutex::new(listing),
         ..MockMessageReadRepo::new()
     });
@@ -174,4 +185,169 @@ async fn the_destination_must_be_another_mailbox_of_the_account() {
             .await,
     );
     assert!(d.provider.deleted_mailboxes.read().unwrap().is_empty());
+}
+
+/// `Work` and `Work/Fin` on the repo, the server answering as after the
+/// rename to `Jobs`.
+fn renaming() -> (Deleting, mc_domain::Mailbox, mc_domain::Mailbox) {
+    let account = AccountId::new();
+    let work = test_mailbox(account, "Work", MailboxType::Custom);
+    let fin = test_mailbox(account, "Work/Fin", MailboxType::Custom);
+    let other = test_mailbox(account, "Other", MailboxType::Custom);
+    let provider = MockEmailProvider::new();
+    *provider.listed.write().unwrap() = vec![
+        test_mailbox(account, "Jobs", MailboxType::Custom),
+        test_mailbox(account, "Jobs/Fin", MailboxType::Custom),
+    ];
+    let more = vec![work.clone(), fin.clone(), other];
+    (deleting_with(0, provider, account, more), work, fin)
+}
+
+#[tokio::test]
+async fn renaming_a_mailbox_renames_its_children_as_the_server_lists_them() {
+    let (d, work, fin) = renaming();
+
+    let result = d.handler.handle_rename_mailbox(work.id, "Jobs").await;
+
+    assert!(matches!(
+        result,
+        Ok(CommandResult::MailboxRenamed { renamed: 2 })
+    ));
+    assert_eq!(
+        *d.provider.renamed_mailboxes.read().unwrap(),
+        [(work.path.clone(), "Jobs".to_owned())]
+    );
+    let renamed: Vec<_> = d
+        .bus
+        .published
+        .read()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match &e.payload {
+            DomainEvent::MailboxRenamed {
+                mailbox_id,
+                new_path,
+                display_path,
+                ..
+            } => Some((*mailbox_id, new_path.full_path(), display_path.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        renamed,
+        [
+            (work.id, "Jobs".into(), "Jobs".into()),
+            (fin.id, "Jobs/Fin".into(), "Jobs/Fin".into())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_mailbox_is_not_renamed_to_a_taken_name_inside_itself_or_as_a_system_one() {
+    let (d, work, _) = renaming();
+
+    for (new_name, why) in [
+        ("other", "is taken"),
+        ("Work/Fin/Old", "is taken"),
+        ("Work/New", "inside"),
+        ("A//B", "empty"),
+    ] {
+        let said = refused(d.handler.handle_rename_mailbox(work.id, new_name).await);
+        assert!(said.contains(why), "{new_name}: {said}");
+    }
+    let said = refused(d.handler.handle_rename_mailbox(d.sent.id, "Mine").await);
+    assert!(said.contains("system mailbox"), "{said}");
+    assert!(d.provider.renamed_mailboxes.read().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn renaming_to_the_name_it_has_changes_nothing() {
+    let (d, work, _) = renaming();
+
+    let result = d.handler.handle_rename_mailbox(work.id, "Work").await;
+
+    assert!(matches!(
+        result,
+        Ok(CommandResult::MailboxRenamed { renamed: 0 })
+    ));
+    assert!(d.provider.renamed_mailboxes.read().unwrap().is_empty());
+}
+
+fn renamed_ids(d: &Deleting) -> Vec<MailboxId> {
+    d.bus
+        .published
+        .read()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match &e.payload {
+            DomainEvent::MailboxRenamed { mailbox_id, .. } => Some(*mailbox_id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_rename_is_written_down_before_the_server_hears_of_it_and_forgotten_once_recorded() {
+    let (d, work, _) = renaming();
+
+    d.handler
+        .handle_rename_mailbox(work.id, "Jobs")
+        .await
+        .unwrap();
+
+    assert!(d.repo.renames.lock().unwrap().is_empty());
+
+    // The server refuses: the record stays for a sync to settle.
+    let (d, work, _) = renaming();
+    *d.provider.listed.write().unwrap() = vec![];
+    refused(d.handler.handle_rename_mailbox(work.id, "Jobs").await);
+    assert_eq!(d.repo.renames.lock().unwrap().len(), 1);
+    assert!(renamed_ids(&d).is_empty());
+}
+
+#[tokio::test]
+async fn a_rename_the_crash_left_on_the_server_is_recorded_by_the_next_attempt() {
+    let (d, work, fin) = renaming();
+    d.repo
+        .put_pending_rename(&mc_domain::PendingRename {
+            mailbox_id: work.id,
+            account_id: work.account_id,
+            old_display: "Work".into(),
+            new_display: "Jobs".into(),
+        })
+        .await
+        .unwrap();
+
+    // The mock read model does not follow events, so the rename that comes
+    // after the settling is sent again; what counts is the settling.
+    d.handler
+        .handle_rename_mailbox(work.id, "Jobs")
+        .await
+        .unwrap();
+
+    // Recorded from the listing, before anything else.
+    assert_eq!(renamed_ids(&d)[..2], [work.id, fin.id]);
+    assert!(d.repo.renames.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rename_waits_for_a_sync_holding_the_account() {
+    let (mut d, work, _) = renaming();
+    let locks = Arc::new(crate::services::AccountLocks::default());
+    d.handler = d.handler.clone().with_sync_locks(locks.clone());
+    let sync = locks.lock(&work.account_id).await;
+
+    let rename = tokio::spawn({
+        let handler = d.handler.clone();
+        async move { handler.handle_rename_mailbox(work.id, "Jobs").await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(d.provider.renamed_mailboxes.read().unwrap().is_empty());
+
+    drop(sync);
+    let result = rename.await.unwrap();
+    assert!(matches!(
+        result,
+        Ok(CommandResult::MailboxRenamed { renamed: 2 })
+    ));
 }

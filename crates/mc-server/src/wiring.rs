@@ -9,8 +9,8 @@ use mc_application::CommandBus;
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
 use mc_application::projections::{ProjectionEventHandler, SearchProjectionHandler};
 use mc_application::{
-    AccountLifecycle, AuthGates, EventPublisher, OAuthLoginTrigger, RefreshFn, SyncConfig,
-    SyncService, SyncTrigger,
+    AccountLifecycle, AccountLocks, AuthGates, EventPublisher, OAuthLoginTrigger, RefreshFn,
+    SyncConfig, SyncService, SyncTrigger,
 };
 use mc_domain::{
     AccountId, AccountReadRepository, AccountWriteRepository, AggregateType, DomainError,
@@ -136,6 +136,9 @@ impl AppContext {
         let (resync_tx, resync_rx) =
             tokio::sync::mpsc::unbounded_channel::<(AccountId, MailboxPath)>();
 
+        // A mailbox rename and a sync must not interleave on one account.
+        let account_locks = Arc::new(AccountLocks::default());
+
         // Create command bus
         let command_bus = Arc::new(
             InProcessCommandBus::new(
@@ -146,7 +149,8 @@ impl AppContext {
                 repository_arc.clone(),    // MR
                 event_bus.clone(),         // B
             )
-            .with_resync_requests(resync_tx),
+            .with_resync_requests(resync_tx)
+            .with_sync_locks(account_locks.clone()),
         );
         tracing::info!("Initialized command bus");
 
@@ -177,7 +181,8 @@ impl AppContext {
                 repository_arc.clone(),
                 sync_config,
             )
-            .with_event_publisher(event_bus.clone()),
+            .with_event_publisher(event_bus.clone())
+            .with_account_locks(account_locks),
         );
         tracing::info!("Initialized sync service");
 

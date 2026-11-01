@@ -26,6 +26,15 @@ pub enum MailboxesCmd {
         /// Mailbox id, path, display path or name
         mailbox: String,
     },
+    /// Rename or move a user mailbox on the server; its children follow
+    Rename {
+        /// Account ID (from `mc accounts list`)
+        account_id: String,
+        /// Mailbox id, path, display path or name
+        mailbox: String,
+        /// New label path, such as `Work/Invoices`; missing parents are made
+        new_name: String,
+    },
     /// Delete an empty user mailbox on the server, first moving its messages
     Delete {
         /// Account ID (from `mc accounts list`)
@@ -53,6 +62,11 @@ pub async fn run(cmd: MailboxesCmd, client: MailCatClient, json: bool) -> Result
             account_id,
             mailbox,
         } => subscribe(&client, &account_id, &mailbox, false).await,
+        MailboxesCmd::Rename {
+            account_id,
+            mailbox,
+            new_name,
+        } => rename(&client, &account_id, &mailbox, &new_name).await,
         MailboxesCmd::Delete {
             account_id,
             mailbox,
@@ -241,6 +255,23 @@ async fn delete(
         .await?;
     println!(
         "{} deleted {} ({moved} messages moved)",
+        "✓".green(),
+        mailbox.display_path
+    );
+    Ok(())
+}
+
+async fn rename(
+    client: &MailCatClient,
+    account_id: &str,
+    wanted: &str,
+    new_name: &str,
+) -> Result<()> {
+    let mailboxes = client.list_mailboxes(account_id).await?;
+    let mailbox = find(&mailboxes, wanted)?;
+    let renamed = client.rename_mailbox(&mailbox.id, new_name).await?;
+    println!(
+        "{} renamed {} to {new_name} ({renamed} mailboxes)",
         "✓".green(),
         mailbox.display_path
     );

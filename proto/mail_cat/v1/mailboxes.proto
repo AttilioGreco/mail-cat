@@ -88,11 +88,14 @@ message CreateMailboxResponse {
 
 message RenameMailboxRequest {
   string mailbox_id = 1;
+  // The new label path ("Work/Invoices"); missing parents are made.
   string new_path = 2;
 }
 
 message RenameMailboxResponse {
   MailboxSummary mailbox = 1;
+  // Mailboxes renamed: the mailbox and the children that followed.
+  uint32 renamed = 2;
 }
 
 message DeleteMailboxRequest {

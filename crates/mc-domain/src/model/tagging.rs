@@ -259,6 +259,12 @@ pub struct TagSource {
     /// The one folder of a folders account's message.
     pub folder: Option<MailboxId>,
     pub in_inbox: bool,
+    /// How many mailboxes hold it (labels accounts): taking its last one away
+    /// would leave it nowhere.
+    pub mailboxes: u32,
+    /// The keywords as the server holds them (a folders account), whatever
+    /// their case: removing a label has to name each spelling.
+    pub spellings: Vec<String>,
     pub received_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -277,6 +283,9 @@ pub enum SourceFilter {
     /// Carrying none.
     Unlabelled,
     Any,
+    /// `Labelled`, also in the Trash, Spam and Drafts that training skips:
+    /// changing a label has to reach every message that carries it.
+    Held,
 }
 
 /// What the model was last taught about a message, kept so the lesson can be

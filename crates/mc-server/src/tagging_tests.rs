@@ -20,6 +20,7 @@ use mc_domain::{
 mod curation;
 mod discovery;
 mod embeddings;
+mod relabel;
 
 use mc_infrastructure::{SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore};
 

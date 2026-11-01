@@ -162,6 +162,20 @@ pub trait EmailProvider: Send + Sync {
         ))
     }
 
+    /// Rename or move `mailbox` to the label path `new_name` (`A/B/C`, parents
+    /// made when missing), its children following. Returns the mailbox's path
+    /// afterwards: the server's own spelling where paths are names, unchanged
+    /// where they are ids.
+    async fn rename_mailbox(
+        &self,
+        _mailbox: &MailboxPath,
+        _new_name: &str,
+    ) -> Result<MailboxPath, DomainError> {
+        Err(DomainError::NotSupported(
+            "this server cannot rename mailboxes".into(),
+        ))
+    }
+
     /// The mailbox whose sync carries `mailbox`'s messages, when `mailbox` is
     /// only a view over it (a Gmail label over All Mail). Views are never
     /// synced themselves, and their memberships hold the backing mailbox's ids.

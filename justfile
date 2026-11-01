@@ -110,7 +110,7 @@ gmail-integration-test:
         set -q $v; or begin; echo "manca $v (vedi tests/itest/README.md)"; exit 1; end
     end
     python3 tests/itest/gmail/selftest.py; or exit 1
-    tests/itest/scenarios.py gmail_sync gmail_labels_mc_to_server gmail_server_to_mc gmail_delete_permanent gmail_model_default
+    tests/itest/scenarios.py gmail_sync gmail_labels_mc_to_server gmail_server_to_mc gmail_delete_permanent gmail_model_default gmail_rename_tree
 
 # benchmark di sync con corpus da ~3000 messaggi e proxy che conta i byte
 # (es: just itest-bench branch; just itest-bench main --root ../mail-cat-bench-main)

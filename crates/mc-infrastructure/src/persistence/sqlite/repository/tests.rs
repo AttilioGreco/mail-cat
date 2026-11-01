@@ -481,3 +481,28 @@ async fn mailbox_paths_round_trip() {
     assert_eq!(stored.path, path);
     assert_eq!(stored.display_name, "2026");
 }
+
+#[tokio::test]
+async fn a_pending_rename_is_kept_per_account_until_cleared() {
+    use mc_domain::{PendingRename, PendingRenameStore};
+    let (_dir, repo) = open();
+    let (account, other) = (AccountId::new(), AccountId::new());
+    let rename = |account_id| PendingRename {
+        mailbox_id: MailboxId::new(),
+        account_id,
+        old_display: "Old".into(),
+        new_display: "New".into(),
+    };
+    let (mine, theirs) = (rename(account), rename(other));
+    repo.put_pending_rename(&mine).await.unwrap();
+    repo.put_pending_rename(&theirs).await.unwrap();
+
+    assert_eq!(
+        repo.pending_renames(&account).await.unwrap(),
+        std::slice::from_ref(&mine)
+    );
+
+    repo.clear_pending_rename(&mine.mailbox_id).await.unwrap();
+    assert!(repo.pending_renames(&account).await.unwrap().is_empty());
+    assert_eq!(repo.pending_renames(&other).await.unwrap().len(), 1);
+}

@@ -47,7 +47,11 @@ const SOURCE_COLUMNS: &str = concat!(
         WHERE x.message_id = m.id AND mb.mailbox_type = '\"Inbox\"'), \
      m.received_at, a.mailbox_model = '\"Folders\"', \
      (SELECT x.mailbox_id FROM message_mailboxes x WHERE x.message_id = m.id LIMIT 1), \
-     COALESCE(a.supports_tags, 0) \
+     COALESCE(a.supports_tags, 0), \
+     (SELECT COUNT(*) FROM message_mailboxes x WHERE x.message_id = m.id), \
+     CASE WHEN a.mailbox_model = '\"Folders\"' THEN (SELECT json_group_array(k.value) FROM ",
+    keywords!(),
+    ") ELSE '[]' END \
      FROM messages m \
      JOIN accounts a ON a.id = m.account_id \
      LEFT JOIN message_bodies b ON b.message_id = m.id"
@@ -64,6 +68,17 @@ pub(super) const LABELLED: &str = concat!(
 pub(super) const UNREADABLE: &str = "NOT EXISTS (SELECT 1 FROM message_mailboxes x \
      JOIN mailboxes mb ON mb.id = x.mailbox_id WHERE x.message_id = m.id \
      AND mb.mailbox_type IN ('\"Trash\"', '\"Spam\"', '\"Drafts\"'))";
+
+/// The mail a filter walks (`Held` also takes the unreadable) and its
+/// condition on labels.
+fn scan(filter: SourceFilter) -> (&'static str, String) {
+    match filter {
+        SourceFilter::Labelled => (UNREADABLE, format!("AND {LABELLED}")),
+        SourceFilter::Held => ("1", format!("AND {LABELLED}")),
+        SourceFilter::Unlabelled => (UNREADABLE, format!("AND NOT ({LABELLED})")),
+        SourceFilter::Any => (UNREADABLE, String::new()),
+    }
+}
 
 /// A duplicate of a system folder the server did not give the role ("Sent"
 /// beside a declared "Sent Items") is still not a label to learn.
@@ -99,6 +114,8 @@ fn source_from_row(row: &Row) -> rusqlite::Result<TagSource> {
         keywords: row.get(11)?,
         folder: row.get::<_, Option<Uuid>>(12)?.map(MailboxId::from_uuid),
         tags: row.get(13)?,
+        mailboxes: row.get(14)?,
+        spellings: json_col(row, 15)?,
     })
 }
 
@@ -124,13 +141,9 @@ pub(super) fn page(
     } else {
         (">", "")
     };
-    let kind = match filter {
-        SourceFilter::Labelled => format!("AND {LABELLED}"),
-        SourceFilter::Unlabelled => format!("AND NOT ({LABELLED})"),
-        SourceFilter::Any => String::new(),
-    };
+    let (readable, kind) = scan(filter);
     let sql = format!(
-        "{SOURCE_COLUMNS} WHERE m.account_id IN ({}) AND m.id {past} ?1 AND {UNREADABLE} {kind} \
+        "{SOURCE_COLUMNS} WHERE m.account_id IN ({}) AND m.id {past} ?1 AND {readable} {kind} \
          ORDER BY m.id {order} LIMIT {limit}",
         placeholders(2, accounts.len())
     );
@@ -164,14 +177,10 @@ pub(super) fn count(
     accounts: &[Uuid],
     filter: SourceFilter,
 ) -> Result<u64, DomainError> {
-    let kind = match filter {
-        SourceFilter::Labelled => format!("AND {LABELLED}"),
-        SourceFilter::Unlabelled => format!("AND NOT ({LABELLED})"),
-        SourceFilter::Any => String::new(),
-    };
+    let (readable, kind) = scan(filter);
     let sql = format!(
         "SELECT COUNT(*) FROM messages m JOIN accounts a ON a.id = m.account_id \
-         WHERE m.account_id IN ({}) AND {UNREADABLE} {kind}",
+         WHERE m.account_id IN ({}) AND {readable} {kind}",
         placeholders(1, accounts.len())
     );
     Ok(

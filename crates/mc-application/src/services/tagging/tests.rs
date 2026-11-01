@@ -22,6 +22,8 @@ fn source(from: &str, subject: &str, labels: &[&str]) -> TagSource {
         tags: true,
         folder: None,
         in_inbox: true,
+        mailboxes: 1,
+        spellings: vec![],
         received_at: Utc::now(),
     }
 }

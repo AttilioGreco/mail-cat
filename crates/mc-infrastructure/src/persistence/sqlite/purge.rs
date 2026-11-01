@@ -93,6 +93,7 @@ impl SqliteRepository {
                     "thread_links",
                     "sync_cursors",
                     "sent_counted",
+                    "pending_renames",
                 ] {
                     exec(
                         &tx,

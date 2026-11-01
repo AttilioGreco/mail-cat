@@ -14,8 +14,8 @@ use mc_domain::{
     Account, AccountId, AggregateType, Attachment, AttachmentId, DomainError, DomainEvent,
     EmailProvider, Envelope, EventEnvelope, EventStore, Flag, Mailbox, MailboxId, MailboxPath,
     MailboxReadRepository, MailboxType, Membership, Message, MessageBodyStore, MessageId,
-    MessageReadRepository, OutgoingMessage, ProviderRegistry, ReadModelProjector, SentCopy,
-    value_objects::remote_id::RemoteId,
+    MessageReadRepository, OutgoingMessage, PendingRenameStore, ProviderRegistry,
+    ReadModelProjector, SentCopy, value_objects::remote_id::RemoteId,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
@@ -24,6 +24,7 @@ use crate::bus::EventPublisher;
 use crate::commands::CommandResult;
 use crate::compose::{self, BodyKind, ComposeInput, ComposeMode, ComposeView, ParsedSource};
 use crate::error::ApplicationError;
+use crate::services::AccountLocks;
 
 /// Handles Message-related commands.
 ///
@@ -33,7 +34,11 @@ use crate::error::ApplicationError;
 pub struct MessageCommandHandler<
     ES: EventStore,
     PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
+    MR: MessageReadRepository
+        + ReadModelProjector
+        + MailboxReadRepository
+        + MessageBodyStore
+        + PendingRenameStore,
     B: EventPublisher,
 > {
     event_store: Arc<ES>,
@@ -48,12 +53,19 @@ pub struct MessageCommandHandler<
     /// Mailboxes to sync after the server changed them in a way the local
     /// state could not follow; the sync repairs it.
     resync: Option<UnboundedSender<(AccountId, MailboxPath)>>,
+    /// The sync slots: a rename holds its account's so no sync lists the
+    /// server between the rename and its record.
+    sync_locks: Arc<AccountLocks>,
 }
 
 impl<
     ES: EventStore,
     PR: ProviderRegistry,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore,
+    MR: MessageReadRepository
+        + ReadModelProjector
+        + MailboxReadRepository
+        + MessageBodyStore
+        + PendingRenameStore,
     B: EventPublisher,
 > Clone for MessageCommandHandler<ES, PR, MR, B>
 {
@@ -65,6 +77,7 @@ impl<
             event_bus: Arc::clone(&self.event_bus),
             account_queues: Arc::clone(&self.account_queues),
             resync: self.resync.clone(),
+            sync_locks: Arc::clone(&self.sync_locks),
         }
     }
 }
@@ -81,7 +94,12 @@ const RECORD_ATTEMPTS: u32 = 3;
 impl<
     ES: EventStore + 'static,
     PR: ProviderRegistry + 'static,
-    MR: MessageReadRepository + ReadModelProjector + MailboxReadRepository + MessageBodyStore + 'static,
+    MR: MessageReadRepository
+        + ReadModelProjector
+        + MailboxReadRepository
+        + MessageBodyStore
+        + PendingRenameStore
+        + 'static,
     B: EventPublisher + 'static,
 > MessageCommandHandler<ES, PR, MR, B>
 {
@@ -98,7 +116,15 @@ impl<
             event_bus,
             account_queues: Arc::default(),
             resync: None,
+            sync_locks: Arc::default(),
         }
+    }
+
+    /// The per-account locks syncs run under.
+    #[must_use]
+    pub fn with_sync_locks(mut self, locks: Arc<AccountLocks>) -> Self {
+        self.sync_locks = locks;
+        self
     }
 
     /// Where to ask for a mailbox sync when local state fell behind the server.

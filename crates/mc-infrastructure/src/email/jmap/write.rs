@@ -224,6 +224,32 @@ impl JmapEmailProvider {
         )))
     }
 
+    /// Name `mailbox` after the last segment of `name` (`A/B/C`) and put it in
+    /// `A/B`, made first when missing. Its children follow by their `parentId`.
+    pub(super) async fn move_mailbox(&self, mailbox: &str, name: &str) -> Result<(), DomainError> {
+        let (parents, leaf) = name.rsplit_once('/').unzip();
+        let parent = match parents {
+            Some(parents) => Some(self.create_mailbox(parents).await?),
+            None => None,
+        };
+        let reply = self
+            .client
+            .call(vec![(
+                "Mailbox/set",
+                json!({"update": {mailbox: {"name": leaf.unwrap_or(name), "parentId": parent}}}),
+            )])
+            .await?
+            .remove(0)?;
+        let refused = refusals(&reply, "notUpdated");
+        if refused.is_empty() {
+            return Ok(());
+        }
+        Err(DomainError::Provider(format!(
+            "JMAP refused: {}",
+            refused.join(", ")
+        )))
+    }
+
     /// Destroy an empty mailbox. `onDestroyRemoveEmails` stays false so a
     /// server that still has mail in it refuses (`mailboxHasEmail`) instead of
     /// destroying that mail.

@@ -45,6 +45,10 @@ pub enum ApplyKind {
     Apply,
     /// Taking an accepted proposal's label off again.
     Undo,
+    /// Renaming a label, or merging it into another.
+    Relabel,
+    /// Taking a label off all its mail and deleting it.
+    Delete,
 }
 
 /// A throttled labelling job, queued or running.

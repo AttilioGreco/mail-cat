@@ -6,6 +6,7 @@
 mod cluster;
 mod curate;
 mod plan;
+mod relabel;
 #[cfg(test)]
 mod tests;
 mod undo;
@@ -73,6 +74,7 @@ pub struct ProposalView {
 
 pub use curate::{LabelDetail, LabelEntry, LabelHome, LabelPresence, LabelScope, ProposalMessage};
 pub use plan::{AccountCount, OpResult, OpStatus, PlanOp, PlanReport, PlanSummary};
+pub use relabel::{AccountChange, ChangeKind, LabelChange, MailboxStep, StepKind};
 pub use undo::UndoReport;
 
 /// Marks a discovery as over when dropped, however it ends.

@@ -861,7 +861,97 @@ def restart_account(w):
         raise Fail("restarting an unknown account was not refused")
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk, hot_add, remove_account, restart_account]
+def server_tree(user, *names):
+    """Create (and subscribe) mailboxes on the server, as another client would."""
+    for name in names:
+        imapctl.main(["--user", user, "create", name])
+        imapctl.main(["--user", user, "subscribe", name])
+
+
+def rename_imap(w):
+    """alice renames a folder that has a child, under a new parent that does not exist
+    yet: the server renames both (children follow, parents are made), the local
+    mailboxes keep their ids and the next sync finds them where they are: nothing is
+    duplicated, deleted or read again, and the subscriptions follow."""
+    server_tree("alice", "Rn", "Rn/Child")
+    run([sys.executable, str(HERE / "seed.py"), "--user", "alice", "--start", "101", "-n", "3", "Rn/Child"])
+    w.sync()
+    w.boxes = {r["Path"]: r for r in table(mc("mailboxes", "list", w.account))}
+    boxes = {path: r["ID"] for path, r in w.boxes.items()}
+    if len(w.mc_list("Rn/Child")) != 3:
+        raise Fail("the seeded child was not synced")
+    mc("mailboxes", "rename", w.account, "Rn", "Moved/Deep")
+
+    m = imapctl.connect()
+    try:
+        names, subscribed = set(imapctl.mailboxes(m)), imapctl.lsub(m)
+    finally:
+        m.logout()
+    wanted = {"Moved", "Moved/Deep", "Moved/Deep/Child"}
+    if not wanted <= names or {"Rn", "Rn/Child"} & names:
+        raise Fail(f"server mailboxes after the rename: {sorted(names)}")
+    if not {"Moved/Deep", "Moved/Deep/Child"} <= subscribed or {"Rn", "Rn/Child"} & subscribed:
+        raise Fail(f"server subscriptions after the rename: {sorted(subscribed)}")
+
+    def local():
+        return {r["Path"]: r["ID"] for r in table(mc("mailboxes", "list", w.account))}
+
+    def check(what):
+        now = local()
+        if (now.get("Moved/Deep"), now.get("Moved/Deep/Child")) != (boxes["Rn"], boxes["Rn/Child"]) \
+                or {"Rn", "Rn/Child"} & now.keys():
+            raise Fail(f"{what}: local mailboxes {sorted(now)} (ids kept: "
+                       f"{now.get('Moved/Deep') == boxes['Rn']})")
+
+    check("right after the rename")
+    received = db("select count(*) from events where event_type = 'MessageReceived'")[0]
+    w.sync()
+    check("after a sync")
+    w.boxes = {r["Path"]: r for r in table(mc("mailboxes", "list", w.account))}
+    if len(w.mc_list("Moved/Deep/Child")) != 3:
+        raise Fail("the renamed child lost or duplicated messages")
+    if db("select count(*) from events where event_type = 'MessageReceived'")[0] != received:
+        raise Fail("a sync after the rename received messages again")
+    w.assert_consistent()
+
+
+def rename_jmap(w):
+    """bob (JMAP) renames a mailbox that has a child under a new parent: one
+    Mailbox/set per rename, the child follows by its parent id, the ids and
+    messages stay, and a sync adds and removes nothing."""
+    bob = account_id("bob")
+    server_tree("bob", "Rn", "Rn/Child")
+    run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "--start", "101", "-n", "3", "Rn/Child"])
+    mc("sync", bob)
+    jmap_sync_all(bob)
+    before, msgs = jmap_snapshot(bob)
+    if int(before["Rn/Child"]["total_messages"]) != 3:
+        raise Fail(f"Rn/Child has {before['Rn/Child']['total_messages']} messages, expected 3")
+    mc("mailboxes", "rename", bob, "Rn", "Moved/Deep")
+
+    m = imapctl.connect("bob")
+    try:
+        names = set(imapctl.mailboxes(m))
+    finally:
+        m.logout()
+    if not {"Moved", "Moved/Deep", "Moved/Deep/Child"} <= names or {"Rn", "Rn/Child"} & names:
+        raise Fail(f"server mailboxes after the rename: {sorted(names)}")
+
+    def check(what):
+        after, found = jmap_snapshot(bob)
+        if (after.get("Moved/Deep", {}).get("id"), after.get("Moved/Deep/Child", {}).get("id")) != \
+                (before["Rn"]["id"], before["Rn/Child"]["id"]) or {"Rn", "Rn/Child"} & after.keys():
+            raise Fail(f"{what}: local mailboxes {sorted(after)}")
+        if int(after["Moved/Deep/Child"]["total_messages"]) != 3 or \
+                sorted(t for t, (path, _) in found.items() if path == "Moved/Deep/Child") != [101, 102, 103]:
+            raise Fail(f"{what}: the child's messages are {sorted(t for t, (p, _) in found.items() if 'Deep' in p)}")
+
+    check("right after the rename")
+    jmap_sync_all(bob)
+    check("after a sync")
+
+
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk, hot_add, remove_account, restart_account, rename_imap, rename_jmap]
 SCENARIOS += gmail_scenarios.make(sys.modules[__name__])
 
 

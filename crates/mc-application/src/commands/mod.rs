@@ -114,6 +114,14 @@ pub enum Command {
         move_to: Option<MailboxId>,
     },
 
+    /// Rename or move a user mailbox to the label path `new_name` (`A/B/C`);
+    /// its child mailboxes follow. Refused for a system mailbox, for a name
+    /// another mailbox has, and for one inside the mailbox itself.
+    RenameMailbox {
+        mailbox_id: MailboxId,
+        new_name: String,
+    },
+
     /// Take messages out of the Inbox; what that means depends on the
     /// account's mailbox model (see `handle_archive`).
     ArchiveMessages { message_ids: Vec<MessageId> },
@@ -224,6 +232,10 @@ pub enum CommandResult {
     MessageDeleted,
     LabelCreated {
         mailbox_id: MailboxId,
+    },
+    /// The mailbox and its children, renamed.
+    MailboxRenamed {
+        renamed: u32,
     },
     /// Messages moved out of the mailbox before it was deleted.
     MailboxDeleted {
