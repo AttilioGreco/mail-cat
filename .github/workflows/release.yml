@@ -25,7 +25,7 @@ jobs:
           - os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Tag matches the app version
         shell: bash
@@ -39,9 +39,9 @@ jobs:
           fi
 
       - uses: oven-sh/setup-bun@v2
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -75,7 +75,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Tauri CLI
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         id: tauri-cli
         with:
           path: ~/.cargo/bin/cargo-tauri${{ runner.os == 'Windows' && '.exe' || '' }}
@@ -83,17 +83,18 @@ jobs:
       - if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "^2" --locked
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/mc-ui
+          tauriScript: cargo tauri # the CLI installed above; v1 would otherwise guess from lockfiles
           tagName: ${{ github.ref_name }}
           releaseName: mail-cat ${{ github.ref_name }}
           releaseBody: |
             Installation and first launch (the app is not code-signed): see [docs/install.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/install.md).
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
