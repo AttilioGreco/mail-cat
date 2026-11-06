@@ -19,9 +19,10 @@ A tag `vX.Y.Z` makes GitHub Actions (`.github/workflows/release.yml`) build inst
 
 ## Each release
 
-1. Bump the version: edit `version` in the workspace `Cargo.toml`, run `just version-sync` to copy it to `tauri.conf.json`, and `cargo check` so `Cargo.lock` follows. Commit.
-2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow fails immediately, with a message, if the tag differs from either version.
-3. When the three jobs are green, open the draft under Releases, check the assets (including `latest.json`), and **Publish**. Installed apps see the update only once the release is published, because the updater endpoint is `releases/latest/download/latest.json`.
+1. Write the notes under `## [Unreleased]` in `CHANGELOG.md` and commit them (`just release-check` shows them).
+2. `just release-create X.Y.Z` (from a terminal, on `main`). `scripts/release.sh` refuses a dirty tree or a version that is not newer than both `Cargo.toml` and the highest tag, then bumps `Cargo.toml`, `Cargo.lock` and `tauri.conf.json`, dates the changelog, runs the same checks as CI, and after a confirmation commits `chore: release vX.Y.Z`, tags it and, after a second confirmation, pushes branch and tag. The very first release may use the version already in `Cargo.toml`. `just release-prepare X.Y.Z` stops before the push; `just release-undo` removes a local tag and its release commit.
+3. `just release-watch` follows the build. The workflow fails immediately, with a message, if the tag differs from either version.
+4. When the three jobs are green, open the draft under Releases, check the assets (including `latest.json`), and **Publish**. Installed apps see the update only once the release is published, because the updater endpoint is `releases/latest/download/latest.json`.
 
 The release body links to `docs/install.md` (first launch without code signing).
 

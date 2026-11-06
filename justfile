@@ -70,6 +70,39 @@ version-sync:
     mv /tmp/tauri.conf.json.$$ crates/mc-ui/tauri.conf.json
     echo "→ tauri.conf.json: $CUR → $V"
 
+# ── Release (docs/release.md) ─────────────────────────────────────────────────
+
+# bump, changelog, check, commit, tag e push: il tag avvia la build su GitHub
+release-create VERSION:
+    ./scripts/release.sh {{VERSION}}
+
+# come release-create ma senza fmt/clippy/test
+release-create-skip-tests VERSION:
+    ./scripts/release.sh {{VERSION}} --skip-tests
+
+# prepara commit e tag in locale, senza push
+release-prepare VERSION:
+    ./scripts/release.sh {{VERSION}} --no-push
+
+# versione corrente e note non ancora rilasciate
+release-check:
+    @echo "Versione: $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+    @echo
+    @sed -n '/^## \[Unreleased\]/,/^## \[/p' CHANGELOG.md | sed '1d;/^## \[/d'
+
+# segue la build della release in corso su GitHub Actions
+release-watch:
+    gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+
+# annulla l'ultima release in locale (solo prima del push!)
+release-undo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TAG=$(git describe --tags --abbrev=0 2>/dev/null) || { echo "Nessun tag"; exit 1; }
+    git tag -d "$TAG"
+    if [ "$(git log -1 --format=%s)" = "chore: release $TAG" ]; then git reset --hard HEAD~1; fi
+    echo "Release $TAG annullata (solo in locale)"
+
 # ── Test & Check ──────────────────────────────────────────────────────────────
 
 # esegui tutti i test
