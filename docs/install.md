@@ -21,6 +21,8 @@ On macOS 15 and later the old right-click, Open shortcut no longer works; the Pr
 
 ## Linux
 
+Needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40 or later.
+
 - **AppImage:** `chmod +x mail-cat_<version>_amd64.AppImage`, then run it. On first launch the bundled server is copied to `~/.local/share/mail-cat/bin/` so it can keep running after the app closes. Needs FUSE 2 on some distributions (`libfuse2`).
 - **Debian / Ubuntu:** `sudo apt install ./mail-cat_<version>_amd64.deb`
 - **Fedora / openSUSE:** `sudo dnf install ./mail-cat-<version>-1.x86_64.rpm`

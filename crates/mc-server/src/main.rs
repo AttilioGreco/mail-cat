@@ -231,15 +231,24 @@ async fn run() -> anyhow::Result<()> {
 /// handler, systemd stopping the service bypasses this entire graceful path —
 /// the process is killed outright, with no chance to cancel background tasks.
 async fn shutdown_signal() {
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to install SIGTERM handler");
+    // Windows has no SIGTERM: the Scheduled Task and the updater stop the server
+    // by terminating the process, so Ctrl+C is the only graceful path there.
+    #[cfg(unix)]
+    let sigterm = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await
+    };
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<Option<()>>();
 
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
             result.expect("failed to install CTRL+C signal handler");
             tracing::info!("Received SIGINT, stopping server...");
         }
-        _ = sigterm.recv() => {
+        _ = sigterm => {
             tracing::info!("Received SIGTERM, stopping server...");
         }
     }

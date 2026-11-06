@@ -512,6 +512,9 @@ impl AppContext {
                                         return;
                                     }
                                 };
+                                // Only freedesktop handles carry an id; elsewhere there
+                                // is no shared listener and is_listening() is false.
+                                #[cfg(target_os = "linux")]
                                 if center.is_listening() {
                                     // The shared listener owns the actions from here
                                     // on; it survives the banner being swept into the

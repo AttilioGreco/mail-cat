@@ -107,7 +107,7 @@ accounts are added from the UI).
 - `ci.yml` (push + PR): Linux job with Tauri system deps, frontend build (bun), `cargo
   fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test
   --workspace`; frontend job: typecheck, eslint, `lint:fsd`.
-- `release.yml` (tag `v*`): matrix `ubuntu-22.04` (older glibc for the AppImage),
+- `release.yml` (tag `v*`): matrix `ubuntu-24.04` (22.04 is too old for the static ONNX Runtime: glibc 2.38+),
   `macos-latest` (arm64), `windows-latest`; build server + CLI release, then
   `tauri-apps/tauri-action` to bundle, sign updater artifacts and upload to a **draft**
   GitHub Release with `latest.json`. Version comes from the tag; the workflow fails if

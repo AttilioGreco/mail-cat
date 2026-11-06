@@ -18,7 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04 # oldest glibc we can get: the AppImage runs on anything newer
+          # Not 22.04: the static ONNX Runtime that ort downloads needs glibc >= 2.38
+          # (__isoc23_strtol). The AppImage runs on glibc 2.39+ (Ubuntu 24.04, Debian 13).
+          - os: ubuntu-24.04
           - os: macos-latest
           - os: windows-latest
     runs-on: ${{ matrix.os }}

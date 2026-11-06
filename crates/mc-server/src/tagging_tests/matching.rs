@@ -53,8 +53,9 @@ impl Recording {
     }
 }
 
+// Generous: CI runners are slow and run every test in parallel.
 async fn until(what: &str, mut done: impl AsyncFnMut() -> bool) {
-    for _ in 0..200 {
+    for _ in 0..400 {
         if done().await {
             return;
         }

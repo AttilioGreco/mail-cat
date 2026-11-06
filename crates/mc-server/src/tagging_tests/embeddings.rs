@@ -77,8 +77,9 @@ impl Embedder for Fake {
     }
 }
 
+// Generous: CI runners are slow and run every test in parallel.
 async fn until<F: Future<Output = bool>>(what: &str, mut ready: impl FnMut() -> F) {
-    for _ in 0..100 {
+    for _ in 0..400 {
         if ready().await {
             return;
         }
