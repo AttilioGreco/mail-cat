@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use async_imap::imap_proto::types::{BodyContentCommon, BodyContentSinglePart, BodyStructure};
-use async_imap::imap_proto::types::{BodyParams, ContentEncoding};
+use async_imap::imap_proto::{BodyContentCommon, BodyContentSinglePart, BodyStructure};
+use async_imap::imap_proto::{BodyParams, ContentEncoding};
 use tracing::{debug, warn};
 
 use mc_domain::error::DomainError;

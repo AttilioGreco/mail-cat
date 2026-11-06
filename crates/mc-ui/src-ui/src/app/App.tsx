@@ -12,8 +12,8 @@ import { useSyncNow } from '@/features/manage-accounts';
 import { useSessionStore } from '@/entities/session';
 import { useAuthStatusWatch, useSyncProgress } from '@/entities/account';
 import { Toaster } from '@/shared/ui/sonner';
-import { QueryProvider } from './providers/QueryProvider';
-import { ThemeProvider } from './providers/ThemeProvider';
+import { QueryProvider } from './model/QueryProvider';
+import { ThemeProvider } from './model/ThemeProvider';
 
 export default function App() {
   return (

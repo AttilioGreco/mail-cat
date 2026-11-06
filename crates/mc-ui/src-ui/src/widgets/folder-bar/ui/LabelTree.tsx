@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { useMemo, useState, type KeyboardEvent } from 'react';
 import { ChevronRight, Tag } from 'lucide-react';
 import { cn } from '@/shared/lib/utils';
 import { labelKey } from '@/shared/lib/label-colors';
@@ -51,12 +51,15 @@ export function LabelTree({ accountId, labels, selectedMailboxId, onSelect, onCo
   };
 
   // The branch holding the selected label opens whenever the selection moves into it.
-  useEffect(() => {
-    if (!selectedPath) return;
-    const missing = ancestorKeys(selectedPath.split('/').filter(Boolean).join('/')).filter((k) => !expanded.has(k));
+  const selectionKey = `${accountId}|${selectedPath}`;
+  const [seenSelection, setSeenSelection] = useState<string | null>(null);
+  if (seenSelection !== selectionKey) {
+    setSeenSelection(selectionKey);
+    const missing = selectedPath
+      ? ancestorKeys(selectedPath.split('/').filter(Boolean).join('/')).filter((k) => !expanded.has(k))
+      : [];
     if (missing.length > 0) update(new Set([...expanded, ...missing]));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a selection change should force-open
-  }, [selectedPath, accountId]);
+  }
 
   const rows = visibleRows(roots, expanded);
 

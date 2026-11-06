@@ -18,11 +18,10 @@ import type { Mailbox } from '@/entities/mailbox'
  */
 export function useInboxWatcher(accountId: string | null, inbox: Mailbox | null) {
   const queryClient = useQueryClient()
+  const mailboxId = inbox?.id
 
   useEffect(() => {
-    if (!accountId || !inbox) return
-
-    const mailboxId = inbox.id
+    if (!accountId || !mailboxId) return
 
     invoke('start_watching', { mailboxId }).catch((e) =>
       console.error('[inbox-watcher] start_watching failed:', e),
@@ -41,5 +40,5 @@ export function useInboxWatcher(accountId: string | null, inbox: Mailbox | null)
       invoke('stop_watching', { mailboxId }).catch(() => {})
       unlisten?.()
     }
-  }, [accountId, inbox?.id, queryClient])
+  }, [accountId, mailboxId, queryClient])
 }

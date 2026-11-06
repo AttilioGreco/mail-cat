@@ -7,7 +7,7 @@ export default tseslint.config(
   { ignores: ['dist', 'node_modules', 'src-tauri'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
-  reactHooks.configs['recommended-latest'],
+  reactHooks.configs.flat.recommended,
   {
     languageOptions: {
       globals: globals.browser,

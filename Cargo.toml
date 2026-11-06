@@ -47,38 +47,35 @@ async-graphql-axum = "7"
 axum = "0.8"
 
 # Email
-# Pinned: the IMAP login classifier reads the NO text async-imap formats
-# (`code: …, info: …`); a bump must re-run its raw-reply tests.
-async-imap = "=0.11.2"
+async-imap = "0.12.0"
 async-native-tls = "0.6"
 lettre = { version = "0.11", features = ["tokio1-native-tls"] }
-mailparse = "0.16"
+mailparse = "0.18"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
-base64 = "0.22"
+base64 = "0.23"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 
 # OAuth2 (Google/Microsoft login for XOAUTH2 IMAP/SMTP)
-oauth2 = { version = "4", features = ["reqwest"] }
+oauth2 = { version = "5", features = ["reqwest"] }
 url = "2"
 
-# JMAP: raw RFC 8620/8621 requests over reqwest (already in the tree via oauth2).
-# Pinned to the version oauth2 resolves to, so no second HTTP stack is built.
-reqwest = { version = "=0.11.27", default-features = false, features = ["json", "rustls-tls"] }
+# JMAP: raw RFC 8620/8621 requests over reqwest.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 
 # Storage
-rusqlite = { version = "0.40", features = ["bundled", "uuid"] }
-zstd = "0.13"
+rusqlite = { version = "0.41", features = ["bundled", "uuid"] }
+zstd = "0.14"
 
 # Search
-tantivy = "0.26"
+tantivy = "0.27"
 
 # Local sentence embeddings (ONNX runtime, downloaded at build time). Pinned:
 # the model files in `mc-infrastructure/src/embedding` are verified by hash and
 # a bump must re-run the ignored real-model test. Our own downloader feeds it
 # the bytes, so hf-hub (and a second HTTP stack) stays out.
-fastembed = { version = "=7.5.0", default-features = false, features = ["ort-download-binaries-native-tls"] }
-sha2 = "0.10"
+fastembed = { version = "7.6.1", default-features = false, features = ["ort-download-binaries-native-tls"] }
+sha2 = "0.11"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -99,18 +96,13 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 
 # Config
-toml = "1.1"
+toml = "1.2"
 toml_edit = "0.25"
-dirs = "6"
+dirs = "7"
 
 # Secrets (OS keychain, cross-platform) + config file watching
-# v3 is the mature line; v4's `v1` auto-init is broken (never sets a default store).
-keyring = { version = "3", features = [
-    "apple-native",
-    "windows-native",
-    "sync-secret-service",
-    "crypto-rust",
-] }
+# v4 `v1` (default) picks the native store per OS; entries keep the v3 service/user keys.
+keyring = "4"
 
 # Utilities
 futures = "0.3"
@@ -120,7 +112,7 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 bytes = "1"
 async-compat = "0.2"
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 # Testing
 tempfile = "3"

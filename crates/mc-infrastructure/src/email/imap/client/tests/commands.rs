@@ -159,10 +159,10 @@ fn imap4rev2_implies_move_and_uidplus() {
 
 #[test]
 fn copy_reports_the_destination_uid_only_with_uidplus() {
-    use async_imap::imap_proto::{Response, parser::parse_response};
+    use async_imap::imap_proto::Response;
 
-    let code_of = |line: &'static [u8]| match parse_response(line).unwrap().1 {
-        Response::Done { code, .. } => code,
+    let code_of = |line: &'static [u8]| match Response::parse(line).unwrap().1 {
+        Response::Done { outcome, .. } => outcome.code,
         other => panic!("not a tagged reply: {other:?}"),
     };
     assert_eq!(

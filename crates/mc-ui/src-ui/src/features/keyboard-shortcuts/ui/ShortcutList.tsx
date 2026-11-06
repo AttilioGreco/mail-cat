@@ -1,7 +1,7 @@
 import {
   formatForDisplay,
   useHotkeyRegistrations,
-  type HotkeyRegistrationsResult,
+  type HotkeyRegistrationView,
 } from '@tanstack/react-hotkeys';
 import { CATEGORY_ORDER, type ShortcutCategory } from '../model/presets';
 
@@ -18,7 +18,7 @@ interface Row {
  * becomes conditional (message actions, for instance, are unbound in
  * conversation mode because the thread view owns them there).
  */
-function buildRows(registrations: HotkeyRegistrationsResult): Row[] {
+function buildRows(registrations: HotkeyRegistrationView[]): Row[] {
   const byLabel = new Map<string, Row>();
 
   const add = (label: string | undefined, category: string | undefined, keys: string[]) => {
@@ -28,14 +28,12 @@ function buildRows(registrations: HotkeyRegistrationsResult): Row[] {
     byLabel.set(label, row);
   };
 
-  for (const reg of registrations.hotkeys) {
-    add(reg.options.meta?.name, reg.options.meta?.description, [formatForDisplay(reg.hotkey)]);
-  }
-  for (const reg of registrations.sequences) {
+  for (const reg of registrations) {
+    const steps = reg.kind === 'chord' ? [reg.hotkey] : reg.hotkey;
     add(
       reg.options.meta?.name,
       reg.options.meta?.description,
-      reg.sequence.map((step) => formatForDisplay(step)),
+      steps.map((step) => formatForDisplay(step)),
     );
   }
 

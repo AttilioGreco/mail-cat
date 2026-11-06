@@ -1,8 +1,6 @@
 import {
   useHotkeys,
-  useHotkeySequences,
   type UseHotkeyDefinition,
-  type UseHotkeySequenceDefinition,
 } from '@tanstack/react-hotkeys';
 import { useKeymap } from './shortcuts-store';
 import { ACTION_META, type ShortcutAction } from './presets';
@@ -18,14 +16,13 @@ export type ShortcutHandlers = Partial<Record<ShortcutAction, (() => void) | und
  * passed as `undefined`, stays unbound: that's how conversation mode hands
  * message actions over to the thread view without both registering the same key.
  *
- * Both underlying hooks take a dynamic array, so a changing preset or handler
+ * The underlying hook takes a dynamic array, so a changing preset or handler
  * set stays a single hook call and never trips the rules of hooks.
  */
 export function useShortcuts(handlers: ShortcutHandlers) {
   const keymap = useKeymap();
 
   const chords: UseHotkeyDefinition[] = [];
-  const sequences: UseHotkeySequenceDefinition[] = [];
 
   for (const [action, handler] of Object.entries(handlers) as [
     ShortcutAction,
@@ -49,10 +46,9 @@ export function useShortcuts(handlers: ShortcutHandlers) {
         chords.push({ hotkey, callback: handler, options: { meta } });
       }
     } else {
-      sequences.push({ sequence: binding.sequence, callback: handler, options: { meta } });
+      chords.push({ hotkey: binding.sequence, callback: handler, options: { meta } });
     }
   }
 
   useHotkeys(chords);
-  useHotkeySequences(sequences);
 }

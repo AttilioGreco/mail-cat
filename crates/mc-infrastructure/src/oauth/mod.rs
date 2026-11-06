@@ -10,16 +10,43 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use mc_domain::{DomainError, OAuthProvider, OAuthSecrets};
 use oauth2::basic::BasicClient;
 use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use tokio::net::TcpListener;
+
+type ProviderClient =
+    BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
+
+fn build_client(preset: &ProviderPreset) -> Result<ProviderClient, DomainError> {
+    let client = BasicClient::new(ClientId::new(preset.client_id()))
+        .set_auth_uri(
+            AuthUrl::new(preset.auth_url.to_string())
+                .map_err(|e| DomainError::Provider(format!("invalid auth url: {e}")))?,
+        )
+        .set_token_uri(
+            TokenUrl::new(preset.token_url.to_string())
+                .map_err(|e| DomainError::Provider(format!("invalid token url: {e}")))?,
+        );
+    Ok(match preset.client_secret() {
+        Some(secret) => client.set_client_secret(ClientSecret::new(secret)),
+        None => client,
+    })
+}
+
+fn http_client() -> Result<oauth2::reqwest::Client, DomainError> {
+    // Redirects off: a token endpoint never legitimately redirects (RFC 6749 SSRF note).
+    oauth2::reqwest::Client::builder()
+        .redirect(oauth2::reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| DomainError::Provider(format!("failed to build OAuth http client: {e}")))
+}
 
 /// Holds everything needed to complete a login once the browser redirects
 /// back: the bound loopback listener, the PKCE verifier, and the CSRF token
 /// to check the redirect against.
 pub struct PendingLogin {
-    client: BasicClient,
+    client: ProviderClient,
     pkce_verifier: PkceCodeVerifier,
     csrf_token: CsrfToken,
     listener: TcpListener,
@@ -43,17 +70,7 @@ pub async fn begin_authorization(
         .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
-    let client = BasicClient::new(
-        ClientId::new(preset.client_id()),
-        preset.client_secret().map(ClientSecret::new),
-        AuthUrl::new(preset.auth_url.to_string())
-            .map_err(|e| DomainError::Provider(format!("invalid auth url: {e}")))?,
-        Some(
-            TokenUrl::new(preset.token_url.to_string())
-                .map_err(|e| DomainError::Provider(format!("invalid token url: {e}")))?,
-        ),
-    )
-    .set_redirect_uri(
+    let client = build_client(&preset)?.set_redirect_uri(
         RedirectUrl::new(redirect_uri)
             .map_err(|e| DomainError::Provider(format!("invalid redirect url: {e}")))?,
     );
@@ -96,7 +113,7 @@ pub async fn complete_authorization(pending: PendingLogin) -> Result<OAuthSecret
         .client
         .exchange_code(AuthorizationCode::new(code))
         .set_pkce_verifier(pending.pkce_verifier)
-        .request_async(oauth2::reqwest::async_http_client)
+        .request_async(&http_client()?)
         .await
         .map_err(|e| DomainError::Provider(format!("OAuth token exchange failed: {e}")))?;
 
@@ -109,20 +126,11 @@ pub async fn refresh(
     refresh_token: &str,
 ) -> Result<OAuthSecrets, DomainError> {
     let preset = provider_preset(provider);
-    let client = BasicClient::new(
-        ClientId::new(preset.client_id()),
-        preset.client_secret().map(ClientSecret::new),
-        AuthUrl::new(preset.auth_url.to_string())
-            .map_err(|e| DomainError::Provider(format!("invalid auth url: {e}")))?,
-        Some(
-            TokenUrl::new(preset.token_url.to_string())
-                .map_err(|e| DomainError::Provider(format!("invalid token url: {e}")))?,
-        ),
-    );
+    let client = build_client(&preset)?;
 
     let token = client
         .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
-        .request_async(oauth2::reqwest::async_http_client)
+        .request_async(&http_client()?)
         .await
         .map_err(classify_refresh_error)?;
 
@@ -158,9 +166,7 @@ fn classify_refresh_error<RE: std::error::Error + 'static>(
     }
 }
 
-fn token_response_to_secrets<TR: TokenResponse<oauth2::basic::BasicTokenType>>(
-    token: &TR,
-) -> Result<OAuthSecrets, DomainError> {
+fn token_response_to_secrets<TR: TokenResponse>(token: &TR) -> Result<OAuthSecrets, DomainError> {
     let expires_in = token
         .expires_in()
         .unwrap_or(std::time::Duration::from_secs(3600));

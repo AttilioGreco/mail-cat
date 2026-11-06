@@ -272,9 +272,9 @@ async fn add_notification_matches(conn: &zbus::Connection) -> zbus::Result<()> {
     for member in ["ActionInvoked", "NotificationClosed"] {
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
-            .interface("org.freedesktop.Notifications")?
-            .member(member)?
-            .build();
+            .interface("org.freedesktop.Notifications")
+            .member(member)
+            .build()?;
         proxy.add_match_rule(rule).await?;
     }
     Ok(())

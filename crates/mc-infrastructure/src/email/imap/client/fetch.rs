@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use async_imap::imap_proto::types::{BodyStructure, ContentEncoding};
+use async_imap::imap_proto::{BodyStructure, ContentEncoding};
 use tracing::{debug, info, warn};
 
 use mc_domain::error::DomainError;

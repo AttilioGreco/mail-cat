@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Tauri
-tauri = { version = "2.11", features = ["devtools"] }
+tauri = { version = "2.12", features = ["devtools"] }
 # Forwards argv to the already-running window instead of opening a second one,
 # which is what makes the notification deep link focus the existing client.
 tauri-plugin-single-instance = "2"
@@ -38,4 +38,4 @@ tauri-plugin-process = "2"
 tauri-plugin-opener = "2"
 
 [build-dependencies]
-tauri-build = { version = "2.6", features = [] }
+tauri-build = { version = "2.7", features = [] }

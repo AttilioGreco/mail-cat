@@ -116,7 +116,8 @@ enum LoginVerdict {
 }
 
 /// Reads a tagged NO to LOGIN/AUTHENTICATE. async-imap only hands it over as
-/// `code: {code:?}, info: {info:?}` (hence the pinned version), and imap-proto
+/// `code: {code:?}, info: {info:?}` (the raw-reply tests guard that format
+/// across async-imap bumps), and imap-proto
 /// parses only RFC 3501 codes: ALERT comes out in `code`, while an RFC 5530
 /// code (AUTHENTICATIONFAILED, UNAVAILABLE, LIMIT…) or Gmail's WEBALERT stays
 /// at the start of `info`. A NO without any code is what old servers send on a
@@ -515,7 +516,7 @@ impl ImapEmailProvider {
 
     /// Parse IMAP address list into domain Address list.
     pub(super) fn parse_imap_addresses(
-        addrs: Option<&Vec<async_imap::imap_proto::types::Address>>,
+        addrs: Option<&Vec<async_imap::imap_proto::Address>>,
     ) -> Vec<mc_domain::Address> {
         addrs
             .map(|addrs| {

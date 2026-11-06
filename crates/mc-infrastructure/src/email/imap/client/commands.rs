@@ -3,7 +3,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use async_imap::imap_proto::types::{AttributeValue, Response, SectionPath};
+use async_imap::imap_proto::{AttributeValue, Response, SectionPath};
 
 use mc_domain::error::DomainError;
 use mc_domain::value_objects::remote_id::RemoteId;
@@ -121,10 +121,9 @@ where
             Response::Done {
                 tag,
                 status,
-                code,
-                information,
-                ..
+                outcome,
             } if *tag == id => {
+                let (code, information) = (&outcome.code, &outcome.information);
                 let reply = format!("code: {code:?}, info: {information:?}");
                 return match status {
                     Status::Ok => Ok(fetched),
@@ -419,19 +418,17 @@ where
         match response.parsed() {
             Response::Data {
                 status: Status::Ok,
-                code,
-                ..
-            } => copied.extend(copied_uids(code.as_ref())),
+                outcome,
+            } => copied.extend(copied_uids(outcome.code.as_ref())),
             Response::Done {
                 tag: done,
                 status,
-                code,
-                information,
+                outcome,
             } if *done == tag => {
                 if *status != Status::Ok {
-                    return Err(failed(&format!("{status:?} {information:?}")));
+                    return Err(failed(&format!("{status:?} {:?}", outcome.information)));
                 }
-                copied.extend(copied_uids(code.as_ref()));
+                copied.extend(copied_uids(outcome.code.as_ref()));
                 return Ok(copied);
             }
             _ => {}
@@ -442,7 +439,7 @@ where
 /// `(source, destination)` UID pairs of a `[COPYUID <validity> <source set>
 /// <dest set>]` code: the sets list the UIDs in matching order (RFC 4315).
 pub(super) fn copied_uids(code: Option<&async_imap::imap_proto::ResponseCode>) -> Vec<(u32, u32)> {
-    use async_imap::imap_proto::{ResponseCode, UidSetMember};
+    use async_imap::imap_proto::{ResponseCode, rfc4315::UidSetMember};
 
     let Some(ResponseCode::CopyUid(_, from, to)) = code else {
         return Vec::new();

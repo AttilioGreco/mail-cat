@@ -1,10 +1,8 @@
 use super::*;
 
 fn structure_of(response: &[u8]) -> Vec<TextPart> {
-    use async_imap::imap_proto::types::{AttributeValue, Response};
-    let (_, Response::Fetch(_, attrs)) =
-        async_imap::imap_proto::parser::parse_response(response).unwrap()
-    else {
+    use async_imap::imap_proto::{AttributeValue, Response};
+    let (_, Response::Fetch(_, attrs)) = Response::parse(response).unwrap() else {
         panic!("not a FETCH response")
     };
     let structure = attrs

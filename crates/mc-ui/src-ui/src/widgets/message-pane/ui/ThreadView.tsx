@@ -45,11 +45,12 @@ export function ThreadView() {
   // Guard: fire mark-as-read at most once per thread selection
   const markedThreadRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (!messages?.length) return;
-    const lastId = messages[messages.length - 1].id;
-    setExpandedIds(new Set([lastId]));
-  }, [selectedThreadMessageId, messages]);
+  // Reset during render (not in an effect) whenever the thread data changes.
+  const [expandedFor, setExpandedFor] = useState<typeof messages>(undefined);
+  if (messages !== expandedFor) {
+    setExpandedFor(messages);
+    if (messages?.length) setExpandedIds(new Set([messages[messages.length - 1].id]));
+  }
 
   // Auto-mark-as-read the newest (auto-expanded) message when the thread opens.
   // Uses the same ref-guard pattern as MessageViewer to avoid re-firing on

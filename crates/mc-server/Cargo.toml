@@ -31,9 +31,8 @@ dirs = { workspace = true }
 
 # Notification actions must outlive the on-screen banner (notify-rust's
 # per-notification listener does not), so we drive the session bus directly.
-# Same major as notify-rust's own zbus, so no second copy gets built.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = "5"
+zbus = "6"
 
 [dev-dependencies]
 tempfile = { workspace = true }

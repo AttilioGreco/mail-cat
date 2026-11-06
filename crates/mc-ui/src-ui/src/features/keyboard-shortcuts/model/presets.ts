@@ -16,7 +16,7 @@
  * while Ctrl/Meta chords and Escape still fire.
  */
 
-import type { Hotkey, HotkeySequence } from '@tanstack/react-hotkeys';
+import type { HotkeyChord, HotkeySequence } from '@tanstack/react-hotkeys';
 
 /** Marks a binding as "press these in order" rather than "any one of these". */
 export interface SequenceBinding {
@@ -25,7 +25,7 @@ export interface SequenceBinding {
 
 /** Typed by the library, so a misspelled key is a compile error rather than a
  *  shortcut that silently never fires. */
-export type ShortcutBinding = Hotkey | Hotkey[] | SequenceBinding;
+export type ShortcutBinding = HotkeyChord | HotkeyChord[] | SequenceBinding;
 
 /** `seq('G', 'I')` — reads better than `{ sequence: [...] }` in the tables below. */
 function seq(...keys: HotkeySequence): SequenceBinding {
