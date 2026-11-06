@@ -11,11 +11,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "deb",
-      "rpm",
-      "appimage"
-    ],
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",
@@ -23,26 +18,8 @@
       "icons/128x128@2x.png",
       "icons/icon.png"
     ],
-    "linux": {
-      "deb": {
-        "depends": [],
-        "files": {
-          "/usr/bin/mail-cat-server": "../../target/release/mail-cat-server",
-          "/usr/bin/mc": "../../target/release/mc",
-          "/usr/lib/systemd/user/mail-cat-server.service": "../../packaging/systemd/mail-cat-server.service",
-          "/usr/share/mail-cat/config.toml.example": "../../deploy/config.toml.example"
-        }
-      },
-      "rpm": {
-        "depends": [],
-        "files": {
-          "/usr/bin/mail-cat-server": "../../target/release/mail-cat-server",
-          "/usr/bin/mc": "../../target/release/mc",
-          "/usr/lib/systemd/user/mail-cat-server.service": "../../packaging/systemd/mail-cat-server.service",
-          "/usr/share/mail-cat/config.toml.example": "../../deploy/config.toml.example"
-        }
-      }
-    }
+    "createUpdaterArtifacts": true,
+    "shortDescription": "Email client with background sync"
   },
   "app": {
     "windows": [
@@ -60,5 +37,14 @@
     "security": {
       "csp": "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline';"
     }
-  }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY (output of `bun tauri signer generate`, see docs/release.md)",
+      "endpoints": [
+        "https://github.com/AttilioGreco/mail-cat/releases/latest/download/latest.json"
+      ]
+    }
+  },
+  "mainBinaryName": "mail-cat-ui"
 }

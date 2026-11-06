@@ -165,7 +165,7 @@ install-profiling:
 install: build-release
     @echo "→ binari..."
     mkdir -p ~/.local/bin
-    systemctl stop --user mail-cat-server.service
+    systemctl stop --user mail-cat-server.service; or true
     cp target/release/mail-cat-server ~/.local/bin/
     cp target/release/mail-cat-ui ~/.local/bin/
     cp target/release/mc ~/.local/bin/
@@ -175,12 +175,8 @@ install: build-release
     test -f ~/.config/mail-cat/config.toml; or cp deploy/config.toml.example ~/.config/mail-cat/config.toml
     grep -Eq '^(db_path|index_path)\s*=\s*"\./' ~/.config/mail-cat/config.toml; and echo "⚠ config.toml usa un path relativo per db_path/index_path: con systemd si risolve contro \$HOME, non contro il repo. Usa un path assoluto (es. ~/.local/share/mail-cat/db)." ; or true
 
-    @echo "→ systemd user service..."
-    mkdir -p ~/.config/systemd/user
-    cp deploy/mail-cat-server.service ~/.config/systemd/user/
-    systemctl --user daemon-reload
-    systemctl --user enable mail-cat-server
-    systemctl --user restart mail-cat-server
+    @echo "→ autostart (systemd user service)..."
+    ~/.local/bin/mail-cat-server service install
 
     @echo "→ icona..."
     mkdir -p ~/.local/share/icons/hicolor/32x32/apps

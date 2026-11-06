@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 use mc_domain::error::DomainError;
 use mc_domain::traits::login_gate::LoginGate;
 use mc_domain::{
-    AccountId, EmailProvider, Existing, Flag, Mailbox, MailboxChanges, MailboxCounts, MailboxId,
-    MailboxPath, Message, MessageBodyResult, MessageEnvelopeSummary, MessageKey, OutgoingMessage,
-    ProviderNotification, RemoteId, Reset, SendOutcome, SyncCursor,
+    AccountId, Attachment, EmailProvider, Existing, Flag, Mailbox, MailboxChanges, MailboxCounts,
+    MailboxId, MailboxPath, Message, MessageBodyResult, MessageEnvelopeSummary, MessageKey,
+    OutgoingMessage, ProviderNotification, RemoteId, Reset, SendOutcome, SyncCursor,
 };
 
 use super::client::{JmapClient, MethodError};
@@ -123,7 +123,11 @@ impl JmapEmailProvider {
             extra["maxBodyValueBytes"] = json!(cap);
         }
         let emails = self
-            .get_emails(ids, &["id", "textBody", "htmlBody", "bodyValues"], extra)
+            .get_emails(
+                ids,
+                &["id", "textBody", "htmlBody", "bodyValues", "attachments"],
+                extra,
+            )
             .await?;
         Ok(emails.iter().filter_map(mapper::bodies).collect())
     }
@@ -393,7 +397,12 @@ impl EmailProvider for JmapEmailProvider {
             .await?
             .pop()
             .ok_or_else(|| DomainError::MessageNotFound(id.to_string()))?;
-        Ok(body_only_message(id, body.body_text, body.body_html))
+        Ok(body_only_message(
+            id,
+            body.body_text,
+            body.body_html,
+            body.attachments,
+        ))
     }
 
     async fn fetch_bodies_bulk(
@@ -402,6 +411,20 @@ impl EmailProvider for JmapEmailProvider {
         ids: &[RemoteId],
     ) -> Result<Vec<MessageBodyResult>, DomainError> {
         self.bodies(ids, Some(TEXT_PART_CAP)).await
+    }
+
+    async fn fetch_attachments(
+        &self,
+        _mailbox: &MailboxPath,
+        ids: &[RemoteId],
+    ) -> Result<HashMap<RemoteId, Vec<Attachment>>, DomainError> {
+        let emails = self
+            .get_emails(ids, &["id", "attachments"], json!({}))
+            .await?;
+        Ok(emails
+            .iter()
+            .filter_map(|e| Some((RemoteId::new(e["id"].as_str()?), mapper::attachments(e))))
+            .collect())
     }
 
     async fn find_by_message_id(

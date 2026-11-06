@@ -9,6 +9,7 @@ use futures::Stream;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
+use mc_domain::Attachment;
 use mc_domain::error::DomainError;
 use mc_domain::model::account::MailboxModel;
 use mc_domain::model::mailbox::Mailbox;
@@ -35,6 +36,7 @@ use self::fetch::isolating;
 use self::session::Counted;
 #[cfg(test)]
 use self::{
+    attachments::structure_attachments,
     commands::{copied_uids, uid_flags},
     fetch::{TextPart, message_start, text_bodies, text_parts, whole_message_text},
     session::{XOAuth2Authenticator, log_in, login_error, xoauth2_rejects_token},
@@ -140,13 +142,14 @@ impl EmailProvider for ImapEmailProvider {
         let MessageBodyResult {
             body_text,
             body_html,
+            attachments,
             ..
         } = self
             .fetch_one_body(&mailbox_name, uid_of(id)?)
             .await?
             .ok_or_else(|| DomainError::Provider("Message not found".into()))?;
 
-        Ok(body_only_message(id, body_text, body_html))
+        Ok(body_only_message(id, body_text, body_html, attachments))
     }
 
     async fn fetch_bodies_bulk(
@@ -173,6 +176,21 @@ impl EmailProvider for ImapEmailProvider {
             );
         }
         Ok(results)
+    }
+
+    async fn fetch_attachments(
+        &self,
+        mailbox: &MailboxPath,
+        ids: &[RemoteId],
+    ) -> Result<HashMap<RemoteId, Vec<Attachment>>, DomainError> {
+        let uids = uids_of(ids)?;
+        let named = self
+            .attachments_in(&mailbox_path_to_string(mailbox), &uids)
+            .await?;
+        Ok(named
+            .into_iter()
+            .map(|(uid, attachments)| (RemoteId::from(uid), attachments))
+            .collect())
     }
 
     async fn find_by_message_id(
@@ -500,6 +518,7 @@ fn sent_copy_of(stored: Result<Option<RemoteId>, DomainError>) -> SentCopy {
 
 pub use self::session::asks_the_user_to_act;
 
+mod attachments;
 mod changes;
 mod commands;
 mod fetch;

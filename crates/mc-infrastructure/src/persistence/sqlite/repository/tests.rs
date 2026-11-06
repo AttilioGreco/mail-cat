@@ -535,3 +535,86 @@ async fn message_ids_page_in_id_order_and_the_list_id_comes_from_the_headers() {
     }
     assert_eq!(found, ["<digest.example.org>"]);
 }
+
+fn pdf(name: &str, is_inline: bool) -> mc_domain::Attachment {
+    mc_domain::Attachment {
+        id: mc_domain::AttachmentId::new(),
+        filename: Some(name.into()),
+        mime_type: "application/pdf".into(),
+        size_bytes: 10,
+        content_id: None,
+        is_inline,
+    }
+}
+
+#[tokio::test]
+async fn only_stored_flagged_mail_without_names_waits_for_them() {
+    let (_dir, repo) = open();
+    let account = AccountId::new();
+    let mailbox = MailboxId::new();
+    let mut ids = Vec::new();
+    for (n, flagged) in [(1, true), (2, false), (3, true)] {
+        let (id, mut event) = received(account, mailbox, &format!("<{n}@x>"));
+        if let DomainEvent::MessageReceived {
+            has_attachments, ..
+        } = &mut event
+        {
+            *has_attachments = flagged;
+        }
+        repo.project(&at_position(n, event)).await.unwrap();
+        ids.push(id);
+    }
+    // The third one's body is still queued for the backfill.
+    for id in &ids[..2] {
+        repo.put_body(id, Some("x".into()), None, false)
+            .await
+            .unwrap();
+        let stored = DomainEvent::MessageBodyFetched {
+            message_id: *id,
+            attachments: vec![],
+        };
+        repo.project(&at_position(10, stored)).await.unwrap();
+    }
+
+    let waiting = repo.list_unnamed_attachments(&account, 10).await.unwrap();
+    assert_eq!(
+        waiting.iter().map(|e| e.message_id).collect::<Vec<_>>(),
+        [ids[0]]
+    );
+
+    let named = DomainEvent::MessageBodyFetched {
+        message_id: ids[0],
+        attachments: vec![pdf("fattura.pdf", false)],
+    };
+    repo.project(&at_position(11, named)).await.unwrap();
+
+    assert!(
+        repo.list_unnamed_attachments(&account, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let message = repo.get_message(&ids[0]).await.unwrap().unwrap();
+    assert!(message.has_attachments);
+    assert_eq!(
+        message.attachments[0].filename.as_deref(),
+        Some("fattura.pdf")
+    );
+}
+
+#[tokio::test]
+async fn embedded_images_are_listed_but_do_not_make_a_paperclip() {
+    let (_dir, repo) = open();
+    let (id, event) = received(AccountId::new(), MailboxId::new(), "<a@x>");
+    repo.project(&at_position(1, event)).await.unwrap();
+
+    let named = DomainEvent::MessageBodyFetched {
+        message_id: id,
+        attachments: vec![pdf("logo.png", true)],
+    };
+    repo.project(&at_position(2, named)).await.unwrap();
+
+    let message = repo.get_message(&id).await.unwrap().unwrap();
+    assert!(!message.has_attachments);
+    assert_eq!(message.attachments.len(), 1);
+}

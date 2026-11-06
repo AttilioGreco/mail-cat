@@ -138,7 +138,7 @@ impl Message {
         self.body_text = body_text.clone();
         self.body_html = body_html.clone();
         self.attachments = attachments.clone();
-        self.has_attachments = !self.attachments.is_empty();
+        self.has_attachments = Attachment::any_downloadable(&self.attachments);
 
         DomainEvent::MessageBodyFetched {
             message_id: self.id,
@@ -353,7 +353,7 @@ impl Message {
             // A text-only fetch carries no attachment info: keep the envelope's.
             DomainEvent::MessageBodyFetched { attachments, .. } if !attachments.is_empty() => {
                 self.attachments = attachments.clone();
-                self.has_attachments = true;
+                self.has_attachments = Attachment::any_downloadable(attachments);
             }
             DomainEvent::MessageBodyFetched { .. } => {}
             DomainEvent::MessageFlagged {

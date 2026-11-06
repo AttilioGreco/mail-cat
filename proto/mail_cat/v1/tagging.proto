@@ -14,6 +14,10 @@ service TaggingService {
 
   rpc GetLabelSettings(LabelRef) returns (LabelStatus);
   rpc SetLabelSettings(SetLabelSettingsRequest) returns (LabelStatus);
+  // Colors live in mail-cat only; any palette key, unset to clear. Needs no
+  // examples, unlike leaving mode "off".
+  rpc SetLabelColor(SetLabelColorRequest) returns (LabelStatus);
+  rpc ListLabelColors(ListLabelColorsRequest) returns (ListLabelColorsResponse);
 
   // What the classifier suggests for a message and what it applied itself.
   rpc GetMessageTags(MessageTagsRequest) returns (MessageTagsResponse);
@@ -500,7 +504,17 @@ message LabelStatus {
   double threshold = 3;
   uint32 positives = 4;
   uint32 min_positives = 5;
+  optional string color = 6;
 }
+
+message SetLabelColorRequest {
+  string account_id = 1;
+  string label = 2;  // any case
+  optional string color = 3;
+}
+message ListLabelColorsRequest { string account_id = 1; }
+// Lowercased label -> palette key, for the account's training group.
+message ListLabelColorsResponse { map<string, string> colors = 1; }
 
 message SetLabelSettingsRequest {
   string account_id = 1;

@@ -113,6 +113,40 @@ fn html_only_mail_has_no_text_body() {
     assert!(body.truncated);
 }
 
+#[test]
+fn attachments_are_named_from_the_email() {
+    let body = mapper::bodies(&json!({
+        "id": "e1",
+        "attachments": [
+            {"partId": "2", "type": "application/PDF", "name": "fattura.pdf", "size": 900, "disposition": "attachment"},
+            {"partId": "3", "type": "image/png", "name": "logo.png", "size": 40, "cid": "c1", "disposition": "inline"},
+            {"partId": "4", "type": "application/zip", "name": null, "size": 7},
+        ],
+    }))
+    .unwrap();
+    let listed: Vec<_> = body
+        .attachments
+        .iter()
+        .map(|a| {
+            (
+                a.filename.as_deref(),
+                a.mime_type.as_str(),
+                a.size_bytes,
+                a.is_inline,
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (Some("fattura.pdf"), "application/pdf", 900, false),
+            (Some("logo.png"), "image/png", 40, true),
+            (None, "application/zip", 7, false),
+        ]
+    );
+    assert_eq!(body.attachments[1].content_id.as_deref(), Some("c1"));
+}
+
 /// A throwaway JMAP server: `handler` answers each method call, back-references
 /// to an earlier call's `ids` are resolved before it sees them.
 async fn serve(handler: impl Fn(&str, &Value) -> Value + Send + Sync + 'static) -> String {

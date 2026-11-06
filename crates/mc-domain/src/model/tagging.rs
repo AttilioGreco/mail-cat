@@ -190,6 +190,22 @@ pub struct LabelSettings {
     pub mode: LabelMode,
     /// Confidence from which `Apply` modes act.
     pub threshold: f64,
+    /// A palette key (see [`LabelSettings::is_color`]). Kept here only: mail servers have no label
+    /// colors. Saving the other settings never changes it.
+    pub color: Option<String>,
+}
+
+const HUES: [&str; 12] = [
+    "red", "orange", "amber", "yellow", "lime", "green", "teal", "cyan", "blue", "indigo",
+    "purple", "pink",
+];
+
+impl LabelSettings {
+    /// Whether `key` is `hue` or `hue-soft` for one of the twelve hues.
+    pub fn is_color(key: &str) -> bool {
+        let hue = key.strip_suffix("-soft").unwrap_or(key);
+        HUES.contains(&hue)
+    }
 }
 
 impl LabelSettings {
@@ -202,6 +218,7 @@ impl LabelSettings {
             label: label.to_owned(),
             mode: LabelMode::Off,
             threshold: Self::DEFAULT_THRESHOLD,
+            color: None,
         }
     }
 }

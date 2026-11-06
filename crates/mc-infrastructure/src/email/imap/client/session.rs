@@ -329,6 +329,7 @@ impl ImapEmailProvider {
             body_text,
             body_html,
             truncated: false,
+            attachments: Vec::new(),
         }))
     }
 

@@ -1,8 +1,12 @@
 import { HotkeysProvider } from '@tanstack/react-hotkeys';
 import { MainPage } from '@/pages/main';
+import { LabelsPage } from '@/pages/labels';
 import { SettingsPage } from '@/pages/settings';
 import { useSettingsStore } from '@/features/manage-settings';
 import { useShortcuts, useShortcutsStore, ShortcutsOverlay } from '@/features/keyboard-shortcuts';
+import { useAppUpdate } from '@/features/app-update';
+import { useServerAutostartError } from '@/features/server-autostart';
+import { useLabelsPage } from '@/features/manage-labels';
 import { useComposeStore } from '@/features/compose-message';
 import { useSyncNow } from '@/features/manage-accounts';
 import { useSessionStore } from '@/entities/session';
@@ -24,12 +28,13 @@ export default function App() {
 }
 
 /**
- * Two screens, one flag — settings is a full page, not an overlay.
- * ponytail: no router dependency for a single either/or; add one if a third
- * screen or deep-linkable URLs show up.
+ * Settings and labels are full pages that replace the main layout, not overlays.
+ * ponytail: two flags instead of a router; add one if a fourth screen or
+ * deep-linkable URLs show up.
  */
 function Router() {
   const { settingsOpen, openSettings, closeSettings } = useSettingsStore();
+  const { labelsOpen, closeLabels } = useLabelsPage();
   const openCompose = useComposeStore((s) => s.openCompose);
   const selectedAccountId = useSessionStore((s) => s.selectedAccountId);
   const syncNow = useSyncNow();
@@ -38,6 +43,8 @@ function Router() {
   // subscription, or the page would open with no progress to show.
   useSyncProgress();
   useAuthStatusWatch();
+  useAppUpdate();
+  useServerAutostartError();
 
   // Only the shortcuts that need no list context — the rest are bound where
   // their data lives (message list, message viewer).
@@ -51,7 +58,13 @@ function Router() {
   });
   return (
     <>
-      {settingsOpen ? <SettingsPage onClose={closeSettings} /> : <MainPage />}
+      {settingsOpen ? (
+        <SettingsPage onClose={closeSettings} />
+      ) : labelsOpen ? (
+        <LabelsPage onClose={closeLabels} />
+      ) : (
+        <MainPage />
+      )}
       {/* Above both screens: the list of what's bound must be reachable anywhere. */}
       <ShortcutsOverlay />
       <Toaster position="bottom-right" />

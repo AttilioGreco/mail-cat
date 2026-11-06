@@ -261,7 +261,7 @@ impl TaggingStore for SqliteTaggingStore {
             .read(move |conn| {
                 query_all(
                     conn,
-                    "SELECT label, mode, threshold FROM tag_settings WHERE scope = ?1",
+                    "SELECT label, mode, threshold, color FROM tag_settings WHERE scope = ?1",
                     [key],
                     |r| {
                         let mode: String = r.get(1)?;
@@ -271,6 +271,7 @@ impl TaggingStore for SqliteTaggingStore {
                                 .parse::<LabelMode>()
                                 .map_err(|e| conversion_err(1, Type::Text, e))?,
                             threshold: r.get(2)?,
+                            color: r.get(3)?,
                         })
                     },
                 )
@@ -288,10 +289,32 @@ impl TaggingStore for SqliteTaggingStore {
             .write(move |conn| {
                 exec(
                     conn,
-                    "INSERT INTO tag_settings (scope, label, mode, threshold) VALUES (?1, ?2, ?3, ?4) \
+                    "INSERT INTO tag_settings (scope, label, mode, threshold, color) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
                      ON CONFLICT(scope, label) DO UPDATE SET mode = excluded.mode, \
                          threshold = excluded.threshold",
-                    params![key, s.label, s.mode.as_str(), s.threshold],
+                    params![key, s.label, s.mode.as_str(), s.threshold, s.color],
+                )
+                .map(drop)
+            })
+            .await
+    }
+
+    async fn set_color(
+        &self,
+        scope: Scope,
+        label: &str,
+        color: Option<&str>,
+    ) -> Result<(), DomainError> {
+        let (key, label, color) = (scope.key(), label.to_owned(), color.map(str::to_owned));
+        self.db
+            .write(move |conn| {
+                exec(
+                    conn,
+                    "INSERT INTO tag_settings (scope, label, mode, threshold, color) \
+                     VALUES (?1, ?2, 'off', ?3, ?4) \
+                     ON CONFLICT(scope, label) DO UPDATE SET color = excluded.color",
+                    params![key, label, LabelSettings::DEFAULT_THRESHOLD, color],
                 )
                 .map(drop)
             })
@@ -482,8 +505,8 @@ impl TaggingStore for SqliteTaggingStore {
                 if let Some(into) = &into {
                     exec(
                         &tx,
-                        "INSERT OR IGNORE INTO tag_settings (scope, label, mode, threshold) \
-                         SELECT scope, ?3, mode, threshold FROM tag_settings \
+                        "INSERT OR IGNORE INTO tag_settings (scope, label, mode, threshold, color) \
+                         SELECT scope, ?3, mode, threshold, color FROM tag_settings \
                          WHERE scope = ?1 AND label = ?2",
                         params![key, label, into],
                     )?;

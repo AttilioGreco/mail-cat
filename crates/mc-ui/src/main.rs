@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod service;
 
 use commands::{AppState, DeepLink, PendingDeepLink, WatchState};
+use std::sync::atomic::AtomicBool;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
@@ -83,6 +85,9 @@ async fn main() {
                 None => tracing::debug!("Second instance with no deep link"),
             }
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_opener::init())
         // tauri.conf.json starts the window undecorated (the tiling-WM case);
         // turn the titlebar back on for floating desktops.
         .setup(|app| {
@@ -91,12 +96,15 @@ async fn main() {
             {
                 window.set_decorations(true)?;
             }
+            service::spawn_ensure(app.handle());
             Ok(())
         })
         .manage(AppState {
             client: Mutex::new(None), // lazy connect on first command
             server_url,
+            starting: AtomicBool::new(false),
         })
+        .manage(service::ServiceState::default())
         .manage(PendingDeepLink(Mutex::new(startup_link)))
         .manage(WatchState::new())
         .invoke_handler(tauri::generate_handler![
@@ -143,6 +151,9 @@ async fn main() {
             commands::list_conversations,
             commands::get_thread,
             commands::take_pending_deep_link,
+            service::take_server_service_error,
+            service::stop_server_service,
+            service::ensure_server_service,
             commands::tagging::list_training_groups,
             commands::tagging::create_training_group,
             commands::tagging::rename_training_group,
@@ -150,6 +161,8 @@ async fn main() {
             commands::tagging::assign_account_group,
             commands::tagging::get_label_settings,
             commands::tagging::set_label_settings,
+            commands::tagging::set_label_color,
+            commands::tagging::list_label_colors,
             commands::tagging::get_message_tags,
             commands::tagging::accept_suggestion,
             commands::tagging::reject_suggestion,
@@ -169,6 +182,8 @@ async fn main() {
             commands::tagging::list_labels,
             commands::tagging::assign_matching_mail,
             commands::tagging::apply_all_labels,
+            commands::tagging::rename_label,
+            commands::tagging::delete_label,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

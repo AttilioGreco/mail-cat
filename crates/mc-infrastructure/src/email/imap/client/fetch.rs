@@ -185,11 +185,15 @@ where
     .await?;
     let structure_count = structures.len();
 
+    let mut attachments_by_uid = HashMap::new();
     let parts_by_uid: HashMap<u32, Vec<TextPart>> = structures
         .into_iter()
         // An unsolicited FLAGS update for the same UID carries no structure:
         // skipping it keeps the real one. A UID with none comes back missing.
-        .filter_map(|item| Some((item.uid?, item.text_parts?)))
+        .filter_map(|item| {
+            attachments_by_uid.insert(item.uid?, item.attachments?);
+            Some((item.uid?, item.text_parts?))
+        })
         .collect();
     // Messages laid out alike share one FETCH of the same sections.
     let mut layouts: HashMap<Vec<Vec<u32>>, Vec<u32>> = HashMap::new();
@@ -209,6 +213,7 @@ where
                 body_text: None,
                 body_html: None,
                 truncated: false,
+                attachments: attachments_by_uid.remove(&uid).unwrap_or_default(),
             }));
             continue;
         }
@@ -243,6 +248,7 @@ where
                 body_text: None,
                 body_html: None,
                 truncated: false,
+                attachments: attachments_by_uid.get(&uid).cloned().unwrap_or_default(),
             };
             for part in parts {
                 let Some(data) = item.section(Some(&part.section)) else {
@@ -302,6 +308,7 @@ where
         body_text,
         body_html,
         truncated,
+        attachments: Vec::new(),
     };
     Ok(Some(result))
 }

@@ -86,7 +86,7 @@ impl<PR: ProviderRegistry, ES: mc_domain::EventStore, P: SyncStore> SyncService<
                 result.body_text.clone(),
                 result.body_html.clone(),
                 result.truncated,
-                vec![],
+                result.attachments.clone(),
             )
             .await?;
         }
@@ -130,6 +130,9 @@ impl<PR: ProviderRegistry, ES: mc_domain::EventStore, P: SyncStore> SyncService<
 
         let mut missing_counts: HashMap<MessageId, u32> = HashMap::new();
         let mut abandoned: HashSet<MessageId> = HashSet::new();
+        // Messages whose structure was read this run, named or not: one with
+        // no attachment in it would otherwise be asked about forever.
+        let mut asked_names: HashSet<MessageId> = HashSet::new();
         // Bodies downloaded since the queue was last empty. Progress is this
         // against itself plus what's still queued, so the percentage climbs to
         // 100% across batches instead of restarting with each one; new mail
@@ -200,6 +203,15 @@ impl<PR: ProviderRegistry, ES: mc_domain::EventStore, P: SyncStore> SyncService<
 
             if batch.is_empty() {
                 drained = 0;
+                match self
+                    .name_attachments(&account_id, &path_by_id, &mut asked_names)
+                    .await
+                {
+                    Ok(0) => {}
+                    // The cap is looked at again before the next round.
+                    Ok(_) => continue,
+                    Err(e) => warn!(%account_id, error = %e, "backfill: naming attachments failed"),
+                }
                 // Say so explicitly: this worker is otherwise silent while idle, so
                 // without an "all done" event a watching client keeps showing the
                 // last in-progress percentage forever. `total: 0` means "no backlog",
@@ -311,6 +323,58 @@ impl<PR: ProviderRegistry, ES: mc_domain::EventStore, P: SyncStore> SyncService<
                 }
             }
         }
+    }
+
+    /// Names the attachments of stored mail that predates them, one batch
+    /// at a time, from the structure alone (no body is downloaded); returns
+    /// how many messages it asked the server about. `asked` keeps a message
+    /// the server could not name from being asked again.
+    async fn name_attachments(
+        &self,
+        account_id: &AccountId,
+        paths: &HashMap<MailboxId, MailboxPath>,
+        asked: &mut HashSet<MessageId>,
+    ) -> Result<usize, ApplicationError> {
+        let candidates = self
+            .projector
+            .list_unnamed_attachments(account_id, 500)
+            .await?;
+        let mut by_mailbox: HashMap<MailboxId, Vec<BackfillEntry>> = HashMap::new();
+        for entry in candidates
+            .into_iter()
+            .filter(|e| !asked.contains(&e.message_id) && paths.contains_key(&e.mailbox_id))
+            .take(BACKFILL_BATCH)
+        {
+            by_mailbox.entry(entry.mailbox_id).or_default().push(entry);
+        }
+        let provider = self.provider_registry.get_provider(account_id)?;
+        let mut count = 0;
+        for (mailbox_id, entries) in by_mailbox {
+            let ids: Vec<RemoteId> = entries.iter().map(|e| e.remote_id.clone()).collect();
+            let mut named = provider
+                .fetch_attachments(&paths[&mailbox_id], &ids)
+                .await?;
+            for entry in entries {
+                asked.insert(entry.message_id);
+                count += 1;
+                let Some(attachments) = named.remove(&entry.remote_id).filter(|a| !a.is_empty())
+                else {
+                    continue;
+                };
+                // Reindexes the message: the search projection follows this event.
+                let event = DomainEvent::MessageBodyFetched {
+                    message_id: entry.message_id,
+                    attachments,
+                };
+                self.append_and_project(
+                    &entry.message_id.to_string(),
+                    AggregateType::Message,
+                    event,
+                )
+                .await?;
+            }
+        }
+        Ok(count)
     }
 
     /// Gives the copies of these messages a body another copy already has

@@ -8,8 +8,10 @@ use async_imap::imap_proto::types::{AttributeValue, Response, SectionPath};
 use mc_domain::error::DomainError;
 use mc_domain::value_objects::remote_id::RemoteId;
 
+use super::attachments::attachments;
 use super::fetch::{TextPart, text_parts};
 use super::{BODY_FETCH_TIMEOUT, COMMAND_TIMEOUT, ImapEmailProvider, UPLOAD_FLOOR_BYTES_PER_SEC};
+use mc_domain::Attachment;
 
 /// `fut` within `limit`. A server that stops answering fails as a typed
 /// timeout — a transient network fault to the callers' backoff — and the
@@ -44,6 +46,7 @@ pub(super) async fn exchange<T>(
 pub(super) struct Fetched {
     pub(super) uid: Option<u32>,
     pub(super) text_parts: Option<Vec<TextPart>>,
+    pub(super) attachments: Option<Vec<Attachment>>,
     /// `BODY[..]` data by part number; `None` is the whole message.
     sections: Vec<(Option<Vec<u32>>, Vec<u8>)>,
 }
@@ -53,13 +56,15 @@ impl Fetched {
         let mut fetched = Fetched {
             uid: None,
             text_parts: None,
+            attachments: None,
             sections: Vec::new(),
         };
         for attribute in attributes {
             match attribute {
                 AttributeValue::Uid(uid) => fetched.uid = Some(*uid),
                 AttributeValue::BodyStructure(structure) => {
-                    fetched.text_parts = Some(text_parts(structure))
+                    fetched.text_parts = Some(text_parts(structure));
+                    fetched.attachments = Some(attachments(structure));
                 }
                 AttributeValue::BodySection {
                     section: None,

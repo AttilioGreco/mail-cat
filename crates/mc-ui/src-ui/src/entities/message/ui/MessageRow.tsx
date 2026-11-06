@@ -9,8 +9,8 @@ interface MessageRowProps {
   onSelect: (e: React.MouseEvent) => void;
   onOpen?: () => void;
   onContextMenu?: (x: number, y: number) => void;
-  /** Label display names; shown only on Labels accounts. */
-  labels?: string[];
+  /** Labels with their color; shown only on Labels accounts. */
+  labels?: { name: string; color?: string }[];
   style?: React.CSSProperties;
 }
 
@@ -69,7 +69,7 @@ export function MessageRow({ message, isSelected, onSelect, onOpen, onContextMen
 
       {(labels?.length || message.tags.length) ? (
         <div className="flex gap-1 overflow-hidden pt-0.5">
-          {labels?.map((l) => <LabelChip key={l} name={l} />)}
+          {labels?.map((l) => <LabelChip key={l.name} name={l.name} color={l.color} />)}
           {message.tags.map((t) => <LabelChip key={`tag:${t}`} name={t} tag />)}
         </div>
       ) : null}

@@ -822,13 +822,10 @@ async fn append_account_event(
 /// fidelity regardless of whether `gtk-update-icon-cache` has run.
 /// Falls back to the theme name `"mail-cat"` (works after `just install`).
 fn app_icon_path() -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        let path = format!("{home}/.local/share/icons/hicolor/128x128/apps/mail-cat.png");
-        if std::path::Path::new(&path).exists() {
-            return path;
-        }
-    }
-    "mail-cat".to_owned()
+    dirs::data_dir()
+        .map(|d| d.join("icons/hicolor/128x128/apps/mail-cat.png"))
+        .filter(|p| p.exists())
+        .map_or_else(|| "mail-cat".to_owned(), |p| p.display().to_string())
 }
 
 #[cfg(test)]

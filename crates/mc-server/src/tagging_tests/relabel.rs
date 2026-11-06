@@ -159,6 +159,18 @@ async fn renaming_creates_the_new_label_moves_the_mail_and_deletes_the_old_one()
     occupy(&s.world, s.world.account).await;
     let new = MailboxId::new();
     *s.commands.1.lock().unwrap() = Some(new);
+    let scope = Scope::Group(GroupId::DEFAULT);
+    let settings = LabelSettings {
+        label: "newsletter".into(),
+        mode: LabelMode::Apply,
+        threshold: 0.8,
+        color: None,
+    };
+    s.store.put_settings(scope, &settings).await.unwrap();
+    s.store
+        .set_color(scope, "newsletter", Some("blue"))
+        .await
+        .unwrap();
 
     let dry = s
         .service
@@ -209,6 +221,16 @@ async fn renaming_creates_the_new_label_moves_the_mail_and_deletes_the_old_one()
         &commands[2],
         Command::DeleteMailbox { mailbox_id, move_to: None } if *mailbox_id == s.world.label
     ));
+    let moved = s.store.settings(scope).await.unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(
+        (
+            moved[0].label.as_str(),
+            moved[0].mode,
+            moved[0].color.as_deref()
+        ),
+        ("dev/news", LabelMode::Apply, Some("blue"))
+    );
 }
 
 #[tokio::test]
@@ -224,8 +246,12 @@ async fn renaming_into_an_existing_label_merges_and_keeps_its_settings() {
             label: label.into(),
             mode,
             threshold: 0.8,
+            color: None,
         };
         s.store.put_settings(scope, &settings).await.unwrap();
+    }
+    for (label, color) in [("newsletter", "red"), ("digest", "green")] {
+        s.store.set_color(scope, label, Some(color)).await.unwrap();
     }
     let example = Example {
         message_id: s.messages[0],
@@ -263,8 +289,12 @@ async fn renaming_into_an_existing_label_merges_and_keeps_its_settings() {
     let settings = s.store.settings(scope).await.unwrap();
     assert_eq!(settings.len(), 1);
     assert_eq!(
-        (settings[0].label.as_str(), settings[0].mode),
-        ("digest", LabelMode::Suggest)
+        (
+            settings[0].label.as_str(),
+            settings[0].mode,
+            settings[0].color.as_deref()
+        ),
+        ("digest", LabelMode::Suggest, Some("green"))
     );
     let kept = s.store.example(s.messages[0]).await.unwrap().unwrap();
     assert_eq!(kept.negatives, ["digest", "other"]);
@@ -410,6 +440,10 @@ async fn deleting_keeps_the_mail_and_files_what_would_be_in_no_mailbox_in_the_ar
     let scope = Scope::Group(GroupId::DEFAULT);
     s.store
         .put_settings(scope, &LabelSettings::off("newsletter"))
+        .await
+        .unwrap();
+    s.store
+        .set_color(scope, "newsletter", Some("red"))
         .await
         .unwrap();
 

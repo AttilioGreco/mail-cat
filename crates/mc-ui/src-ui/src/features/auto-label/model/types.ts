@@ -14,6 +14,7 @@ export interface LabelStatus {
   threshold: number;
   positives: number;
   minPositives: number;
+  color?: string | null;
 }
 
 export interface TagSuggestion {

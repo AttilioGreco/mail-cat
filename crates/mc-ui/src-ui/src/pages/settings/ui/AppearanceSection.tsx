@@ -1,5 +1,6 @@
 import { Monitor, Moon, Sun, Palette } from 'lucide-react';
 import { useThemeStore } from '@/entities/theme';
+import { SimpleSelect } from '@/shared/ui/select';
 
 /** Client-local look & feel. Moved here from the old settings modal. */
 export function AppearanceSection() {
@@ -46,15 +47,15 @@ export function AppearanceSection() {
           Quando il tema app e scuro, alcune email con sfondo neutro possono risultare poco
           leggibili.
         </p>
-        <select
+        <SimpleSelect
           value={mailContentMode}
-          onChange={(e) => setMailContentMode(e.target.value as 'auto' | 'light' | 'invert')}
-          className="w-full rounded border border-border bg-background px-2.5 py-2 text-sm text-foreground"
-        >
-          <option value="light">Chiaro (consigliato)</option>
-          <option value="auto">Auto</option>
-          <option value="invert">Inverti contenuto</option>
-        </select>
+          onChange={setMailContentMode}
+          items={[
+            { value: 'light', label: 'Chiaro (consigliato)' },
+            { value: 'auto', label: 'Auto' },
+            { value: 'invert', label: 'Inverti contenuto' },
+          ]}
+        />
       </section>
     </section>
   );

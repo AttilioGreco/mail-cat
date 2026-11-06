@@ -3,10 +3,11 @@ use super::*;
 use async_trait::async_trait;
 use futures::Stream;
 use mc_domain::{
-    Address, AggregateType, BackfillEntry, BodyBackfillQueue, DomainError, EmailAddress, Envelope,
-    EventEnvelope, Existing, Flag, LoginGate, LoginSecret, MailboxChanges, MailboxCounts,
-    MailboxType, Membership, Message, MessageBodyResult, MessageBodyStore, MessageEnvelopeSummary,
-    MessageId, MessageSummary, OutgoingMessage, ProviderNotification, RemoteId, Reset, SyncCursor,
+    Address, AggregateType, Attachment, AttachmentId, BackfillEntry, BodyBackfillQueue,
+    DomainError, EmailAddress, Envelope, EventEnvelope, Existing, Flag, LoginGate, LoginSecret,
+    MailboxChanges, MailboxCounts, MailboxType, Membership, Message, MessageBodyResult,
+    MessageBodyStore, MessageEnvelopeSummary, MessageId, MessageSummary, OutgoingMessage,
+    ProviderNotification, RemoteId, Reset, SyncCursor,
 };
 use std::collections::HashSet;
 use std::pin::Pin;

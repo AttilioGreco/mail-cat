@@ -1,8 +1,10 @@
 //! Tauri commands for label suggestion; thin wrappers over the gRPC client.
 
+use std::collections::HashMap;
+
 use mc_client::{
-    ApplyAllReport, ApplyPreview, BackgroundStats, EmbeddingsStatus, LabelProposal, LabelScope,
-    LabelStatus, MatchReport, MessageTags, TrainingGroup,
+    ApplyAllReport, ApplyPreview, BackgroundStats, EmbeddingsStatus, LabelChange, LabelProposal,
+    LabelScope, LabelStatus, MatchReport, MessageTags, TrainingGroup,
 };
 use tauri::State;
 
@@ -95,6 +97,32 @@ pub async fn set_label_settings(
     get_or_connect(&state)
         .await?
         .set_label_settings(&account_id, &label, &mode, threshold)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_label_color(
+    account_id: String,
+    label: String,
+    color: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<LabelStatus, String> {
+    get_or_connect(&state)
+        .await?
+        .set_label_color(&account_id, &label, color.as_deref())
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_label_colors(
+    account_id: String,
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, String>, String> {
+    get_or_connect(&state)
+        .await?
+        .list_label_colors(&account_id)
         .await
         .map_err(err)
 }
@@ -342,6 +370,36 @@ pub async fn apply_all_labels(
     get_or_connect(&state)
         .await?
         .apply_all_labels(&labels, account_id.as_deref(), dry_run)
+        .await
+        .map_err(err)
+}
+
+/// Rename `from` to `to` across the label's whole group; merges when `to`
+/// exists. Without `dry_run` the change runs in the background on the server.
+#[tauri::command]
+pub async fn rename_label(
+    from: String,
+    to: String,
+    mail_only: bool,
+    dry_run: bool,
+    state: State<'_, AppState>,
+) -> Result<LabelChange, String> {
+    get_or_connect(&state)
+        .await?
+        .rename_label(&from, &to, None, mail_only, dry_run)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_label(
+    label: String,
+    dry_run: bool,
+    state: State<'_, AppState>,
+) -> Result<LabelChange, String> {
+    get_or_connect(&state)
+        .await?
+        .delete_label(&label, None, dry_run)
         .await
         .map_err(err)
 }

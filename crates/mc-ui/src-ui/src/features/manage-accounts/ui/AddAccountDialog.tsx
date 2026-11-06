@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { X, ExternalLink, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { SimpleSelect } from '@/shared/ui/select';
 import {
   useAddImapAccount,
   useOAuthLogin,
@@ -110,14 +111,14 @@ function OAuthForm({ onAdded }: { onAdded: () => void }) {
       </p>
 
       <Field label="Provider">
-        <select
+        <SimpleSelect<OAuthProviderId>
           value={provider}
-          onChange={(e) => setProvider(e.target.value as OAuthProviderId)}
-          className="w-full rounded border border-border bg-background px-2.5 py-2 text-sm text-foreground"
-        >
-          <option value="google">Google (Gmail)</option>
-          <option value="microsoft">Microsoft (Outlook)</option>
-        </select>
+          onChange={setProvider}
+          items={[
+            { value: 'google', label: 'Google (Gmail)' },
+            { value: 'microsoft', label: 'Microsoft (Outlook)' },
+          ]}
+        />
       </Field>
 
       <Field label="Email">

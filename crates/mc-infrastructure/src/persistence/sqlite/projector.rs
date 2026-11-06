@@ -10,9 +10,9 @@ use rusqlite::{Connection, params};
 use uuid::Uuid;
 
 use mc_domain::{
-    AccountId, AccountStatus, ContactEmail, ContactId, DomainError, DomainEvent, Envelope,
-    EventEnvelope, Flag, ListHeaders, MailboxId, MailboxModel, MailboxType, Membership, MessageId,
-    MessageKey, ReadModelProjector, RemoteId,
+    AccountId, AccountStatus, Attachment, ContactEmail, ContactId, DomainError, DomainEvent,
+    Envelope, EventEnvelope, Flag, ListHeaders, MailboxId, MailboxModel, MailboxType, Membership,
+    MessageId, MessageKey, ReadModelProjector, RemoteId,
 };
 
 use super::repo_err;
@@ -352,9 +352,13 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             } else {
                 exec(
                     tx,
-                    "UPDATE messages SET attachments = ?2, has_attachments = 1, body_state = 'stored' \
+                    "UPDATE messages SET attachments = ?2, has_attachments = ?3, body_state = 'stored' \
                      WHERE id = ?1",
-                    params![message_id.as_uuid(), json(attachments)?],
+                    params![
+                        message_id.as_uuid(),
+                        json(attachments)?,
+                        Attachment::any_downloadable(attachments)
+                    ],
                 )?;
             }
         }

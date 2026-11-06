@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
 use crate::model::account::MailboxModel;
+use crate::model::attachment::Attachment;
 use crate::model::mailbox::Mailbox;
 use crate::model::message::{Envelope, ListHeaders, Message, OutgoingMessage};
 use crate::value_objects::flag::Flag;
@@ -64,6 +65,17 @@ pub trait EmailProvider: Send + Sync {
         mailbox: &MailboxPath,
         ids: &[RemoteId],
     ) -> Result<Vec<MessageBodyResult>, DomainError>;
+
+    /// The attachments of these messages, from their structure alone: no
+    /// body is downloaded. Ids the server no longer has are absent. Providers
+    /// that cannot tell return nothing.
+    async fn fetch_attachments(
+        &self,
+        _mailbox: &MailboxPath,
+        _ids: &[RemoteId],
+    ) -> Result<HashMap<RemoteId, Vec<Attachment>>, DomainError> {
+        Ok(HashMap::new())
+    }
 
     /// Ids of the messages with RFC Message-ID `rfc_id` (`<…>`) in
     /// `mailbox`, oldest first (callers `.rev()` for the newest); several when
@@ -336,6 +348,8 @@ pub struct MessageBodyResult {
     pub body_html: Option<String>,
     /// Only the start of a long text part was downloaded.
     pub truncated: bool,
+    /// Named from the message structure, which every body fetch reads anyway.
+    pub attachments: Vec<Attachment>,
 }
 
 /// Real-time notifications from provider.

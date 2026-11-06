@@ -371,7 +371,7 @@ where
     exchange(COMMAND_TIMEOUT, "UNSUBSCRIBE", session.unsubscribe(name)).await
 }
 
-/// CREATE and SUBSCRIBE each level of `name`: `A/B/C` makes `A`, `A/B` and
+/// CREATE each level of `name`, subscribing the ones it makes: `A/B/C` makes `A`, `A/B` and
 /// `A/B/C`, as a server may not make the parents itself (Gmail shows a label
 /// under a parent only when it exists). A level that exists already is the
 /// one wanted: a sync or another client got there first. `name` is written
@@ -391,14 +391,42 @@ where
         }
         level.push_str(segment);
         match exchange(COMMAND_TIMEOUT, "CREATE", session.create(&level)).await {
+            // An existing level keeps whatever subscription the user chose.
             Err(DomainError::Provider(reply))
                 if reply.to_ascii_lowercase().contains("alreadyexists")
                     || reply.to_ascii_lowercase().contains("already exists") => {}
-            created => created?,
+            created => {
+                created?;
+                subscribe_created(session, &level).await?;
+            }
         }
-        set_subscribed_on(session, &level, true).await?;
     }
     Ok(())
+}
+
+/// Gmail can answer `[NONEXISTENT]` to a SUBSCRIBE sent right after the CREATE
+/// that made the label, on the same session: give it a moment.
+async fn subscribe_created<T>(
+    session: &mut async_imap::Session<T>,
+    name: &str,
+) -> Result<(), DomainError>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    for pause in [500, 1500, 3000] {
+        match set_subscribed_on(session, name, true).await {
+            Err(DomainError::Provider(reply))
+                if reply.to_ascii_lowercase().contains("nonexistent") =>
+            {
+                debug!(name, "SUBSCRIBE after CREATE: not visible yet, retrying");
+                tokio::time::sleep(Duration::from_millis(pause)).await;
+            }
+            done => return done,
+        }
+    }
+    set_subscribed_on(session, name, true)
+        .await
+        .map_err(|e| DomainError::Provider(format!("subscribing the new mailbox {name:?}: {e}")))
 }
 
 /// UNSUBSCRIBE, then DELETE: some servers keep listing a deleted mailbox that

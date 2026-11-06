@@ -99,6 +99,7 @@ fn labels_list_json_shape() {
                 threshold: 0.9,
                 positives: 42,
                 min_positives: 5,
+                color: None,
             },
         }],
     }];
@@ -115,6 +116,7 @@ fn labels_list_json_shape() {
                 "threshold": 0.9,
                 "positives": 42,
                 "minPositives": 5,
+                "color": null,
             }],
         }])
     );

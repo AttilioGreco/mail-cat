@@ -352,3 +352,87 @@ async fn ingesting_wakes_an_idle_backfill_worker() {
     worker.await.unwrap();
     assert!(woke.is_ok(), "the worker slept through the new message");
 }
+
+/// Mail synced before attachment names were kept: its structure is asked for
+/// (no body), once, and what the server names is recorded.
+#[tokio::test]
+async fn backfill_names_the_attachments_of_stored_mail_once() {
+    let account_id = AccountId::new();
+    let (inbox, discovered) =
+        Mailbox::discover(account_id, MailboxPath::inbox(), MailboxType::Inbox);
+    let projector = Arc::new(MockProjector::new());
+    let event_store = Arc::new(MockEventStore::new());
+    let mut events = vec![discovered];
+    let mut message = |uid: u32, has_attachments: bool| {
+        let (message, event) = Message::receive(
+            account_id,
+            inbox.id,
+            RemoteId::from(uid),
+            None,
+            None,
+            vec![],
+            test_envelope(),
+            vec![],
+            10,
+            has_attachments,
+            chrono::Utc::now(),
+        );
+        events.push(event);
+        message.id
+    };
+    let (named, unnameable, plain) = (message(1, true), message(2, true), message(3, false));
+    for event in events {
+        projector
+            .project(&EventEnvelope::new(
+                String::new(),
+                AggregateType::Message,
+                1,
+                event,
+            ))
+            .await
+            .unwrap();
+    }
+    for id in [named, unnameable, plain] {
+        projector
+            .put_body(&id, Some("x".into()), None, false)
+            .await
+            .unwrap();
+    }
+
+    let service = Arc::new(make_service(
+        MockEmailProvider::new(),
+        event_store.clone(),
+        projector.clone(),
+    ));
+    let mut progress = service.subscribe_progress();
+    let shutdown = CancellationToken::new();
+    let worker = tokio::spawn({
+        let (service, shutdown) = (Arc::clone(&service), shutdown.clone());
+        let gate: Arc<dyn LoginGate> = Arc::new(mc_domain::LoginSecret::Password("x".into()));
+        async move { service.run_backfill(account_id, None, gate, shutdown).await }
+    });
+    while progress.recv().await.unwrap().message != "All message bodies downloaded" {}
+    shutdown.cancel();
+    worker.await.unwrap();
+
+    let provider = service.provider_registry.get_provider(&account_id).unwrap();
+    assert_eq!(
+        *provider.attachment_calls.lock().unwrap(),
+        [vec![1, 2]],
+        "only flagged mail, asked once"
+    );
+    let recorded: Vec<_> = event_store
+        .appended_events()
+        .into_iter()
+        .filter_map(|(_, e)| match e {
+            DomainEvent::MessageBodyFetched {
+                message_id,
+                attachments,
+            } => Some((message_id, attachments)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].0, named);
+    assert_eq!(recorded[0].1[0].filename.as_deref(), Some("doc-1.pdf"));
+}

@@ -68,8 +68,33 @@ export function useSetLabelSettings() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (p: LabelSettingsParams) => invoke<LabelStatus>('set_label_settings', { ...p }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['label-status'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['label-status'] });
+      qc.invalidateQueries({ queryKey: ['label-modes'] });
+    },
     onSettled: () => qc.invalidateQueries({ queryKey: ['tags'] }),
+  });
+}
+
+/** Mode per label (see `labelKey`) for the account's group; labels the model has
+ *  no example of are absent, i.e. off. */
+export function useLabelModes(accountId: string) {
+  return useQuery({
+    queryKey: ['label-modes', accountId],
+    queryFn: async () => {
+      const [scope] = await invoke<{ labels: LabelStatus[] }[]>('list_labels', { accountId });
+      return new Map((scope?.labels ?? []).map((l) => [l.label, l.mode]));
+    },
+  });
+}
+
+/** Colors need no examples: they never change what the classifier does. */
+export function useSetLabelColor() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (p: { accountId: string; label: string; color: string | null }) =>
+      invoke<LabelStatus>('set_label_color', { ...p }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['label-colors'] }),
   });
 }
 
@@ -84,6 +109,7 @@ export function useConfirmApply() {
     mutationFn: (p: LabelSettingsParams) => invoke<ApplyPreview>('confirm_apply', { ...p }),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['label-status'] });
+      qc.invalidateQueries({ queryKey: ['label-modes'] });
       requery(qc);
     },
   });

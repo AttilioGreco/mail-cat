@@ -1,0 +1,97 @@
+name: Release
+
+# A tag v* builds installers for Linux, macOS (arm64) and Windows and uploads them,
+# with the updater manifest, to a DRAFT GitHub Release. See docs/release.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04 # oldest glibc we can get: the AppImage runs on anything newer
+          - os: macos-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the app version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          tauri_v=$(grep -m1 '"version"' crates/mc-ui/tauri.conf.json | cut -d'"' -f4)
+          if [ "$tag" != "$cargo_v" ] || [ "$tag" != "$tauri_v" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml ($cargo_v) / tauri.conf.json ($tauri_v). Bump both (just version-sync), commit, and re-tag."
+            exit 1
+          fi
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev libdbus-1-dev libssl-dev pkg-config \
+            patchelf rpm
+
+      - name: Server and CLI
+        shell: bash
+        run: cargo build --release -p mc-server -p mc-cli
+
+      # macOS and Windows ship them as Tauri external binaries, which are looked up by
+      # target-triple suffix. On Linux the bundle config maps target/release directly.
+      - name: Stage server and CLI for the bundle
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          mkdir -p crates/mc-ui/binaries
+          for bin in mail-cat-server mc; do
+            cp "target/release/$bin$ext" "crates/mc-ui/binaries/$bin-$triple$ext"
+          done
+
+      - name: Frontend dependencies
+        working-directory: crates/mc-ui/src-ui
+        run: bun install --frozen-lockfile
+
+      - name: Tauri CLI
+        uses: actions/cache@v4
+        id: tauri-cli
+        with:
+          path: ~/.cargo/bin/cargo-tauri${{ runner.os == 'Windows' && '.exe' || '' }}
+          key: tauri-cli-2-${{ runner.os }}
+      - if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: crates/mc-ui
+          tagName: ${{ github.ref_name }}
+          releaseName: mail-cat ${{ github.ref_name }}
+          releaseBody: |
+            Installation and first launch (the app is not code-signed): see [docs/install.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/install.md).
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true

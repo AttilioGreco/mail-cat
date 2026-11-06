@@ -1,6 +1,8 @@
 //! Label suggestion: training groups, per-label settings, what the classifier
 //! offers on a message, and applying a label to existing mail.
 
+use std::collections::HashMap;
+
 use crate::client::MailCatClient;
 use crate::error::Result;
 use crate::proto::mail_cat::v1::{self as pb, tagging_service_client::TaggingServiceClient};
@@ -23,6 +25,7 @@ pub struct LabelStatus {
     pub threshold: f64,
     pub positives: u32,
     pub min_positives: u32,
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -221,6 +224,7 @@ pub(crate) fn status(s: pb::LabelStatus) -> LabelStatus {
         threshold: s.threshold,
         positives: s.positives,
         min_positives: s.min_positives,
+        color: s.color,
     }
 }
 
@@ -334,6 +338,35 @@ impl MailCatClient {
             })
             .await?;
         Ok(status(resp.into_inner()))
+    }
+
+    /// `None` clears the color.
+    pub async fn set_label_color(
+        &self,
+        account_id: &str,
+        label: &str,
+        color: Option<&str>,
+    ) -> Result<LabelStatus> {
+        let resp = self
+            .tagging()
+            .set_label_color(pb::SetLabelColorRequest {
+                account_id: account_id.into(),
+                label: label.into(),
+                color: color.map(str::to_owned),
+            })
+            .await?;
+        Ok(status(resp.into_inner()))
+    }
+
+    /// Lowercased label to palette key, for the account's training group.
+    pub async fn list_label_colors(&self, account_id: &str) -> Result<HashMap<String, String>> {
+        let resp = self
+            .tagging()
+            .list_label_colors(pb::ListLabelColorsRequest {
+                account_id: account_id.into(),
+            })
+            .await?;
+        Ok(resp.into_inner().colors)
     }
 
     /// Labels with their settings per training scope; one scope with an account.

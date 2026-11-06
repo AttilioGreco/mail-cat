@@ -268,6 +268,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         new_display TEXT NOT NULL
     );
     CREATE INDEX pending_renames_account ON pending_renames(account_id);",
+    // 13: a label's color (a palette key), kept here because mail servers
+    // have none. Shared by the label's whole training group.
+    "ALTER TABLE tag_settings ADD COLUMN color TEXT;",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

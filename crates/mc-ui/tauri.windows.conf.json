@@ -1,0 +1,20 @@
+{
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/mail-cat-server",
+      "binaries/mc"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
+  },
+  "build": {
+    "beforeBuildCommand": "bun run build"
+  }
+}

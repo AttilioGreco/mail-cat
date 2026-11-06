@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Tag } from 'lucide-react';
 import { LabelChip } from '@/shared/ui/label-chip';
 import { useAccounts } from '@/entities/account';
-import { useMailboxes, labelNames } from '@/entities/mailbox';
+import { useMailboxes, useLabelColors, labelChips } from '@/entities/mailbox';
 import { useLabelDialogs } from '../model/dialogStore';
 import { useModifyTags } from '../model/useLabelMutations';
 import { labelMode } from './LabelPickerDialog';
@@ -22,13 +22,14 @@ interface MessageLabelsProps {
 export function MessageLabels({ accountId, messageId, mailboxIds, tags, viewedId }: MessageLabelsProps) {
   const account = useAccounts().data?.find((a) => a.id === accountId);
   const { data: mailboxes = [] } = useMailboxes(accountId);
+  const colors = useLabelColors(accountId);
   const openPicker = useLabelDialogs((s) => s.openPicker);
   if (!labelMode(account)) return null;
 
-  const chips = account?.mailboxModel === 'labels' ? labelNames(mailboxes, mailboxIds, viewedId) : [];
+  const chips = account?.mailboxModel === 'labels' ? labelChips(mailboxes, mailboxIds, viewedId, colors) : [];
   return (
     <div className="mt-3 flex flex-wrap items-center gap-1.5">
-      {chips.map((name) => <LabelChip key={name} name={name} />)}
+      {chips.map((c) => <LabelChip key={c.name} name={c.name} color={c.color} />)}
       <button
         type="button"
         aria-label="Modifica etichette"

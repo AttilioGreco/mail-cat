@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, RefreshCw, AlertCircle, MailCheck, Sparkles } from 'lucide-react';
+import { ChevronDown, Pencil, Trash2, ChevronRight, RefreshCw, AlertCircle, MailCheck, Sparkles, Settings2 } from 'lucide-react';
 import { ContextMenu } from '@/shared/ui/ContextMenu';
 import { useMailboxes, subscribedOnly, FolderItem, type Mailbox, type MailboxKind } from '@/entities/mailbox';
 import { LabelSettingsDialog, ProposalsBadge } from '@/features/auto-label';
+import { useLabelDialogs, useLabelsPage } from '@/features/manage-labels';
 import { useMarkMailboxRead } from '@/features/message-actions';
 import { LabelTree } from './LabelTree';
 
@@ -35,6 +36,8 @@ export function FolderTree({
   const { data: all = [], isLoading, error } = useMailboxes(accountId);
   const mailboxes = useMemo(() => subscribedOnly(all), [all]);
   const markMailboxRead = useMarkMailboxRead();
+  const openManage = useLabelDialogs((s) => s.openManage);
+  const openLabels = useLabelsPage((s) => s.openLabels);
   const [menu, setMenu] = useState<{ mailbox: Mailbox; x: number; y: number } | null>(null);
   const [autoLabel, setAutoLabel] = useState<Mailbox | null>(null);
   const [more, setMore] = useState(() => ({ accountId, open: loadMoreOpen(accountId) }));
@@ -110,9 +113,22 @@ export function FolderTree({
           {moreOpen && other.map(item)}
         </>
       )}
+      {labels && (
+        <div className="flex items-center justify-between px-2 pb-1 pt-4">
+          <h2 className="text-[10px] font-semibold uppercase tracking-wide text-muted">Etichette</h2>
+          <button
+            type="button"
+            aria-label="Gestisci etichette"
+            title="Gestisci etichette"
+            onClick={openLabels}
+            className="rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+          >
+            <Settings2 size={13} />
+          </button>
+        </div>
+      )}
       {custom.length > 0 && (
         <>
-          <h2 className="px-2 pb-1 pt-4 text-[10px] font-semibold uppercase tracking-wide text-muted">Etichette</h2>
           <LabelTree
             accountId={accountId}
             labels={custom}
@@ -148,6 +164,32 @@ export function FolderTree({
               <Sparkles size={14} className="shrink-0" />
               Etichetta automatica…
             </button>
+          )}
+          {labels && menu.mailbox.kind === 'custom' && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  openManage(accountId, menu.mailbox.displayPath, 'rename');
+                  setMenu(null);
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-hover"
+              >
+                <Pencil size={14} className="shrink-0" />
+                Rinomina o sposta…
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  openManage(accountId, menu.mailbox.displayPath, 'delete');
+                  setMenu(null);
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-destructive transition-colors hover:bg-surface-hover"
+              >
+                <Trash2 size={14} className="shrink-0" />
+                Elimina…
+              </button>
+            </>
           )}
         </ContextMenu>
       )}

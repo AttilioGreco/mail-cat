@@ -1,0 +1,35 @@
+{
+  "bundle": {
+    "targets": [
+      "appimage",
+      "deb",
+      "rpm"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [],
+        "files": {
+          "/usr/bin/mail-cat-server": "../../target/release/mail-cat-server",
+          "/usr/bin/mc": "../../target/release/mc",
+          "/usr/lib/systemd/user/mail-cat-server.service": "../../packaging/systemd/mail-cat-server.service",
+          "/usr/share/mail-cat/config.toml.example": "../../deploy/config.toml.example"
+        }
+      },
+      "rpm": {
+        "depends": [],
+        "files": {
+          "/usr/bin/mail-cat-server": "../../target/release/mail-cat-server",
+          "/usr/bin/mc": "../../target/release/mc",
+          "/usr/lib/systemd/user/mail-cat-server.service": "../../packaging/systemd/mail-cat-server.service",
+          "/usr/share/mail-cat/config.toml.example": "../../deploy/config.toml.example"
+        }
+      },
+      "appimage": {
+        "files": {
+          "/usr/bin/mail-cat-server": "../../target/release/mail-cat-server",
+          "/usr/bin/mc": "../../target/release/mc"
+        }
+      }
+    }
+  }
+}

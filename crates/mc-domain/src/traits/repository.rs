@@ -299,6 +299,15 @@ pub trait BodyBackfillQueue: Send + Sync {
         limit: usize,
     ) -> Result<Vec<BackfillEntry>, DomainError>;
 
+    /// Messages flagged as having attachments whose body is stored but whose
+    /// attachments were never named (mail synced before names were kept),
+    /// newest first, up to `limit`.
+    async fn list_unnamed_attachments(
+        &self,
+        account_id: &AccountId,
+        limit: usize,
+    ) -> Result<Vec<BackfillEntry>, DomainError>;
+
     /// How many bodies are still queued for this account — the "N messages
     /// left to download" number, unbounded by any page size.
     async fn count_pending_backfill(&self, account_id: &AccountId) -> Result<u32, DomainError>;

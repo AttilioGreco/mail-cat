@@ -27,6 +27,8 @@ function resolveTheme(theme: AppTheme): 'light' | 'dark' {
 function applyTheme(theme: AppTheme): void {
   const resolved = resolveTheme(theme);
   document.documentElement.setAttribute('data-theme', resolved);
+  // Native controls (checkboxes, scrollbars, datalist popups) follow this, not our CSS tokens.
+  document.documentElement.style.colorScheme = resolved;
 }
 
 interface ThemeState {

@@ -1,7 +1,7 @@
 //! Configuration management for mail-cat server.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +24,7 @@ pub struct ServerConfig {
 
     /// Path to the mail-cat-ui binary, launched when the user clicks
     /// "Apri Mail Cat" in a desktop notification.
-    /// Defaults to `~/.local/bin/mail-cat-ui` (the `just install` location).
+    /// Defaults to the UI next to the server executable, else `~/.local/bin/mail-cat-ui`.
     #[serde(default = "default_ui_bin")]
     pub ui_bin: String,
 
@@ -163,24 +163,40 @@ fn default_grpc_addr() -> String {
 }
 
 fn default_db_path() -> String {
-    xdg_data_dir("mail-cat.db")
+    data_path("mail-cat.db")
 }
 
 fn default_index_path() -> String {
-    xdg_data_dir("index")
+    data_path("index")
 }
 
+/// Resolves the UI next to the running server first (bundle, deb/rpm and
+/// `just install` all ship them side by side; on macOS the .app keeps both in
+/// `Contents/MacOS`), then the historical `~/.local/bin` location.
 fn default_ui_bin() -> String {
-    std::env::var("HOME")
-        .map(|h| format!("{h}/.local/bin/mail-cat-ui"))
-        .unwrap_or_else(|_| "mail-cat-ui".to_string())
+    let name = format!("mail-cat-ui{}", std::env::consts::EXE_SUFFIX);
+    let beside_server = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(&name)))
+        .filter(|p| p.exists());
+    beside_server
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local/bin/mail-cat-ui")))
+        .map_or_else(|| "mail-cat-ui".to_string(), |p| p.display().to_string())
 }
 
-/// Returns `~/.local/share/mail-cat/<subdir>`, falling back to `./data/<subdir>`.
-fn xdg_data_dir(subdir: &str) -> String {
-    std::env::var("HOME")
-        .map(|h| format!("{h}/.local/share/mail-cat/{subdir}"))
-        .unwrap_or_else(|_| format!("./data/{subdir}"))
+/// `<local data dir>/mail-cat`: `~/.local/share/mail-cat` on Linux,
+/// `~/Library/Application Support/mail-cat` on macOS, `%LOCALAPPDATA%\mail-cat`
+/// on Windows. Local, not roaming: the database must not follow the user
+/// profile around a domain.
+pub fn app_data_dir() -> Option<PathBuf> {
+    Some(dirs::data_local_dir()?.join("mail-cat"))
+}
+
+fn data_path(subdir: &str) -> String {
+    app_data_dir().map_or_else(
+        || format!("./data/{subdir}"),
+        |d| d.join(subdir).display().to_string(),
+    )
 }
 
 impl ServerConfig {
@@ -192,12 +208,14 @@ impl ServerConfig {
     }
 
     /// Returns the default config file path: `$MAIL_CAT_CONFIG` →
-    /// `~/.config/mail-cat/config.toml` → `./config.toml`.
+    /// `<config dir>/mail-cat/config.toml` (`~/.config` on Linux) → `./config.toml`.
+    /// A missing file is fine: `load_or_default` then yields an empty config.
     pub fn default_path() -> String {
         std::env::var("MAIL_CAT_CONFIG").unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| format!("{h}/.config/mail-cat/config.toml"))
-                .unwrap_or_else(|_| "./config.toml".to_string())
+            dirs::config_dir().map_or_else(
+                || "./config.toml".to_string(),
+                |d| d.join("mail-cat/config.toml").display().to_string(),
+            )
         })
     }
 

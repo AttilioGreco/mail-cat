@@ -840,6 +840,42 @@ impl BodyBackfillQueue for SqliteRepository {
             .await
     }
 
+    async fn list_unnamed_attachments(
+        &self,
+        account_id: &AccountId,
+        limit: usize,
+    ) -> Result<Vec<BackfillEntry>, DomainError> {
+        let (account, limit) = (*account_id.as_uuid(), sql_int(limit as u64));
+        self.db
+            .read(move |conn| {
+                let mut entries = query_all(
+                    conn,
+                    "SELECT m.id, mm.mailbox_id, mm.remote_id, m.rfc_message_id, \
+                     m.size_bytes, m.from_email \
+                     FROM message_mailboxes mm JOIN messages m ON m.id = mm.message_id \
+                     WHERE m.account_id = ?1 AND m.body_state = 'stored' \
+                     AND m.has_attachments = 1 AND m.attachments = '[]' \
+                     AND mm.remote_id IS NOT NULL \
+                     ORDER BY m.received_at DESC LIMIT ?2",
+                    params![account, limit],
+                    |r| {
+                        Ok(BackfillEntry {
+                            message_id: MessageId::from_uuid(r.get(0)?),
+                            mailbox_id: MailboxId::from_uuid(r.get(1)?),
+                            remote_id: RemoteId::from(r.get::<_, String>(2)?),
+                            rfc_message_id: r.get(3)?,
+                            size_bytes: r.get::<_, i64>(4)? as u64,
+                            from_email: r.get(5)?,
+                        })
+                    },
+                )?;
+                let mut seen = HashSet::new();
+                entries.retain(|e| seen.insert(e.message_id));
+                Ok(entries)
+            })
+            .await
+    }
+
     async fn downloaded_since(
         &self,
         account_id: &AccountId,

@@ -4,7 +4,7 @@ pub mod imap;
 pub mod jmap;
 pub mod smtp;
 
-use mc_domain::{AccountId, Envelope, MailboxId, Message, RemoteId};
+use mc_domain::{AccountId, Attachment, Envelope, MailboxId, Message, RemoteId};
 
 pub use any::AnyProvider;
 pub use event_source::AnyAccountEventSource;
@@ -18,6 +18,7 @@ fn body_only_message(
     id: &RemoteId,
     body_text: Option<String>,
     body_html: Option<String>,
+    attachments: Vec<Attachment>,
 ) -> Message {
     let now = chrono::Utc::now();
     let envelope = Envelope {
@@ -45,6 +46,7 @@ fn body_only_message(
     Message {
         body_text,
         body_html,
+        attachments,
         ..message
     }
 }

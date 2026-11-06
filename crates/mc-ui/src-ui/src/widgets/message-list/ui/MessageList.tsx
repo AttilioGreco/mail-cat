@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useMessages, MessageRow, type MessageEnvelope } from '@/entities/message';
 import { useAccounts } from '@/entities/account';
-import { useMailboxes, labelNames, type Mailbox } from '@/entities/mailbox';
+import { useMailboxes, useLabelColors, labelChips, type Mailbox } from '@/entities/mailbox';
 import { useConversations, ConversationRow, type ConversationSummary } from '@/entities/conversation';
 import { useMailboxWatcher } from '@/features/watch-mailbox';
 import { SearchBar, SearchResults, useSearchStore } from '@/features/search-messages';
@@ -46,6 +46,7 @@ export function MessageList() {
   const requestSearchFocus = useSearchStore((s) => s.requestFocus);
 
   const { data: mailboxes = [] } = useMailboxes(selectedAccountId);
+  const colors = useLabelColors(selectedAccountId);
   const { data: accounts = [] } = useAccounts();
   const showLabels = accounts.find((a) => a.id === selectedAccountId)?.mailboxModel === 'labels';
   const selectedMailbox = mailboxes.find((m) => m.id === selectedMailboxId) ?? null;
@@ -403,7 +404,7 @@ export function MessageList() {
               rowComponent={MsgRow}
               rowCount={messages.length}
               rowHeight={showLabels ? MESSAGE_ROW_HEIGHT + LABEL_ROW_EXTRA : MESSAGE_ROW_HEIGHT}
-              rowProps={{ messages, selectedMessageId, selectedMessageIds, clickRow, openMenu, openDraft, mailboxes: showLabels ? mailboxes : null, viewedId: selectedMailboxId }}
+              rowProps={{ messages, selectedMessageId, selectedMessageIds, clickRow, openMenu, openDraft, mailboxes: showLabels ? mailboxes : null, colors, viewedId: selectedMailboxId }}
             />
           </div>
         )
@@ -473,10 +474,11 @@ interface MsgRowData {
   openDraft?: (id: string) => void;
   /** Set on Labels accounts only. */
   mailboxes: Mailbox[] | null;
+  colors: Readonly<Record<string, string>>;
   viewedId: string | null;
 }
 
-function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds, clickRow, openMenu, openDraft, mailboxes, viewedId }: RowComponentProps<MsgRowData>) {
+function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds, clickRow, openMenu, openDraft, mailboxes, colors, viewedId }: RowComponentProps<MsgRowData>) {
   const message = messages[index];
   return (
     <MessageRow
@@ -485,7 +487,7 @@ function MsgRow({ index, style, messages, selectedMessageId, selectedMessageIds,
       onSelect={(e) => clickRow(message.uid, e)}
       onOpen={openDraft && (() => openDraft(message.uid))}
       onContextMenu={(x, y) => openMenu(message.uid, x, y)}
-      labels={mailboxes ? labelNames(mailboxes, message.mailboxIds, viewedId) : undefined}
+      labels={mailboxes ? labelChips(mailboxes, message.mailboxIds, viewedId, colors) : undefined}
       style={style}
     />
   );

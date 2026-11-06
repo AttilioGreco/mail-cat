@@ -1,0 +1,19 @@
+{
+  "bundle": {
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "externalBin": [
+      "binaries/mail-cat-server",
+      "binaries/mc"
+    ],
+    "macOS": {
+      "signingIdentity": "-",
+      "minimumSystemVersion": "12.0"
+    }
+  },
+  "build": {
+    "beforeBuildCommand": "bun run build"
+  }
+}

@@ -2,6 +2,13 @@
 //!
 //! DDD email client with Event Sourcing + CQRS architecture.
 //! Exposes gRPC API for account management, mailbox browsing, message operations, and search.
+//!
+//! `mail-cat-server service <install|uninstall|start|stop|status>` manages the
+//! per-user autostart instead of running the server (see [`service`]).
+
+// GUI subsystem on Windows so the logon task opens no console window; terminal
+// use (`service`, `--version`) reattaches the parent console in `main`.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,6 +24,7 @@ mod notifications;
 mod oauth_login;
 mod oauth_reauth;
 mod secret_ingest;
+mod service;
 #[cfg(test)]
 mod tagging_tests;
 mod wiring;
@@ -42,6 +50,14 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const STREAM_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if !args.is_empty() {
+        service::attach_parent_console();
+    }
+    if args.first().map(String::as_str) == Some("service") {
+        std::process::exit(service::run(&args[1..]));
+    }
     // A personal mail server is I/O bound: two workers keep up with IMAP and
     // gRPC, while the default (one per core) costs a stack and a malloc arena
     // per thread. Blocking threads only run SQLite calls (one writer, four
@@ -52,6 +68,24 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(run())
+}
+
+/// Append-only, never rotated. Falls back to discarding output rather than
+/// failing to start when the file cannot be opened.
+#[cfg(windows)]
+fn log_file() -> std::sync::Mutex<Box<dyn std::io::Write + Send>> {
+    let file = config::app_data_dir().and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("server.log"))
+            .ok()
+    });
+    std::sync::Mutex::new(match file {
+        Some(f) => Box::new(f),
+        None => Box::new(std::io::sink()),
+    })
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -76,9 +110,14 @@ async fn run() -> anyhow::Result<()> {
     if !filter.contains("tantivy") {
         filter.push_str(",tantivy=warn");
     }
+    let fmt = tracing_subscriber::fmt::layer();
+    // The Windows logon task has no console and nothing captures stdout, so log
+    // to a file there (macOS gets one from launchd, Linux from journald).
+    #[cfg(windows)]
+    let fmt = fmt.with_ansi(false).with_writer(log_file());
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(filter))
-        .with(tracing_subscriber::fmt::layer())
+        .with(fmt)
         .init();
 
     tracing::info!("Starting mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE}) [{RUSTC}]");

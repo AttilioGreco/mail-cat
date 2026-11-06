@@ -298,6 +298,56 @@ def backfill_text_only(w):
     w.assert_consistent()
 
 
+def attachment_names(w):
+    """A PDF's name is stored without downloading it, from BODYSTRUCTURE on
+    IMAP (alice) and Email/get on JMAP (bob), RFC 2231 names decoded, and
+    `filename:` finds it. Mail stored before names were kept gets them from a
+    structure-only catch-up."""
+    def deliver(user, n):
+        msg = EmailMessage()
+        msg["Subject"], msg["From"], msg["To"] = f"Relazione [itest-{n}]", "carol@example.net", f"{user}@itest.local"
+        msg["Message-ID"] = f"<att{n}@example.net>"
+        msg.set_content("In allegato.\n")
+        msg.add_attachment(os.urandom(1 << 20), maintype="application", subtype="pdf", filename="relazione città.pdf")
+        m = imapctl.connect(user)
+        imapctl.check(m.append("INBOX", "", imaplib.Time2Internaldate(time.time()), msg.as_bytes()))
+        m.logout()
+        return f"<att{n}@example.net>"
+
+    def stored(rfc):
+        row = db("SELECT attachments, has_attachments FROM messages WHERE rfc_message_id = ?", (rfc,))
+        return row if row and row[0] != "[]" else None
+
+    before = db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0]
+    imap_rfc, jmap_rfc = deliver("alice", 931), deliver("bob", 932)
+    w.sync()
+    bob = account_id("bob")
+    mc("sync", bob)
+    for rfc in (imap_rfc, jmap_rfc):
+        wait(lambda: stored(rfc), f"names of {rfc}", timeout=90)
+        names, flagged = stored(rfc)
+        if "città.pdf" not in names or not flagged:
+            raise Fail(f"{rfc}: stored {names!r} flagged={flagged}")
+    wait(lambda: "itest-931" in mc("messages", "search", "filename:pdf", "--account-id", w.account), "alice's PDF found")
+    wait(lambda: "itest-932" in mc("messages", "search", "filename:pdf", "--account-id", bob), "bob's PDF found")
+    if (spent := db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0] - before) > 600 << 10:
+        raise Fail(f"naming two 1 MB PDFs downloaded {spent} bytes")
+
+    # Mail stored before names were kept: structure only, bodies stay put.
+    for rfc in (imap_rfc, jmap_rfc):
+        con = sqlite3.connect(HERE / ".state" / "mc" / "mail-cat.db", timeout=10)
+        with con:
+            con.execute("UPDATE messages SET attachments = '[]' WHERE rfc_message_id = ?", (rfc,))
+        con.close()
+    before = db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0]
+    w.sync()
+    mc("sync", bob)
+    for rfc in (imap_rfc, jmap_rfc):
+        wait(lambda: stored(rfc), f"catch-up names of {rfc}", timeout=90)
+    if (spent := db("SELECT COALESCE(SUM(bytes), 0) FROM downloads")[0] - before) > 100 << 10:
+        raise Fail(f"the catch-up downloaded {spent} bytes")
+
+
 def jmap_snapshot(account):
     """({display_path: mailbox}, {tag: (display_path, message)}) as mail-cat has them."""
     boxes = {m["display_path"]: m for m in json.loads(mc("--json", "mailboxes", "list", account))}
@@ -363,7 +413,6 @@ def jmap_write(w):
     mail from another client then appears through push, without `mc sync`."""
     bob = account_id("bob")
     run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
-    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
 
     def server(path, user="bob"):
@@ -420,7 +469,6 @@ def jmap_write(w):
         raise Fail("the sent mail was left in Drafts")
 
     # What mail-cat believes after all that matches the server.
-    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
     for path, name in (("INBOX", "Inbox"), ("Archive", "Archive"), ("Trash", "Trash")):
         got = sorted(tag for tag, (p, _) in msgs.items() if p == name and tag is not None)
@@ -441,7 +489,6 @@ def jmap_labels(w):
     another client. Switching the model changes no data."""
     bob = account_id("bob")
     run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
-    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
     inbox, archive, projects = (boxes[n]["id"] for n in ("Inbox", "Archive", "Projects"))
 
@@ -473,10 +520,8 @@ def jmap_labels(w):
     mc("messages", "labels", msg(1), "--add", projects)
     if where(1) != ["INBOX", "Projects"]:
         raise Fail(f"tag 1 after adding a label: {where(1)}")
-    jmap_sync_all(bob)
     if rows(1) != (1, 2):
         raise Fail(f"tag 1 has (message rows, mailbox rows) {rows(1)}, expected (1, 2)")
-    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
     if int(boxes["Projects"]["total_messages"]) != 2 or rows(1) != (1, 2):
         raise Fail("syncing after a label change duplicated or lost a row")
@@ -501,7 +546,6 @@ def jmap_labels(w):
     mc("messages", "archive", msg(2))
     if where(2) != ["Projects"]:
         raise Fail(f"tag 2 after archive: {where(2)}")
-    jmap_sync_all(bob)
     if rows(4) != (1, 1) or rows(2) != (1, 1):
         raise Fail(f"rows after archive: tag 4 {rows(4)}, tag 2 {rows(2)}")
 
@@ -519,7 +563,6 @@ def jmap_labels(w):
     mc("messages", "tag", msg(1), "--add", "work")
     wait(lambda: any(f.lower() == "work" for f in server_flags(1)), "tag work on the server")
     imapctl.main(["--user", "bob", "store", "INBOX", "tag:1", "+phone"])
-    jmap_sync_all(bob)
     if sorted(tags(1)) != ["phone", "work"]:
         raise Fail(f"tags of tag 1 after the phone added one: {tags(1)}")
     mc("messages", "tag", msg(1), "--remove", "work")
@@ -619,7 +662,6 @@ def subscriptions_jmap(w):
     unsubscription of Archive arrives with the next sync."""
     bob = account_id("bob")
     run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
-    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
     if "Projects" not in subscribed_on_server("bob") or not boxes["Projects"]["subscribed"]:
         raise Fail("expected Projects subscribed to start with")
@@ -631,7 +673,6 @@ def subscriptions_jmap(w):
         raise Fail("Projects still subscribed after unsubscribe")
     if "Projects" in subscribed_on_server("bob"):
         raise Fail("the server still lists Projects as subscribed")
-    jmap_sync_all(bob)
     if any(p == "Projects" for p, _ in jmap_snapshot(bob)[1].values()):
         raise Fail("a sync brought the unsubscribed Projects back")
 
@@ -923,7 +964,6 @@ def rename_jmap(w):
     server_tree("bob", "Rn", "Rn/Child")
     run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "--start", "101", "-n", "3", "Rn/Child"])
     mc("sync", bob)
-    jmap_sync_all(bob)
     before, msgs = jmap_snapshot(bob)
     if int(before["Rn/Child"]["total_messages"]) != 3:
         raise Fail(f"Rn/Child has {before['Rn/Child']['total_messages']} messages, expected 3")
@@ -947,11 +987,10 @@ def rename_jmap(w):
             raise Fail(f"{what}: the child's messages are {sorted(t for t, (p, _) in found.items() if 'Deep' in p)}")
 
     check("right after the rename")
-    jmap_sync_all(bob)
     check("after a sync")
 
 
-SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk, hot_add, remove_account, restart_account, rename_imap, rename_jmap]
+SCENARIOS = [basic_sync, flags, move_delete, phone_moved_first, remote_delete, reappear, delete_twice, backfill_text_only, attachment_names, jmap_sync, jmap_write, jmap_labels, subscriptions_imap, subscriptions_jmap, subscriptions_bulk, hot_add, remove_account, restart_account, rename_imap, rename_jmap]
 SCENARIOS += gmail_scenarios.make(sys.modules[__name__])
 
 

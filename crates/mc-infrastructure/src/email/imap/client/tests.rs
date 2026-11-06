@@ -1,5 +1,6 @@
 use super::*;
 
+mod attachments;
 mod commands;
 mod fetch_and_connect;
 

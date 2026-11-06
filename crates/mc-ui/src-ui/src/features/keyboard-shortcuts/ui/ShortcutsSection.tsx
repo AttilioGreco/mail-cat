@@ -2,6 +2,7 @@ import { Keyboard } from 'lucide-react';
 import { useShortcutsStore } from '../model/shortcuts-store';
 import { PRESET_LABELS, type PresetId } from '../model/presets';
 import { ShortcutList } from './ShortcutList';
+import { SimpleSelect } from '@/shared/ui/select';
 
 const PRESET_IDS: PresetId[] = ['vim', 'outlook', 'none'];
 
@@ -20,17 +21,11 @@ export function ShortcutsSection() {
           <Keyboard size={15} />
           Set di scorciatoie
         </div>
-        <select
+        <SimpleSelect
           value={preset}
-          onChange={(e) => setPreset(e.target.value as PresetId)}
-          className="w-full rounded border border-border bg-background px-2.5 py-2 text-sm text-foreground"
-        >
-          {PRESET_IDS.map((id) => (
-            <option key={id} value={id}>
-              {PRESET_LABELS[id]}
-            </option>
-          ))}
-        </select>
+          onChange={setPreset}
+          items={PRESET_IDS.map((id) => ({ value: id, label: PRESET_LABELS[id] }))}
+        />
         <p className="mt-2 text-xs text-muted">
           I tasti singoli non scattano mentre scrivi in un campo di testo, quindi non interferiscono
           con la composizione. Premi F1 in qualsiasi momento per l'elenco completo.

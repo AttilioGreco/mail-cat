@@ -616,10 +616,46 @@ where
             label: status.settings.label,
             mode,
             threshold,
+            color: status.settings.color,
         };
         let scope = self.store.scope_of(account).await?;
         self.store.put_settings(scope, &settings).await?;
         Ok(LabelStatus { settings, ..status })
+    }
+
+    /// Coloring needs no examples: it never changes what the classifier does.
+    pub async fn set_label_color(
+        &self,
+        account: AccountId,
+        label: &str,
+        color: Option<&str>,
+    ) -> Result<LabelStatus, ApplicationError> {
+        if color.is_some_and(|c| !LabelSettings::is_color(c)) {
+            return Err(mc_domain::DomainError::Validation(format!(
+                "unknown label color {color:?}"
+            ))
+            .into());
+        }
+        let scope = self.store.scope_of(account).await?;
+        self.store
+            .set_color(scope, &label_key(label), color)
+            .await?;
+        self.label_status(account, label).await
+    }
+
+    /// The colors of the account's training group, by lowercased label.
+    pub async fn label_colors(
+        &self,
+        account: AccountId,
+    ) -> Result<HashMap<String, String>, ApplicationError> {
+        let scope = self.store.scope_of(account).await?;
+        Ok(self
+            .store
+            .settings(scope)
+            .await?
+            .into_iter()
+            .filter_map(|s| Some((s.label, s.color?)))
+            .collect())
     }
 
     // ── On a message ──

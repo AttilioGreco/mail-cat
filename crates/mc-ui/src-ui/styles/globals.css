@@ -29,6 +29,32 @@
     --destructive: 0 72% 51%;
 
     --radius: 0.625rem;
+
+    /* Label palette (keys defined in mc-domain LabelSettings::is_color). */
+    --label-red: 0 72% 46%;
+    --label-red-soft: 0 75% 78%;
+    --label-orange: 25 72% 46%;
+    --label-orange-soft: 25 75% 78%;
+    --label-amber: 40 72% 46%;
+    --label-amber-soft: 40 75% 78%;
+    --label-yellow: 52 72% 46%;
+    --label-yellow-soft: 52 75% 78%;
+    --label-lime: 85 72% 46%;
+    --label-lime-soft: 85 75% 78%;
+    --label-green: 140 72% 46%;
+    --label-green-soft: 140 75% 78%;
+    --label-teal: 172 72% 46%;
+    --label-teal-soft: 172 75% 78%;
+    --label-cyan: 190 72% 46%;
+    --label-cyan-soft: 190 75% 78%;
+    --label-blue: 217 72% 46%;
+    --label-blue-soft: 217 75% 78%;
+    --label-indigo: 240 72% 46%;
+    --label-indigo-soft: 240 75% 78%;
+    --label-purple: 270 72% 46%;
+    --label-purple-soft: 270 75% 78%;
+    --label-pink: 330 72% 46%;
+    --label-pink-soft: 330 75% 78%;
   }
 
   html[data-theme='dark'] {
@@ -52,6 +78,31 @@
     --badge: 217 91% 60%;
 
     --destructive: 0 72% 51%;
+
+    --label-red: 0 72% 60%;
+    --label-red-soft: 0 42% 40%;
+    --label-orange: 25 72% 60%;
+    --label-orange-soft: 25 42% 40%;
+    --label-amber: 40 72% 60%;
+    --label-amber-soft: 40 42% 40%;
+    --label-yellow: 52 72% 60%;
+    --label-yellow-soft: 52 42% 40%;
+    --label-lime: 85 72% 60%;
+    --label-lime-soft: 85 42% 40%;
+    --label-green: 140 72% 60%;
+    --label-green-soft: 140 42% 40%;
+    --label-teal: 172 72% 60%;
+    --label-teal-soft: 172 42% 40%;
+    --label-cyan: 190 72% 60%;
+    --label-cyan-soft: 190 42% 40%;
+    --label-blue: 217 72% 60%;
+    --label-blue-soft: 217 42% 40%;
+    --label-indigo: 240 72% 60%;
+    --label-indigo-soft: 240 42% 40%;
+    --label-purple: 270 72% 60%;
+    --label-purple-soft: 270 42% 40%;
+    --label-pink: 330 72% 60%;
+    --label-pink-soft: 330 42% 40%;
   }
 
   * {

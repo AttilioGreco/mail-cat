@@ -2,6 +2,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
@@ -18,6 +19,9 @@ use mc_client::{
 pub struct AppState {
     pub client: Mutex<Option<MailCatClient>>,
     pub server_url: String,
+    /// Set while the start-up check may still be registering or launching the
+    /// server, so early connects wait for it instead of failing.
+    pub starting: AtomicBool,
 }
 
 /// Where a desktop notification wants the UI to navigate.
@@ -336,12 +340,25 @@ fn body_to_dto(b: MessageBody) -> MessageBodyDto {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// How long a connect keeps retrying while the server is being brought up.
+const STARTUP_CONNECT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(crate) async fn get_or_connect(state: &State<'_, AppState>) -> Result<MailCatClient, String> {
     let mut guard = state.client.lock().await;
     if guard.is_none() {
-        let client = MailCatClient::connect(&state.server_url)
-            .await
-            .map_err(|e| e.to_string())?;
+        let deadline = std::time::Instant::now() + STARTUP_CONNECT_GRACE;
+        let client = loop {
+            match MailCatClient::connect(&state.server_url).await {
+                Ok(client) => break client,
+                Err(_)
+                    if state.starting.load(Ordering::SeqCst)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        };
         *guard = Some(client);
     }
     Ok(guard.as_ref().unwrap().clone())

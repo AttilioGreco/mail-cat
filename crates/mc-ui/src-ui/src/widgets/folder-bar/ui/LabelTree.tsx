@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { ChevronRight, Tag } from 'lucide-react';
 import { cn } from '@/shared/lib/utils';
-import { ancestorKeys, buildLabelTree, visibleRows, type LabelRow, type Mailbox } from '@/entities/mailbox';
+import { labelKey } from '@/shared/lib/label-colors';
+import { LabelDot } from '@/shared/ui/label-dot';
+import { ancestorKeys, buildLabelTree, useLabelColors, visibleRows, type LabelRow, type Mailbox } from '@/entities/mailbox';
 
 const storageKey = (accountId: string) => `sidebar.labels.expanded.${accountId}`;
 
@@ -31,6 +33,7 @@ interface LabelTreeProps {
 }
 
 export function LabelTree({ accountId, labels, selectedMailboxId, onSelect, onContextMenu }: LabelTreeProps) {
+  const colors = useLabelColors(accountId);
   const roots = useMemo(() => buildLabelTree(labels), [labels]);
   const [state, setState] = useState(() => ({ accountId, expanded: loadExpanded(accountId) }));
   const expanded = state.accountId === accountId ? state.expanded : loadExpanded(accountId);
@@ -140,6 +143,7 @@ export function LabelTree({ accountId, labels, selectedMailboxId, onSelect, onCo
             </span>
             <Tag size={15} className="shrink-0" />
             <span className="flex-1 truncate text-left">{node.segment}</span>
+            {node.mailbox && <LabelDot color={colors[labelKey(node.mailbox.displayPath)]} />}
             {unread > 0 && (
               <span
                 className={cn(

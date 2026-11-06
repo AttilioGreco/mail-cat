@@ -21,6 +21,7 @@ import {
   useSyncNow,
 } from '../model/useAccountMutations';
 import { AddAccountDialog } from './AddAccountDialog';
+import { SimpleSelect } from '@/shared/ui/select';
 
 export function AccountsSection({ accountActions }: { accountActions?: (account: Account) => ReactNode }) {
   const { data: accounts = [], isLoading, error } = useAccounts();
@@ -252,16 +253,18 @@ function MailboxModelField({ account }: { account: Account }) {
     <div className="mt-3">
       <div className="flex items-center gap-2">
         <label htmlFor={id} className="text-xs text-foreground">Organizzazione</label>
-        <select
+        <SimpleSelect
           id={id}
+          size="sm"
+          className="w-auto"
           value={account.mailboxModel}
           disabled={setModel.isPending}
-          onChange={(e) => setModel.mutate({ accountId: account.id, labels: e.target.value === 'labels' })}
-          className="rounded border border-border bg-background px-2 py-1 text-xs text-foreground"
-        >
-          <option value="folders">Cartelle</option>
-          <option value="labels">Etichette</option>
-        </select>
+          onChange={(v) => setModel.mutate({ accountId: account.id, labels: v === 'labels' })}
+          items={[
+            { value: 'folders', label: 'Cartelle' },
+            { value: 'labels', label: 'Etichette' },
+          ]}
+        />
       </div>
       <p className="mt-1 text-[11px] text-muted">
         Cambia solo come vedi la posta (cartelle o etichette sui messaggi); i dati non vengono modificati.

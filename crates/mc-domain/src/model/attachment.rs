@@ -41,3 +41,11 @@ pub struct Attachment {
     pub content_id: Option<String>,
     pub is_inline: bool,
 }
+
+impl Attachment {
+    /// Whether these make a message "have attachments": embedded images
+    /// (signature logos, newsletter art) are listed but don't count.
+    pub fn any_downloadable(attachments: &[Attachment]) -> bool {
+        attachments.iter().any(|a| !a.is_inline)
+    }
+}

@@ -454,11 +454,35 @@ async fn a_level_that_exists_already_is_not_an_error() {
 
     create_on(&mut session, "Shopping/Ebay", '/').await.unwrap();
 
-    assert_eq!(
-        uid_commands(&commands).len(),
-        4,
-        "the child was made all the same"
+    let sent = uid_commands(&commands);
+    assert_eq!(sent.len(), 3, "the child was made all the same: {sent:?}");
+    assert!(
+        !sent.iter().any(|c| c == "SUBSCRIBE \"Shopping\""),
+        "the existing parent keeps the user's subscription: {sent:?}"
     );
+}
+
+#[tokio::test]
+async fn a_new_label_gmail_does_not_see_yet_is_subscribed_on_a_retry() {
+    use super::super::mailbox::create_on;
+    let mut refusals = 2;
+    let (mut session, commands) = super::serving(move |command| {
+        if command == "SUBSCRIBE \"Work\"" && refusals > 0 {
+            refusals -= 1;
+            "$T NO [NONEXISTENT] Folder doesn't exist (Failure)\r\n".to_owned()
+        } else {
+            "$T OK Done\r\n".to_owned()
+        }
+    })
+    .await;
+
+    create_on(&mut session, "Work", '/').await.unwrap();
+
+    let subscribes = uid_commands(&commands)
+        .iter()
+        .filter(|c| c.starts_with("SUBSCRIBE"))
+        .count();
+    assert_eq!(subscribes, 3);
 }
 
 #[tokio::test]

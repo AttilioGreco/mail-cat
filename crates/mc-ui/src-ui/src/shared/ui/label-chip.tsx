@@ -1,14 +1,17 @@
 import { X } from 'lucide-react';
 import { cn } from '@/shared/lib/utils';
+import { LabelDot } from './label-dot';
 
 interface LabelChipProps {
   name: string;
   /** A tag (server keyword) rather than a mailbox label. */
   tag?: boolean;
+  /** Palette key of the label's color. */
+  color?: string | null;
   onRemove?: () => void;
 }
 
-export function LabelChip({ name, tag = false, onRemove }: LabelChipProps) {
+export function LabelChip({ name, tag = false, color, onRemove }: LabelChipProps) {
   return (
     <span
       className={cn(
@@ -16,6 +19,7 @@ export function LabelChip({ name, tag = false, onRemove }: LabelChipProps) {
         tag ? 'border border-border text-muted-foreground' : 'bg-accent/15 text-accent',
       )}
     >
+      <LabelDot color={color} />
       <span className="truncate">{name}</span>
       {onRemove && (
         <button

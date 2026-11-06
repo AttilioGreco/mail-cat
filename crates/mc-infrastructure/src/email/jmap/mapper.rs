@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use mc_domain::error::DomainError;
 use mc_domain::{
-    Address, EmailAddress, Envelope, Flag, ListHeaders, MailboxType, MessageBodyResult,
-    MessageEnvelopeSummary, MessageKey, RemoteId,
+    Address, Attachment, AttachmentId, EmailAddress, Envelope, Flag, ListHeaders, MailboxType,
+    MessageBodyResult, MessageEnvelopeSummary, MessageKey, RemoteId,
 };
 
 /// Email properties a list view needs; no body values.
@@ -207,6 +207,32 @@ fn part_text(email: &Value, parts: &str, mime: &str) -> (Option<String>, bool) {
     ((!text.is_empty()).then_some(text), truncated)
 }
 
+/// The `attachments` list of an Email: body parts outside the readable text,
+/// whose default properties include name, type, size, cid and disposition.
+pub(super) fn attachments(email: &Value) -> Vec<Attachment> {
+    email["attachments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|part| Attachment {
+            id: AttachmentId::new(),
+            filename: part["name"]
+                .as_str()
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned),
+            mime_type: part["type"]
+                .as_str()
+                .unwrap_or("application/octet-stream")
+                .to_ascii_lowercase(),
+            size_bytes: part["size"].as_u64().unwrap_or(0),
+            content_id: part["cid"].as_str().map(str::to_owned),
+            is_inline: part["disposition"]
+                .as_str()
+                .is_some_and(|d| d.eq_ignore_ascii_case("inline")),
+        })
+        .collect()
+}
+
 pub(super) fn bodies(email: &Value) -> Option<MessageBodyResult> {
     let (body_text, text_cut) = part_text(email, "textBody", "text/plain");
     let (body_html, html_cut) = part_text(email, "htmlBody", "text/html");
@@ -215,5 +241,6 @@ pub(super) fn bodies(email: &Value) -> Option<MessageBodyResult> {
         body_text,
         body_html,
         truncated: text_cut || html_cut,
+        attachments: attachments(email),
     })
 }

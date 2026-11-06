@@ -10,6 +10,7 @@ async fn setting(s: &Setup, label: &str) {
         label: label.into(),
         mode: LabelMode::Suggest,
         threshold: 0.8,
+        color: None,
     };
     s.store.put_settings(SCOPE, &settings).await.unwrap();
 }

@@ -40,6 +40,13 @@ pub trait TaggingStore: Send + Sync {
     async fn settings(&self, scope: Scope) -> Result<Vec<LabelSettings>, DomainError>;
     async fn put_settings(&self, scope: Scope, settings: &LabelSettings)
     -> Result<(), DomainError>;
+    /// Only the color; the label's mode and threshold are kept (or default).
+    async fn set_color(
+        &self,
+        scope: Scope,
+        label: &str,
+        color: Option<&str>,
+    ) -> Result<(), DomainError>;
 
     // ── Counts ──
     /// Counts for `tokens` of every label of the scope.

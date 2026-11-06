@@ -184,6 +184,7 @@ impl ReadModelProjector for MockProjector {
                 message_rfc_id,
                 flags,
                 size_bytes,
+                has_attachments,
                 provider_key,
                 ..
             } => {
@@ -204,7 +205,7 @@ impl ReadModelProjector for MockProjector {
                     subject: String::new(),
                     flags: flags.clone(),
                     size_bytes: *size_bytes,
-                    has_attachments: false,
+                    has_attachments: *has_attachments,
                     received_at: chrono::Utc::now(),
                 });
                 if let Some(rfc_id) = message_rfc_id {
@@ -514,6 +515,44 @@ impl BodyBackfillQueue for MockProjector {
         limit: usize,
     ) -> Result<Vec<mc_domain::BackfillEntry>, DomainError> {
         Ok(self.pending().into_iter().take(limit).collect())
+    }
+
+    async fn list_unnamed_attachments(
+        &self,
+        _account_id: &AccountId,
+        limit: usize,
+    ) -> Result<Vec<mc_domain::BackfillEntry>, DomainError> {
+        let named: Vec<MessageId> = self
+            .projected_events()
+            .iter()
+            .filter_map(|e| match e {
+                DomainEvent::MessageBodyFetched {
+                    message_id,
+                    attachments,
+                } if !attachments.is_empty() => Some(*message_id),
+                _ => None,
+            })
+            .collect();
+        let bodies = self.bodies.lock().unwrap();
+        Ok(self
+            .stored
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.has_attachments && bodies.contains_key(&m.id) && !named.contains(&m.id))
+            .filter_map(|m| {
+                let home = m.memberships.first()?;
+                Some(mc_domain::BackfillEntry {
+                    message_id: m.id,
+                    mailbox_id: home.mailbox_id,
+                    remote_id: home.remote_id.clone()?,
+                    rfc_message_id: None,
+                    size_bytes: m.size_bytes,
+                    from_email: m.from_email.clone(),
+                })
+            })
+            .take(limit)
+            .collect())
     }
 
     async fn count_pending_backfill(&self, _account_id: &AccountId) -> Result<u32, DomainError> {

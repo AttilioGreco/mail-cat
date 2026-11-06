@@ -6,9 +6,9 @@ use futures::Stream;
 
 use mc_domain::error::DomainError;
 use mc_domain::{
-    EmailProvider, Flag, Mailbox, MailboxChanges, MailboxPath, Message, MessageBodyResult,
-    MessageEnvelopeSummary, OutgoingMessage, ProviderNotification, RemoteId, SendOutcome,
-    SyncCursor,
+    Attachment, EmailProvider, Flag, Mailbox, MailboxChanges, MailboxPath, Message,
+    MessageBodyResult, MessageEnvelopeSummary, OutgoingMessage, ProviderNotification, RemoteId,
+    SendOutcome, SyncCursor,
 };
 
 use super::{ImapEmailProvider, JmapEmailProvider};
@@ -73,6 +73,14 @@ impl EmailProvider for AnyProvider {
         ids: &[RemoteId],
     ) -> Result<Vec<MessageBodyResult>, DomainError> {
         delegate!(self, p => p.fetch_bodies_bulk(mailbox, ids).await)
+    }
+
+    async fn fetch_attachments(
+        &self,
+        mailbox: &MailboxPath,
+        ids: &[RemoteId],
+    ) -> Result<HashMap<RemoteId, Vec<Attachment>>, DomainError> {
+        delegate!(self, p => p.fetch_attachments(mailbox, ids).await)
     }
 
     async fn find_by_message_id(

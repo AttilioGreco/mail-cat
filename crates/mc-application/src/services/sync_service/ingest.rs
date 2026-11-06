@@ -113,7 +113,7 @@ impl<PR: ProviderRegistry, ES: EventStore, P: SyncStore> SyncService<PR, ES, P> 
                                 body.body_text,
                                 body.body_html,
                                 body.truncated,
-                                vec![],
+                                body.attachments,
                             )
                             .await
                     {

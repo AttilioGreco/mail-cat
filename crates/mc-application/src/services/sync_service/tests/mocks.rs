@@ -34,6 +34,9 @@ pub(super) struct MockEmailProvider {
     pub(super) envelopes: Vec<MessageEnvelopeSummary>,
     pub(super) status: Option<MockStatus>,
     pub(super) bulk_fetch_calls: Mutex<Vec<Vec<u32>>>,
+    /// `fetch_attachments` calls. The server names `doc-<id>.pdf` for odd
+    /// ids and has nothing for even ones.
+    pub(super) attachment_calls: Mutex<Vec<Vec<u32>>>,
     /// Envelope fetches asking for this id fail.
     pub(super) fail_envelopes_with: Mutex<Option<u32>>,
     /// What those failures are.
@@ -80,6 +83,7 @@ impl MockEmailProvider {
                 unread: 0,
             }),
             bulk_fetch_calls: Mutex::new(vec![]),
+            attachment_calls: Mutex::new(vec![]),
             fail_envelopes_with: Mutex::new(None),
             changes_calls: AtomicUsize::new(0),
             envelope_error: provider_error,
@@ -340,6 +344,33 @@ impl EmailProvider for MockEmailProvider {
                 body_text: Some(format!("body-{id}")),
                 body_html: None,
                 truncated: false,
+                attachments: vec![],
+            })
+            .collect())
+    }
+
+    async fn fetch_attachments(
+        &self,
+        _mailbox: &MailboxPath,
+        ids: &[RemoteId],
+    ) -> Result<HashMap<RemoteId, Vec<Attachment>>, DomainError> {
+        self.attachment_calls
+            .lock()
+            .unwrap()
+            .push(ids.iter().map(numeric).collect());
+        Ok(ids
+            .iter()
+            .filter(|id| numeric(id) % 2 == 1)
+            .map(|id| {
+                let pdf = Attachment {
+                    id: AttachmentId::new(),
+                    filename: Some(format!("doc-{id}.pdf")),
+                    mime_type: "application/pdf".into(),
+                    size_bytes: 10,
+                    content_id: None,
+                    is_inline: false,
+                };
+                (id.clone(), vec![pdf])
             })
             .collect())
     }

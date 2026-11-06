@@ -94,6 +94,7 @@ fn status(s: AppLabelStatus) -> pb::LabelStatus {
         threshold: s.settings.threshold,
         positives: s.positives,
         min_positives: LabelSettings::MIN_POSITIVES,
+        color: s.settings.color,
     }
 }
 
@@ -451,6 +452,31 @@ where
             .await
             .map_err(application_error_to_status)?;
         Ok(Response::new(status(saved)))
+    }
+
+    async fn set_label_color(
+        &self,
+        request: Request<pb::SetLabelColorRequest>,
+    ) -> Result<Response<pb::LabelStatus>, Status> {
+        let req = request.into_inner();
+        let saved = self
+            .service
+            .set_label_color(account(&req.account_id)?, &req.label, req.color.as_deref())
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(status(saved)))
+    }
+
+    async fn list_label_colors(
+        &self,
+        request: Request<pb::ListLabelColorsRequest>,
+    ) -> Result<Response<pb::ListLabelColorsResponse>, Status> {
+        let colors = self
+            .service
+            .label_colors(account(&request.into_inner().account_id)?)
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(pb::ListLabelColorsResponse { colors }))
     }
 
     async fn get_message_tags(

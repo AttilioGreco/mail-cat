@@ -3,3 +3,4 @@
 config.toml
 /.worktrees
 .superpowers/
+/crates/mc-ui/binaries

@@ -184,7 +184,47 @@ function SelectScrollDownButton({
   )
 }
 
+/** A themed stand-in for a native <select>: native popups ignore the app theme. */
+function SimpleSelect<T extends string>({
+  value,
+  onChange,
+  items,
+  size = "default",
+  className,
+  disabled,
+  id,
+}: {
+  value: T
+  onChange: (value: T) => void
+  items: readonly { value: T; label: string }[]
+  size?: "sm" | "default"
+  className?: string
+  disabled?: boolean
+  id?: string
+}) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(v: T | null) => v !== null && onChange(v)}
+      items={items}
+      disabled={disabled}
+    >
+      <SelectTrigger id={id} size={size} className={cn("w-full", className)}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {items.map((i) => (
+          <SelectItem key={i.value} value={i.value}>
+            {i.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
 export {
+  SimpleSelect,
   Select,
   SelectContent,
   SelectGroup,

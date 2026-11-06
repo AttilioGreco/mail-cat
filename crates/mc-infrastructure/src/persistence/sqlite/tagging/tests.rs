@@ -408,9 +408,32 @@ async fn settings_and_auto_records_round_trip() {
         label: "newsletter".into(),
         mode: LabelMode::ApplyArchive,
         threshold: 0.8,
+        color: None,
     };
     f.store.put_settings(scope, &s).await.unwrap();
-    assert_eq!(f.store.settings(scope).await.unwrap(), [s]);
+    assert_eq!(
+        f.store.settings(scope).await.unwrap(),
+        std::slice::from_ref(&s)
+    );
+
+    f.store
+        .set_color(scope, "newsletter", Some("blue"))
+        .await
+        .unwrap();
+    f.store.put_settings(scope, &s).await.unwrap();
+    let colored = f.store.settings(scope).await.unwrap();
+    assert_eq!(
+        (colored[0].mode, colored[0].color.as_deref()),
+        (LabelMode::ApplyArchive, Some("blue")),
+        "saving the mode keeps the color"
+    );
+    f.store
+        .set_color(scope, "plain", Some("red"))
+        .await
+        .unwrap();
+    let plain = f.store.settings(scope).await.unwrap();
+    let plain = plain.iter().find(|p| p.label == "plain").unwrap();
+    assert_eq!(plain.mode, LabelMode::Off);
 
     let message = MessageId::new();
     let applied = AutoApplied {
