@@ -28,6 +28,7 @@ fn tokens(access: &str, expires_in: TimeDelta) -> OAuthSecrets {
         access_token: access.into(),
         refresh_token: "refresh".into(),
         expires_at: Utc::now() + expires_in,
+        scopes: vec![],
     }
 }
 
@@ -661,4 +662,27 @@ async fn watchers_hear_of_accounts_added_and_removed() {
     // Removing what is gone says nothing.
     h.gates.remove(&id);
     assert!(changes.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_refresh_that_omits_scope_keeps_the_granted_ones() {
+    let h = Harness::new(fresh);
+    let granted = vec!["mail".to_owned(), "dav".to_owned()];
+    let gate = h.gates.add(
+        AccountId::new(),
+        EMAIL,
+        Credential::OAuth {
+            provider: OAuthProvider::Google,
+            tokens: OAuthSecrets {
+                scopes: granted.clone(),
+                ..tokens("old", TimeDelta::zero())
+            },
+        },
+    );
+
+    gate.secret().await.unwrap();
+
+    let stored = h.keychain.load(EMAIL).unwrap().unwrap().oauth.unwrap();
+    assert_eq!(stored.access_token, "new");
+    assert_eq!(stored.scopes, granted);
 }

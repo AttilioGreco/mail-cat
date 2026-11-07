@@ -34,6 +34,16 @@ pub struct OAuthSecrets {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: DateTime<Utc>,
+    /// What the provider granted, from the token response. A refresh cannot
+    /// widen it, so this is how a token that predates a new scope is told apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+}
+
+impl OAuthSecrets {
+    pub fn grants_all(&self, wanted: &[&str]) -> bool {
+        wanted.iter().all(|w| self.scopes.iter().any(|s| s == w))
+    }
 }
 
 /// Persistence of per-account secrets. Keyed by account email.
@@ -68,5 +78,25 @@ mod tests {
             "absent fields must be omitted: {json}"
         );
         assert_eq!(serde_json::from_str::<AccountSecrets>(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn granted_scopes_roundtrip_and_old_entries_have_none() {
+        let tokens = OAuthSecrets {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_at: Utc::now(),
+            scopes: vec!["mail".into(), "dav".into()],
+        };
+        let json = serde_json::to_string(&tokens).unwrap();
+        let back: OAuthSecrets = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, tokens);
+        assert!(back.grants_all(&["dav", "mail"]));
+        assert!(!back.grants_all(&["calendar"]));
+
+        let old = r#"{"access_token":"a","refresh_token":"r","expires_at":"2026-01-01T00:00:00Z"}"#;
+        let old: OAuthSecrets = serde_json::from_str(old).unwrap();
+        assert!(old.scopes.is_empty());
+        assert!(!old.grants_all(&["dav"]));
     }
 }

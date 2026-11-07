@@ -7,10 +7,11 @@ use tokio_util::sync::CancellationToken;
 
 use mc_application::CommandBus;
 use mc_application::bus::{InProcessCommandBus, InProcessEventBus, InProcessQueryBus};
+use mc_application::handlers::dav::DavCommandHandler;
 use mc_application::projections::{ProjectionEventHandler, SearchProjectionHandler};
 use mc_application::{
-    AccountLifecycle, AccountLocks, AuthGates, EventPublisher, OAuthLoginTrigger, RefreshFn,
-    SyncConfig, SyncService, SyncTrigger,
+    AccountLifecycle, AccountLocks, AuthGates, DavProviders, DavSyncService, EventPublisher,
+    OAuthLoginTrigger, RefreshFn, SyncConfig, SyncService, SyncTrigger,
 };
 use mc_domain::{
     AccountId, AccountReadRepository, AccountWriteRepository, AggregateType, DomainError,
@@ -139,6 +140,18 @@ impl AppContext {
         // A mailbox rename and a sync must not interleave on one account.
         let account_locks = Arc::new(AccountLocks::default());
 
+        // Contacts and calendars: the service the DAV loops run and the DAV
+        // commands call, over the providers each account runtime registers.
+        let dav_providers = Arc::new(DavProviders::default());
+        let dav_sync = Arc::new(
+            DavSyncService::new(
+                repository_arc.clone(),
+                event_store.clone(),
+                dav_providers.clone(),
+            )
+            .with_event_publisher(event_bus.clone()),
+        );
+
         // Create command bus
         let command_bus = Arc::new(
             InProcessCommandBus::new(
@@ -150,7 +163,8 @@ impl AppContext {
                 event_bus.clone(),         // B
             )
             .with_resync_requests(resync_tx)
-            .with_sync_locks(account_locks.clone()),
+            .with_sync_locks(account_locks.clone())
+            .with_dav(DavCommandHandler::new(dav_sync.clone())),
         );
         tracing::info!("Initialized command bus");
 
@@ -294,6 +308,8 @@ impl AppContext {
             query_bus: query_bus.clone(),
             sync: sync_service.clone(),
             search: search_handler.clone(),
+            dav: dav_sync,
+            dav_providers,
             tagging: tagging.clone(),
             idle_enabled: std::env::var_os("MAIL_CAT_NO_IDLE").is_none(),
             shutdown: shutdown.clone(),

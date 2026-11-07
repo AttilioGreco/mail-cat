@@ -6,6 +6,10 @@
 
 use mc_domain::OAuthProvider;
 
+/// Contacts and calendars over DAV; a token without both gets no DAV sync.
+pub const GOOGLE_CARDDAV: &str = "https://www.googleapis.com/auth/carddav";
+pub const GOOGLE_CALENDAR: &str = "https://www.googleapis.com/auth/calendar";
+
 pub struct ProviderPreset {
     pub auth_url: &'static str,
     pub token_url: &'static str,
@@ -54,7 +58,7 @@ pub fn provider_preset(provider: OAuthProvider) -> ProviderPreset {
         OAuthProvider::Google => ProviderPreset {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: "https://oauth2.googleapis.com/token",
-            scopes: &["https://mail.google.com/"],
+            scopes: &["https://mail.google.com/", GOOGLE_CARDDAV, GOOGLE_CALENDAR],
             auth_extra_params: &[
                 ("access_type", "offline"),
                 ("prompt", "consent select_account"),
@@ -98,6 +102,12 @@ mod tests {
         let preset = provider_preset(OAuthProvider::Google);
         assert_eq!(preset.imap_host, "imap.gmail.com");
         assert_eq!(preset.smtp_host, "smtp.gmail.com");
+    }
+
+    #[test]
+    fn google_preset_asks_for_the_dav_scopes() {
+        let scopes = provider_preset(OAuthProvider::Google).scopes;
+        assert!(scopes.contains(&GOOGLE_CARDDAV) && scopes.contains(&GOOGLE_CALENDAR));
     }
 
     #[test]

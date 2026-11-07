@@ -1,17 +1,22 @@
-//! The account's sync loop and body backfill, each under a supervisor.
+//! The account's sync loop, body backfill and contacts/calendars sync, each
+//! under a supervisor.
 
 use chrono::Utc;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use mc_application::{AuthGate, AuthState};
-use mc_domain::{AccountId, LoginGate};
-use mc_infrastructure::SqliteEventStore;
+use mc_application::{AuthGate, AuthState, DavBackend, DavProviders, DavSyncService};
+use mc_domain::model::account::DavConfig;
+use mc_domain::{AccountId, AccountSecrets, DomainError, LoginGate};
+use mc_infrastructure::oauth::{GOOGLE_CALENDAR, GOOGLE_CARDDAV};
+use mc_infrastructure::{DavProfile, DavProvider, SqliteEventStore};
 
 use super::supervisor::supervise;
 use super::{AccountRuntime, TaskCtx};
+use crate::config::{AccountConfig, OAuthProviderConfig};
 use crate::wiring::{SearchHandlerImpl, SyncServiceImpl};
 
 /// How often an account is re-synced when nothing else prompts it.
@@ -123,26 +128,215 @@ impl SyncLoop {
             if let Err(e) = search.catch_up(event_store.as_ref()).await {
                 tracing::warn!("Search index catch-up after sync of '{name}' failed: {e}");
             }
-            // A failure while the retry is already due wasn't a login the
-            // gate rescheduled: don't spin on it.
-            if failed
-                && let AuthState::Offline { next_retry } = gate.status().state
-                && next_retry <= Utc::now()
-            {
-                tokio::select! {
-                    _ = stop.cancelled() => break,
-                    _ = tokio::time::sleep(SYNC_RETRY_FLOOR) => {}
-                }
-                continue;
-            }
-            // Offline, the gate's schedule (2s, 5s, …) beats the 5-minute period.
-            tokio::select! {
-                _ = stop.cancelled() => break,
-                _ = tokio::time::sleep(SYNC_PERIOD) => {}
-                () = gate.recovered() => {}
-                () = gate.retry_due() => {}
+            if !rest(&gate, &stop, failed).await {
+                break;
             }
         }
         tracing::info!("Sync loop stopped for '{name}'");
+    }
+}
+
+/// Waits for the next pass; false when `stop` ended the wait.
+async fn rest(gate: &AuthGate, stop: &CancellationToken, failed: bool) -> bool {
+    // A failure while the retry is already due wasn't a login the gate
+    // rescheduled: don't spin on it.
+    if failed
+        && let AuthState::Offline { next_retry } = gate.status().state
+        && next_retry <= Utc::now()
+    {
+        return sleep_or_stop(stop, SYNC_RETRY_FLOOR).await;
+    }
+    // Offline, the gate's schedule (2s, 5s, …) beats the 5-minute period.
+    tokio::select! {
+        _ = stop.cancelled() => false,
+        _ = tokio::time::sleep(SYNC_PERIOD) => true,
+        () = gate.recovered() => true,
+        () = gate.retry_due() => true,
+    }
+}
+
+async fn sleep_or_stop(stop: &CancellationToken, wait: Duration) -> bool {
+    tokio::select! {
+        _ = stop.cancelled() => false,
+        _ = tokio::time::sleep(wait) => true,
+    }
+}
+
+/// What an account gets for contacts and calendars.
+pub(super) enum DavSetup {
+    /// The endpoints are known: Google's fixed ones or the account's own.
+    Known(DavProvider),
+    /// A generic server with no URL configured: discovery decides.
+    Discover(DavProvider),
+    /// A Google token granted before the DAV scopes: mail only.
+    NeedsScopes,
+    None,
+}
+
+pub(super) fn dav_setup(
+    config: &AccountConfig,
+    secrets: &AccountSecrets,
+    account: AccountId,
+    dav: Option<&DavConfig>,
+    gate: Arc<dyn LoginGate>,
+) -> Result<DavSetup, DomainError> {
+    let profile = match config.oauth_provider {
+        // ponytail: Graph contacts/calendars are phase 3.
+        Some(OAuthProviderConfig::Microsoft) => return Ok(DavSetup::None),
+        Some(OAuthProviderConfig::Google) => {
+            let granted = secrets
+                .oauth
+                .as_ref()
+                .is_some_and(|t| t.grants_all(&[GOOGLE_CARDDAV, GOOGLE_CALENDAR]));
+            if !granted {
+                return Ok(DavSetup::NeedsScopes);
+            }
+            DavProfile::Google
+        }
+        None => DavProfile::Generic,
+    };
+    let known = profile == DavProfile::Google
+        || dav.is_some_and(|d| d.carddav.is_some() || d.caldav.is_some());
+    let provider = DavProvider::new(
+        account,
+        &config.email,
+        config.username.clone(),
+        gate,
+        dav,
+        profile,
+    )?;
+    Ok(if known {
+        DavSetup::Known(provider)
+    } else {
+        DavSetup::Discover(provider)
+    })
+}
+
+#[derive(Clone)]
+struct DavLoop {
+    id: AccountId,
+    name: String,
+    gate: Arc<AuthGate>,
+    stop: CancellationToken,
+    sync: Arc<DavSyncService>,
+    providers: Arc<DavProviders>,
+    backend: Arc<dyn DavBackend>,
+    /// Set while the server's DAV endpoints are still to be discovered.
+    probe: Option<Arc<DavProvider>>,
+}
+
+impl AccountRuntime {
+    /// Starts the account's contacts and calendars loop, if its setup has one.
+    pub(super) fn spawn_dav_loop(&self, ctx: TaskCtx, setup: DavSetup) {
+        let (provider, discover) = match setup {
+            DavSetup::Known(provider) => (Arc::new(provider), false),
+            DavSetup::Discover(_) if !self.dav_discovery.load(Ordering::Relaxed) => return,
+            DavSetup::Discover(provider) => (Arc::new(provider), true),
+            DavSetup::NeedsScopes => {
+                tracing::info!(
+                    "'{}' has no contacts and calendars sync until it logs in again",
+                    ctx.name
+                );
+                ctx.gate.dav_unavailable(
+                    "contacts and calendars need a new login to grant access".into(),
+                );
+                return;
+            }
+            DavSetup::None => return,
+        };
+        let probe = discover.then(|| provider.clone());
+        self.spawn_dav_task(ctx, provider, probe);
+    }
+
+    /// `probe` is set while the server's DAV endpoints are still to be
+    /// discovered: the backend is registered only once it answers.
+    pub(super) fn spawn_dav_task(
+        &self,
+        ctx: TaskCtx,
+        backend: Arc<dyn DavBackend>,
+        probe: Option<Arc<DavProvider>>,
+    ) {
+        let task = DavLoop {
+            id: ctx.id,
+            name: ctx.name.clone(),
+            gate: ctx.gate.clone(),
+            stop: ctx.stop.clone(),
+            sync: self.deps.dav.clone(),
+            providers: self.deps.dav_providers.clone(),
+            backend,
+            probe,
+        };
+        supervise(
+            ("contacts and calendars loop", ctx.name),
+            ctx.stop,
+            &ctx.tasks,
+            move |reason| ctx.gate.task_failed(reason),
+            move || task.clone().run(),
+        );
+    }
+}
+
+impl DavLoop {
+    /// Same cadence and gate as the mail sync, as a task of its own so a slow
+    /// DAV server never delays mail. The gate already hears of login,
+    /// connection and throttling failures from the DAV client; the pass only
+    /// has to wait out what it schedules.
+    async fn run(self) {
+        let Self {
+            id,
+            name,
+            gate,
+            stop,
+            sync,
+            providers,
+            backend,
+            probe,
+        } = self;
+        let mut registered = probe.is_none();
+        if registered {
+            providers.register(id, backend.clone());
+        }
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                () = gate.ready() => {}
+            }
+            let mut failed = false;
+            if let Some(probe) = probe.as_ref().filter(|_| !registered) {
+                let found = tokio::select! {
+                    _ = stop.cancelled() => break,
+                    found = probe.is_available() => found,
+                };
+                match found {
+                    Ok(true) => {
+                        providers.register(id, backend.clone());
+                        registered = true;
+                    }
+                    // Looked up again only when the account restarts.
+                    Ok(false) => {
+                        tracing::info!("No CardDAV or CalDAV server found for '{name}'");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("DAV discovery failed for '{name}': {e}");
+                        failed = true;
+                    }
+                }
+            }
+            if registered {
+                let synced = tokio::select! {
+                    _ = stop.cancelled() => break,
+                    synced = sync.sync_account(&id) => synced,
+                };
+                if let Err(e) = synced {
+                    tracing::error!("Contacts and calendars sync failed for '{name}': {e}");
+                    failed = true;
+                }
+            }
+            if !rest(&gate, &stop, failed).await {
+                break;
+            }
+        }
+        tracing::info!("Contacts and calendars loop stopped for '{name}'");
     }
 }

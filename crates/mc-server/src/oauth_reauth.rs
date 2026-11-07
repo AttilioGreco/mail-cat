@@ -62,7 +62,15 @@ impl OAuthLoginTrigger for ReauthTrigger {
                 // refetches accounts on that event already sees "active".
                 if let OAuthLoginProgress::Succeeded { email } = &event {
                     match gates.by_email(email) {
-                        Some(gate) => apply_fresh_tokens(&gate, secret_store.as_ref()).await,
+                        Some(gate) => {
+                            let lacked_dav = gate.status().dav_error.is_some();
+                            apply_fresh_tokens(&gate, secret_store.as_ref()).await;
+                            // The DAV loop is chosen at start, from the scopes
+                            // the keychain's token then has.
+                            if lacked_dav && let Err(e) = runtime.restart(gate.account_id()).await {
+                                tracing::warn!("Restart after re-login for {email} failed: {e}");
+                            }
+                        }
                         // No gate for the address: a brand-new account, start it.
                         None => {
                             if let Err(e) = runtime.start_declared(email).await {
@@ -166,6 +174,7 @@ mod tests {
             access_token: "stale".into(),
             refresh_token: "dead".into(),
             expires_at: Utc::now() - Duration::days(1),
+            scopes: vec![],
         };
         let gate = gates.add(
             AccountId::new(),
@@ -182,6 +191,7 @@ mod tests {
             access_token: "new-access".into(),
             refresh_token: "new-refresh".into(),
             expires_at: Utc::now() + Duration::hours(1),
+            scopes: vec![],
         };
         store
             .store(

@@ -173,6 +173,31 @@ impl DavProvider {
         })
     }
 
+    /// Whether the server offers CardDAV or CalDAV. Only a failure that says
+    /// something about the account or the connection is an error: the rest
+    /// means the server has no such service.
+    pub async fn is_available(&self) -> Result<bool, DomainError> {
+        let (contacts, calendar) =
+            tokio::join!(self.home(Kind::Contacts), self.home(Kind::Calendar));
+        if contacts.is_ok() || calendar.is_ok() {
+            return Ok(true);
+        }
+        match (contacts, calendar) {
+            (Err(e), _) | (_, Err(e))
+                if matches!(
+                    e,
+                    DomainError::AuthenticationFailed(_)
+                        | DomainError::ConnectionFailed(_)
+                        | DomainError::ConnectionTimeout(_)
+                        | DomainError::Throttled(_)
+                ) =>
+            {
+                Err(e)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Resolves once per provider; a failure is retried by the next pass.
     async fn home(&self, kind: Kind) -> Result<&Home, DomainError> {
         let (cell, manual) = match kind {

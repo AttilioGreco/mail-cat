@@ -6,6 +6,7 @@
 use anyhow::Context;
 use chrono::Utc;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -13,12 +14,13 @@ use tokio_util::task::TaskTracker;
 
 use mc_application::{
     AccountLifecycle, AccountProvisioner, ApplicationError, AuthGate, AuthGates, Backoff, Command,
-    CommandBus, CommandResult, Credential,
+    CommandBus, CommandResult, Credential, DavProviders, DavSyncService,
 };
 use mc_domain::model::account::{IncomingServer, SmtpConnectionConfig, SmtpSecurity};
 use mc_domain::{
-    AccountId, AccountReadRepository, AccountSecrets, AuthConfig, ConnectionConfig, DomainError,
-    EmailAddress, Identity, LoginGate, ProviderRegistry, SecretStore,
+    AccountId, AccountReadRepository, AccountSecrets, AccountWriteRepository, AuthConfig,
+    ConnectionConfig, DomainError, EmailAddress, Identity, LoginGate, ProviderRegistry,
+    SecretStore,
 };
 use mc_infrastructure::{
     AnyProvider, DownloadMeter, ImapEmailProvider, JmapEmailProvider, SqliteDb, SqliteEventStore,
@@ -49,6 +51,8 @@ pub struct RuntimeDeps {
     pub query_bus: Arc<QueryBusImpl>,
     pub sync: Arc<SyncServiceImpl>,
     pub search: Arc<SearchHandlerImpl>,
+    pub dav: Arc<DavSyncService>,
+    pub dav_providers: Arc<DavProviders>,
     pub tagging: Arc<TaggingServiceInner>,
     /// Push watchers off: tests need syncs to happen only when they ask.
     pub idle_enabled: bool,
@@ -79,6 +83,8 @@ pub struct AccountRuntime {
     /// both create it and a removal never races a start.
     starting: tokio::sync::Mutex<()>,
     running: Mutex<HashMap<AccountId, Running>>,
+    /// Off in tests, which must not reach out to the address's domain.
+    dav_discovery: AtomicBool,
 }
 
 impl AccountRuntime {
@@ -87,6 +93,7 @@ impl AccountRuntime {
             deps,
             starting: tokio::sync::Mutex::new(()),
             running: Mutex::new(HashMap::new()),
+            dav_discovery: AtomicBool::new(true),
         }
     }
 
@@ -187,6 +194,8 @@ impl AccountRuntime {
         };
         self.spawn_sync_loop(task_ctx.clone(), first_sync.clone());
         self.spawn_backfill(task_ctx.clone(), account_config.daily_download_limit());
+        self.provision_dav(&task_ctx, account_config, &secrets)
+            .await;
         if deps.idle_enabled {
             self.spawn_watcher(task_ctx, provider, first_sync);
         }
@@ -195,6 +204,32 @@ impl AccountRuntime {
             .unwrap()
             .insert(account_id, Running { name, stop, tasks });
         Ok(account_id)
+    }
+
+    /// Never fails the start: contacts and calendars are not worth losing mail.
+    async fn provision_dav(
+        &self,
+        ctx: &TaskCtx,
+        account_config: &AccountConfig,
+        secrets: &AccountSecrets,
+    ) {
+        let dav = match AccountWriteRepository::load(self.deps.repository.as_ref(), &ctx.id).await {
+            Ok(account) => account.and_then(|a| a.connection_config.dav),
+            Err(e) => {
+                tracing::warn!("Could not read the DAV settings of '{}': {e}", ctx.name);
+                None
+            }
+        };
+        match tasks::dav_setup(
+            account_config,
+            secrets,
+            ctx.id,
+            dav.as_ref(),
+            ctx.gate.clone() as Arc<dyn LoginGate>,
+        ) {
+            Ok(setup) => self.spawn_dav_loop(ctx.clone(), setup),
+            Err(e) => tracing::warn!("No contacts and calendars sync for '{}': {e}", ctx.name),
+        }
     }
 
     /// Starts the account `config.toml` declares under `email`: what a login
@@ -246,6 +281,7 @@ impl AccountRuntime {
         };
         running.stop.cancel();
         self.deps.registry.remove_provider(account_id);
+        self.deps.dav.forget(account_id);
         self.deps.auth_gates.remove(account_id);
         running.tasks.close();
         running.tasks.wait().await;
@@ -402,6 +438,7 @@ fn credential(
                 access_token: String::new(),
                 refresh_token: String::new(),
                 expires_at: Utc::now(),
+                scopes: vec![],
             }
         });
         return Credential::OAuth {

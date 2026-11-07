@@ -131,6 +131,10 @@ message AccountAuthStatus {
   // crashed repeatedly and was given up on. `state` stays as it was; cleared
   // by RestartAccount.
   optional string task_error = 10;
+  // Why contacts and calendars do not sync while mail does (a Google token
+  // granted before the DAV scopes existed). `state` stays as it was; a new
+  // login (ReauthAccount) clears it.
+  optional string dav_error = 11;
 }
 
 message WatchAuthStatusRequest {}

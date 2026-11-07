@@ -110,6 +110,10 @@ pub struct AuthStatus {
     /// A background task of the account crashed for good: it looks active but
     /// part of it no longer runs, until the account is restarted.
     pub task_error: Option<String>,
+    /// Why contacts and calendars do not sync while mail does, e.g. a Google
+    /// token granted before the DAV scopes existed: only a new login fixes it,
+    /// yet it never pauses the account.
+    pub dav_error: Option<String>,
 }
 
 /// Exchanges a refresh token for fresh tokens at the provider.
@@ -137,6 +141,7 @@ struct Tracked {
     last_throttled: Option<DateTime<Utc>>,
     smtp_error: Option<String>,
     task_error: Option<String>,
+    dav_error: Option<String>,
 }
 
 /// What an offline or throttled gate has accumulated, so a successor gate
@@ -197,12 +202,19 @@ impl AuthGate {
             token_expires_at,
             smtp_error: tracked.smtp_error.clone(),
             task_error: tracked.task_error.clone(),
+            dav_error: tracked.dav_error.clone(),
         }
     }
 
     /// Shows clients that a background task of the account gave up.
     pub fn task_failed(&self, reason: String) {
         self.tracked.send_modify(|t| t.task_error = Some(reason));
+        let _ = self.changes.send(self.account_id);
+    }
+
+    /// Shows clients why the account has no contacts and calendars sync.
+    pub fn dav_unavailable(&self, reason: String) {
+        self.tracked.send_modify(|t| t.dav_error = Some(reason));
         let _ = self.changes.send(self.account_id);
     }
 
@@ -382,8 +394,14 @@ impl AuthGate {
             return Err(e);
         }
         match (self.refresh)(provider, refresh_token).await {
-            Ok(fresh) => {
+            Ok(mut fresh) => {
                 info!("OAuth token refreshed for {}", self.email);
+                if fresh.scopes.is_empty()
+                    && let Credential::OAuth { tokens, .. } = &*self.credential()
+                {
+                    // A refresh response may omit `scope`; the grant is unchanged.
+                    fresh.scopes.clone_from(&tokens.scopes);
+                }
                 self.persist_tokens(&fresh);
                 let token = fresh.access_token.clone();
                 if let Credential::OAuth { tokens, .. } = &mut *self.credential() {
@@ -715,6 +733,7 @@ impl AuthGates {
                 last_throttled: None,
                 smtp_error: None,
                 task_error: None,
+                dav_error: None,
             }),
             refresh: self.refresh.clone(),
             secret_store: self.secret_store.clone(),

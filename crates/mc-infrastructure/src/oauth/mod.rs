@@ -4,7 +4,7 @@
 pub mod loopback;
 mod presets;
 
-pub use presets::{ProviderPreset, provider_preset};
+pub use presets::{GOOGLE_CALENDAR, GOOGLE_CARDDAV, ProviderPreset, provider_preset};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use mc_domain::{DomainError, OAuthProvider, OAuthSecrets};
@@ -179,6 +179,10 @@ fn token_response_to_secrets<TR: TokenResponse>(token: &TR) -> Result<OAuthSecre
             .map(|t| t.secret().clone())
             .unwrap_or_default(),
         expires_at,
+        scopes: token
+            .scopes()
+            .map(|s| s.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default(),
     })
 }
 

@@ -57,6 +57,9 @@ async fn fixture(accounts_toml: &str) -> Fixture {
     let ctx = crate::wiring::AppContext::new(&config, &path, secrets, oauth)
         .await
         .unwrap();
+    ctx.account_runtime
+        .dav_discovery
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     Fixture { ctx, _dir: dir }
 }
 
@@ -440,4 +443,241 @@ async fn restart_of_an_unknown_or_undeclared_account_changes_nothing() {
     std::fs::write(&runtime.deps.config_path, "").unwrap();
     assert!(runtime.restart(id).await.is_err());
     assert!(runtime.is_running(&id), "still running as before");
+}
+
+fn plan(
+    config: &str,
+    scopes: &[&str],
+    dav: Option<mc_domain::model::account::DavConfig>,
+) -> tasks::DavSetup {
+    let account: AccountConfig = toml::from_str::<ServerConfig>(config)
+        .unwrap()
+        .accounts
+        .remove(0);
+    let secrets = AccountSecrets {
+        oauth: Some(mc_domain::OAuthSecrets {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_at: Utc::now(),
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+        }),
+        ..Default::default()
+    };
+    let gate = Arc::new(mc_domain::LoginSecret::Password("pw".into()));
+    tasks::dav_setup(&account, &secrets, AccountId::new(), dav.as_ref(), gate).unwrap()
+}
+
+fn oauth_toml(provider: &str) -> String {
+    format!("{ACCOUNT_TOML}oauth_provider = \"{provider}\"\n")
+}
+
+#[test]
+fn dav_provisioning_decision_table() {
+    use mc_infrastructure::oauth::{GOOGLE_CALENDAR, GOOGLE_CARDDAV};
+    let google = oauth_toml("google");
+    let url = |u: &str| mc_domain::model::account::DavConfig {
+        carddav: Some(u.parse().unwrap()),
+        caldav: None,
+    };
+
+    let both = [GOOGLE_CARDDAV, GOOGLE_CALENDAR];
+    assert!(matches!(
+        plan(&google, &both, None),
+        tasks::DavSetup::Known(_)
+    ));
+    assert!(matches!(
+        plan(&google, &[], None),
+        tasks::DavSetup::NeedsScopes
+    ));
+    assert!(matches!(
+        plan(&google, &[GOOGLE_CARDDAV], None),
+        tasks::DavSetup::NeedsScopes
+    ));
+
+    assert!(matches!(
+        plan(ACCOUNT_TOML, &[], Some(url("https://dav.example.com/"))),
+        tasks::DavSetup::Known(_)
+    ));
+    assert!(matches!(
+        plan(ACCOUNT_TOML, &[], None),
+        tasks::DavSetup::Discover(_)
+    ));
+    assert!(matches!(
+        plan(ACCOUNT_TOML, &[], Some(Default::default())),
+        tasks::DavSetup::Discover(_)
+    ));
+
+    assert!(matches!(
+        plan(&oauth_toml("microsoft"), &both, None),
+        tasks::DavSetup::None
+    ));
+}
+
+#[tokio::test]
+async fn a_google_account_without_dav_scopes_keeps_mail_and_reports_it() {
+    let f = fixture("").await;
+    let runtime = &f.ctx.account_runtime;
+    let mut account = hot_account();
+    account.oauth_provider = Some(crate::config::OAuthProviderConfig::Google);
+    let id = runtime.start(&account).await.unwrap();
+
+    let status = runtime.deps.auth_gates.get(&id).unwrap().status();
+
+    assert!(status.dav_error.is_some());
+    assert!(!status.state.is_paused(), "mail keeps working");
+    assert!(
+        runtime.deps.dav.sync_account(&id).await.is_err(),
+        "no provider"
+    );
+}
+
+/// Answers every listing like a DAV client that reported the failure to the gate.
+struct Failing {
+    gate: Arc<AuthGate>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Failing {
+    async fn fail(&self) -> DomainError {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let busy = DomainError::Throttled("slow down".into());
+        let secret = mc_domain::LoginSecret::Password("pw".into());
+        self.gate.login_failed(&secret, &busy, false).await;
+        busy
+    }
+}
+
+#[async_trait::async_trait]
+impl mc_domain::ContactsProvider for Failing {
+    async fn list_address_books(&self) -> Result<Vec<mc_domain::AddressBook>, DomainError> {
+        Err(self.fail().await)
+    }
+    async fn address_book_changes(
+        &self,
+        _: &mc_domain::CollectionId,
+        _: Option<&mc_domain::SyncCursor>,
+    ) -> Result<mc_domain::CollectionChanges, DomainError> {
+        unreachable!()
+    }
+    async fn fetch_contacts(
+        &self,
+        _: &mc_domain::CollectionId,
+        _: &[mc_domain::Href],
+    ) -> Result<Vec<mc_domain::RemoteResource>, DomainError> {
+        unreachable!()
+    }
+    async fn put_contact(
+        &self,
+        _: &mc_domain::CollectionId,
+        _: mc_domain::ResourcePut,
+    ) -> Result<mc_domain::PutOutcome, DomainError> {
+        unreachable!()
+    }
+    async fn delete_contact(
+        &self,
+        _: &mc_domain::CollectionId,
+        _: &mc_domain::Href,
+        _: &mc_domain::Etag,
+    ) -> Result<mc_domain::DeleteOutcome, DomainError> {
+        unreachable!()
+    }
+}
+
+#[async_trait::async_trait]
+impl mc_domain::CalendarProvider for Failing {
+    async fn list_calendars(&self) -> Result<Vec<mc_domain::Calendar>, DomainError> {
+        Err(self.fail().await)
+    }
+    async fn calendar_changes(
+        &self,
+        _: &mc_domain::CollectionId,
+        _: Option<&mc_domain::SyncCursor>,
+    ) -> Result<mc_domain::CollectionChanges, DomainError> {
+        unreachable!()
+    }
+    async fn fetch_events(
+        &self,
+        _: &mc_domain::CollectionId,
+        _: &[mc_domain::Href],
+    ) -> Result<Vec<mc_domain::RemoteResource>, DomainError> {
+        unreachable!()
+    }
+    async fn put_event(
+        &self,
+        _: &mc_domain::CollectionId,
+        _: mc_domain::ResourcePut,
+    ) -> Result<mc_domain::PutOutcome, DomainError> {
+        unreachable!()
+    }
+    async fn delete_event(
+        &self,
+        _: &mc_domain::CollectionId,
+        _: &mc_domain::Href,
+        _: &mc_domain::Etag,
+    ) -> Result<mc_domain::DeleteOutcome, DomainError> {
+        unreachable!()
+    }
+}
+
+/// Starts the DAV loop of a running account on `backend`.
+fn start_dav_loop(f: &Fixture, id: AccountId, backend: Arc<dyn mc_application::DavBackend>) {
+    let runtime = &f.ctx.account_runtime;
+    let running = runtime.running.lock().unwrap();
+    let ctx = TaskCtx {
+        id,
+        name: "Hot".into(),
+        gate: runtime.deps.auth_gates.get(&id).unwrap(),
+        stop: running[&id].stop.clone(),
+        tasks: running[&id].tasks.clone(),
+    };
+    runtime.spawn_dav_task(ctx, backend, None);
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..100 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn the_dav_loop_runs_once_throttled_backs_off_and_stops_with_the_account() {
+    let f = fixture("").await;
+    let runtime = &f.ctx.account_runtime;
+    let id = runtime.start(&hot_account()).await.unwrap();
+    let gate = runtime.deps.auth_gates.get(&id).unwrap();
+    assert!(
+        matches!(
+            runtime.deps.dav.sync_account(&id).await,
+            Err(ApplicationError::NotFound(..))
+        ),
+        "no provider, no task"
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backend = Failing {
+        gate: gate.clone(),
+        calls: calls.clone(),
+    };
+    let seen = || calls.load(std::sync::atomic::Ordering::SeqCst);
+    gate.login_succeeded();
+
+    start_dav_loop(&f, id, Arc::new(backend));
+    until("the first DAV pass", || seen() >= 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // One pass lists books, then the throttle stops it before calendars.
+    assert_eq!(seen(), 1, "the throttled loop must not retry at once");
+    assert!(matches!(
+        gate.status().state,
+        mc_application::AuthState::Offline { .. }
+    ));
+
+    assert!(runtime.stop(&id).await, "the loop ends with its account");
+    assert!(matches!(
+        runtime.deps.dav.sync_account(&id).await,
+        Err(ApplicationError::NotFound(..))
+    ));
 }

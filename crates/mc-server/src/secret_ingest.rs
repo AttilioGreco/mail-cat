@@ -72,6 +72,7 @@ pub fn ingest_plaintext_secrets(config_path: &Path, store: &dyn SecretStore) -> 
                 access_token: String::new(),
                 refresh_token,
                 expires_at: chrono::DateTime::UNIX_EPOCH,
+                scopes: vec![],
             });
         }
         store

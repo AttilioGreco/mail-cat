@@ -295,6 +295,7 @@ mod tests {
             access_token: access_token.into(),
             refresh_token: "r".into(),
             expires_at: chrono::Utc::now(),
+            scopes: vec![],
         }
     }
 
