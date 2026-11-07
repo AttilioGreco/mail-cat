@@ -11,6 +11,8 @@ import { useComposeStore, type ComposeMode } from '@/features/compose-message';
 import { LabelMenuItems, MessageLabels, useLabelDialogs } from '@/features/manage-labels';
 import { ContextMenu } from '@/shared/ui/ContextMenu';
 import { EmailContent } from './EmailContent';
+import { ContactHover } from './ContactHover';
+import { parseAddress } from '../lib/address';
 
 // ── Main component ─────────────────────────────────────────────────────────
 
@@ -394,9 +396,11 @@ function ExpandedMessage({
         <SenderAvatar name={message.fromName || message.fromEmail} size="md" />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2">
-            <span className="text-sm font-semibold text-foreground">
-              {message.fromName || message.fromEmail}
-            </span>
+            <ContactHover name={message.fromName ?? ''} email={message.fromEmail} accountId={selectedAccountId}>
+              <span className="text-sm font-semibold text-foreground">
+                {message.fromName || message.fromEmail}
+              </span>
+            </ContactHover>
             {message.fromName && (
               <span className="text-xs text-muted-foreground">&lt;{message.fromEmail}&gt;</span>
             )}
@@ -410,7 +414,18 @@ function ExpandedMessage({
           </div>
           <div className="mt-0.5 text-xs text-muted-foreground">
             <span className="font-medium text-foreground">A:</span>{' '}
-            {message.to.length > 0 ? message.to.join(', ') : '—'}
+            {message.to.length === 0 && '—'}
+            {message.to.map((raw, i) => {
+              const a = parseAddress(raw);
+              return (
+                <span key={raw}>
+                  {i > 0 && ', '}
+                  <ContactHover name={a.name} email={a.email} accountId={selectedAccountId}>
+                    {a.name || a.email}
+                  </ContactHover>
+                </span>
+              );
+            })}
           </div>
         </div>
       </button>

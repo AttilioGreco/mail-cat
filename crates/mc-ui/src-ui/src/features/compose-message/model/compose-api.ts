@@ -3,10 +3,11 @@ import { invoke } from '@tauri-apps/api/core';
 import type { ComposeRequest } from './compose-store';
 import type { ComposeDto, ComposeInput } from './composeTypes';
 
-export function usePrepareCompose({ mode, messageId, accountId }: ComposeRequest) {
+export function usePrepareCompose({ mode, messageId, accountId, to }: ComposeRequest) {
   return useQuery({
-    queryKey: ['compose', mode, messageId, accountId],
+    queryKey: ['compose', mode, messageId, accountId, to],
     queryFn: () => invoke<ComposeDto>('prepare_compose', { mode, messageId, accountId }),
+    select: (dto) => (to ? { ...dto, to: [to] } : dto),
     // One fetch per compose session: a refetch mid-edit would hand the form
     // a new baseline, and a cached one would reopen a stale draft.
     staleTime: Infinity,

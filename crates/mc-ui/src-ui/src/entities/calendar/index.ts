@@ -10,7 +10,8 @@ export { useCalendarGroups, type CalendarAccount, type CalendarGroup } from './m
 export { useVisibleEvents, isEditable, type AccountEvent } from './model/useVisibleEvents';
 export { useCalendarVisibility } from './model/visibility-store';
 export { calendarColor, calendarKey } from './lib/color';
-export { utcDay } from './lib/dates';
+export { utcDay, coversDay } from './lib/dates';
+export { useAgendaPane } from './model/agenda-store';
 export { useDavChangesWatch } from './model/useDavWatch';
 export type {
   Calendar,

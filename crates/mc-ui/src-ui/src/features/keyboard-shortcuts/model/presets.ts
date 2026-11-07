@@ -65,6 +65,7 @@ export type ShortcutAction =
   // view & app
   | 'toggleUnreadFilter'
   | 'toggleConversations'
+  | 'toggleAgenda'
   | 'markFolderRead'
   | 'syncNow'
   | 'openSettings'
@@ -111,6 +112,7 @@ export const ACTION_META: Record<
 
   toggleUnreadFilter: { label: 'Solo non letti', category: 'Vista' },
   toggleConversations: { label: 'Modalità conversazioni', category: 'Vista' },
+  toggleAgenda: { label: 'Mostra/nascondi agenda', category: 'Vista' },
   markFolderRead: { label: 'Segna cartella come letta', category: 'Vista' },
   syncNow: { label: 'Sincronizza ora', category: 'Vista' },
   openSettings: { label: 'Impostazioni', category: 'Vista' },
@@ -152,6 +154,7 @@ const VIM: Keymap = {
 
   toggleUnreadFilter: 'Shift+U',
   toggleConversations: 'Shift+C',
+  toggleAgenda: 'V',
   markFolderRead: 'Shift+A',
   syncNow: 'Shift+R',
   openSettings: seq('G', 'P'),
@@ -188,6 +191,7 @@ const OUTLOOK: Keymap = {
 
   toggleUnreadFilter: 'Mod+Shift+U',
   toggleConversations: 'Mod+Shift+C',
+  toggleAgenda: 'Mod+Alt+A',
   markFolderRead: 'Mod+Shift+M',
   syncNow: 'F9',
   openSettings: 'Mod+,',

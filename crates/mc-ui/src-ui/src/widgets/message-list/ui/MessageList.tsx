@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { List, type RowComponentProps } from 'react-window';
-import { Archive, RefreshCw, Inbox, MailOpen, MessageSquare, List as ListIcon, Trash2, X } from 'lucide-react';
+import { Archive, CalendarDays, RefreshCw, Inbox, MailOpen, MessageSquare, List as ListIcon, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSessionStore, mailboxKey } from '@/entities/session';
 import { useMessages, MessageRow, type MessageEnvelope } from '@/entities/message';
 import { useAccounts } from '@/entities/account';
+import { useAgendaPane } from '@/entities/calendar';
 import { useMailboxes, useLabelColors, labelChips, type Mailbox } from '@/entities/mailbox';
 import { useConversations, ConversationRow, type ConversationSummary } from '@/entities/conversation';
 import { useMailboxWatcher } from '@/features/watch-mailbox';
@@ -33,6 +34,8 @@ const LABEL_ROW_EXTRA = 20;
 const CONV_ROW_HEIGHT = 64;
 
 export function MessageList() {
+  const agendaOpen = useAgendaPane((s) => s.open);
+  const toggleAgenda = useAgendaPane((s) => s.toggle);
   const {
     selectedAccountId, selectedMailboxId,
     selectedMessageId, selectMessage, selectMailbox,
@@ -297,8 +300,20 @@ export function MessageList() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-border px-3 py-2">
-        <SearchBar />
+      <div className="flex items-center gap-1 border-b border-border px-3 py-2">
+        <div className="min-w-0 flex-1">
+          <SearchBar />
+        </div>
+        <button
+          type="button"
+          title="Agenda"
+          aria-label="Mostra o nascondi l'agenda"
+          aria-pressed={agendaOpen}
+          onClick={toggleAgenda}
+          className={`rounded p-1.5 transition-colors hover:bg-accent ${agendaOpen ? 'text-foreground' : 'text-muted hover:text-foreground'}`}
+        >
+          <CalendarDays size={15} />
+        </button>
       </div>
 
       {/* Toolbar */}

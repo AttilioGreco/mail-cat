@@ -17,6 +17,8 @@ import { useShortcuts } from '@/features/keyboard-shortcuts';
 import { MessageLabels } from '@/features/manage-labels';
 import { MessageTags } from '@/features/auto-label';
 import { EmailContent } from './EmailContent';
+import { ContactHover } from './ContactHover';
+import { parseAddress } from '../lib/address';
 
 interface MessageViewerProps {
   envelope: MessageEnvelope;
@@ -200,13 +202,28 @@ export function MessageViewer({ envelope, mailboxId }: MessageViewerProps) {
           <SenderAvatar name={envelope.fromName || envelope.fromEmail} />
           <div className="flex-1 min-w-0">
             <div className="flex items-baseline gap-2">
-              <span className="font-medium text-foreground">
-                {envelope.fromName || envelope.fromEmail}
-              </span>
+              <ContactHover name={envelope.fromName} email={envelope.fromEmail} accountId={selectedAccountId}>
+                <span className="font-medium text-foreground">
+                  {envelope.fromName || envelope.fromEmail}
+                </span>
+              </ContactHover>
               <span className="text-xs text-muted">&lt;{envelope.fromEmail}&gt;</span>
             </div>
             <div className="mt-0.5 flex items-center gap-2 text-xs text-muted">
-              <span>To: {envelope.toAddresses.join(', ')}</span>
+              <span>
+                To:{' '}
+                {envelope.toAddresses.map((raw, i) => {
+                  const a = parseAddress(raw);
+                  return (
+                    <span key={raw}>
+                      {i > 0 && ', '}
+                      <ContactHover name={a.name} email={a.email} accountId={selectedAccountId}>
+                        {a.name || a.email}
+                      </ContactHover>
+                    </span>
+                  );
+                })}
+              </span>
               <span>·</span>
               <span>{formatDate(envelope.date)}</span>
               {envelope.hasAttachment && (

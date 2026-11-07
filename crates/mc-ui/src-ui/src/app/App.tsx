@@ -1,6 +1,6 @@
 import { HotkeysProvider } from '@tanstack/react-hotkeys';
 import { MainPage } from '@/pages/main';
-import { CalendarPage } from '@/pages/calendar';
+import { CalendarPage, useCalendarView } from '@/pages/calendar';
 import { ContactsPage } from '@/pages/contacts';
 import { LabelsPage } from '@/pages/labels';
 import { SettingsPage } from '@/pages/settings';
@@ -13,7 +13,7 @@ import { useComposeStore } from '@/features/compose-message';
 import { useSyncNow } from '@/features/manage-accounts';
 import { useSectionStore, useSessionStore } from '@/entities/session';
 import { useAuthStatusWatch, useSyncProgress } from '@/entities/account';
-import { useDavChangesWatch } from '@/entities/calendar';
+import { useAgendaPane, useDavChangesWatch } from '@/entities/calendar';
 import { Toaster } from '@/shared/ui/sonner';
 import { QueryProvider } from './model/QueryProvider';
 import { ThemeProvider } from './model/ThemeProvider';
@@ -40,7 +40,9 @@ function Router() {
   const { labelsOpen, closeLabels } = useLabelsPage();
   const openCompose = useComposeStore((s) => s.openCompose);
   const selectedAccountId = useSessionStore((s) => s.selectedAccountId);
+  const section = useSectionStore((s) => s.section);
   const setSection = useSectionStore((s) => s.setSection);
+  const toggleAgenda = useAgendaPane((s) => s.toggle);
   const syncNow = useSyncNow();
   const toggleHelp = useShortcutsStore((s) => s.toggleHelp);
   // Mounted above both screens: switching to settings must not drop the
@@ -60,10 +62,17 @@ function Router() {
       if (selectedAccountId) syncNow.mutate(selectedAccountId);
     },
     showShortcuts: toggleHelp,
+    toggleAgenda: section === 'mail' ? toggleAgenda : undefined,
     goMail: () => setSection('mail'),
     goCalendar: () => setSection('calendar'),
     goContacts: () => setSection('contacts'),
   });
+  const openCalendarDay = (day: Date) => {
+    const view = useCalendarView.getState();
+    view.setDate(day);
+    view.setView('day');
+    setSection('calendar');
+  };
   return (
     <>
       {settingsOpen ? (
@@ -71,7 +80,7 @@ function Router() {
       ) : labelsOpen ? (
         <LabelsPage onClose={closeLabels} />
       ) : (
-        <MainPage calendar={<CalendarPage />} contacts={<ContactsPage />} />
+        <MainPage calendar={<CalendarPage />} contacts={<ContactsPage />} openCalendarDay={openCalendarDay} />
       )}
       {/* Above both screens: the list of what's bound must be reachable anywhere. */}
       <ShortcutsOverlay />

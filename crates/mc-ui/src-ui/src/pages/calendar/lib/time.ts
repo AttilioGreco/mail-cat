@@ -3,7 +3,7 @@ import {
   isSameDay, startOfDay, startOfMonth, startOfWeek,
 } from 'date-fns';
 import { it } from 'date-fns/locale';
-import { utcDay } from '@/entities/calendar';
+import { coversDay } from '@/entities/calendar';
 
 export type View = 'day' | 'workweek' | 'week' | 'month';
 
@@ -44,23 +44,7 @@ interface Timed {
   allDay: boolean;
 }
 
-/** First and last local day an event touches. */
-function spanOf(e: Timed): [Date, Date] {
-  if (e.allDay) {
-    const first = utcDay(e.start);
-    const after = utcDay(e.end);
-    return [first, after > first ? addDays(after, -1) : first];
-  }
-  const first = startOfDay(e.start);
-  const lastDay = startOfDay(e.end);
-  // An event ending exactly at midnight does not touch the next day.
-  return [first, e.end > e.start && +lastDay === +e.end ? addDays(lastDay, -1) : lastDay];
-}
-
-export function coversDay(e: Timed, day: Date): boolean {
-  const [first, last] = spanOf(e);
-  return first <= day && day <= last;
-}
+export { coversDay };
 
 const minutesOf = (d: Date) => getHours(d) * 60 + getMinutes(d);
 
