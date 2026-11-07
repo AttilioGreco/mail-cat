@@ -16,6 +16,7 @@ A tag `vX.Y.Z` makes GitHub Actions (`.github/workflows/release.yml`) build inst
 3. In GitHub, Settings, Secrets and variables, Actions, add:
    - `TAURI_SIGNING_PRIVATE_KEY`: the content of the private key file (`~/.tauri/mail-cat.key`);
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: its password.
+   - `MAILCAT_GOOGLE_CLIENT_ID`, `MAILCAT_GOOGLE_CLIENT_SECRET`, `MAILCAT_MICROSOFT_CLIENT_ID`: the shared OAuth apps, baked into the server at compile time. The workflow stops if any is missing, since a build without them cannot sign in to Gmail or Outlook. From the values in `.envrc`: `direnv exec . sh -c 'for v in MAILCAT_GOOGLE_CLIENT_ID MAILCAT_GOOGLE_CLIENT_SECRET MAILCAT_MICROSOFT_CLIENT_ID; do printenv $v | gh secret set $v; done'`
 
 ## Each release
 
