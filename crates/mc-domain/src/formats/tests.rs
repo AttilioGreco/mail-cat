@@ -269,3 +269,24 @@ fn event_edit_can_make_an_event_all_day() {
     assert!(edited.contains("SEQUENCE:1\r\n"));
     assert!(parse_event(&edited).unwrap().fields.unwrap().all_day);
 }
+
+#[test]
+fn a_series_whose_first_instance_is_excluded_starts_at_its_next_one() {
+    let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:split\r\n\
+        DTSTART:20251111T140000Z\r\nDTEND:20251111T150000Z\r\n\
+        RRULE:FREQ=WEEKLY;COUNT=3\r\nEXDATE:20251111T140000Z\r\n\
+        SUMMARY:Weekly\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let fields = parse_event(raw).unwrap().fields.unwrap();
+    assert_eq!(fields.start, at("2025-11-18T14:00:00Z"));
+}
+
+#[test]
+fn a_series_with_no_occurrence_left_is_kept_without_fields() {
+    let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:gone\r\n\
+        DTSTART:20251111T140000Z\r\nDTEND:20251111T150000Z\r\n\
+        RRULE:FREQ=WEEKLY;COUNT=1\r\nEXDATE:20251111T140000Z\r\n\
+        SUMMARY:Gone\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let parsed = parse_event(raw).unwrap();
+    assert_eq!(parsed.uid.as_deref(), Some("gone"));
+    assert!(parsed.fields.is_none());
+}

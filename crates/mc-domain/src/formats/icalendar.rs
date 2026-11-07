@@ -16,6 +16,8 @@ use crate::model::collection::{EventFields, EventStatus};
 /// Daily since 2010 is ~6000, so this covers any real calendar.
 // ponytail: raise, or seed the expansion near `from`, if someone has a minutely rule.
 const EXPAND_LIMIT: usize = 20_000;
+/// Enough to get past a series' leading EXDATEs and overrides.
+const FIRST_OCCURRENCES: usize = 64;
 
 /// What queries need from an iCalendar resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,13 +110,33 @@ pub fn parse_event(raw: &str) -> Result<ParsedEvent, DomainError> {
         });
     };
 
-    let expanded = ical.expand_dates(Utc, 1);
+    // The master's own first start is not always an occurrence: Google's
+    // "this and following" splits leave series whose first instance is an
+    // EXDATE or an override. The earliest occurrence of any of its events
+    // stands in; a series with none left is kept, without fields.
+    let expanded = ical.expand_dates(Utc, FIRST_OCCURRENCES).events;
     let first = expanded
-        .events
-        .into_iter()
-        .find(|e| e.comp_id as usize == id)
-        .ok_or_else(|| invalid("iCalendar event (no usable DTSTART)"))?;
-    let (start, end) = span(first.start, first.end);
+        .iter()
+        .filter(|e| e.comp_id as usize == id)
+        .min_by_key(|e| e.start)
+        .or_else(|| {
+            expanded
+                .iter()
+                .filter(|e| {
+                    ical.components
+                        .get(e.comp_id as usize)
+                        .is_some_and(|c| c.component_type == ICalendarComponentType::VEvent)
+                })
+                .min_by_key(|e| e.start)
+        });
+    let Some(first) = first else {
+        return Ok(ParsedEvent {
+            uid,
+            fields: None,
+            last_modified: None,
+        });
+    };
+    let (start, end) = span(first.start, first.end.clone());
 
     Ok(ParsedEvent {
         uid,

@@ -248,8 +248,14 @@ pub(crate) fn resource_events(
 ) -> Result<(Key, Vec<DomainEvent>), DomainError> {
     if kind == Kind::Calendar {
         let key = Key::event(binding.account, &binding.href);
+        // An event the parser cannot read is still tracked, raw and etag:
+        // skipped, it would never be fetched again once the cursor moved.
+        let fields = formats::parse_event(raw)
+            .inspect_err(|e| tracing::warn!(href = %binding.href, "event kept unread: {e}"))
+            .ok()
+            .and_then(|p| p.fields);
         let event = CalendarEvent {
-            fields: formats::parse_event(raw)?.fields,
+            fields,
             binding,
             raw: raw.to_owned(),
         };
