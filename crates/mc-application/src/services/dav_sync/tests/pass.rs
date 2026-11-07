@@ -183,3 +183,37 @@ async fn the_fast_path_and_the_pass_never_push_one_resource_twice() {
     fast.unwrap();
     assert_eq!(env.fake.calls_to("put /book/a.vcf"), 1);
 }
+
+#[tokio::test]
+async fn an_empty_relist_is_believed_only_when_the_next_pass_agrees() {
+    let env = Env::with_book();
+    env.fake.write("/book/a.vcf", &vcard("a", "Ann", None));
+    env.sync().await;
+
+    env.fake.remove("/book/a.vcf");
+    env.fake.expire_token();
+    env.sync().await;
+    assert_eq!(
+        env.contact_count().await,
+        1,
+        "one empty answer may be a glitch"
+    );
+
+    env.fake.expire_token();
+    env.sync().await;
+    assert_eq!(env.contact_count().await, 0);
+}
+
+#[tokio::test]
+async fn an_empty_collection_list_is_believed_only_when_the_next_pass_agrees() {
+    let env = Env::with_book();
+    env.fake.write("/book/a.vcf", &vcard("a", "Ann", None));
+    env.sync().await;
+
+    env.fake.remove_book(BOOK);
+    env.sync().await;
+    assert_eq!(env.contact_count().await, 1);
+
+    env.sync().await;
+    assert_eq!(env.contact_count().await, 0);
+}

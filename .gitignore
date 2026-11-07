@@ -4,3 +4,4 @@ config.toml
 /.worktrees
 .superpowers/
 /crates/mc-ui/binaries
+graphify-out/

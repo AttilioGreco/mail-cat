@@ -67,6 +67,16 @@ impl DavSyncService {
                     Err(e) => return skipped(e),
                 };
                 let local = self.store.list_address_books(&ctx.account).await?;
+                if !self.believe_empty(
+                    &ctx.account,
+                    "address_books",
+                    remote.is_empty() && !local.is_empty(),
+                ) {
+                    warn!(
+                        "server listed no address_books; not believed until the next pass agrees"
+                    );
+                    return Ok(None);
+                }
                 for book in &remote {
                     let known = local.iter().find(|l| l.collection == book.collection);
                     if known != Some(book) {
@@ -97,6 +107,14 @@ impl DavSyncService {
                     Err(e) => return skipped(e),
                 };
                 let local = self.store.list_calendars(&ctx.account).await?;
+                if !self.believe_empty(
+                    &ctx.account,
+                    "calendars",
+                    remote.is_empty() && !local.is_empty(),
+                ) {
+                    warn!("server listed no calendars; not believed until the next pass agrees");
+                    return Ok(None);
+                }
                 for calendar in &remote {
                     let known = local.iter().find(|l| l.collection == calendar.collection);
                     if known != Some(calendar) {

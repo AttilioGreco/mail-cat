@@ -99,6 +99,8 @@ async fn a_vanished_collection_records_the_unpushed_edit_first() {
     let a = env.contact_at("/book/a.vcf").await;
     env.edit_local(a, "Local").await;
     env.fake.remove_book(BOOK);
+    // The only book gone reads as a glitch until a second pass agrees.
+    env.sync().await;
     env.sync().await;
 
     assert_eq!(env.lost().await, 1);

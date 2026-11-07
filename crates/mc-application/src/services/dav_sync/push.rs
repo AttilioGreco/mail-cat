@@ -217,7 +217,8 @@ impl DavSyncService {
         let removed = self.removed_event(ctx, &key, &p.binding.href);
         superseded(match (&p.change, remote) {
             (PendingChange::Put { .. }, Some(remote)) => {
-                self.apply_remote(ctx, t, Some(&key), Some(at), remote).await
+                self.apply_remote(ctx, t, Some(&key), Some(at), remote)
+                    .await
             }
             (_, None) => self.append(&key, Some(at), vec![removed]).await,
             // The removal clears the pending delete; the resource comes back

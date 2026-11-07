@@ -25,6 +25,11 @@ impl DavSyncService {
         let since = self.store.get_cursor(&ctx.account, &cursor).await?;
         let changes = ctx.changes(t, since.as_ref()).await?;
         let local = self.etags(ctx, t).await?;
+        let suspect = changes.reset && changes.changed.is_empty() && !local.is_empty();
+        if !self.believe_empty(&ctx.account, &cursor, suspect) {
+            warn!(collection = %t.collection, "server listed no resources; not believed until the next pass agrees");
+            return Ok(());
+        }
 
         let stale: Vec<Href> = changes
             .changed

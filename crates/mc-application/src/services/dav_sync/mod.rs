@@ -10,8 +10,8 @@ mod push;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracing::warn;
 
@@ -219,6 +219,9 @@ pub struct DavSyncService {
     /// Held while resources are pushed, so the fast path of a local edit and
     /// the sync pass never send the same one at once.
     push_locks: AccountLocks,
+    /// Listings that came back empty while local data exists, keyed by
+    /// account and listing. One is not believed; the next in a row is.
+    empty_once: Mutex<HashSet<String>>,
 }
 
 impl DavSyncService {
@@ -233,6 +236,7 @@ impl DavSyncService {
             providers,
             publisher: None,
             push_locks: AccountLocks::default(),
+            empty_once: Mutex::default(),
         }
     }
 
@@ -334,6 +338,20 @@ impl DavSyncService {
         // Under the lock: a pass may have pushed it while this waited.
         let pending = self.pending(&ctx, target).await?;
         self.push_all(&ctx, target, pending, Some(only)).await
+    }
+
+    /// Whether an empty listing of `what` is to be acted on. A server that
+    /// glitches answers empty once; acting on it would drop every local copy
+    /// and, with the cursor moved, keep them dropped. Two in a row is a
+    /// collection that really was emptied. Anything non-empty resets it.
+    pub(super) fn believe_empty(&self, account: &AccountId, what: &str, empty: bool) -> bool {
+        let key = format!("{account}:{what}");
+        let mut seen = self.empty_once.lock().unwrap_or_else(|e| e.into_inner());
+        if !empty {
+            seen.remove(&key);
+            return true;
+        }
+        !seen.insert(key)
     }
 
     async fn pending(&self, ctx: &Ctx, t: &Target) -> Result<Vec<PendingPush>, DomainError> {
