@@ -2,6 +2,7 @@
 #![allow(async_fn_in_trait)]
 
 pub mod config;
+pub mod dav;
 pub mod email;
 pub mod embedding;
 pub mod oauth;
@@ -11,6 +12,7 @@ pub mod search;
 pub mod secret;
 
 // Re-exports for ergonomics
+pub use dav::{DavProvider, Profile as DavProfile};
 pub use email::{
     AnyAccountEventSource, AnyProvider, ImapEmailProvider, JmapEmailProvider, SmtpSender,
 };

@@ -435,6 +435,7 @@ pub async fn create_account(
         password: None,
     });
     let connection_config = ConnectionConfig {
+        dav: None,
         incoming: match &account_config.jmap_url {
             Some(session_url) => IncomingServer::Jmap {
                 session_url: session_url.clone(),

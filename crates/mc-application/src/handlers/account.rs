@@ -212,6 +212,7 @@ mod tests {
 
     fn test_config() -> ConnectionConfig {
         ConnectionConfig {
+            dav: None,
             incoming: mc_domain::IncomingServer::Imap {
                 host: "imap.example.com".into(),
                 port: 993,

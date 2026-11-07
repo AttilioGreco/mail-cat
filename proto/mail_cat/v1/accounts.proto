@@ -197,6 +197,15 @@ message ConnectionConfig {
   AuthConfig auth = 2;
   // Unset: outbound sending is disabled.
   optional SmtpServer smtp = 3;
+  // Unset: contacts and calendars endpoints come from discovery.
+  optional DavConfig dav = 4;
+}
+
+// Manual CardDAV/CalDAV endpoints (principal or home-set URLs); each one set
+// skips discovery for its protocol.
+message DavConfig {
+  optional string carddav = 1;
+  optional string caldav = 2;
 }
 
 // Account summary (list view).

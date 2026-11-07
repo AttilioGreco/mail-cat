@@ -1,0 +1,179 @@
+use reqwest::StatusCode;
+use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+use mc_domain::error::DomainError;
+
+use super::client::{classify, etag};
+use super::xml::parse_multistatus;
+use super::{Cursor, xml};
+
+mod radicale;
+
+/// Radicale answers with `ns0:` prefixes and quoted etags.
+const RADICALE_LISTING: &str = r#"<?xml version='1.0' encoding='utf-8'?>
+<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/" xmlns:ICAL="http://apple.com/ns/ical/">
+<response><href>/alice/work/</href><propstat><prop>
+<resourcetype><collection /><C:calendar /></resourcetype>
+<displayname>Work</displayname>
+<ICAL:calendar-color>#ff8800ff</ICAL:calendar-color>
+<C:supported-calendar-component-set><C:comp name="VEVENT" /><C:comp name="VTODO" /></C:supported-calendar-component-set>
+<CS:getctag>"ctag-1"</CS:getctag>
+<sync-token>http://radicale.org/ns/sync/abc</sync-token>
+<current-user-privilege-set><privilege><read /></privilege></current-user-privilege-set>
+</prop><status>HTTP/1.1 200 OK</status></propstat>
+<propstat><prop><owner /></prop><status>HTTP/1.1 404 Not Found</status></propstat></response>
+</multistatus>"#;
+
+/// Google wraps everything in `D:` and sends payloads with entity-encoded
+/// line breaks.
+const GOOGLE_MULTIGET: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+<D:response><D:href>/caldav/v2/me%40example.com/events/abc.ics</D:href>
+<D:propstat><D:prop><D:getetag>"63812345678"</D:getetag>
+<C:calendar-data>BEGIN:VCALENDAR&#13;
+SUMMARY:Lunch &amp; learn&#13;
+END:VCALENDAR&#13;
+</C:calendar-data></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+<D:response><D:href>/caldav/v2/me%40example.com/events/gone.ics</D:href>
+<D:status>HTTP/1.1 404 Not Found</D:status></D:response>
+</D:multistatus>"#;
+
+/// Stalwart reports removals in sync-collection as bare 404 responses.
+const STALWART_SYNC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<D:multistatus xmlns:D="DAV:">
+<D:response><D:href>/dav/card/alice/default/a.vcf</D:href><D:propstat><D:prop><D:getetag>"5"</D:getetag></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+<D:response><D:href>/dav/card/alice/default/b.vcf</D:href><D:status>HTTP/1.1 404 Not Found</D:status></D:response>
+<D:sync-token>urn:stalwart:davsync:7</D:sync-token>
+</D:multistatus>"#;
+
+#[test]
+fn radicale_collection_properties_flatten() {
+    let ms = parse_multistatus(RADICALE_LISTING.as_bytes()).unwrap();
+    let r = &ms.responses[0];
+    assert_eq!(r.href, "/alice/work/");
+    assert!(r.is_collection());
+    assert!(r.props["resourcetype"].has("calendar"));
+    assert_eq!(r.text("displayname"), Some("Work"));
+    assert_eq!(r.text("calendar-color"), Some("#ff8800ff"));
+    assert_eq!(r.text("getctag"), Some("\"ctag-1\""));
+    assert_eq!(
+        r.props["supported-calendar-component-set"].names,
+        ["VEVENT", "VTODO"]
+    );
+    assert!(r.props["current-user-privilege-set"].has("read"));
+    assert!(!r.props["current-user-privilege-set"].has("write-content"));
+    assert!(!r.props.contains_key("owner"), "a 404 propstat is no value");
+}
+
+#[test]
+fn google_payload_keeps_entities_and_line_breaks() {
+    let ms = parse_multistatus(GOOGLE_MULTIGET.as_bytes()).unwrap();
+    assert_eq!(ms.responses.len(), 2);
+    let data = ms.responses[0].text("calendar-data").unwrap();
+    assert_eq!(
+        data,
+        "BEGIN:VCALENDAR\r\nSUMMARY:Lunch & learn\r\nEND:VCALENDAR\r\n"
+    );
+    assert_eq!(ms.responses[1].status, Some(404));
+    assert!(ms.responses[1].props.is_empty());
+}
+
+#[test]
+fn sync_collection_yields_changes_removals_and_token() {
+    let ms = parse_multistatus(STALWART_SYNC.as_bytes()).unwrap();
+    assert_eq!(ms.sync_token.as_deref(), Some("urn:stalwart:davsync:7"));
+    assert_eq!(ms.responses[0].text("getetag"), Some("\"5\""));
+    assert_eq!(ms.responses[1].status, Some(404));
+}
+
+#[test]
+fn principal_and_home_set_hrefs_are_reachable() {
+    let body = r#"<d:multistatus xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/</d:href><d:propstat><d:prop>
+        <d:current-user-principal><d:href>/principals/alice/</d:href></d:current-user-principal>
+        <card:addressbook-home-set><d:href>/dav/alice/</d:href></card:addressbook-home-set>
+        </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+    let r = &parse_multistatus(body.as_bytes()).unwrap().responses[0];
+    assert_eq!(
+        r.props["current-user-principal"].hrefs,
+        ["/principals/alice/"]
+    );
+    assert_eq!(r.props["addressbook-home-set"].hrefs, ["/dav/alice/"]);
+}
+
+#[test]
+fn malformed_xml_is_a_provider_error() {
+    let err = parse_multistatus(b"<multistatus><response></multistatus>").unwrap_err();
+    assert!(matches!(err, DomainError::Provider(_)), "{err}");
+}
+
+#[test]
+fn etags_are_one_strong_quoted_form() {
+    for raw in ["abc", "\"abc\"", "W/\"abc\"", " W/abc "] {
+        assert_eq!(etag(raw).as_str(), "\"abc\"", "{raw}");
+    }
+}
+
+#[test]
+fn cursor_round_trips_and_garbage_is_no_cursor() {
+    let cursor = Cursor {
+        ctag: Some("c".into()),
+        token: None,
+    };
+    assert_eq!(cursor.encode().as_str(), r#"{"ctag":"c"}"#);
+    assert_eq!(Cursor::parse(&cursor.encode()), Some(cursor));
+    assert_eq!(Cursor::parse(&mc_domain::SyncCursor::new("not json")), None);
+}
+
+#[test]
+fn request_bodies_escape_what_the_server_sent_back() {
+    let sync = xml::sync_collection("a<b&c");
+    assert!(sync.contains("a&lt;b&amp;c"));
+    let multiget = xml::multiget(super::Kind::Contacts, ["/x/a&b.vcf"].into_iter());
+    assert!(multiget.contains("<D:href>/x/a&amp;b.vcf</D:href>"));
+}
+
+#[test]
+fn status_classes_match_what_stops_a_pass() {
+    let with_retry = {
+        let mut h = HeaderMap::new();
+        h.insert(RETRY_AFTER, HeaderValue::from_static("120"));
+        h
+    };
+    let none = HeaderMap::new();
+    let check = |s: StatusCode, h: &HeaderMap, body: &[u8]| classify(s, h, body);
+
+    assert!(matches!(
+        check(StatusCode::UNAUTHORIZED, &none, b""),
+        Err(DomainError::AuthenticationFailed(_))
+    ));
+    assert!(matches!(
+        check(StatusCode::TOO_MANY_REQUESTS, &none, b""),
+        Err(DomainError::Throttled(_))
+    ));
+    let throttled = check(StatusCode::SERVICE_UNAVAILABLE, &with_retry, b"");
+    assert!(matches!(&throttled, Err(DomainError::Throttled(m)) if m.contains("retry after 120")));
+    assert!(matches!(
+        check(StatusCode::SERVICE_UNAVAILABLE, &none, b""),
+        Err(DomainError::ConnectionFailed(_))
+    ));
+    assert!(matches!(
+        check(StatusCode::BAD_GATEWAY, &none, b""),
+        Err(DomainError::ConnectionFailed(_))
+    ));
+    assert!(matches!(
+        check(
+            StatusCode::FORBIDDEN,
+            &none,
+            br#"{"reason":"rateLimitExceeded"}"#
+        ),
+        Err(DomainError::Throttled(_))
+    ));
+    for ok in [
+        StatusCode::FORBIDDEN,
+        StatusCode::PRECONDITION_FAILED,
+        StatusCode::NOT_FOUND,
+        StatusCode::CONFLICT,
+    ] {
+        assert!(check(ok, &none, b"").is_ok(), "{ok} belongs to the call");
+    }
+}

@@ -79,6 +79,7 @@ fn test_account(email: &str, host: &str) -> Account {
         email.clone(),
         mc_domain::ProviderType::Imap,
         mc_domain::ConnectionConfig {
+            dav: None,
             incoming: mc_domain::IncomingServer::Imap {
                 host: host.into(),
                 port: 993,

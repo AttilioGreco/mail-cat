@@ -7,8 +7,8 @@ use crate::grpc::proto::{
 };
 use mc_domain::model::account::{
     Account, AccountStatus as DomainAccountStatus, AuthConfig as DomainAuthConfig,
-    ConnectionConfig as DomainConnectionConfig, IncomingServer, ProviderType as DomainProviderType,
-    SmtpConnectionConfig, SmtpSecurity,
+    ConnectionConfig as DomainConnectionConfig, DavConfig, IncomingServer,
+    ProviderType as DomainProviderType, SmtpConnectionConfig, SmtpSecurity,
 };
 
 /// Convert domain ProviderType to proto ProviderType.
@@ -157,6 +157,10 @@ pub fn domain_connection_to_proto(config: &DomainConnectionConfig) -> ProtoConne
             host: smtp.host.clone(),
             port: u32::from(smtp.port),
         }),
+        dav: config.dav.as_ref().map(|dav| proto::DavConfig {
+            carddav: dav.carddav.as_ref().map(ToString::to_string),
+            caldav: dav.caldav.as_ref().map(ToString::to_string),
+        }),
     }
 }
 
@@ -192,11 +196,27 @@ pub fn proto_connection_to_domain(
             })
         })
         .transpose()?;
+    let dav = config
+        .dav
+        .as_ref()
+        .map(|dav| {
+            let url = |s: &Option<String>| {
+                s.as_deref()
+                    .map(|s| s.parse().map_err(|e| format!("Invalid DAV URL '{s}': {e}")))
+                    .transpose()
+            };
+            Ok::<_, String>(DavConfig {
+                carddav: url(&dav.carddav)?,
+                caldav: url(&dav.caldav)?,
+            })
+        })
+        .transpose()?;
 
     Ok(DomainConnectionConfig {
         incoming: proto_incoming_to_domain(incoming)?,
         auth: proto_auth_to_domain(auth)?,
         smtp,
+        dav,
     })
 }
 
@@ -304,5 +324,38 @@ pub fn domain_account_to_detail(account: &Account) -> AccountDetail {
         updated_at: Some(datetime_to_timestamp(&account.updated_at)),
         mailbox_model: domain_mailbox_model_to_proto(account.mailbox_model),
         supports_tags: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dav_urls_round_trip_through_proto_and_bad_ones_are_refused() {
+        let proto = ProtoConnectionConfig {
+            incoming: Some(ProtoIncomingServer {
+                kind: Some(proto::incoming_server::Kind::Jmap(JmapServer {
+                    session_url: "https://jmap.example.com".into(),
+                })),
+            }),
+            auth: Some(ProtoAuthConfig {
+                auth_type: Some(proto::auth_config::AuthType::Plain(PlainAuth {
+                    username: "u".into(),
+                    password: "p".into(),
+                })),
+            }),
+            smtp: None,
+            dav: Some(proto::DavConfig {
+                carddav: Some("https://dav.example.com/card/".into()),
+                caldav: None,
+            }),
+        };
+        let domain = proto_connection_to_domain(&proto).unwrap();
+        assert_eq!(domain_connection_to_proto(&domain).dav, proto.dav);
+
+        let mut bad = proto;
+        bad.dav.as_mut().unwrap().caldav = Some("not a url".into());
+        assert!(proto_connection_to_domain(&bad).is_err());
     }
 }

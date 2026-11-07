@@ -2,6 +2,7 @@ use super::*;
 
 fn test_connection_config() -> ConnectionConfig {
     ConnectionConfig {
+        dav: None,
         incoming: IncomingServer::Imap {
             host: "imap.example.com".into(),
             port: 993,
@@ -201,6 +202,7 @@ fn mailbox_model_defaults_by_provider_and_changes_once() {
         EmailAddress::new("a@example.com").unwrap(),
         ProviderType::Jmap,
         ConnectionConfig {
+            dav: None,
             incoming: IncomingServer::Jmap {
                 session_url: "https://x".into(),
             },
@@ -229,4 +231,25 @@ fn mailbox_model_defaults_by_provider_and_changes_once() {
     let event = account.set_mailbox_model(MailboxModel::Folders);
     let rebuilt = Account::rehydrate(&[added, event]).unwrap();
     assert_eq!(rebuilt.mailbox_model, MailboxModel::Folders);
+}
+
+#[test]
+fn dav_config_survives_serde_and_old_configs_load_without_it() {
+    let mut config = test_connection_config();
+    config.dav = Some(DavConfig {
+        carddav: Some("https://dav.example.com/card/".parse().unwrap()),
+        caldav: None,
+    });
+    let json = serde_json::to_string(&config).unwrap();
+    assert_eq!(
+        serde_json::from_str::<ConnectionConfig>(&json).unwrap().dav,
+        config.dav
+    );
+
+    let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();
+    old.as_object_mut().unwrap().remove("dav");
+    assert_eq!(
+        serde_json::from_value::<ConnectionConfig>(old).unwrap().dav,
+        None
+    );
 }

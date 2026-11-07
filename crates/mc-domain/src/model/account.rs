@@ -171,6 +171,17 @@ pub struct ConnectionConfig {
     pub auth: AuthConfig,
     /// When `None` outbound sending is disabled for this account.
     pub smtp: Option<SmtpConnectionConfig>,
+    /// Contacts and calendars endpoints. `None` leaves them to discovery.
+    #[serde(default)]
+    pub dav: Option<DavConfig>,
+}
+
+/// Principal or home-set URLs of the CardDAV and CalDAV servers, discovered
+/// or set by hand. A manual URL skips discovery for its protocol.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DavConfig {
+    pub carddav: Option<url::Url>,
+    pub caldav: Option<url::Url>,
 }
 
 /// Account aggregate root.
@@ -343,6 +354,7 @@ impl Account {
             provider_type: *provider_type,
             mailbox_model: MailboxModel::default_for(*provider_type),
             connection_config: ConnectionConfig {
+                dav: None,
                 incoming: IncomingServer::Imap {
                     host: String::new(),
                     port: 0,

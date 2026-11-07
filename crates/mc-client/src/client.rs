@@ -138,6 +138,7 @@ impl MailCatClient {
                 email,
                 provider_type: provider_type as i32,
                 connection_config: Some(pb::ConnectionConfig {
+                    dav: None,
                     incoming: Some(pb::IncomingServer {
                         kind: Some(incoming),
                     }),

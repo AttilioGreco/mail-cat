@@ -27,6 +27,7 @@ macro_rules! read_repository_conformance {
 
         fn test_config() -> ConnectionConfig {
             ConnectionConfig {
+                dav: None,
                 incoming: IncomingServer::Imap {
                     host: "imap.example.com".into(),
                     port: 993,

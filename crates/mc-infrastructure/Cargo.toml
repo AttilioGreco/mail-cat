@@ -22,6 +22,8 @@ serde_json = { workspace = true }
 keyring = { workspace = true }
 oauth2 = { workspace = true }
 url = { workspace = true }
+quick-xml = { workspace = true }
+hickory-resolver = { workspace = true }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }

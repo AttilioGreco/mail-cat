@@ -16,6 +16,7 @@ fn account(email: &str) -> Account {
         email.clone(),
         ProviderType::Imap,
         ConnectionConfig {
+            dav: None,
             incoming: IncomingServer::Imap {
                 host: "imap.example.com".into(),
                 port: 993,
