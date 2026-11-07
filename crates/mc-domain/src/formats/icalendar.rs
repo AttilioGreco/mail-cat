@@ -72,6 +72,7 @@ fn fields(comp: &ICalendarComponent, start: DateTime<Utc>, end: DateTime<Utc>) -
             ICalendarStatus::Cancelled => Some(EventStatus::Cancelled),
             _ => None,
         }),
+        description: text(comp, &ICalendarProperty::Description).filter(|d| !d.is_empty()),
     }
 }
 
@@ -188,6 +189,8 @@ pub struct EventEdit {
     pub summary: Option<String>,
     /// `Some(None)` clears it.
     pub location: Option<Option<String>>,
+    /// `Some(None)` clears it.
+    pub description: Option<Option<String>>,
     pub start: Option<EventWhen>,
     pub end: Option<EventWhen>,
 }
@@ -218,6 +221,14 @@ pub fn edit_event(raw: &str, edit: &EventEdit, now: DateTime<Utc>) -> Result<Str
             location
                 .iter()
                 .map(|l| content_line("LOCATION", "", &escape(l)))
+                .collect()
+        });
+    }
+    if let Some(description) = &edit.description {
+        set(&mut doc, "DESCRIPTION", &|_| {
+            description
+                .iter()
+                .map(|d| content_line("DESCRIPTION", "", &escape(d)))
                 .collect()
         });
     }

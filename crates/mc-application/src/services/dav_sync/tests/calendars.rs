@@ -80,7 +80,7 @@ async fn events_sync_both_ways_and_task_calendars_are_left_alone() {
             CollectionId::new(CAL),
             "Lunch".into(),
             (when, end),
-            None,
+            (None, None),
         )
         .await
         .unwrap()

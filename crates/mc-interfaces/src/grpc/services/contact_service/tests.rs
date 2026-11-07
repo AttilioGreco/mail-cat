@@ -1,6 +1,6 @@
 use super::*;
 use crate::grpc::proto::{ContactFields, StringList};
-use crate::grpc::services::dav_fakes::{FakeDav, NoQueries, RecordingBus};
+use crate::grpc::services::dav_fakes::{FakeContacts, FakeDav, NoQueries, RecordingBus};
 use mc_domain::{AddressBook, RemoteBinding, RemoteContact};
 
 const RAW: &str =
@@ -40,7 +40,12 @@ fn service(
     Arc<RecordingBus>,
 ) {
     let bus = Arc::new(RecordingBus::answering(result));
-    let svc = ContactServiceImpl::new(Arc::new(NoQueries), bus.clone(), Arc::new(dav));
+    let svc = ContactServiceImpl::new(
+        Arc::new(NoQueries),
+        bus.clone(),
+        Arc::new(dav),
+        Arc::new(FakeContacts::default()),
+    );
     (svc, bus)
 }
 
@@ -176,4 +181,104 @@ async fn create_refuses_a_bad_email_before_any_command() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert!(bus.seen.lock().unwrap().is_empty());
+}
+
+fn harvested(name: &str, email: &str, account: Option<AccountId>) -> mc_domain::ContactSummary {
+    let address = EmailAddress::new(email).unwrap();
+    mc_domain::ContactSummary {
+        id: ContactId::new(),
+        display_name: name.into(),
+        primary_email: address.clone(),
+        emails: vec![mc_domain::ContactEmail::new(
+            address,
+            mc_domain::ContactEmailLabel::Other,
+            true,
+        )],
+        organization: None,
+        source: mc_domain::ContactSource::LocalEmail,
+        account_scope: account,
+    }
+}
+
+fn lookup_service(
+    dav: FakeDav,
+    harvested: Vec<mc_domain::ContactSummary>,
+) -> ContactServiceImpl<NoQueries, RecordingBus> {
+    ContactServiceImpl::new(
+        Arc::new(NoQueries),
+        Arc::new(RecordingBus::answering(CommandResult::ContactRemoved)),
+        Arc::new(dav),
+        Arc::new(FakeContacts {
+            contacts: harvested,
+        }),
+    )
+}
+
+async fn lookup(
+    svc: &ContactServiceImpl<NoQueries, RecordingBus>,
+    account: Option<&AccountId>,
+) -> Option<crate::grpc::proto::ContactCard> {
+    svc.lookup_contact(Request::new(LookupContactRequest {
+        email: "ada@example.com".into(),
+        account_id: account.map(ToString::to_string),
+    }))
+    .await
+    .unwrap()
+    .into_inner()
+    .card
+}
+
+#[tokio::test]
+async fn lookup_prefers_the_account_then_any_remote_then_harvested() {
+    let (mine, other) = (contact("/one/"), contact("/two/"));
+    let account = mine.binding.account;
+    let dav = FakeDav {
+        contacts: vec![other.clone(), mine.clone()],
+        books: vec![],
+        ..Default::default()
+    };
+    let svc = lookup_service(dav, vec![harvested("Ada H", "ada@example.com", None)]);
+
+    let card = lookup(&svc, Some(&account)).await.unwrap();
+    assert_eq!(card.id, mine.id.to_string());
+    assert_eq!(
+        card.source,
+        crate::grpc::proto::ContactSource::Remote as i32
+    );
+    assert!(card.dirty && card.raw.is_some());
+
+    let card = lookup(&svc, Some(&AccountId::new())).await.unwrap();
+    assert_eq!(card.id, other.id.to_string());
+
+    let svc = lookup_service(
+        FakeDav::default(),
+        vec![harvested("Ada H", "ada@example.com", None)],
+    );
+    let card = lookup(&svc, None).await.unwrap();
+    assert_eq!(card.display_name, "Ada H");
+    assert_eq!(
+        card.source,
+        crate::grpc::proto::ContactSource::Harvested as i32
+    );
+    assert!(card.raw.is_none());
+
+    let svc = lookup_service(FakeDav::default(), vec![]);
+    assert!(lookup(&svc, None).await.is_none());
+}
+
+#[tokio::test]
+async fn harvested_contacts_are_listed_with_their_fields() {
+    let account = AccountId::new();
+    let svc = lookup_service(
+        FakeDav::default(),
+        vec![harvested("Ada", "ada@example.com", Some(account))],
+    );
+    let listed = svc
+        .list_harvested_contacts(Request::new(ListHarvestedContactsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let card = &listed.contacts[0];
+    assert_eq!(card.emails, ["ada@example.com"]);
+    assert_eq!(card.account_id, account.to_string());
 }

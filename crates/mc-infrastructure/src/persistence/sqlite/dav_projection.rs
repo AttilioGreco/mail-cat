@@ -332,13 +332,14 @@ fn upsert_event(
         tx,
         "INSERT INTO calendar_events \
              (account_id, href, collection, etag, remote_modified, raw, summary, start_at, end_at, \
-              all_day, recurring, location, status, dirty, edited_at, local_seq) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+              all_day, recurring, location, status, description, dirty, edited_at, local_seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
          ON CONFLICT(account_id, href) DO UPDATE SET collection = excluded.collection, \
              etag = excluded.etag, remote_modified = excluded.remote_modified, raw = excluded.raw, \
              summary = excluded.summary, start_at = excluded.start_at, end_at = excluded.end_at, \
              all_day = excluded.all_day, recurring = excluded.recurring, \
-             location = excluded.location, status = excluded.status, dirty = excluded.dirty, \
+             location = excluded.location, status = excluded.status, \
+             description = excluded.description, dirty = excluded.dirty, \
              edited_at = CASE WHEN excluded.dirty THEN excluded.edited_at \
                               ELSE calendar_events.edited_at END, \
              local_seq = CASE WHEN excluded.dirty THEN excluded.local_seq \
@@ -358,6 +359,7 @@ fn upsert_event(
             f.is_some_and(|f| f.recurring),
             f.and_then(|f| f.location.as_deref()),
             f.and_then(|f| f.status).map(|s| json(&s)).transpose()?,
+            f.and_then(|f| f.description.as_deref()),
             origin == Origin::Local,
             nanos(at),
             sequence as i64,

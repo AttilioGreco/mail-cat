@@ -67,6 +67,7 @@ pub struct EventFields {
     pub recurring: bool,
     pub location: Option<String>,
     pub status: Option<EventStatus>,
+    pub description: Option<String>,
 }
 
 /// One iCalendar resource: a master and its overrides (a single `UID`).

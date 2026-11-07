@@ -1472,6 +1472,22 @@ impl ContactReadRepository for SqliteRepository {
             .await
     }
 
+    async fn list_unsynced_contacts(&self) -> Result<Vec<ContactSummary>, DomainError> {
+        self.db
+            .read(|conn| {
+                query_all(
+                    conn,
+                    &select_contacts(
+                        "WHERE c.remote_href IS NULL AND c.primary_email <> '' \
+                         ORDER BY c.display_name, c.id",
+                    ),
+                    [],
+                    |r| contact_from_row(r, 0),
+                )
+            })
+            .await
+    }
+
     async fn find_by_email_in_account(
         &self,
         email: &EmailAddress,

@@ -22,6 +22,11 @@ service CalendarService {
 
   // Sync health of the account's contacts and calendars.
   rpc GetDavStatus(GetDavStatusRequest) returns (GetDavStatusResponse);
+
+  // A coarse "something changed" signal for the contacts and calendars of
+  // every account, coalesced: a sync pass that touches hundreds of
+  // resources sends a few signals, not hundreds. Stays open.
+  rpc WatchDavChanges(WatchDavChangesRequest) returns (stream DavChange);
 }
 
 enum CalendarOwnership {
@@ -59,6 +64,11 @@ message EventOccurrence {
   bool   recurring = 7;
   optional string location = 8;
   optional string status   = 9;
+  optional string description = 10;
+  // A local edit the server has not acknowledged.
+  bool   dirty = 11;
+  // Why the server refused the last push.
+  optional string push_failed = 12;
 }
 
 message ListEventsRequest {
@@ -94,13 +104,14 @@ message CreateEventRequest {
   string start      = 4;
   string end        = 5;
   optional string location = 6;
+  optional string description = 7;
 }
 
 message CreateEventResponse {
   string href = 1;
 }
 
-// Unset fields are left as they are; an empty location clears it.
+// Unset fields are left as they are; an empty location or description clears it.
 message UpdateEventRequest {
   string account_id = 1;
   string href       = 2;
@@ -108,6 +119,7 @@ message UpdateEventRequest {
   optional string location = 4;
   optional string start    = 5;
   optional string end      = 6;
+  optional string description = 7;
 }
 
 message UpdateEventResponse {}
@@ -130,4 +142,18 @@ message GetDavStatusResponse {
   uint32 pending_changes = 2;
   // Of those, the ones the server refused.
   uint32 failed_changes = 3;
+}
+
+message WatchDavChangesRequest {}
+
+enum DavKind {
+  DAV_KIND_CONTACTS = 0;
+  DAV_KIND_CALENDAR = 1;
+}
+
+message DavChange {
+  // Empty when the change does not say which account it belongs to (a local
+  // edit of a contact): treat it as every account.
+  string account_id = 1;
+  DavKind kind      = 2;
 }

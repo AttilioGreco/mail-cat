@@ -18,7 +18,7 @@ macro_rules! dav_conformance {
 
         const ONE_OFF: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//\r\n\
             BEGIN:VEVENT\r\nUID:one\r\nDTSTAMP:20260101T000000Z\r\n\
-            DTSTART:20261026T120000Z\r\nDTEND:20261026T130000Z\r\nSUMMARY:Lunch\r\n\
+            DTSTART:20261026T120000Z\r\nDTEND:20261026T130000Z\r\nSUMMARY:Lunch\r\nDESCRIPTION:Bring cash\r\n\
             END:VEVENT\r\nEND:VCALENDAR\r\n";
 
         fn dav_binding(
@@ -379,6 +379,14 @@ macro_rules! dav_conformance {
                 .unwrap();
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].source, ContactSource::CardDav);
+
+            let remote = repo
+                .remote_contacts_by_email(&email("A@example.com"))
+                .await
+                .unwrap();
+            assert_eq!(remote.len(), 1);
+            assert_eq!(remote[0].id, id);
+            assert!(repo.list_unsynced_contacts().await.unwrap().is_empty());
         }
 
         #[tokio::test]
@@ -509,6 +517,16 @@ macro_rules! dav_conformance {
                     ("2026-10-28T09:00:00+00:00".to_string(), "Standup"),
                 ]
             );
+            let lunch = found.iter().find(|o| o.event.summary == "Lunch").unwrap();
+            assert_eq!(lunch.event.description.as_deref(), Some("Bring cash"));
+            assert!(lunch.sync.dirty, "a local edit is not acknowledged yet");
+            assert!(found.iter().filter(|o| o.event.summary != "Lunch").all(|o| !o.sync.dirty));
+            let sync = repo
+                .event_sync(&account, &Href::new("/cal/one.ics"))
+                .await
+                .unwrap();
+            assert!(sync.dirty && sync.push_failed.is_none());
+
             let only_lunch = repo
                 .events_in_range(
                     &account,

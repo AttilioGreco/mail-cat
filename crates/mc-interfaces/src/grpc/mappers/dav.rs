@@ -8,8 +8,8 @@ use crate::grpc::proto;
 use mc_application::commands::ContactFields;
 use mc_domain::formats::{EventEdit, EventWhen, parse_event, parse_vcard};
 use mc_domain::{
-    AccountId, AddressBook, Calendar, CalendarEvent, ContactEmail, ContactEmailLabel, EmailAddress,
-    EventFields, Occurrence, Ownership, RemoteContact,
+    AccountId, AddressBook, Calendar, CalendarEvent, ContactEmail, ContactEmailLabel,
+    ContactSummary, EmailAddress, EventFields, EventSync, Occurrence, Ownership, RemoteContact,
 };
 
 pub fn parse_account_id(text: &str) -> Result<AccountId, Status> {
@@ -48,6 +48,47 @@ pub fn remote_contact_to_proto(contact: &RemoteContact) -> proto::RemoteContact 
         raw: contact.raw.clone(),
         dirty: contact.dirty,
         push_failed: contact.push_error.clone(),
+    }
+}
+
+pub fn remote_contact_to_card(
+    contact: &RemoteContact,
+    address_book_name: Option<String>,
+) -> proto::ContactCard {
+    let remote = remote_contact_to_proto(contact);
+    proto::ContactCard {
+        id: remote.id,
+        display_name: remote.display_name,
+        organization: remote.organization,
+        emails: remote.emails,
+        phones: remote.phones,
+        address_book: Some(remote.address_book),
+        address_book_name,
+        account_id: remote.account_id,
+        notes: remote.notes,
+        source: proto::ContactSource::Remote as i32,
+        raw: Some(remote.raw),
+        dirty: remote.dirty,
+        push_failed: remote.push_failed,
+    }
+}
+
+pub fn harvested_contact_to_card(contact: &ContactSummary) -> proto::ContactCard {
+    proto::ContactCard {
+        id: contact.id.to_string(),
+        display_name: contact.display_name.clone(),
+        organization: contact.organization.clone(),
+        emails: contact
+            .emails
+            .iter()
+            .map(|e| e.address.to_string())
+            .collect(),
+        account_id: contact
+            .account_scope
+            .map(|a| a.to_string())
+            .unwrap_or_default(),
+        source: proto::ContactSource::Harvested as i32,
+        ..Default::default()
     }
 }
 
@@ -96,6 +137,7 @@ fn occurrence_parts(
     calendar: String,
     href: String,
     fields: &EventFields,
+    sync: &EventSync,
 ) -> proto::EventOccurrence {
     proto::EventOccurrence {
         calendar,
@@ -109,6 +151,9 @@ fn occurrence_parts(
         status: fields
             .status
             .map(|status| format!("{status:?}").to_lowercase()),
+        description: fields.description.clone(),
+        dirty: sync.dirty,
+        push_failed: sync.push_failed.clone(),
     }
 }
 
@@ -117,10 +162,11 @@ pub fn occurrence_to_proto(occurrence: &Occurrence) -> proto::EventOccurrence {
         occurrence.calendar.to_string(),
         occurrence.href.to_string(),
         &occurrence.event,
+        &occurrence.sync,
     )
 }
 
-pub fn event_to_proto(event: &CalendarEvent) -> proto::EventDetail {
+pub fn event_to_proto(event: &CalendarEvent, sync: &EventSync) -> proto::EventDetail {
     let calendar = event.binding.collection.to_string();
     let href = event.binding.href.to_string();
     // The projection keeps the master's fields; a resource it could not read
@@ -132,7 +178,7 @@ pub fn event_to_proto(event: &CalendarEvent) -> proto::EventDetail {
     proto::EventDetail {
         first: fields
             .as_ref()
-            .map(|f| occurrence_parts(calendar.clone(), href.clone(), f)),
+            .map(|f| occurrence_parts(calendar.clone(), href.clone(), f, sync)),
         calendar,
         href,
         raw: event.raw.clone(),
@@ -157,6 +203,10 @@ pub fn event_edit_from_proto(req: &proto::UpdateEventRequest) -> Result<EventEdi
             .location
             .clone()
             .map(|l| Some(l).filter(|l| !l.is_empty())),
+        description: req
+            .description
+            .clone()
+            .map(|d| Some(d).filter(|d| !d.is_empty())),
         start: when(&req.start)?,
         end: when(&req.end)?,
     })

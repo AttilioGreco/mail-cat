@@ -720,10 +720,14 @@ impl AppContext {
             query_bus.clone(),
             command_bus.clone(),
             repository_arc.clone(),
+            repository_arc.clone(),
         );
 
-        let calendar_service =
-            CalendarServiceImpl::new(command_bus.clone(), repository_arc.clone());
+        let calendar_service = CalendarServiceImpl::new(
+            command_bus.clone(),
+            repository_arc.clone(),
+            event_bus.clone(),
+        );
 
         let tagging_service = TaggingServiceImpl::new(tagging);
 

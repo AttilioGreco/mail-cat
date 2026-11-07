@@ -40,6 +40,13 @@ service ContactService {
   rpc UpdateRemoteContact(UpdateRemoteContactRequest) returns (UpdateRemoteContactResponse);
 
   rpc DeleteRemoteContact(DeleteRemoteContactRequest) returns (DeleteRemoteContactResponse);
+
+  // The card for an address: a remote contact of the account, else any remote
+  // one, else a harvested one. No card when nobody has the address.
+  rpc LookupContact(LookupContactRequest) returns (LookupContactResponse);
+
+  // Contacts that live only here: harvested from mail, or added by hand.
+  rpc ListHarvestedContacts(ListHarvestedContactsRequest) returns (ListHarvestedContactsResponse);
 }
 
 // A single result from contact autocomplete.
@@ -193,3 +200,43 @@ message DeleteRemoteContactRequest {
 }
 
 message DeleteRemoteContactResponse {}
+
+enum ContactSource {
+  CONTACT_SOURCE_REMOTE    = 0;
+  CONTACT_SOURCE_HARVESTED = 1;
+}
+
+message ContactCard {
+  string id = 1;
+  string display_name = 2;
+  optional string organization = 3;
+  repeated string emails = 4;
+  repeated string phones = 5;
+  // Remote only: collection path and its name.
+  optional string address_book = 6;
+  optional string address_book_name = 7;
+  // Empty for a harvested contact shared across accounts.
+  string account_id = 8;
+  optional string notes = 9;
+  ContactSource source = 10;
+  // Remote only.
+  optional string raw = 11;
+  bool dirty = 12;
+  optional string push_failed = 13;
+}
+
+message LookupContactRequest {
+  string email = 1;
+  // Prefers a contact of this account.
+  optional string account_id = 2;
+}
+
+message LookupContactResponse {
+  optional ContactCard card = 1;
+}
+
+message ListHarvestedContactsRequest {}
+
+message ListHarvestedContactsResponse {
+  repeated ContactCard contacts = 1;
+}

@@ -1,4 +1,8 @@
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::{Instant, timeout_at};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::{
@@ -7,27 +11,43 @@ use crate::grpc::mappers::{
     timestamp_to_datetime,
 };
 use crate::grpc::proto::{
-    CreateEventRequest, CreateEventResponse, DeleteEventRequest, DeleteEventResponse, EventDetail,
-    GetDavStatusRequest, GetDavStatusResponse, GetEventRequest, ListCalendarsRequest,
-    ListCalendarsResponse, ListEventsRequest, ListEventsResponse, UpdateEventRequest,
-    UpdateEventResponse, calendar_service_server::CalendarService,
+    CreateEventRequest, CreateEventResponse, DavChange, DavKind, DeleteEventRequest,
+    DeleteEventResponse, EventDetail, GetDavStatusRequest, GetDavStatusResponse, GetEventRequest,
+    ListCalendarsRequest, ListCalendarsResponse, ListEventsRequest, ListEventsResponse,
+    UpdateEventRequest, UpdateEventResponse, WatchDavChangesRequest,
+    calendar_service_server::CalendarService,
 };
 use mc_application::{
-    bus::CommandBus,
+    bus::{CommandBus, EventSubscriber, InProcessEventBus},
     commands::{Command, CommandResult},
 };
-use mc_domain::{AccountId, CollectionId, DavReadRepository, Href, PendingPush};
+use mc_domain::{
+    AccountId, AggregateType, CollectionId, DavReadRepository, EventEnvelope, Href, PendingPush,
+};
+
+/// A sync pass appends one event per resource; this is how long the watcher
+/// gathers them before telling the client once.
+const CHANGE_WINDOW: Duration = Duration::from_millis(750);
 
 /// Calendar service: reads come from the DAV projections, edits go through the
 /// command bus so that they are pushed to the server.
 pub struct CalendarServiceImpl<C: CommandBus + 'static> {
     command_bus: Arc<C>,
     dav: Arc<dyn DavReadRepository>,
+    event_bus: Arc<InProcessEventBus>,
 }
 
 impl<C: CommandBus + 'static> CalendarServiceImpl<C> {
-    pub fn new(command_bus: Arc<C>, dav: Arc<dyn DavReadRepository>) -> Self {
-        Self { command_bus, dav }
+    pub fn new(
+        command_bus: Arc<C>,
+        dav: Arc<dyn DavReadRepository>,
+        event_bus: Arc<InProcessEventBus>,
+    ) -> Self {
+        Self {
+            command_bus,
+            dav,
+            event_bus,
+        }
     }
 
     /// Every pending change of the account, contacts and events.
@@ -110,13 +130,20 @@ impl<C: CommandBus + 'static> CalendarService for CalendarServiceImpl<C> {
         request: Request<GetEventRequest>,
     ) -> Result<Response<EventDetail>, Status> {
         let req = request.into_inner();
+        let account = parse_account_id(&req.account_id)?;
+        let href = Href::new(&req.href);
         let event = self
             .dav
-            .get_event(&parse_account_id(&req.account_id)?, &Href::new(&req.href))
+            .get_event(&account, &href)
             .await
             .map_err(domain_error_to_status)?
             .ok_or_else(|| Status::not_found(format!("event {} not found", req.href)))?;
-        Ok(Response::new(event_to_proto(&event)))
+        let sync = self
+            .dav
+            .event_sync(&account, &href)
+            .await
+            .map_err(domain_error_to_status)?;
+        Ok(Response::new(event_to_proto(&event, &sync)))
     }
 
     async fn create_event(
@@ -133,6 +160,7 @@ impl<C: CommandBus + 'static> CalendarService for CalendarServiceImpl<C> {
                 start: event_when_from_str(&req.start).map_err(Status::invalid_argument)?,
                 end: event_when_from_str(&req.end).map_err(Status::invalid_argument)?,
                 location: req.location.filter(|l| !l.is_empty()),
+                description: req.description.filter(|d| !d.is_empty()),
             })
             .await
             .map_err(application_error_to_status)?;
@@ -192,6 +220,52 @@ impl<C: CommandBus + 'static> CalendarService for CalendarServiceImpl<C> {
             pending_changes: pending.len() as u32,
             failed_changes: pending.iter().filter(|p| p.failure.is_some()).count() as u32,
         }))
+    }
+
+    type WatchDavChangesStream = ReceiverStream<Result<DavChange, Status>>;
+
+    async fn watch_dav_changes(
+        &self,
+        _request: Request<WatchDavChangesRequest>,
+    ) -> Result<Response<Self::WatchDavChangesStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        tokio::spawn(forward_changes(self.event_bus.subscribe(), tx));
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+fn change_of(envelope: &EventEnvelope) -> Option<(Option<AccountId>, DavKind)> {
+    let kind = match envelope.aggregate_type {
+        AggregateType::Contact | AggregateType::AddressBook => DavKind::Contacts,
+        AggregateType::Calendar | AggregateType::CalendarEvent => DavKind::Calendar,
+        _ => return None,
+    };
+    Some((envelope.payload.account_id(), kind))
+}
+
+async fn forward_changes(
+    mut events: EventSubscriber,
+    tx: tokio::sync::mpsc::Sender<Result<DavChange, Status>>,
+) {
+    let mut pending = HashSet::new();
+    while let Some(first) = events.recv().await {
+        pending.extend(change_of(&first));
+        if pending.is_empty() {
+            continue;
+        }
+        let flush_at = Instant::now() + CHANGE_WINDOW;
+        while let Ok(Some(next)) = timeout_at(flush_at, events.recv()).await {
+            pending.extend(change_of(&next));
+        }
+        for (account, kind) in pending.drain() {
+            let change = DavChange {
+                account_id: account.map(|a| a.to_string()).unwrap_or_default(),
+                kind: kind as i32,
+            };
+            if tx.send(Ok(change)).await.is_err() {
+                return; // client disconnected
+            }
+        }
     }
 }
 

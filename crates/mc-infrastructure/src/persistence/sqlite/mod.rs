@@ -350,6 +350,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         account_id BLOB NOT NULL
     ) WITHOUT ROWID;
     CREATE INDEX conflicts_lost_account ON conflicts_lost(account_id);",
+    // 15: an event's DESCRIPTION, for the editor.
+    "ALTER TABLE calendar_events ADD COLUMN description TEXT;",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

@@ -389,6 +389,10 @@ pub trait ContactReadRepository: Send + Sync {
     async fn find_by_email(&self, email: &EmailAddress)
     -> Result<Vec<ContactSummary>, DomainError>;
 
+    /// Contacts not bound to a server: the manual ones and those harvested
+    /// from mail.
+    async fn list_unsynced_contacts(&self) -> Result<Vec<ContactSummary>, DomainError>;
+
     /// Find contacts scoped to a specific account that have the given email address.
     async fn find_by_email_in_account(
         &self,

@@ -2,10 +2,11 @@
 //! events in a range and their edits.
 
 use chrono::{DateTime, Utc};
+use tokio_stream::Stream;
 use tonic::transport::Channel;
 
 use crate::client::MailCatClient;
-use crate::error::Result;
+use crate::error::{ClientError, Result};
 use crate::proto::mail_cat::v1::{
     self as pb, calendar_service_client::CalendarServiceClient,
     contact_service_client::ContactServiceClient,
@@ -50,6 +51,44 @@ pub struct ContactFields {
     pub notes: Option<String>,
 }
 
+/// The full card behind an address: a remote contact (with its vCard) or
+/// one harvested from mail.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactCard {
+    pub id: String,
+    pub display_name: String,
+    pub organization: Option<String>,
+    pub emails: Vec<String>,
+    pub phones: Vec<String>,
+    pub address_book: Option<String>,
+    pub address_book_name: Option<String>,
+    /// Empty for a harvested contact shared across accounts.
+    pub account_id: String,
+    pub notes: Option<String>,
+    /// `remote` or `harvested`.
+    pub source: &'static str,
+    pub raw: Option<String>,
+    pub dirty: bool,
+    pub push_failed: Option<String>,
+}
+
+/// Which feature a [`DavChange`] is about.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DavKind {
+    Contacts,
+    Calendar,
+}
+
+/// Contacts or calendars changed; an empty `account_id` means any account.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DavChange {
+    pub account_id: String,
+    pub kind: DavKind,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Calendar {
@@ -75,6 +114,10 @@ pub struct EventOccurrence {
     pub recurring: bool,
     pub location: Option<String>,
     pub status: Option<String>,
+    pub description: Option<String>,
+    /// A local edit the server has not acknowledged.
+    pub dirty: bool,
+    pub push_failed: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -94,15 +137,17 @@ pub struct NewEvent {
     pub start: String,
     pub end: String,
     pub location: Option<String>,
+    pub description: Option<String>,
 }
 
-/// `None` leaves the field as it is; an empty location clears it.
+/// `None` leaves the field as it is; an empty location or description clears it.
 #[derive(Debug, Clone, Default)]
 pub struct EventChanges {
     pub summary: Option<String>,
     pub location: Option<String>,
     pub start: Option<String>,
     pub end: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -136,6 +181,30 @@ fn occurrence(o: pb::EventOccurrence) -> EventOccurrence {
         recurring: o.recurring,
         location: o.location,
         status: o.status,
+        description: o.description,
+        dirty: o.dirty,
+        push_failed: o.push_failed,
+    }
+}
+
+fn contact_card(c: pb::ContactCard) -> ContactCard {
+    ContactCard {
+        source: match pb::ContactSource::try_from(c.source) {
+            Ok(pb::ContactSource::Harvested) => "harvested",
+            _ => "remote",
+        },
+        id: c.id,
+        display_name: c.display_name,
+        organization: c.organization,
+        emails: c.emails,
+        phones: c.phones,
+        address_book: c.address_book,
+        address_book_name: c.address_book_name,
+        account_id: c.account_id,
+        notes: c.notes,
+        raw: c.raw,
+        dirty: c.dirty,
+        push_failed: c.push_failed,
     }
 }
 
@@ -248,6 +317,52 @@ impl MailCatClient {
         Ok(())
     }
 
+    /// The card for an address, preferring a contact of `account_id`.
+    pub async fn lookup_contact(
+        &self,
+        email: &str,
+        account_id: Option<String>,
+    ) -> Result<Option<ContactCard>> {
+        let resp = self
+            .contacts()
+            .lookup_contact(pb::LookupContactRequest {
+                email: email.to_owned(),
+                account_id,
+            })
+            .await?
+            .into_inner();
+        Ok(resp.card.map(contact_card))
+    }
+
+    /// Contacts that live only here: harvested from mail or added by hand.
+    pub async fn list_harvested_contacts(&self) -> Result<Vec<ContactCard>> {
+        let resp = self
+            .contacts()
+            .list_harvested_contacts(pb::ListHarvestedContactsRequest {})
+            .await?
+            .into_inner();
+        Ok(resp.contacts.into_iter().map(contact_card).collect())
+    }
+
+    /// Coarse, coalesced "contacts or calendars changed" signals.
+    pub async fn watch_dav_changes(&self) -> Result<impl Stream<Item = Result<DavChange>>> {
+        let stream = self
+            .calendars()
+            .watch_dav_changes(pb::WatchDavChangesRequest {})
+            .await?
+            .into_inner();
+        Ok(tokio_stream::StreamExt::map(stream, |item| {
+            item.map(|c| DavChange {
+                kind: match pb::DavKind::try_from(c.kind) {
+                    Ok(pb::DavKind::Calendar) => DavKind::Calendar,
+                    _ => DavKind::Contacts,
+                },
+                account_id: c.account_id,
+            })
+            .map_err(ClientError::Grpc)
+        }))
+    }
+
     pub async fn list_calendars(&self, account_id: &str) -> Result<Vec<Calendar>> {
         let resp = self
             .calendars()
@@ -324,6 +439,7 @@ impl MailCatClient {
                 start: event.start,
                 end: event.end,
                 location: event.location,
+                description: event.description,
             })
             .await?
             .into_inner();
@@ -344,6 +460,7 @@ impl MailCatClient {
                 location: changes.location,
                 start: changes.start,
                 end: changes.end,
+                description: changes.description,
             })
             .await?;
         Ok(())

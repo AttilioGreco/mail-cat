@@ -179,6 +179,10 @@ impl ContactReadRepository for MockContactRepo {
         Ok(PagedResult::new(vec![], 0, pagination))
     }
 
+    async fn list_unsynced_contacts(&self) -> Result<Vec<ContactSummary>, DomainError> {
+        Ok(vec![])
+    }
+
     async fn find_by_email(
         &self,
         _email: &EmailAddress,

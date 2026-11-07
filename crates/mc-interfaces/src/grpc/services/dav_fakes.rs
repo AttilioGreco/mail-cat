@@ -12,8 +12,9 @@ use mc_application::{
     commands::{Command, CommandResult},
 };
 use mc_domain::{
-    AccountId, AddressBook, Calendar, CalendarEvent, CollectionId, ContactId, DavReadRepository,
-    DomainError, Etag, Href, Occurrence, PendingPush, RemoteContact,
+    AccountId, AddressBook, Calendar, CalendarEvent, CollectionId, ContactId,
+    ContactReadRepository, ContactSummary, DavReadRepository, DomainError, EmailAddress, Etag,
+    EventSync, Href, Occurrence, PendingPush, RemoteContact,
 };
 
 #[derive(Default)]
@@ -23,6 +24,7 @@ pub struct FakeDav {
     pub contacts: Vec<RemoteContact>,
     pub occurrences: Vec<Occurrence>,
     pub event: Option<CalendarEvent>,
+    pub sync: EventSync,
     pub pending_contacts: Vec<PendingPush>,
     pub conflicts: u64,
     /// What `events_in_range` was asked: the calendars and the window start.
@@ -89,6 +91,18 @@ impl DavReadRepository for FakeDav {
         Ok(self.contacts.iter().find(|c| c.id == *id).cloned())
     }
 
+    async fn remote_contacts_by_email(
+        &self,
+        email: &EmailAddress,
+    ) -> Result<Vec<RemoteContact>, DomainError> {
+        Ok(self
+            .contacts
+            .iter()
+            .filter(|c| c.raw.contains(email.as_str()))
+            .cloned()
+            .collect())
+    }
+
     async fn contact_at(&self, _: &AccountId, _: &Href) -> Result<Option<ContactId>, DomainError> {
         unreachable!()
     }
@@ -99,6 +113,10 @@ impl DavReadRepository for FakeDav {
         _: &Href,
     ) -> Result<Option<CalendarEvent>, DomainError> {
         Ok(self.event.clone())
+    }
+
+    async fn event_sync(&self, _: &AccountId, _: &Href) -> Result<EventSync, DomainError> {
+        Ok(self.sync.clone())
     }
 
     async fn events_in_range(
@@ -150,6 +168,61 @@ impl mc_application::bus::QueryBus for NoQueries {
         &self,
         _: mc_application::queries::Query,
     ) -> Result<mc_application::queries::QueryResult, ApplicationError> {
+        unreachable!()
+    }
+}
+
+/// Harvested contacts, found by address.
+#[derive(Default)]
+pub struct FakeContacts {
+    pub contacts: Vec<ContactSummary>,
+}
+
+#[async_trait]
+impl ContactReadRepository for FakeContacts {
+    async fn get_contact(&self, _: &ContactId) -> Result<Option<ContactSummary>, DomainError> {
+        unreachable!()
+    }
+
+    async fn list_contacts(
+        &self,
+        _: &mc_shared::pagination::Pagination,
+    ) -> Result<mc_shared::pagination::PagedResult<ContactSummary>, DomainError> {
+        unreachable!()
+    }
+
+    async fn list_unsynced_contacts(&self) -> Result<Vec<ContactSummary>, DomainError> {
+        Ok(self.contacts.clone())
+    }
+
+    async fn find_by_email(
+        &self,
+        email: &EmailAddress,
+    ) -> Result<Vec<ContactSummary>, DomainError> {
+        Ok(self
+            .contacts
+            .iter()
+            .filter(|c| c.emails.iter().any(|e| e.address == *email))
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_email_in_account(
+        &self,
+        _: &EmailAddress,
+        _: &AccountId,
+    ) -> Result<Vec<ContactSummary>, DomainError> {
+        unreachable!()
+    }
+
+    async fn search_contacts(&self, _: &str, _: usize) -> Result<Vec<ContactSummary>, DomainError> {
+        unreachable!()
+    }
+
+    async fn find_duplicate_candidates(
+        &self,
+        _: Option<&AccountId>,
+    ) -> Result<Vec<(ContactSummary, ContactSummary)>, DomainError> {
         unreachable!()
     }
 }

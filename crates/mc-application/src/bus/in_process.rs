@@ -400,9 +400,16 @@ where
                 start,
                 end,
                 location,
+                description,
             } => {
                 self.dav()?
-                    .handle_add_event(account_id, calendar, summary, (start, end), location)
+                    .handle_add_event(
+                        account_id,
+                        calendar,
+                        summary,
+                        (start, end),
+                        (location, description),
+                    )
                     .await
             }
             Command::UpdateCalendarEvent {

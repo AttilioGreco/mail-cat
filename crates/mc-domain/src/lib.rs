@@ -47,7 +47,7 @@ pub use traits::dav_provider::{
     RemoteResource, ResourcePut,
 };
 pub use traits::dav_repository::{
-    DavReadRepository, Occurrence, PendingChange, PendingPush, RemoteContact,
+    DavReadRepository, EventSync, Occurrence, PendingChange, PendingPush, RemoteContact,
 };
 pub use traits::email_provider::{
     EmailProvider, Existing, MailboxChanges, MailboxCounts, MessageBodyResult,

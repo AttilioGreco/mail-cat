@@ -1613,6 +1613,7 @@ pub async fn get_thread(
         .map_err(|e| e.to_string())
 }
 
+pub mod dav;
 pub mod tagging;
 
 #[cfg(test)]

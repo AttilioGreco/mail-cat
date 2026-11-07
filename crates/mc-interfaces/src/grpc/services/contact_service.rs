@@ -3,15 +3,17 @@ use tonic::{Request, Response, Status};
 
 use crate::grpc::mappers::{
     address_book_to_proto, application_error_to_status, contact_fields_from_proto,
-    domain_error_to_status, parse_account_id, remote_contact_to_proto,
+    domain_error_to_status, harvested_contact_to_card, parse_account_id, remote_contact_to_card,
+    remote_contact_to_proto,
 };
 use crate::grpc::proto::{
     BackfillContactsRequest, BackfillContactsResponse, ContactDuplicatePair,
     ContactSearchHit as ProtoContactSearchHit, CreateRemoteContactRequest,
     CreateRemoteContactResponse, DeleteRemoteContactRequest, DeleteRemoteContactResponse,
     FindContactDuplicatesRequest, FindContactDuplicatesResponse, GetRemoteContactRequest,
-    ListAddressBooksRequest, ListAddressBooksResponse, ListRemoteContactsRequest,
-    ListRemoteContactsResponse, MergeContactsRequest, MergeContactsResponse,
+    ListAddressBooksRequest, ListAddressBooksResponse, ListHarvestedContactsRequest,
+    ListHarvestedContactsResponse, ListRemoteContactsRequest, ListRemoteContactsResponse,
+    LookupContactRequest, LookupContactResponse, MergeContactsRequest, MergeContactsResponse,
     RebuildContactIndexRequest, RebuildContactIndexResponse, RemoteContact, SearchContactsRequest,
     SearchContactsResponse, UpdateRemoteContactRequest, UpdateRemoteContactResponse,
     contact_service_server::ContactService,
@@ -21,7 +23,9 @@ use mc_application::{
     commands::{Command, CommandResult},
     queries::Query,
 };
-use mc_domain::{AccountId, CollectionId, ContactId, DavReadRepository};
+use mc_domain::{
+    AccountId, CollectionId, ContactId, ContactReadRepository, DavReadRepository, EmailAddress,
+};
 
 /// Contact service implementation — exposes address-book search, duplicate
 /// detection, and merge over gRPC.
@@ -29,15 +33,38 @@ pub struct ContactServiceImpl<Q: QueryBus + 'static, C: CommandBus + 'static> {
     query_bus: Arc<Q>,
     command_bus: Arc<C>,
     dav: Arc<dyn DavReadRepository>,
+    contacts: Arc<dyn ContactReadRepository>,
 }
 
 impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactServiceImpl<Q, C> {
-    pub fn new(query_bus: Arc<Q>, command_bus: Arc<C>, dav: Arc<dyn DavReadRepository>) -> Self {
+    pub fn new(
+        query_bus: Arc<Q>,
+        command_bus: Arc<C>,
+        dav: Arc<dyn DavReadRepository>,
+        contacts: Arc<dyn ContactReadRepository>,
+    ) -> Self {
         Self {
             query_bus,
             command_bus,
             dav,
+            contacts,
         }
+    }
+
+    async fn address_book_name(
+        &self,
+        account: &AccountId,
+        collection: &CollectionId,
+    ) -> Result<Option<String>, Status> {
+        let books = self
+            .dav
+            .list_address_books(account)
+            .await
+            .map_err(domain_error_to_status)?;
+        Ok(books
+            .into_iter()
+            .find(|b| b.collection == *collection)
+            .map(|b| b.name))
     }
 }
 
@@ -287,6 +314,66 @@ impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactService for ContactS
             .await
             .map_err(application_error_to_status)?;
         Ok(Response::new(DeleteRemoteContactResponse {}))
+    }
+
+    async fn lookup_contact(
+        &self,
+        request: Request<LookupContactRequest>,
+    ) -> Result<Response<LookupContactResponse>, Status> {
+        let req = request.into_inner();
+        let email = EmailAddress::new(req.email.trim()).map_err(|_| {
+            Status::invalid_argument(format!("invalid email address: {}", req.email))
+        })?;
+        let preferred = req
+            .account_id
+            .filter(|a| !a.is_empty())
+            .map(|a| parse_account_id(&a))
+            .transpose()?;
+
+        let remote = self
+            .dav
+            .remote_contacts_by_email(&email)
+            .await
+            .map_err(domain_error_to_status)?;
+        let found = remote
+            .iter()
+            .find(|c| Some(c.binding.account) == preferred)
+            .or(remote.first());
+        if let Some(contact) = found {
+            let book = self
+                .address_book_name(&contact.binding.account, &contact.binding.collection)
+                .await?;
+            return Ok(Response::new(LookupContactResponse {
+                card: Some(remote_contact_to_card(contact, book)),
+            }));
+        }
+
+        let harvested = self
+            .contacts
+            .find_by_email(&email)
+            .await
+            .map_err(domain_error_to_status)?;
+        let found = harvested
+            .iter()
+            .find(|c| c.account_scope.is_some() && c.account_scope == preferred)
+            .or(harvested.first());
+        Ok(Response::new(LookupContactResponse {
+            card: found.map(harvested_contact_to_card),
+        }))
+    }
+
+    async fn list_harvested_contacts(
+        &self,
+        _request: Request<ListHarvestedContactsRequest>,
+    ) -> Result<Response<ListHarvestedContactsResponse>, Status> {
+        let contacts = self
+            .contacts
+            .list_unsynced_contacts()
+            .await
+            .map_err(domain_error_to_status)?;
+        Ok(Response::new(ListHarvestedContactsResponse {
+            contacts: contacts.iter().map(harvested_contact_to_card).collect(),
+        }))
     }
 }
 

@@ -213,7 +213,7 @@ async fn contacts_and_events_round_trip_through_the_service() {
             CollectionId::new("/alice/work/"),
             "Lunch".into(),
             (start, end),
-            None,
+            (None, None),
         )
         .await
         .unwrap();

@@ -11,6 +11,7 @@ import { useComposeStore } from '@/features/compose-message';
 import { useSyncNow } from '@/features/manage-accounts';
 import { useSessionStore } from '@/entities/session';
 import { useAuthStatusWatch, useSyncProgress } from '@/entities/account';
+import { useDavChangesWatch } from '@/entities/calendar';
 import { Toaster } from '@/shared/ui/sonner';
 import { QueryProvider } from './model/QueryProvider';
 import { ThemeProvider } from './model/ThemeProvider';
@@ -43,6 +44,7 @@ function Router() {
   // subscription, or the page would open with no progress to show.
   useSyncProgress();
   useAuthStatusWatch();
+  useDavChangesWatch();
   useAppUpdate();
   useServerAutostartError();
 

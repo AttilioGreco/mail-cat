@@ -2,6 +2,8 @@ use super::*;
 use crate::grpc::mappers::datetime_to_timestamp;
 use crate::grpc::services::dav_fakes::{FakeDav, RecordingBus};
 use chrono::{TimeZone, Utc};
+use mc_application::bus::EventPublisher;
+use mc_domain::DomainEvent;
 use mc_domain::formats::EventWhen;
 use mc_domain::{
     Calendar, CalendarComponent, CalendarEvent, EventFields, Occurrence, Ownership, RemoteBinding,
@@ -17,7 +19,12 @@ fn fields(summary: &str) -> EventFields {
         recurring: false,
         location: None,
         status: None,
+        description: None,
     }
+}
+
+fn events() -> Arc<InProcessEventBus> {
+    Arc::new(InProcessEventBus::new(64))
 }
 
 fn service(
@@ -25,7 +32,10 @@ fn service(
     result: CommandResult,
 ) -> (CalendarServiceImpl<RecordingBus>, Arc<RecordingBus>) {
     let bus = Arc::new(RecordingBus::answering(result));
-    (CalendarServiceImpl::new(bus.clone(), Arc::new(dav)), bus)
+    (
+        CalendarServiceImpl::new(bus.clone(), Arc::new(dav), events()),
+        bus,
+    )
 }
 
 #[tokio::test]
@@ -64,6 +74,7 @@ async fn events_in_range_pass_the_window_and_calendars_through() {
             calendar: CollectionId::new("/cal/"),
             href: Href::new("/cal/e.ics"),
             event: fields("Standup"),
+            sync: Default::default(),
         }],
         ..Default::default()
     };
@@ -71,6 +82,7 @@ async fn events_in_range_pass_the_window_and_calendars_through() {
     let svc = CalendarServiceImpl::new(
         Arc::new(RecordingBus::answering(CommandResult::CalendarEventRemoved)),
         dav.clone(),
+        events(),
     );
     let (from, to) = (
         Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap(),
@@ -115,6 +127,10 @@ async fn get_event_returns_raw_and_unknown_is_not_found() {
     };
     let dav = FakeDav {
         event: Some(event),
+        sync: mc_domain::EventSync {
+            dirty: true,
+            push_failed: Some("403".into()),
+        },
         ..Default::default()
     };
     let (svc, _) = service(dav, CommandResult::CalendarEventRemoved);
@@ -128,7 +144,10 @@ async fn get_event_returns_raw_and_unknown_is_not_found() {
         .unwrap()
         .into_inner();
     assert_eq!(detail.raw, "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n");
-    assert_eq!(detail.first.unwrap().summary, "Lunch");
+    let first = detail.first.unwrap();
+    assert_eq!(first.summary, "Lunch");
+    assert!(first.dirty);
+    assert_eq!(first.push_failed.as_deref(), Some("403"));
 
     let (empty, _) = service(FakeDav::default(), CommandResult::CalendarEventRemoved);
     let err = empty.get_event(Request::new(request())).await.unwrap_err();
@@ -146,6 +165,7 @@ async fn create_update_and_delete_dispatch_the_commands() {
 
     let created = svc
         .create_event(Request::new(CreateEventRequest {
+            description: None,
             account_id: account_id.clone(),
             calendar: "/cal/".into(),
             summary: "Dentist".into(),
@@ -191,6 +211,7 @@ async fn bad_event_time_is_refused_before_any_command() {
     let (svc, bus) = service(FakeDav::default(), CommandResult::CalendarEventRemoved);
     let err = svc
         .create_event(Request::new(CreateEventRequest {
+            description: None,
             account_id: AccountId::new().to_string(),
             calendar: "/cal/".into(),
             summary: "x".into(),
@@ -248,4 +269,53 @@ async fn dav_status_counts_lost_conflicts_and_pending_changes() {
         ),
         (3, 2, 1)
     );
+}
+
+fn envelope(event: DomainEvent) -> EventEnvelope {
+    EventEnvelope::new("agg".into(), event.aggregate_type(), 1, event)
+}
+
+#[tokio::test]
+async fn dav_changes_are_coalesced_per_account_and_kind() {
+    let bus = events();
+    let svc = CalendarServiceImpl::new(
+        Arc::new(RecordingBus::answering(CommandResult::CalendarEventRemoved)),
+        Arc::new(FakeDav::default()),
+        bus.clone(),
+    );
+    let mut stream = svc
+        .watch_dav_changes(Request::new(WatchDavChangesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let account = AccountId::new();
+    for i in 0..40 {
+        bus.publish(envelope(DomainEvent::AddressBookRemoved {
+            account_id: account,
+            collection: CollectionId::new(format!("/book{i}/")),
+        }));
+        bus.publish(envelope(DomainEvent::CalendarEventRemoved {
+            account_id: account,
+            href: Href::new(format!("/cal/{i}.ics")),
+            origin: mc_domain::Origin::Remote,
+        }));
+    }
+    // Not a dav event: ignored.
+    bus.publish(envelope(DomainEvent::AccountSyncStarted {
+        account_id: account,
+    }));
+
+    let mut seen = Vec::new();
+    while let Ok(Some(change)) = tokio::time::timeout(
+        Duration::from_millis(1500),
+        tokio_stream::StreamExt::next(&mut stream),
+    )
+    .await
+    {
+        let change = change.unwrap();
+        assert_eq!(change.account_id, account.to_string());
+        seen.push(change.kind);
+    }
+    seen.sort();
+    assert_eq!(seen, [DavKind::Contacts as i32, DavKind::Calendar as i32]);
 }

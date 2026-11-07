@@ -116,7 +116,7 @@ const SERIES: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//\r\n\
     BEGIN:VEVENT\r\nUID:series\r\nDTSTAMP:20260101T000000Z\r\nSEQUENCE:2\r\n\
     DTSTART;TZID=Europe/Rome:20261024T100000\r\nDTEND;TZID=Europe/Rome:20261024T110000\r\n\
     RRULE:FREQ=DAILY;COUNT=5\r\nEXDATE;TZID=Europe/Rome:20261026T100000\r\n\
-    SUMMARY:Standup\r\nLOCATION:Room 1\r\nX-APPLE-STRUCTURED:keep me\r\n\
+    SUMMARY:Standup\r\nLOCATION:Room 1\r\nDESCRIPTION:Daily\\, brief\\nsecond line\r\nX-APPLE-STRUCTURED:keep me\r\n\
     BEGIN:VALARM\r\nACTION:DISPLAY\r\nSUMMARY:alarm\r\nTRIGGER:-PT10M\r\nEND:VALARM\r\n\
     END:VEVENT\r\n\
     BEGIN:VEVENT\r\nUID:series\r\nDTSTAMP:20260101T000000Z\r\n\
@@ -187,6 +187,10 @@ fn event_fields_come_from_the_master() {
     assert_eq!(parsed.uid.as_deref(), Some("series"));
     assert_eq!(fields.summary, "Standup");
     assert_eq!(fields.location.as_deref(), Some("Room 1"));
+    assert_eq!(
+        fields.description.as_deref(),
+        Some("Daily, brief\nsecond line")
+    );
     assert_eq!(fields.start, at("2026-10-24T08:00:00Z"));
     assert_eq!(fields.end, at("2026-10-24T09:00:00Z"));
     assert!(fields.recurring && !fields.all_day);
@@ -222,6 +226,7 @@ fn event_edit_changes_the_master_and_keeps_everything_else() {
     let edit = EventEdit {
         summary: Some("Daily sync, v2".into()),
         location: Some(None),
+        description: Some(Some("New; plan\nline 2".into())),
         // 15:00 CET: the zone of the old DTSTART is kept, not pinned to UTC.
         start: Some(EventWhen::At(at("2026-10-24T13:00:00Z"))),
         end: Some(EventWhen::At(at("2026-10-24T14:00:00Z"))),
@@ -240,6 +245,7 @@ fn event_edit_changes_the_master_and_keeps_everything_else() {
     }
     assert!(edited.contains("SUMMARY:Daily sync\\, v2\r\n"));
     assert!(!edited.contains("LOCATION"));
+    assert!(edited.contains("DESCRIPTION:New\\; plan\\nline 2\r\n"));
     assert!(edited.contains("DTSTART;TZID=Europe/Rome:20261024T150000\r\n"));
     assert!(edited.contains("DTEND;TZID=Europe/Rome:20261024T160000\r\n"));
     assert!(edited.contains("SEQUENCE:3\r\n"));
@@ -250,7 +256,9 @@ fn event_edit_changes_the_master_and_keeps_everything_else() {
 
     let parsed = parse_event(&edited).unwrap();
     assert_eq!(parsed.last_modified, Some(now));
-    assert_eq!(parsed.fields.unwrap().start, at("2026-10-24T13:00:00Z"));
+    let fields = parsed.fields.unwrap();
+    assert_eq!(fields.start, at("2026-10-24T13:00:00Z"));
+    assert_eq!(fields.description.as_deref(), Some("New; plan\nline 2"));
 }
 
 #[test]

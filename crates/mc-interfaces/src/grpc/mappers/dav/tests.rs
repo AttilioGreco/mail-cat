@@ -99,11 +99,13 @@ fn event_times_are_dates_or_instants() {
 fn event_edit_empty_location_clears_and_unset_keeps() {
     let edit = event_edit_from_proto(&proto::UpdateEventRequest {
         location: Some(String::new()),
+        description: Some("Agenda".into()),
         start: Some("2026-11-10".into()),
         ..Default::default()
     })
     .unwrap();
     assert_eq!(edit.location, Some(None));
+    assert_eq!(edit.description, Some(Some("Agenda".into())));
     assert_eq!(edit.summary, None);
     assert!(edit.start.is_some() && edit.end.is_none());
 }
@@ -122,12 +124,20 @@ fn occurrence_and_calendar_map_their_flags() {
             recurring: true,
             location: None,
             status: Some(mc_domain::EventStatus::Confirmed),
+            description: Some("Daily".into()),
+        },
+        sync: mc_domain::EventSync {
+            dirty: true,
+            push_failed: Some("412".into()),
         },
     };
     let proto = occurrence_to_proto(&occurrence);
     assert_eq!(proto.start.unwrap().seconds, start.timestamp());
     assert!(proto.recurring);
     assert_eq!(proto.status.as_deref(), Some("confirmed"));
+    assert_eq!(proto.description.as_deref(), Some("Daily"));
+    assert!(proto.dirty);
+    assert_eq!(proto.push_failed.as_deref(), Some("412"));
 
     let calendar = Calendar {
         account: AccountId::new(),

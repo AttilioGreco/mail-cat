@@ -246,6 +246,7 @@ pub enum Command {
         start: EventWhen,
         end: EventWhen,
         location: Option<String>,
+        description: Option<String>,
     },
 
     UpdateCalendarEvent {

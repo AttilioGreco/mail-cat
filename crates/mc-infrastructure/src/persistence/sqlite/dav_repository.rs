@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AddressBook, AggregateType, Calendar, CalendarEvent, CollectionId, ContactId,
-    DavReadRepository, DomainError, Etag, EventFields, Href, Occurrence, PendingChange,
-    PendingPush, RemoteBinding, RemoteContact, formats,
+    DavReadRepository, DomainError, EmailAddress, Etag, EventFields, EventSync, Href, Occurrence,
+    PendingChange, PendingPush, RemoteBinding, RemoteContact, formats,
 };
 
 use super::repository::{
@@ -36,7 +36,8 @@ fn binding_from_row(row: &Row, at: usize) -> rusqlite::Result<RemoteBinding> {
 }
 
 const EVENT_COLUMNS: &str = "account_id, collection, href, etag, remote_modified, raw, \
-     summary, start_at, end_at, all_day, recurring, location, status";
+     summary, start_at, end_at, all_day, recurring, location, status, description, \
+     dirty, push_error";
 
 fn fields_from_row(row: &Row, at: usize) -> rusqlite::Result<Option<EventFields>> {
     let Some(summary) = row.get::<_, Option<String>>(at)? else {
@@ -55,6 +56,7 @@ fn fields_from_row(row: &Row, at: usize) -> rusqlite::Result<Option<EventFields>
             ),
             None => None,
         },
+        description: row.get(at + 7)?,
     }))
 }
 
@@ -63,6 +65,14 @@ fn event_from_row(row: &Row) -> rusqlite::Result<CalendarEvent> {
         binding: binding_from_row(row, 0)?,
         raw: row.get(5)?,
         fields: fields_from_row(row, 6)?,
+    })
+}
+
+/// Columns after the event's: dirty, push_error.
+fn sync_from_row(row: &Row) -> rusqlite::Result<EventSync> {
+    Ok(EventSync {
+        dirty: row.get(14)?,
+        push_failed: row.get(15)?,
     })
 }
 
@@ -313,6 +323,28 @@ impl DavReadRepository for SqliteRepository {
             .await
     }
 
+    async fn remote_contacts_by_email(
+        &self,
+        email: &EmailAddress,
+    ) -> Result<Vec<RemoteContact>, DomainError> {
+        let email = email.as_str().to_owned();
+        self.db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    &format!(
+                        "SELECT {REMOTE_CONTACT_COLUMNS} FROM contacts \
+                         WHERE remote_href IS NOT NULL AND id IN \
+                           (SELECT contact_id FROM contact_emails WHERE email = ?1) \
+                         ORDER BY id"
+                    ),
+                    [email],
+                    remote_contact_from_row,
+                )
+            })
+            .await
+    }
+
     async fn contact_at(
         &self,
         account: &AccountId,
@@ -352,6 +384,24 @@ impl DavReadRepository for SqliteRepository {
             .await
     }
 
+    async fn event_sync(&self, account: &AccountId, href: &Href) -> Result<EventSync, DomainError> {
+        let (account, href) = (*account.as_uuid(), href.to_string());
+        self.db
+            .read(move |conn| {
+                query_one(
+                    conn,
+                    &format!(
+                        "SELECT {EVENT_COLUMNS} FROM calendar_events \
+                         WHERE account_id = ?1 AND href = ?2"
+                    ),
+                    params![account, href],
+                    sync_from_row,
+                )
+                .map(Option::unwrap_or_default)
+            })
+            .await
+    }
+
     async fn events_in_range(
         &self,
         account: &AccountId,
@@ -375,10 +425,10 @@ impl DavReadRepository for SqliteRepository {
                              OR (start_at < ?3 AND (end_at > ?2 OR start_at >= ?2)))"
                     ),
                     params![account, super::repository::nanos(from), super::repository::nanos(to)],
-                    event_from_row,
+                    |r| Ok((event_from_row(r)?, sync_from_row(r)?)),
                 )?;
                 let mut found = Vec::new();
-                for event in rows {
+                for (event, sync) in rows {
                     let calendar = event.binding.collection.clone();
                     if !calendars.is_empty() && !calendars.contains(&calendar) {
                         continue;
@@ -399,6 +449,7 @@ impl DavReadRepository for SqliteRepository {
                         calendar: calendar.clone(),
                         href: event.binding.href.clone(),
                         event: event_fields,
+                        sync: sync.clone(),
                     }));
                 }
                 found.sort_by_key(|o| o.event.start);

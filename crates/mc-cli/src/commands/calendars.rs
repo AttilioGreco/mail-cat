@@ -67,6 +67,8 @@ pub enum EventsCmd {
         end: String,
         #[arg(long)]
         location: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
     },
 
     /// Edit an event; other properties and the recurrence are kept
@@ -83,6 +85,9 @@ pub enum EventsCmd {
         start: Option<String>,
         #[arg(long)]
         end: Option<String>,
+        /// An empty description clears it
+        #[arg(long)]
+        description: Option<String>,
     },
 
     /// Delete an event (on the server too)
@@ -191,7 +196,12 @@ pub async fn run_events(cmd: EventsCmd, client: MailCatClient, format: Format) -
                     .field("start", s(&when(first, first.start)))
                     .field("end", s(&when(first, first.end)))
                     .field("recurring", n(first.recurring))
-                    .field("location", s(first.location.as_deref().unwrap_or_default()));
+                    .field("location", s(first.location.as_deref().unwrap_or_default()))
+                    .field(
+                        "description",
+                        s(first.description.as_deref().unwrap_or_default()),
+                    )
+                    .field("dirty", n(first.dirty));
             }
             t.field("raw", s(&event.raw)).print();
             Ok(())
@@ -203,6 +213,7 @@ pub async fn run_events(cmd: EventsCmd, client: MailCatClient, format: Format) -
             start,
             end,
             location,
+            description,
         } => {
             let account = find_account(&client, &account).await?;
             let event = NewEvent {
@@ -211,6 +222,7 @@ pub async fn run_events(cmd: EventsCmd, client: MailCatClient, format: Format) -
                 start,
                 end,
                 location,
+                description,
             };
             let href = client.create_event(&account.id, event).await?;
             println!("{} created {href}", "✓".green());
@@ -223,12 +235,15 @@ pub async fn run_events(cmd: EventsCmd, client: MailCatClient, format: Format) -
             location,
             start,
             end,
+            description,
         } => {
-            if [&summary, &location, &start, &end]
+            if [&summary, &location, &start, &end, &description]
                 .iter()
                 .all(|f| f.is_none())
             {
-                bail!("nothing to change: pass --summary, --location, --start or --end");
+                bail!(
+                    "nothing to change: pass --summary, --location, --description, --start or --end"
+                );
             }
             let account = find_account(&client, &account).await?;
             let changes = EventChanges {
@@ -236,6 +251,7 @@ pub async fn run_events(cmd: EventsCmd, client: MailCatClient, format: Format) -
                 location,
                 start,
                 end,
+                description,
             };
             client.update_event(&account.id, &href, changes).await?;
             println!("{} updated {href}", "✓".green());

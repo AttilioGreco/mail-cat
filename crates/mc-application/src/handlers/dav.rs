@@ -131,7 +131,7 @@ impl DavCommandHandler {
         calendar: CollectionId,
         summary: String,
         when: (formats::EventWhen, formats::EventWhen),
-        location: Option<String>,
+        (location, description): (Option<String>, Option<String>),
     ) -> Result<CommandResult, ApplicationError> {
         self.require_writable(account, Kind::Calendar, &calendar)
             .await?;
@@ -144,6 +144,7 @@ impl DavCommandHandler {
         let edit = EventEdit {
             summary: Some(summary),
             location: Some(location),
+            description: Some(description),
             start: Some(when.0),
             end: Some(when.1),
         };

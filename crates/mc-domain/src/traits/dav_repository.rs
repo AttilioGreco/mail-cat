@@ -7,6 +7,7 @@ use crate::error::DomainError;
 use crate::model::account::AccountId;
 use crate::model::collection::{AddressBook, Calendar, CalendarEvent, EventFields};
 use crate::value_objects::contact_id::ContactId;
+use crate::value_objects::email_address::EmailAddress;
 use crate::value_objects::remote::{CollectionId, Etag, Href, RemoteBinding};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +45,15 @@ pub struct Occurrence {
     pub calendar: CollectionId,
     pub href: Href,
     pub event: EventFields,
+    pub sync: EventSync,
+}
+
+/// Where an event stands with the server, like a contact's `dirty` and
+/// `push_error`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventSync {
+    pub dirty: bool,
+    pub push_failed: Option<String>,
 }
 
 /// A contact bound to a server resource, with the state of its sync.
@@ -106,6 +116,12 @@ pub trait DavReadRepository: Send + Sync {
 
     async fn remote_contact(&self, id: &ContactId) -> Result<Option<RemoteContact>, DomainError>;
 
+    /// Contacts bound to a server that have this address, of any account.
+    async fn remote_contacts_by_email(
+        &self,
+        email: &EmailAddress,
+    ) -> Result<Vec<RemoteContact>, DomainError>;
+
     /// The contact bound to a server resource.
     async fn contact_at(
         &self,
@@ -118,6 +134,8 @@ pub trait DavReadRepository: Send + Sync {
         account: &AccountId,
         href: &Href,
     ) -> Result<Option<CalendarEvent>, DomainError>;
+
+    async fn event_sync(&self, account: &AccountId, href: &Href) -> Result<EventSync, DomainError>;
 
     /// Occurrences overlapping `[from, to)`, recurrence expanded at read time,
     /// ordered by start. `calendars` empty means every calendar of the account.
