@@ -199,6 +199,8 @@ install: build-release
     @echo "→ binari..."
     mkdir -p ~/.local/bin
     systemctl stop --user mail-cat-server.service; or true
+    # a running UI keeps its binary busy, and cp would fail half-way
+    pkill -x mail-cat-ui; and sleep 1; or true
     cp target/release/mail-cat-server ~/.local/bin/
     cp target/release/mail-cat-ui ~/.local/bin/
     cp target/release/mc ~/.local/bin/
