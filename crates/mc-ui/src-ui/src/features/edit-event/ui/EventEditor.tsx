@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/shared/ui/button';
+import { selectedFirst } from '@/shared/lib/utils';
 import { DatePicker } from '@/shared/ui/date-picker';
 import { Input } from '@/shared/ui/input';
 import { TimePicker } from '@/shared/ui/time-picker';
@@ -11,6 +12,7 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/shared/ui/alert-dialog';
 import { useAccounts } from '@/entities/account';
+import { useSessionStore } from '@/entities/session';
 import {
   calendarKey, useCalendarGroups, useCalendarVisibility, useCreateEvent, useDeleteEvent, useUpdateEvent,
   type AccountEvent,
@@ -37,7 +39,8 @@ interface Props {
 }
 
 export function EventEditor({ initial, event, onClose }: Props) {
-  const groups = useCalendarGroups(useAccounts().data ?? []);
+  const selected = useSessionStore((s) => s.selectedAccountId);
+  const groups = useCalendarGroups(selectedFirst(useAccounts().data ?? [], selected));
   const lastCalendar = useCalendarVisibility((s) => s.lastCalendar);
   const setLastCalendar = useCalendarVisibility((s) => s.setLastCalendar);
   const create = useCreateEvent();
@@ -55,7 +58,8 @@ export function EventEditor({ initial, event, onClose }: Props) {
   // Resolved at render, not at mount: the calendar list may still be loading when the dialog opens.
   const calendar = choices.some((c) => c.value === form.calendar)
     ? form.calendar
-    : (choices.find((c) => c.value === lastCalendar) ?? choices[0])?.value ?? '';
+    : // A new event goes to the selected account: its last used calendar, else its first.
+      (choices.find((c) => c.value === lastCalendar && (!selected || c.accountId === selected)) ?? choices[0])?.value ?? '';
   const set = <K extends keyof EventForm>(key: K, value: EventForm[K]) => setForm((f) => ({ ...f, [key]: value }));
 
   const readOnly = event?.readOnly ?? false;

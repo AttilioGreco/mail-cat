@@ -3,11 +3,15 @@ import { useAccounts } from '@/entities/account';
 import {
   calendarColor, calendarKey, useCalendarGroups, useCalendarVisibility, type CalendarGroup,
 } from '@/entities/calendar';
+import { useSessionStore } from '@/entities/session';
 import { useOAuthLogin } from '@/features/manage-accounts';
+import { selectedFirst } from '@/shared/lib/utils';
 import { MiniMonth } from './MiniMonth';
 
 export function CalendarSidebar() {
-  const groups = useCalendarGroups(useAccounts().data ?? []);
+  // The account selected in the mail view leads, as its calendars are the likely ones.
+  const selected = useSessionStore((s) => s.selectedAccountId);
+  const groups = useCalendarGroups(selectedFirst(useAccounts().data ?? [], selected));
   const empty = groups.length === 0 || groups.every((g) => !g.isLoading && g.calendars.length === 0 && g.feature.state === 'enabled');
   const hasPermissionGap = groups.some((g) => g.feature.state === 'missing_permission');
 

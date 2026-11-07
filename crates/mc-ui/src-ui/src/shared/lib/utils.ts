@@ -32,3 +32,9 @@ export function truncate(str: string, maxLen: number): string {
 export function sourceMailbox(mailboxIds: string[], shown: string | null): string {
   return shown !== null && mailboxIds.includes(shown) ? shown : mailboxIds[0];
 }
+
+/** `items` with the one whose id is `id` moved to the front, order otherwise kept. */
+export function selectedFirst<T extends { id: string }>(items: T[], id: string | null): T[] {
+  if (!id) return items;
+  return [...items.filter((x) => x.id === id), ...items.filter((x) => x.id !== id)];
+}
