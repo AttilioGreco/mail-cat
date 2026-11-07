@@ -3,7 +3,7 @@ use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
 
 use mc_domain::error::DomainError;
 
-use super::client::{classify, etag};
+use super::client::{DavView, classify, etag};
 use super::xml::parse_multistatus;
 use super::{Cursor, xml};
 
@@ -176,4 +176,55 @@ fn status_classes_match_what_stops_a_pass() {
     ] {
         assert!(check(ok, &none, b"").is_ok(), "{ok} belongs to the call");
     }
+}
+
+/// Records what reaches the account's gate.
+#[derive(Default)]
+struct Recording(std::sync::Mutex<Vec<&'static str>>);
+
+#[async_trait::async_trait]
+impl mc_domain::LoginGate for Recording {
+    async fn secret(&self) -> Result<mc_domain::LoginSecret, DomainError> {
+        Ok(mc_domain::LoginSecret::OAuthToken("t".into()))
+    }
+    async fn login_failed(&self, _: &mc_domain::LoginSecret, _: &DomainError, _: bool) -> bool {
+        self.0.lock().unwrap().push("login_failed");
+        false
+    }
+    fn login_succeeded(&self) {
+        self.0.lock().unwrap().push("login_succeeded");
+    }
+    async fn smtp_token_refused(&self, _: &mc_domain::LoginSecret) -> bool {
+        self.0.lock().unwrap().push("refresh");
+        true
+    }
+    async fn ready(&self) {}
+}
+
+#[tokio::test]
+async fn dav_failures_never_reach_the_account_state() {
+    use mc_domain::LoginGate;
+    let gate = Recording::default();
+    let view = DavView(&gate);
+    let token = mc_domain::LoginSecret::OAuthToken("t".into());
+
+    for e in [
+        DomainError::ConnectionFailed("521".into()),
+        DomainError::Throttled("slow".into()),
+    ] {
+        assert!(!view.login_failed(&token, &e, false).await);
+    }
+    view.login_succeeded();
+    assert!(
+        gate.0.lock().unwrap().is_empty(),
+        "the mail's state is IMAP's"
+    );
+
+    let refused = DomainError::AuthenticationFailed("401".into());
+    assert!(
+        view.login_failed(&token, &refused, false).await,
+        "one refresh"
+    );
+    assert!(!view.login_failed(&token, &refused, true).await);
+    assert_eq!(*gate.0.lock().unwrap(), ["refresh"]);
 }

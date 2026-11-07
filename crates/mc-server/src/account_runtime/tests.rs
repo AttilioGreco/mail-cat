@@ -531,19 +531,15 @@ async fn a_google_account_without_dav_scopes_keeps_mail_and_reports_it() {
     );
 }
 
-/// Answers every listing like a DAV client that reported the failure to the gate.
+/// Answers every listing like a DAV server that is throttling.
 struct Failing {
-    gate: Arc<AuthGate>,
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Failing {
     async fn fail(&self) -> DomainError {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let busy = DomainError::Throttled("slow down".into());
-        let secret = mc_domain::LoginSecret::Password("pw".into());
-        self.gate.login_failed(&secret, &busy, false).await;
-        busy
+        DomainError::Throttled("slow down".into())
     }
 }
 
@@ -643,6 +639,12 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+#[test]
+fn the_dav_backoff_doubles_up_to_half_an_hour() {
+    let mins = |n| tasks::dav_delay(n).as_secs() / 60;
+    assert_eq!([0, 1, 2, 3, 9].map(mins), [5, 10, 20, 30, 30]);
+}
+
 #[tokio::test]
 async fn the_dav_loop_runs_once_throttled_backs_off_and_stops_with_the_account() {
     let f = fixture("").await;
@@ -658,7 +660,6 @@ async fn the_dav_loop_runs_once_throttled_backs_off_and_stops_with_the_account()
     );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let backend = Failing {
-        gate: gate.clone(),
         calls: calls.clone(),
     };
     let seen = || calls.load(std::sync::atomic::Ordering::SeqCst);
@@ -670,10 +671,6 @@ async fn the_dav_loop_runs_once_throttled_backs_off_and_stops_with_the_account()
 
     // One pass lists books, then the throttle stops it before calendars.
     assert_eq!(seen(), 1, "the throttled loop must not retry at once");
-    assert!(matches!(
-        gate.status().state,
-        mc_application::AuthState::Offline { .. }
-    ));
 
     assert!(runtime.stop(&id).await, "the loop ends with its account");
     assert!(matches!(

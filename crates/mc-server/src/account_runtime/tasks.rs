@@ -155,6 +155,14 @@ async fn rest(gate: &AuthGate, stop: &CancellationToken, failed: bool) -> bool {
     }
 }
 
+/// The wait before the next DAV pass: the period, doubled per failure in a
+/// row up to 30 minutes, so a server that is down is asked rarely.
+pub(super) fn dav_delay(failures: u32) -> Duration {
+    SYNC_PERIOD
+        .saturating_mul(1 << failures.min(3))
+        .min(Duration::from_secs(30 * 60))
+}
+
 async fn sleep_or_stop(stop: &CancellationToken, wait: Duration) -> bool {
     tokio::select! {
         _ = stop.cancelled() => false,
@@ -277,10 +285,9 @@ impl AccountRuntime {
 }
 
 impl DavLoop {
-    /// Same cadence and gate as the mail sync, as a task of its own so a slow
-    /// DAV server never delays mail. The gate already hears of login,
-    /// connection and throttling failures from the DAV client; the pass only
-    /// has to wait out what it schedules.
+    /// Same cadence as the mail sync, as a task of its own so a slow DAV
+    /// server never delays mail. The gate does not hear of DAV failures (they
+    /// would pause the mail), so the loop backs off on its own.
     async fn run(self) {
         let Self {
             id,
@@ -293,6 +300,7 @@ impl DavLoop {
             probe,
         } = self;
         let mut registered = probe.is_none();
+        let mut failures = 0u32;
         if registered {
             providers.register(id, backend.clone());
         }
@@ -333,7 +341,8 @@ impl DavLoop {
                     failed = true;
                 }
             }
-            if !rest(&gate, &stop, failed).await {
+            failures = if failed { failures + 1 } else { 0 };
+            if !sleep_or_stop(&stop, dav_delay(failures)).await {
                 break;
             }
         }

@@ -44,8 +44,16 @@ impl Reply {
         Err(self.unexpected(what))
     }
 
+    /// Carries the start of the body: a bare status hides why a server
+    /// refused (Google names the disabled API or missing scope there).
     pub fn unexpected(&self, what: &str) -> DomainError {
-        DomainError::Provider(format!("DAV {what}: the server answered {}", self.status))
+        let body = String::from_utf8_lossy(&self.body);
+        let body: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body: String = body.chars().take(300).collect();
+        DomainError::Provider(format!(
+            "DAV {what}: the server answered {}: {body}",
+            self.status
+        ))
     }
 
     pub fn multistatus(self, what: &str) -> Result<Multistatus, DomainError> {
@@ -94,7 +102,7 @@ impl DavClient {
     ) -> Result<Reply, DomainError> {
         let method = Method::from_bytes(method.as_bytes())
             .map_err(|e| DomainError::Validation(format!("HTTP method {method}: {e}")))?;
-        login_with(self.gate.as_ref(), |secret| {
+        login_with(&DavView(self.gate.as_ref()), |secret| {
             let mut request = self.http.request(method.clone(), url.clone());
             for (name, value) in headers {
                 request = request.header(*name, *value);
@@ -147,6 +155,32 @@ fn transport_error(e: reqwest::Error) -> DomainError {
         DomainError::ConnectionTimeout(e.to_string())
     } else {
         DomainError::ConnectionFailed(e.to_string())
+    }
+}
+
+/// The account's gate as DAV may use it: the secret and one refresh of a
+/// refused token, nothing more. The account's state belongs to IMAP, so a DAV
+/// server that is down or refusing never pauses the mail; the DAV loop keeps
+/// its own backoff.
+pub(super) struct DavView<'a>(pub(super) &'a dyn LoginGate);
+
+#[allow(clippy::double_must_use)] // async_trait's expansion
+#[async_trait::async_trait]
+impl LoginGate for DavView<'_> {
+    async fn secret(&self) -> Result<LoginSecret, DomainError> {
+        self.0.secret().await
+    }
+
+    async fn login_failed(&self, secret: &LoginSecret, error: &DomainError, retried: bool) -> bool {
+        matches!(error, DomainError::AuthenticationFailed(_))
+            && !retried
+            && self.0.smtp_token_refused(secret).await
+    }
+
+    fn login_succeeded(&self) {}
+
+    async fn ready(&self) {
+        self.0.ready().await;
     }
 }
 
