@@ -24,7 +24,7 @@ const TEXTAREA =
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="grid gap-1 text-xs text-muted-foreground">
+    <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
       {label}
       {children}
     </label>
@@ -118,8 +118,10 @@ export function EventEditor({ initial, event, onClose }: Props) {
   };
 
   return (
+    // min-w-0: a grid item grows to its widest child, and a long calendar name
+    // would push the form, and the footer under it, past the dialog's edge.
     <form
-      className="grid gap-3"
+      className="grid min-w-0 gap-3"
       onSubmit={(e) => {
         e.preventDefault();
         if (canSave) void save();
@@ -143,6 +145,7 @@ export function EventEditor({ initial, event, onClose }: Props) {
           onChange={(v) => set('calendar', v)}
           items={choices.length > 0 ? choices : [{ value: '', label: 'Nessun calendario scrivibile' }]}
           disabled={event !== undefined}
+          className="min-w-0"
         />
       </Field>
 
