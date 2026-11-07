@@ -1,7 +1,9 @@
 name: Release
 
 # A tag v* builds installers for Linux, macOS (arm64) and Windows and uploads them,
-# with the updater manifest, to a DRAFT GitHub Release. See docs/release.md.
+# with the updater manifest, to a draft GitHub Release; once all three succeed the
+# draft is published. A tag with a suffix (v1.2.0-rc1) becomes a pre-release, which
+# releases/latest skips, so installed apps are never offered it. See docs/release.md.
 on:
   push:
     tags: ["v*"]
@@ -96,5 +98,22 @@ jobs:
           releaseBody: |
             Installation and first launch (the app is not code-signed): see [docs/install.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/install.md).
           releaseDraft: true
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           uploadUpdaterJson: true
+
+  # Publishing only after every platform uploaded keeps latest.json from pointing
+  # installed apps at a release that lacks their platform.
+  publish:
+    needs: release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$TAG" == *-* ]]; then
+            gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --prerelease
+          else
+            gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --latest
+          fi

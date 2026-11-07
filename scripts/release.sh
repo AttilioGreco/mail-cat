@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bump version (Cargo.toml + tauri.conf.json), date the CHANGELOG, run the CI
 # checks, commit, tag and push. The tag triggers .github/workflows/release.yml,
-# which builds a DRAFT GitHub Release (see docs/release.md).
+# which builds the GitHub Release (a pre-release for X.Y.Z-rc tags, see docs/release.md).
 set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -51,10 +51,11 @@ git rev-parse -q --verify "refs/tags/${TAG}" > /dev/null && error "Tag ${TAG} al
 git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null 2>&1 && error "Tag ${TAG} already exists on origin. Pick a higher version."
 
 # Compare with the highest tag too: a failed release can leave Cargo.toml rewound,
-# and then an old number looks new. `sort -V` gets prereleases wrong (rc1 > final),
-# good enough to catch re-releasing an old number.
-HIGHEST_TAG=$(git tag --list 'v*' | sed 's/^v//' | sort -V | tail -1)
-newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
+# and then an old number looks new. sort -V puts X.Y.Z-rc1 after X.Y.Z, but sorts
+# '~' before anything, so prerelease dashes become tildes for the comparison.
+vsort() { sed 's/-/~/' | sort -V | sed 's/~/-/'; }
+HIGHEST_TAG=$(git tag --list 'v*' | sed 's/^v//' | vsort | tail -1)
+newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | vsort | tail -1)" = "$1" ]; }
 if [ -n "$HIGHEST_TAG" ]; then
     newer "$VERSION" "$HIGHEST_TAG" || error "${VERSION} is not newer than the highest released ${HIGHEST_TAG}."
 fi
@@ -143,7 +144,7 @@ if [ "$NO_PUSH" = true ]; then
     exit 0
 fi
 echo
-info "Pushing ${BRANCH} and ${TAG} starts the Release workflow (draft GitHub Release)."
+info "Pushing ${BRANCH} and ${TAG} starts the Release workflow: it publishes the release once all three builds pass."
 read -p "$(echo -e "${GREEN}Push to origin?${NC} [Y/n] ")" -n 1 -r; echo
 if [[ $REPLY =~ ^[Nn]$ ]]; then
     warn "Push cancelled. To push later:"; echo "$PUSH_HINT"
@@ -154,5 +155,5 @@ success "Pushed ${TAG}"
 echo
 info "Next steps:"
 echo "  1. Watch the build: just release-watch"
-echo "  2. Check the draft and its assets (latest.json included), then Publish:"
+echo "  2. When it is green the release is public:"
 echo "     https://github.com/AttilioGreco/mail-cat/releases"
