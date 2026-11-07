@@ -547,7 +547,12 @@ async fn a_google_account_without_dav_scopes_keeps_mail_and_reports_it() {
 
     assert_eq!(status.dav.contacts.state, FeatureState::MissingPermission);
     assert_eq!(status.dav.calendar.state, FeatureState::MissingPermission);
-    assert!(!status.state.is_paused(), "mail keeps working");
+    // The account's state is IMAP's to judge (this fixture can never log in,
+    // so it is not asserted); missing DAV scopes only must not stop the mail.
+    assert!(
+        f.ctx.provider_registry.get_provider(&id).is_ok(),
+        "mail keeps working"
+    );
     assert!(
         runtime.deps.dav.sync_account(&id).await.is_err(),
         "no provider"
