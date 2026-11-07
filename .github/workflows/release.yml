@@ -115,6 +115,9 @@ jobs:
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           uploadUpdaterJson: true
+          # RPM versions cannot contain '-', which Cargo needs for a pre-release
+          # (0.1.3-rc.1): rc builds ship AppImage and deb only.
+          args: ${{ (runner.os == 'Linux' && contains(github.ref_name, '-')) && '--bundles appimage,deb' || '' }}
 
   # Publishing only after every platform uploaded keeps latest.json from pointing
   # installed apps at a release that lacks their platform.
