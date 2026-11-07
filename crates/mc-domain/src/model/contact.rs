@@ -292,6 +292,13 @@ impl Contact {
                 }
                 self.updated_at = Utc::now();
             }
+            DomainEvent::ContactPushedToServer { href, etag, .. } => {
+                // An edit builds on the server's latest version, which this is.
+                if let Some(binding) = &mut self.remote {
+                    binding.href = href.clone();
+                    binding.etag = Some(etag.clone());
+                }
+            }
             DomainEvent::ContactRemoved { .. } => {
                 // No state to mutate; removal is tracked externally.
             }

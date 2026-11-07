@@ -3,12 +3,15 @@
 //! Each variant represents a use case. Commands are dispatched through the
 //! [`CommandBus`](crate::bus::CommandBus) and handled by command handlers.
 
+use mc_domain::formats::{EventEdit, EventWhen};
 use mc_domain::{
-    AccountId, ConnectionConfig, ContactEmail, ContactId, ContactSource, EmailAddress, Flag,
-    Identity, MailboxId, MailboxModel, MailboxPath, MessageId, ProviderType,
+    AccountId, CollectionId, ConnectionConfig, ContactEmail, ContactId, ContactSource,
+    EmailAddress, Flag, Href, Identity, MailboxId, MailboxModel, MailboxPath, MessageId,
+    ProviderType,
 };
 
 use crate::compose::{ComposeInput, ComposeMode, ComposeView};
+pub use crate::handlers::dav::ContactFields;
 pub use mc_domain::value_objects::remote_id::RemoteId;
 
 /// All write-side commands in the application.
@@ -38,10 +41,14 @@ pub enum Command {
     },
 
     /// Remove an account and all associated data.
-    RemoveAccount { account_id: AccountId },
+    RemoveAccount {
+        account_id: AccountId,
+    },
 
     /// Start a full sync for an account.
-    SyncAccount { account_id: AccountId },
+    SyncAccount {
+        account_id: AccountId,
+    },
 
     // ── Message ────────────────────────────────────────────────────────
     /// Fetch the body and attachments for a message, from its copy in
@@ -105,7 +112,10 @@ pub enum Command {
 
     /// Make sure the account has a label of that name, creating it on the
     /// server when it has none.
-    CreateLabel { account_id: AccountId, name: String },
+    CreateLabel {
+        account_id: AccountId,
+        name: String,
+    },
 
     /// Delete a user mailbox, first moving its messages to `move_to`. Refused
     /// for a system mailbox, and for one with messages and no `move_to`.
@@ -124,7 +134,9 @@ pub enum Command {
 
     /// Take messages out of the Inbox; what that means depends on the
     /// account's mailbox model (see `handle_archive`).
-    ArchiveMessages { message_ids: Vec<MessageId> },
+    ArchiveMessages {
+        message_ids: Vec<MessageId>,
+    },
 
     /// Compute the compose window's starting state (recipients, subject,
     /// quote, sender). A command, not a query, because forwarding and draft
@@ -136,13 +148,19 @@ pub enum Command {
     },
 
     /// Build and send a composed message via SMTP or provider API.
-    SendCompose { input: ComposeInput },
+    SendCompose {
+        input: ComposeInput,
+    },
 
     /// Store a draft in the Drafts folder, replacing `input.draft_id`.
-    SaveDraft { input: ComposeInput },
+    SaveDraft {
+        input: ComposeInput,
+    },
 
     /// Discard a draft (locally and on the server).
-    DiscardDraft { message_id: MessageId },
+    DiscardDraft {
+        message_id: MessageId,
+    },
 
     /// Apply a flag change that originated from a remote IMAP client (e.g. IDLE notification).
     /// Does NOT call the provider — flags are already changed on the server.
@@ -189,7 +207,9 @@ pub enum Command {
     },
 
     /// Remove a contact from the address book.
-    RemoveContact { contact_id: ContactId },
+    RemoveContact {
+        contact_id: ContactId,
+    },
 
     /// Merge two contacts: absorb `discard_id` into `keep_id`.
     /// After this command `discard_id` no longer exists.
@@ -198,18 +218,63 @@ pub enum Command {
         discard_id: ContactId,
     },
 
+    // ── Contacts and calendars synced with a server ────────────────────
+    /// Create a contact in an address book of the account. The target is
+    /// explicit: there is no default address book.
+    AddRemoteContact {
+        account_id: AccountId,
+        book: CollectionId,
+        fields: ContactFields,
+    },
+
+    /// Edit a contact synced with a server. The edit is applied to its
+    /// vCard, so what the app does not model is kept.
+    UpdateRemoteContact {
+        contact_id: ContactId,
+        fields: ContactFields,
+    },
+
+    RemoveRemoteContact {
+        contact_id: ContactId,
+    },
+
+    /// Create an event in a calendar of the account.
+    AddCalendarEvent {
+        account_id: AccountId,
+        calendar: CollectionId,
+        summary: String,
+        start: EventWhen,
+        end: EventWhen,
+        location: Option<String>,
+    },
+
+    UpdateCalendarEvent {
+        account_id: AccountId,
+        href: Href,
+        edit: EventEdit,
+    },
+
+    RemoveCalendarEvent {
+        account_id: AccountId,
+        href: Href,
+    },
+
     /// Rebuild the contact search index from the stored contact read models.
     /// Useful after a fresh install or when the Tantivy index is lost/corrupted.
     /// If `account_id` is given, only contacts scoped to that account are indexed;
     /// otherwise all contacts are processed.
-    RebuildContactIndex { account_id: Option<AccountId> },
+    RebuildContactIndex {
+        account_id: Option<AccountId>,
+    },
 
     /// Backfill the contact address book by scanning all stored messages and
     /// calling `EnsureContact` for every from/to/cc address found.
     ///
     /// Idempotent: contacts that already exist are left unchanged.
     /// Use this after a fresh install to populate contacts from historical mail.
-    BackfillContactsFromMessages { account_id: Option<AccountId> },
+    BackfillContactsFromMessages {
+        account_id: Option<AccountId>,
+    },
 }
 
 /// Result of a successfully dispatched command.
@@ -268,6 +333,11 @@ pub enum CommandResult {
     },
     ContactUpdated,
     ContactRemoved,
+    CalendarEventAdded {
+        href: Href,
+    },
+    CalendarEventUpdated,
+    CalendarEventRemoved,
     ContactsMerged,
     /// Number of contacts that were successfully (re-)indexed.
     ContactIndexRebuilt {

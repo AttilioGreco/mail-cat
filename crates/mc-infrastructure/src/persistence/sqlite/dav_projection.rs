@@ -24,6 +24,7 @@ pub(super) fn bind_contact(
     contact_id: &ContactId,
     card: &RemoteCard,
     at: DateTime<Utc>,
+    sequence: u64,
 ) -> Result<(), DomainError> {
     let b = &card.binding;
     let local = card.origin == Origin::Local;
@@ -31,7 +32,8 @@ pub(super) fn bind_contact(
         tx,
         "UPDATE contacts SET raw = ?2, remote_account = ?3, remote_collection = ?4, \
              remote_href = ?5, remote_etag = ?6, remote_modified = ?7, dirty = ?8, \
-             edited_at = CASE WHEN ?8 THEN ?9 ELSE edited_at END, push_error = NULL \
+             edited_at = CASE WHEN ?8 THEN ?9 ELSE edited_at END, \
+             local_seq = CASE WHEN ?8 THEN ?10 ELSE local_seq END, push_error = NULL \
          WHERE id = ?1",
         params![
             contact_id.as_uuid(),
@@ -43,6 +45,7 @@ pub(super) fn bind_contact(
             b.remote_modified.map(nanos),
             local,
             nanos(at),
+            sequence as i64,
         ],
     )
     .map(drop)
@@ -56,16 +59,18 @@ pub(super) fn contact_removed(
     contact_id: &ContactId,
     origin: Origin,
     at: DateTime<Utc>,
+    sequence: u64,
 ) -> Result<(), DomainError> {
     let key = contact_id.to_string();
     if origin == Origin::Local {
         exec(
             tx,
             "INSERT OR REPLACE INTO pending_deletes \
-                 (aggregate_id, kind, account_id, collection, href, etag, edited_at) \
-             SELECT ?1, 'contact', remote_account, remote_collection, remote_href, remote_etag, ?3 \
+                 (aggregate_id, kind, account_id, collection, href, etag, edited_at, local_seq) \
+             SELECT ?1, 'contact', remote_account, remote_collection, remote_href, remote_etag, \
+                 ?3, ?4 \
              FROM contacts WHERE id = ?2 AND remote_etag IS NOT NULL",
-            params![key, contact_id.as_uuid(), nanos(at)],
+            params![key, contact_id.as_uuid(), nanos(at), sequence as i64],
         )?;
     } else {
         exec(
@@ -84,17 +89,27 @@ pub(super) fn apply(tx: &Connection, envelope: &EventEnvelope) -> Result<(), Dom
             contact_id,
             href,
             etag,
+            local_sequence,
         } => {
+            // The server's version is recorded either way, so the newer local
+            // edit is pushed on top of it; only the acknowledged one is clean.
             exec(
                 tx,
-                "UPDATE contacts SET remote_href = ?2, remote_etag = ?3, dirty = 0, \
-                     push_error = NULL WHERE id = ?1",
-                params![contact_id.as_uuid(), href.as_str(), etag.as_str()],
+                "UPDATE contacts SET remote_href = ?2, remote_etag = ?3, \
+                     dirty = CASE WHEN local_seq = ?4 THEN 0 ELSE dirty END, \
+                     push_error = CASE WHEN local_seq = ?4 THEN NULL ELSE push_error END \
+                 WHERE id = ?1",
+                params![
+                    contact_id.as_uuid(),
+                    href.as_str(),
+                    etag.as_str(),
+                    *local_sequence as i64
+                ],
             )?;
             exec(
                 tx,
-                "DELETE FROM pending_deletes WHERE aggregate_id = ?1",
-                [contact_id.to_string()],
+                "DELETE FROM pending_deletes WHERE aggregate_id = ?1 AND local_seq = ?2",
+                params![contact_id.to_string(), *local_sequence as i64],
             )?;
         }
         DomainEvent::ContactConflictLost { contact_id, .. } => {
@@ -214,7 +229,7 @@ pub(super) fn apply(tx: &Connection, envelope: &EventEnvelope) -> Result<(), Dom
 
         DomainEvent::CalendarEventAdded { event, origin }
         | DomainEvent::CalendarEventUpdated { event, origin } => {
-            upsert_event(tx, event, *origin, at)?;
+            upsert_event(tx, event, *origin, at, envelope.sequence_number)?;
         }
         DomainEvent::CalendarEventRemoved {
             account_id,
@@ -226,10 +241,17 @@ pub(super) fn apply(tx: &Connection, envelope: &EventEnvelope) -> Result<(), Dom
                 exec(
                     tx,
                     "INSERT OR REPLACE INTO pending_deletes \
-                         (aggregate_id, kind, account_id, collection, href, etag, edited_at) \
-                     SELECT ?1, 'event', account_id, collection, href, etag, ?4 \
+                         (aggregate_id, kind, account_id, collection, href, etag, edited_at, \
+                          local_seq) \
+                     SELECT ?1, 'event', account_id, collection, href, etag, ?4, ?5 \
                      FROM calendar_events WHERE account_id = ?2 AND href = ?3 AND etag IS NOT NULL",
-                    params![key, account_id.as_uuid(), href.as_str(), nanos(at)],
+                    params![
+                        key,
+                        account_id.as_uuid(),
+                        href.as_str(),
+                        nanos(at),
+                        envelope.sequence_number as i64
+                    ],
                 )?;
             } else {
                 exec(
@@ -248,17 +270,25 @@ pub(super) fn apply(tx: &Connection, envelope: &EventEnvelope) -> Result<(), Dom
             account_id,
             href,
             etag,
+            local_sequence,
         } => {
             exec(
                 tx,
-                "UPDATE calendar_events SET etag = ?3, dirty = 0, push_error = NULL \
+                "UPDATE calendar_events SET etag = ?3, \
+                     dirty = CASE WHEN local_seq = ?4 THEN 0 ELSE dirty END, \
+                     push_error = CASE WHEN local_seq = ?4 THEN NULL ELSE push_error END \
                  WHERE account_id = ?1 AND href = ?2",
-                params![account_id.as_uuid(), href.as_str(), etag.as_str()],
+                params![
+                    account_id.as_uuid(),
+                    href.as_str(),
+                    etag.as_str(),
+                    *local_sequence as i64
+                ],
             )?;
             exec(
                 tx,
-                "DELETE FROM pending_deletes WHERE aggregate_id = ?1",
-                [event_key_of(account_id, href)],
+                "DELETE FROM pending_deletes WHERE aggregate_id = ?1 AND local_seq = ?2",
+                params![event_key_of(account_id, href), *local_sequence as i64],
             )?;
         }
         DomainEvent::CalendarEventConflictLost { account_id, .. } => {
@@ -294,6 +324,7 @@ fn upsert_event(
     event: &CalendarEvent,
     origin: Origin,
     at: DateTime<Utc>,
+    sequence: u64,
 ) -> Result<(), DomainError> {
     let b = &event.binding;
     let f = event.fields.as_ref();
@@ -301,8 +332,8 @@ fn upsert_event(
         tx,
         "INSERT INTO calendar_events \
              (account_id, href, collection, etag, remote_modified, raw, summary, start_at, end_at, \
-              all_day, recurring, location, status, dirty, edited_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+              all_day, recurring, location, status, dirty, edited_at, local_seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
          ON CONFLICT(account_id, href) DO UPDATE SET collection = excluded.collection, \
              etag = excluded.etag, remote_modified = excluded.remote_modified, raw = excluded.raw, \
              summary = excluded.summary, start_at = excluded.start_at, end_at = excluded.end_at, \
@@ -310,6 +341,8 @@ fn upsert_event(
              location = excluded.location, status = excluded.status, dirty = excluded.dirty, \
              edited_at = CASE WHEN excluded.dirty THEN excluded.edited_at \
                               ELSE calendar_events.edited_at END, \
+             local_seq = CASE WHEN excluded.dirty THEN excluded.local_seq \
+                              ELSE calendar_events.local_seq END, \
              push_error = NULL",
         params![
             b.account.as_uuid(),
@@ -327,6 +360,7 @@ fn upsert_event(
             f.and_then(|f| f.status).map(|s| json(&s)).transpose()?,
             origin == Origin::Local,
             nanos(at),
+            sequence as i64,
         ],
     )
     .map(drop)

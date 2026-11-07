@@ -533,3 +533,34 @@ async fn search_returns_results() {
     let search = result.into_search_results().unwrap();
     assert_eq!(search.total_count, 0);
 }
+
+#[tokio::test]
+async fn contact_search_prefers_the_server_contact_over_the_harvested_one() {
+    let mine = AccountId::new();
+    let mut harvested = contact("a@example.com", Some(mine));
+    harvested.source = mc_domain::ContactSource::LocalEmail;
+    let mut synced = contact("A@example.com", Some(mine));
+    synced.source = mc_domain::ContactSource::CardDav;
+    let (harvested_id, synced_id) = (harvested.id, synced.id);
+    let handler = handler_with_contacts(vec![
+        harvested,
+        contact("b@example.com", Some(mine)),
+        synced,
+    ]);
+
+    let QueryResult::ContactHits(hits) = handler
+        .dispatch(Query::SearchContacts {
+            query: "example".into(),
+            limit: 5,
+            requesting_account_id: Some(mine),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected contact hits");
+    };
+    let ids: Vec<_> = hits.iter().map(|h| h.id).collect();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0], synced_id, "same slot, best match order kept");
+    assert!(!ids.contains(&harvested_id));
+}

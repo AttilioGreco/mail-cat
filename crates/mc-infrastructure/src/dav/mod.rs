@@ -201,6 +201,10 @@ impl DavProvider {
 
 #[async_trait]
 impl ContactsProvider for DavProvider {
+    fn creates_by_post(&self) -> bool {
+        self.profile.posts_creates(Kind::Contacts)
+    }
+
     async fn list_address_books(&self) -> Result<Vec<AddressBook>, DomainError> {
         self.address_books().await
     }

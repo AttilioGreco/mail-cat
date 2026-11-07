@@ -356,11 +356,14 @@ pub enum DomainEvent {
         origin: Origin,
     },
 
-    /// The server accepted the local version of a contact.
+    /// The server accepted a local version of a contact: the one the
+    /// aggregate's `local_sequence`-th event produced. An edit made while the
+    /// push was in flight has a later sequence and stays dirty.
     ContactPushedToServer {
         contact_id: ContactId,
         href: Href,
         etag: Etag,
+        local_sequence: u64,
     },
 
     /// The local version lost to the server's (last write wins). Kept so the
@@ -424,11 +427,13 @@ pub enum DomainEvent {
         href: Href,
         origin: Origin,
     },
-    /// The server accepted the local version of an event.
+    /// The server accepted the local version of an event; see
+    /// [`DomainEvent::ContactPushedToServer`] for `local_sequence`.
     CalendarEventPushedToServer {
         account_id: AccountId,
         href: Href,
         etag: Etag,
+        local_sequence: u64,
     },
     /// See [`DomainEvent::ContactConflictLost`].
     CalendarEventConflictLost {

@@ -128,6 +128,7 @@ where
         notes: Option<Option<String>>,
     ) -> Result<CommandResult, ApplicationError> {
         let mut contact = self.load_contact(&contact_id).await?;
+        refuse_remote(&contact)?;
         let event = contact
             .update(display_name, emails, phones, organization, notes)
             .map_err(ApplicationError::Domain)?;
@@ -144,6 +145,7 @@ where
         contact_id: ContactId,
     ) -> Result<CommandResult, ApplicationError> {
         let contact = self.load_contact(&contact_id).await?;
+        refuse_remote(&contact)?;
         let event = contact.remove();
 
         self.write_repo.save(&contact, vec![event.clone()]).await?;
@@ -161,6 +163,8 @@ where
     ) -> Result<CommandResult, ApplicationError> {
         let mut kept = self.load_contact(&keep_id).await?;
         let discarded = self.load_contact(&discard_id).await?;
+        refuse_remote(&kept)?;
+        refuse_remote(&discarded)?;
 
         let merge_event = kept.merge_from(&discarded);
         let remove_event = discarded.remove();
@@ -209,4 +213,15 @@ where
         let envelope = EventEnvelope::new(aggregate_id, AggregateType::Contact, 0, event);
         self.event_bus.publish(envelope);
     }
+}
+
+/// A contact synced with a server is edited through its vCard, which these
+/// commands would leave behind: the server would never see the change.
+fn refuse_remote(contact: &Contact) -> Result<(), ApplicationError> {
+    if contact.remote.is_some() {
+        return Err(ApplicationError::PreconditionFailed(
+            "the contact is synced with a server: use the remote contact commands".into(),
+        ));
+    }
+    Ok(())
 }

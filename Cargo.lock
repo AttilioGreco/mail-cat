@@ -3658,13 +3658,17 @@ dependencies = [
  "hdbscan",
  "mailparse",
  "mc-domain",
+ "mc-infrastructure",
  "mc-shared",
  "pulldown-cmark",
+ "reqwest 0.13.5",
  "serde",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 

@@ -71,12 +71,23 @@ macro_rules! dav_conformance {
             }
         }
 
+        /// Acknowledges the local event the projection numbered 1 (`env_of`).
         fn pushed(id: ContactId, href: &str, etag: &str) -> DomainEvent {
+            pushed_seq(id, href, etag, 1)
+        }
+
+        fn pushed_seq(id: ContactId, href: &str, etag: &str, local_sequence: u64) -> DomainEvent {
             DomainEvent::ContactPushedToServer {
                 contact_id: id,
                 href: Href::new(href),
                 etag: Etag::new(etag),
+                local_sequence,
             }
+        }
+
+        async fn project_at(repo: &impl ReadModelProjector, sequence: u64, event: DomainEvent) {
+            let envelope = make_event_envelope(1, "agg", event.aggregate_type(), sequence, event);
+            repo.project(&envelope).await.unwrap();
         }
 
         fn calendar_event(binding: RemoteBinding, raw: &str) -> CalendarEvent {
@@ -180,6 +191,45 @@ macro_rules! dav_conformance {
         }
 
         #[tokio::test]
+        async fn acknowledging_an_older_push_leaves_a_newer_edit_dirty() {
+            let (_guard, _es, repo) = $make;
+            let (account, id) = (AccountId::new(), ContactId::new());
+            let book = CollectionId::new("/book/");
+            let bound = |etag| dav_binding(account, "/book/", "/book/a.vcf", etag);
+            let added = remote_contact_added(
+                id,
+                card(bound(Some("e0")), "v1", Origin::Local),
+                &["a@example.com"],
+            );
+            project_at(&repo, 1, added).await;
+            // v2 is edited while v1 is on its way to the server.
+            let edit = remote_contact_updated(id, card(bound(Some("e0")), "v2", Origin::Local));
+            project_at(&repo, 2, edit).await;
+
+            project_at(&repo, 3, pushed_seq(id, "/book/a.vcf", "e1", 1)).await;
+            let pending = repo.pending_contacts(&account, &book).await.unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].sequence, 2);
+            assert_eq!(pending[0].change, PendingChange::Put { raw: "v2".into() });
+            // v2 now builds on what the server holds.
+            assert_eq!(pending[0].binding.etag, Some(Etag::new("e1")));
+
+            project_at(&repo, 4, pushed_seq(id, "/book/a.vcf", "e2", 2)).await;
+            assert!(repo.pending_contacts(&account, &book).await.unwrap().is_empty());
+
+            // The same for a delete: an ack of the edit does not settle it.
+            project_at(&repo, 5, DomainEvent::ContactRemoved {
+                contact_id: id,
+                origin: Origin::Local,
+            })
+            .await;
+            project_at(&repo, 6, pushed_seq(id, "/book/a.vcf", "e3", 4)).await;
+            assert_eq!(repo.pending_contacts(&account, &book).await.unwrap().len(), 1);
+            project_at(&repo, 7, pushed_seq(id, "/book/a.vcf", "e3", 5)).await;
+            assert!(repo.pending_contacts(&account, &book).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
         async fn local_delete_of_a_server_contact_waits_for_the_server() {
             let (_guard, _es, repo) = $make;
             let account = AccountId::new();
@@ -266,6 +316,31 @@ macro_rules! dav_conformance {
             .await;
             assert_eq!(repo.conflicts_lost(&account).await.unwrap(), 2);
             assert_eq!(repo.conflicts_lost(&other).await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_server_contact_is_found_by_its_address_so_the_harvester_skips_it() {
+            let (_guard, _es, repo) = $make;
+            let (account, id) = (AccountId::new(), ContactId::new());
+            project_all(
+                &repo,
+                [remote_contact_added(
+                    id,
+                    card(
+                        dav_binding(account, "/book/", "/book/a.vcf", Some("e1")),
+                        "v1",
+                        Origin::Remote,
+                    ),
+                    &["a@example.com"],
+                )],
+            )
+            .await;
+            let found = repo
+                .find_by_email_in_account(&email("A@example.com"), &account)
+                .await
+                .unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].source, ContactSource::CardDav);
         }
 
         #[tokio::test]
@@ -429,6 +504,7 @@ macro_rules! dav_conformance {
                     account_id: account,
                     href: Href::new("/cal/one.ics"),
                     etag: Etag::new("e3"),
+                    local_sequence: 1,
                 }],
             )
             .await;

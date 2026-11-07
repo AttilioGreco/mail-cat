@@ -18,6 +18,7 @@ use crate::commands::{Command, CommandResult};
 use crate::error::ApplicationError;
 use crate::handlers::account::AccountCommandHandler;
 use crate::handlers::contact::ContactCommandHandler;
+use crate::handlers::dav::DavCommandHandler;
 use crate::handlers::message::MessageCommandHandler;
 use crate::handlers::query::QueryHandler;
 use crate::queries::{Query, QueryResult};
@@ -47,6 +48,8 @@ where
     message_repo: Arc<MR>,
     /// Compose needs every account's identity (sender choice, own addresses).
     account_repo: Arc<AW>,
+    /// Absent while contacts and calendars sync is not set up.
+    dav_handler: Option<DavCommandHandler>,
 }
 
 impl<AW, CW, ES, PR, MR, B> InProcessCommandBus<AW, CW, ES, PR, MR, B>
@@ -85,7 +88,23 @@ where
             ),
             message_repo: message_read_repo,
             account_repo: account_write_repo,
+            dav_handler: None,
         }
+    }
+
+    /// Serves the commands on contacts and events synced with a server.
+    #[must_use]
+    pub fn with_dav(mut self, handler: DavCommandHandler) -> Self {
+        self.dav_handler = Some(handler);
+        self
+    }
+
+    fn dav(&self) -> Result<&DavCommandHandler, ApplicationError> {
+        self.dav_handler.as_ref().ok_or_else(|| {
+            ApplicationError::PreconditionFailed(
+                "contacts and calendars sync is not available".into(),
+            )
+        })
     }
 
     /// Where message commands ask for a mailbox sync when their local record
@@ -359,6 +378,45 @@ where
                 keep_id,
                 discard_id,
             } => self.contact_handler.handle_merge(keep_id, discard_id).await,
+            Command::AddRemoteContact {
+                account_id,
+                book,
+                fields,
+            } => {
+                self.dav()?
+                    .handle_add_contact(account_id, book, fields)
+                    .await
+            }
+            Command::UpdateRemoteContact { contact_id, fields } => {
+                self.dav()?.handle_update_contact(contact_id, fields).await
+            }
+            Command::RemoveRemoteContact { contact_id } => {
+                self.dav()?.handle_remove_contact(contact_id).await
+            }
+            Command::AddCalendarEvent {
+                account_id,
+                calendar,
+                summary,
+                start,
+                end,
+                location,
+            } => {
+                self.dav()?
+                    .handle_add_event(account_id, calendar, summary, (start, end), location)
+                    .await
+            }
+            Command::UpdateCalendarEvent {
+                account_id,
+                href,
+                edit,
+            } => {
+                self.dav()?
+                    .handle_update_event(account_id, href, edit)
+                    .await
+            }
+            Command::RemoveCalendarEvent { account_id, href } => {
+                self.dav()?.handle_remove_event(account_id, href).await
+            }
             Command::RebuildContactIndex { account_id } => {
                 self.contact_handler.handle_rebuild_index(account_id).await
             }

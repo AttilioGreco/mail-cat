@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use crate::error::DomainError;
 use crate::model::account::AccountId;
 use crate::model::collection::{AddressBook, Calendar, CalendarEvent, EventFields};
+use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::remote::{CollectionId, Etag, Href, RemoteBinding};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,9 @@ pub struct PendingPush {
     pub edited_at: DateTime<Utc>,
     /// Why the server refused the last push, if it did.
     pub failure: Option<String>,
+    /// Sequence of the local event that made this the pending state: what a
+    /// `PushedToServer` acknowledging it must carry.
+    pub sequence: u64,
 }
 
 /// One occurrence of an event in a requested range: `event` holds that
@@ -80,6 +84,13 @@ pub trait DavReadRepository: Send + Sync {
         account: &AccountId,
         calendar: &CollectionId,
     ) -> Result<HashMap<Href, Etag>, DomainError>;
+
+    /// The contact bound to a server resource.
+    async fn contact_at(
+        &self,
+        account: &AccountId,
+        href: &Href,
+    ) -> Result<Option<ContactId>, DomainError>;
 
     async fn get_event(
         &self,

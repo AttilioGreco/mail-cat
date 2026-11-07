@@ -275,8 +275,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "ALTER TABLE tag_settings ADD COLUMN color TEXT;",
     // 14: server-synced contacts and calendars. A contact bound to a server
     // keeps its whole vCard and the place it lives; `dirty` is derived from
-    // the events (last local one not yet pushed) and `edited_at` is when it
-    // happened. A resource the user deleted has no row left to be dirty, so
+    // the events (last local one not yet pushed), `edited_at` is when it
+    // happened and `local_seq` is its sequence, which an acknowledgement
+    // must match to clear it. A resource the user deleted has no row left to be dirty, so
     // its pending DELETE waits in `pending_deletes` until the server
     // acknowledges it. `conflicts_lost` is keyed by event id so that
     // re-projecting an event cannot count it twice.
@@ -288,6 +289,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE contacts ADD COLUMN remote_modified INTEGER;
     ALTER TABLE contacts ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE contacts ADD COLUMN edited_at INTEGER;
+    ALTER TABLE contacts ADD COLUMN local_seq INTEGER;
     ALTER TABLE contacts ADD COLUMN push_error TEXT;
     CREATE INDEX contacts_remote ON contacts(remote_account, remote_collection)
         WHERE remote_href IS NOT NULL;
@@ -326,6 +328,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         status          TEXT,
         dirty           INTEGER NOT NULL DEFAULT 0,
         edited_at       INTEGER,
+        local_seq       INTEGER,
         push_error      TEXT,
         PRIMARY KEY (account_id, href)
     ) WITHOUT ROWID;
@@ -338,6 +341,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         href         TEXT NOT NULL,
         etag         TEXT NOT NULL,
         edited_at    INTEGER NOT NULL,
+        local_seq    INTEGER NOT NULL,
         push_error   TEXT
     ) WITHOUT ROWID;
     CREATE INDEX pending_deletes_collection ON pending_deletes(account_id, collection, kind);

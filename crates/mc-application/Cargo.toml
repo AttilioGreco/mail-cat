@@ -22,4 +22,8 @@ base64 = { workspace = true }
 hdbscan = { workspace = true }
 
 [dev-dependencies]
+mc-infrastructure = { workspace = true }
+tempfile = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

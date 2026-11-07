@@ -520,7 +520,13 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             )?;
             index_contact_emails(tx, contact_id, emails)?;
             if let Some(card) = remote {
-                dav_projection::bind_contact(tx, contact_id, card, event.occurred_at)?;
+                dav_projection::bind_contact(
+                    tx,
+                    contact_id,
+                    card,
+                    event.occurred_at,
+                    event.sequence_number,
+                )?;
             }
         }
         DomainEvent::ContactUpdated {
@@ -549,11 +555,23 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 )?;
             }
             if let Some(card) = remote {
-                dav_projection::bind_contact(tx, contact_id, card, event.occurred_at)?;
+                dav_projection::bind_contact(
+                    tx,
+                    contact_id,
+                    card,
+                    event.occurred_at,
+                    event.sequence_number,
+                )?;
             }
         }
         DomainEvent::ContactRemoved { contact_id, origin } => {
-            dav_projection::contact_removed(tx, contact_id, *origin, event.occurred_at)?;
+            dav_projection::contact_removed(
+                tx,
+                contact_id,
+                *origin,
+                event.occurred_at,
+                event.sequence_number,
+            )?;
             exec(
                 tx,
                 "DELETE FROM contacts WHERE id = ?1",

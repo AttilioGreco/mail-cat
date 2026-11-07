@@ -2,11 +2,12 @@
 
 #[allow(unused_imports)]
 use async_trait::async_trait;
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountId, AccountReadRepository, ContactReadRepository, ContactSearchHit,
+    AccountId, AccountReadRepository, ContactReadRepository, ContactSearchHit, ContactSource,
     ConversationReadRepository, IndexHit, MailboxReadRepository, Message, MessageReadRepository,
     SearchDirectory, SearchHit, SearchIndex, SearchResults,
 };
@@ -211,7 +212,8 @@ where
     }
 
     /// Own-account addresses first; others only fill the remaining slots, and
-    /// never repeat an address already suggested.
+    /// never repeat an address already suggested. For one address, the
+    /// contact a server holds is suggested over the one harvested from mail.
     async fn search_contacts(
         &self,
         query: &str,
@@ -227,15 +229,36 @@ where
             .search_contacts(query.trim(), limit.saturating_mul(4))
             .await?
             .into_iter()
-            .map(|c| ContactSearchHit::from_summary(c, requesting_account))
-            .partition(|hit| !hit.is_cross_account);
-        let mut seen = HashSet::new();
-        Ok(own
-            .into_iter()
-            .chain(cross)
-            .filter(|hit| seen.insert(hit.primary_email.to_lowercase()))
-            .take(limit)
-            .collect())
+            .map(|c| {
+                let from_server = matches!(
+                    c.source,
+                    ContactSource::CardDav | ContactSource::MicrosoftGraph
+                );
+                (
+                    ContactSearchHit::from_summary(c, requesting_account),
+                    from_server,
+                )
+            })
+            .partition(|(hit, _)| !hit.is_cross_account);
+        let mut kept: Vec<(ContactSearchHit, bool)> = Vec::new();
+        let mut slot_of = HashMap::new();
+        for (hit, from_server) in own.into_iter().chain(cross) {
+            match slot_of.entry(hit.primary_email.to_lowercase()) {
+                Entry::Vacant(slot) => {
+                    slot.insert(kept.len());
+                    kept.push((hit, from_server));
+                }
+                // Within one account scope: another account's copy never
+                // displaces an own-account suggestion.
+                Entry::Occupied(slot) => {
+                    let held = &mut kept[*slot.get()];
+                    if from_server && !held.1 && held.0.is_cross_account == hit.is_cross_account {
+                        *held = (hit, from_server);
+                    }
+                }
+            }
+        }
+        Ok(kept.into_iter().map(|(hit, _)| hit).take(limit).collect())
     }
 }
 

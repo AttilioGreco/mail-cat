@@ -57,7 +57,7 @@ impl<T> SyncStore for T where
 }
 
 /// A failure that would fail every other mailbox of the pass the same way: the account cannot log in or connect, or is over a usage limit.
-fn stops_the_pass(e: &DomainError) -> bool {
+pub(crate) fn stops_the_pass(e: &DomainError) -> bool {
     matches!(
         e,
         DomainError::AuthenticationFailed(_)

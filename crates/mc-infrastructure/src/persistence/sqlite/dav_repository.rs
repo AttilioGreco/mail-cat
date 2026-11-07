@@ -9,7 +9,7 @@ use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
 
 use mc_domain::{
-    AccountId, AddressBook, AggregateType, Calendar, CalendarEvent, CollectionId,
+    AccountId, AddressBook, AggregateType, Calendar, CalendarEvent, CollectionId, ContactId,
     DavReadRepository, DomainError, Etag, EventFields, Href, Occurrence, PendingChange,
     PendingPush, RemoteBinding, formats,
 };
@@ -73,7 +73,7 @@ fn pending(
     kind: &str,
     dirty_sql: &str,
 ) -> Result<Vec<PendingPush>, DomainError> {
-    // Columns: aggregate id, binding (5), raw, edited_at, push_error.
+    // Columns: aggregate id, binding (5), raw, edited_at, push_error, local_seq.
     let map = |r: &Row, change: Option<PendingChange>| -> rusqlite::Result<PendingPush> {
         let binding = binding_from_row(r, 1)?;
         let aggregate_id = match r.get_ref(0)? {
@@ -92,6 +92,7 @@ fn pending(
             },
             edited_at: time_col(r, 7)?,
             failure: r.get(8)?,
+            sequence: r.get::<_, Option<i64>>(9)?.unwrap_or(0) as u64,
         })
     };
     let mut found = query_all(conn, dirty_sql, params![account, collection], |r| {
@@ -99,8 +100,8 @@ fn pending(
     })?;
     found.extend(query_all(
         conn,
-        "SELECT aggregate_id, account_id, collection, href, etag, NULL, NULL, edited_at, push_error \
-         FROM pending_deletes WHERE account_id = ?1 AND collection = ?2 AND kind = ?3",
+        "SELECT aggregate_id, account_id, collection, href, etag, NULL, NULL, edited_at, push_error, \
+             local_seq FROM pending_deletes WHERE account_id = ?1 AND collection = ?2 AND kind = ?3",
         params![account, collection, kind],
         |r| map(r, Some(PendingChange::Delete)),
     )?);
@@ -192,7 +193,7 @@ impl DavReadRepository for SqliteRepository {
                     &book,
                     "contact",
                     "SELECT id, remote_account, remote_collection, remote_href, \
-                         remote_etag, remote_modified, raw, edited_at, push_error \
+                         remote_etag, remote_modified, raw, edited_at, push_error, local_seq \
                      FROM contacts \
                      WHERE remote_account = ?1 AND remote_collection = ?2 AND dirty = 1",
                 )
@@ -214,7 +215,7 @@ impl DavReadRepository for SqliteRepository {
                     &calendar,
                     "event",
                     "SELECT NULL, account_id, collection, href, etag, remote_modified, raw, \
-                         edited_at, push_error \
+                         edited_at, push_error, local_seq \
                      FROM calendar_events WHERE account_id = ?1 AND collection = ?2 AND dirty = 1",
                 )
             })
@@ -254,6 +255,24 @@ impl DavReadRepository for SqliteRepository {
                          AND collection = ?2 AND etag IS NOT NULL",
                     account,
                     &calendar,
+                )
+            })
+            .await
+    }
+
+    async fn contact_at(
+        &self,
+        account: &AccountId,
+        href: &Href,
+    ) -> Result<Option<ContactId>, DomainError> {
+        let (account, href) = (*account.as_uuid(), href.to_string());
+        self.db
+            .read(move |conn| {
+                query_one(
+                    conn,
+                    "SELECT id FROM contacts WHERE remote_account = ?1 AND remote_href = ?2",
+                    params![account, href],
+                    |r| Ok(ContactId::from_uuid(r.get(0)?)),
                 )
             })
             .await

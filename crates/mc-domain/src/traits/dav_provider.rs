@@ -65,6 +65,13 @@ pub enum DeleteOutcome {
 /// errors and stop the pass, like in [`EmailProvider`](super::email_provider::EmailProvider).
 #[async_trait]
 pub trait ContactsProvider: Send + Sync {
+    /// Creates are POSTed and the server picks the href (Google): a create
+    /// that was stored but never acknowledged cannot be recognised by a
+    /// refused retry, so the retry may leave a duplicate.
+    fn creates_by_post(&self) -> bool {
+        false
+    }
+
     async fn list_address_books(&self) -> Result<Vec<AddressBook>, DomainError>;
 
     async fn address_book_changes(
