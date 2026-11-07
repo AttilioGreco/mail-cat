@@ -135,6 +135,11 @@ message AccountAuthStatus {
   // `state`. A missing permission is fixed by a new login (ReauthAccount).
   FeatureStatus contacts = 11;
   FeatureStatus calendar = 12;
+  // The contacts and calendars pass of this server run: in progress, when the
+  // last one finished and why it failed. Lost on restart.
+  bool dav_syncing = 13;
+  optional Timestamp dav_last_sync = 14;
+  optional string dav_last_error = 15;
 }
 
 enum FeatureState {

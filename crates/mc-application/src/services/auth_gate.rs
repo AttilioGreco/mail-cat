@@ -115,6 +115,18 @@ pub struct AuthStatus {
     /// Which of contacts and calendars sync. A missing permission only a new
     /// login fixes, yet it never pauses the account.
     pub dav: DavStatus,
+    pub dav_pass: DavPass,
+}
+
+/// The contacts and calendars pass of an account, for clients to show.
+// ponytail: in memory, so a restart forgets the last sync; persist it if
+// clients need it across restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DavPass {
+    pub running: bool,
+    pub last_sync: Option<DateTime<Utc>>,
+    /// Why the last pass failed; cleared by the next one that succeeds.
+    pub last_error: Option<String>,
 }
 
 /// Exchanges a refresh token for fresh tokens at the provider.
@@ -143,6 +155,7 @@ struct Tracked {
     smtp_error: Option<String>,
     task_error: Option<String>,
     dav: DavStatus,
+    dav_pass: DavPass,
 }
 
 /// What an offline or throttled gate has accumulated, so a successor gate
@@ -204,6 +217,7 @@ impl AuthGate {
             smtp_error: tracked.smtp_error.clone(),
             task_error: tracked.task_error.clone(),
             dav: tracked.dav.clone(),
+            dav_pass: tracked.dav_pass.clone(),
         }
     }
 
@@ -216,6 +230,22 @@ impl AuthGate {
     /// Shows clients which of contacts and calendars sync.
     pub fn set_dav(&self, dav: DavStatus) {
         self.tracked.send_modify(|t| t.dav = dav);
+        let _ = self.changes.send(self.account_id);
+    }
+
+    pub fn dav_pass_started(&self) {
+        self.tracked.send_modify(|t| t.dav_pass.running = true);
+        let _ = self.changes.send(self.account_id);
+    }
+
+    pub fn dav_pass_finished(&self, outcome: Result<(), String>) {
+        self.tracked.send_modify(|t| {
+            t.dav_pass = DavPass {
+                running: false,
+                last_sync: Some(Utc::now()),
+                last_error: outcome.err(),
+            }
+        });
         let _ = self.changes.send(self.account_id);
     }
 
@@ -735,6 +765,7 @@ impl AuthGates {
                 smtp_error: None,
                 task_error: None,
                 dav: DavStatus::default(),
+                dav_pass: DavPass::default(),
             }),
             refresh: self.refresh.clone(),
             secret_store: self.secret_store.clone(),

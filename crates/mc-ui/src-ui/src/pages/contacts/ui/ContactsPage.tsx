@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { Plus, Search } from 'lucide-react';
 import { Input } from '@/shared/ui/input';
 import { Button } from '@/shared/ui/button';
+import { SyncDavButton } from '@/features/sync-dav';
 import { useAccounts } from '@/entities/account';
 import { useContactEditor, useContactGroups, useHarvestedContacts } from '@/entities/contact';
 import { buildRows } from '../lib/group';
@@ -29,6 +30,7 @@ export function ContactsPage() {
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <Input className="pl-7" placeholder="Cerca contatti" value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
+          <SyncDavButton feature="contacts" />
           <Button size="icon" variant="ghost" title="Nuovo contatto" aria-label="Nuovo contatto" onClick={() => openEditor({ mode: 'create' })}>
             <Plus size={15} />
           </Button>

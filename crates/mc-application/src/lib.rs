@@ -21,7 +21,7 @@ pub use projections::ProjectionEventHandler;
 pub use queries::{Query, QueryResult};
 pub use services::{
     AccountLifecycle, AccountLocks, AccountProvisioner, AuthGate, AuthGates, AuthState, AuthStatus,
-    Backoff, Credential, DavBackend, DavProviders, DavStatus, DavStore, DavSyncService,
+    Backoff, Credential, DavBackend, DavPass, DavProviders, DavStatus, DavStore, DavSyncService,
     FeatureState, FeatureStatus, OAuthLoginProgress, OAuthLoginTrigger, ProvisionParams, RefreshFn,
     SyncConfig, SyncProgressEvent, SyncService, SyncState, SyncTrigger, TaggingService,
 };

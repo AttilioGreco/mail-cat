@@ -150,6 +150,20 @@ pub async fn update_event(
         .map_err(err)
 }
 
+/// Runs a contacts and calendars pass now; the pass itself is followed through
+/// `dav:changed` and the account's auth status.
+#[tauri::command]
+pub async fn sync_dav_now(
+    account_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    get_or_connect(&state)
+        .await?
+        .sync_dav_now(account_id.as_deref())
+        .await
+        .map_err(err)
+}
+
 #[tauri::command]
 pub async fn delete_event(
     account_id: String,

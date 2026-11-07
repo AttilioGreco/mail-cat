@@ -310,7 +310,7 @@ impl AppContext {
             sync: sync_service.clone(),
             search: search_handler.clone(),
             dav: dav_sync,
-            dav_providers,
+            dav_providers: dav_providers.clone(),
             tagging: tagging.clone(),
             idle_enabled: std::env::var_os("MAIL_CAT_NO_IDLE").is_none(),
             shutdown: shutdown.clone(),
@@ -727,6 +727,7 @@ impl AppContext {
             command_bus.clone(),
             repository_arc.clone(),
             event_bus.clone(),
+            dav_providers.clone(),
         );
 
         let tagging_service = TaggingServiceImpl::new(tagging);

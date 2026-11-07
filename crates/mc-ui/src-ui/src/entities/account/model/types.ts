@@ -45,6 +45,11 @@ export interface AccountAuth {
   /** Contacts and calendars are separate features; neither affects mail. */
   contacts: FeatureStatus;
   calendar: FeatureStatus;
+  /** A contacts and calendars pass is running. */
+  davSyncing: boolean;
+  /** When the last pass finished (RFC 3339); null until one has, and again after a server restart. */
+  davLastSync: string | null;
+  davLastError: string | null;
 }
 
 /** How an account's mailboxes are presented: a folder tree, or labels on messages. */

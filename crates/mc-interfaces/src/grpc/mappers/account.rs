@@ -286,6 +286,13 @@ pub fn auth_status_to_proto(status: &mc_application::AuthStatus) -> proto::Accou
         task_error: status.task_error.clone(),
         contacts: Some(feature_status_to_proto(&status.dav.contacts)),
         calendar: Some(feature_status_to_proto(&status.dav.calendar)),
+        dav_syncing: status.dav_pass.running,
+        dav_last_sync: status
+            .dav_pass
+            .last_sync
+            .as_ref()
+            .map(datetime_to_timestamp),
+        dav_last_error: status.dav_pass.last_error.clone(),
     }
 }
 
@@ -393,6 +400,7 @@ mod tests {
             smtp_error: None,
             task_error: None,
             dav,
+            dav_pass: mc_application::DavPass::default(),
         };
         let proto = auth_status_to_proto(&status);
         let contacts = proto.contacts.unwrap();
@@ -404,5 +412,43 @@ mod tests {
             proto::FeatureState::MissingPermission as i32
         );
         assert_eq!(calendar.missing_scopes, ["calendar-scope"]);
+    }
+
+    #[test]
+    fn the_dav_pass_reaches_proto() {
+        let at = chrono::Utc::now();
+        let mut status = mc_application::AuthStatus {
+            account_id: mc_domain::AccountId::new(),
+            state: mc_application::AuthState::Active,
+            reason: None,
+            last_error: None,
+            since: at,
+            oauth_provider: None,
+            token_expires_at: None,
+            smtp_error: None,
+            task_error: None,
+            dav: mc_application::DavStatus::default(),
+            dav_pass: mc_application::DavPass {
+                running: true,
+                last_sync: Some(at),
+                last_error: Some("throttled".into()),
+            },
+        };
+        let proto = auth_status_to_proto(&status);
+        assert!(proto.dav_syncing);
+        assert_eq!(proto.dav_last_error.as_deref(), Some("throttled"));
+        assert_eq!(
+            proto
+                .dav_last_sync
+                .as_ref()
+                .map(crate::grpc::mappers::timestamp_to_datetime),
+            Some(at)
+        );
+
+        status.dav_pass = Default::default();
+        let proto = auth_status_to_proto(&status);
+        assert!(
+            !proto.dav_syncing && proto.dav_last_sync.is_none() && proto.dav_last_error.is_none()
+        );
     }
 }

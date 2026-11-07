@@ -23,6 +23,13 @@ pub enum CalendarsCmd {
         /// Account name, email or ID
         account: String,
     },
+
+    /// Sync contacts and calendars now, without waiting for the next period
+    /// or the failure backoff; returns before the pass finishes
+    Sync {
+        /// Account name, email or ID (default: every account)
+        account: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -130,6 +137,15 @@ pub async fn run_calendars(cmd: CalendarsCmd, client: MailCatClient, format: For
                 "holds_events",
             ];
             Toon::default().table("calendars", &fields, &rows).print();
+            Ok(())
+        }
+        CalendarsCmd::Sync { account } => {
+            let id = match account {
+                Some(wanted) => Some(find_account(&client, &wanted).await?.id),
+                None => None,
+            };
+            client.sync_dav_now(id.as_deref()).await?;
+            println!("Sync requested");
             Ok(())
         }
         CalendarsCmd::Status { account } => {

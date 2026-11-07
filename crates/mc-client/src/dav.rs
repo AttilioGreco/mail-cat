@@ -476,6 +476,17 @@ impl MailCatClient {
         Ok(())
     }
 
+    /// Wakes the contacts and calendars loop of one account, or of every one;
+    /// returns before the pass runs.
+    pub async fn sync_dav_now(&self, account_id: Option<&str>) -> Result<()> {
+        self.calendars()
+            .sync_dav_now(pb::SyncDavNowRequest {
+                account_id: account_id.map(str::to_owned),
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn dav_status(&self, account_id: &str) -> Result<DavStatus> {
         let resp = self
             .calendars()

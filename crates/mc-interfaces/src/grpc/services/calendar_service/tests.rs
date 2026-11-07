@@ -33,7 +33,7 @@ fn service(
 ) -> (CalendarServiceImpl<RecordingBus>, Arc<RecordingBus>) {
     let bus = Arc::new(RecordingBus::answering(result));
     (
-        CalendarServiceImpl::new(bus.clone(), Arc::new(dav), events()),
+        CalendarServiceImpl::new(bus.clone(), Arc::new(dav), events(), Default::default()),
         bus,
     )
 }
@@ -83,6 +83,7 @@ async fn events_in_range_pass_the_window_and_calendars_through() {
         Arc::new(RecordingBus::answering(CommandResult::CalendarEventRemoved)),
         dav.clone(),
         events(),
+        Default::default(),
     );
     let (from, to) = (
         Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap(),
@@ -282,6 +283,7 @@ async fn dav_changes_are_coalesced_per_account_and_kind() {
         Arc::new(RecordingBus::answering(CommandResult::CalendarEventRemoved)),
         Arc::new(FakeDav::default()),
         bus.clone(),
+        Default::default(),
     );
     let mut stream = svc
         .watch_dav_changes(Request::new(WatchDavChangesRequest {}))

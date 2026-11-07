@@ -11,6 +11,7 @@ import { useServerAutostartError } from '@/features/server-autostart';
 import { useLabelsPage } from '@/features/manage-labels';
 import { useComposeStore } from '@/features/compose-message';
 import { useSyncNow } from '@/features/manage-accounts';
+import { useSyncDav } from '@/features/sync-dav';
 import { useSectionStore, useSessionStore } from '@/entities/session';
 import { useAuthStatusWatch, useSyncProgress } from '@/entities/account';
 import { useAgendaPane, useDavChangesWatch } from '@/entities/calendar';
@@ -44,6 +45,7 @@ function Router() {
   const setSection = useSectionStore((s) => s.setSection);
   const toggleAgenda = useAgendaPane((s) => s.toggle);
   const syncNow = useSyncNow();
+  const syncDav = useSyncDav();
   const toggleHelp = useShortcutsStore((s) => s.toggleHelp);
   // Mounted above both screens: switching to settings must not drop the
   // subscription, or the page would open with no progress to show.
@@ -58,8 +60,10 @@ function Router() {
   useShortcuts({
     compose: () => openCompose({ mode: 'new', accountId: selectedAccountId }),
     openSettings,
+    // One key for "send/receive": in the calendar and contacts sections it means their sync.
     syncNow: () => {
-      if (selectedAccountId) syncNow.mutate(selectedAccountId);
+      if (section !== 'mail') syncDav.mutate();
+      else if (selectedAccountId) syncNow.mutate(selectedAccountId);
     },
     showShortcuts: toggleHelp,
     toggleAgenda: section === 'mail' ? toggleAgenda : undefined,

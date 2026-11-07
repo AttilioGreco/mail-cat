@@ -58,6 +58,9 @@ pub fn auth_status_from_proto(s: pb::AccountAuthStatus) -> AuthStatus {
         task_error: s.task_error,
         contacts: feature_from_proto(s.contacts),
         calendar: feature_from_proto(s.calendar),
+        dav_syncing: s.dav_syncing,
+        dav_last_sync: time(s.dav_last_sync),
+        dav_last_error: s.dav_last_error,
     }
 }
 

@@ -23,11 +23,24 @@ service CalendarService {
   // Sync health of the account's contacts and calendars.
   rpc GetDavStatus(GetDavStatusRequest) returns (GetDavStatusResponse);
 
+  // Runs a contacts and calendars pass now instead of at the next period,
+  // skipping the failure backoff. Returns at once; follow the pass with
+  // WatchDavChanges and the account's AccountAuthStatus. Repeated calls while
+  // a pass runs collapse into one more pass.
+  rpc SyncDavNow(SyncDavNowRequest) returns (SyncDavNowResponse);
+
   // A coarse "something changed" signal for the contacts and calendars of
   // every account, coalesced: a sync pass that touches hundreds of
   // resources sends a few signals, not hundreds. Stays open.
   rpc WatchDavChanges(WatchDavChangesRequest) returns (stream DavChange);
 }
+
+message SyncDavNowRequest {
+  // Unset wakes every account that syncs contacts or calendars.
+  optional string account_id = 1;
+}
+
+message SyncDavNowResponse {}
 
 enum CalendarOwnership {
   CALENDAR_OWNERSHIP_OWN          = 0;

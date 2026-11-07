@@ -156,6 +156,9 @@ pub struct AuthStatusDto {
     /// fixed by re-authenticating.
     pub contacts: FeatureStatus,
     pub calendar: FeatureStatus,
+    pub dav_syncing: bool,
+    pub dav_last_sync: Option<String>,
+    pub dav_last_error: Option<String>,
 }
 
 /// Download progress for one account.
@@ -273,6 +276,9 @@ fn auth_status_to_dto(s: AuthStatus) -> AuthStatusDto {
         task_error: s.task_error,
         contacts: s.contacts,
         calendar: s.calendar,
+        dav_syncing: s.dav_syncing,
+        dav_last_sync: s.dav_last_sync.map(|t| t.to_rfc3339()),
+        dav_last_error: s.dav_last_error,
     }
 }
 

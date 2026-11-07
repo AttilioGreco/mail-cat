@@ -626,3 +626,6 @@ async fn build_smtp_sender(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_dav;

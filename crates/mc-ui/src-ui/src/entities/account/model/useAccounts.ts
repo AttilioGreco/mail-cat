@@ -17,6 +17,9 @@ interface AuthStatusDto {
   task_error: string | null;
   contacts: FeatureStatusDto;
   calendar: FeatureStatusDto;
+  dav_syncing: boolean;
+  dav_last_sync: string | null;
+  dav_last_error: string | null;
 }
 
 interface FeatureStatusDto {
@@ -52,6 +55,9 @@ function authFromDto(d: AuthStatusDto): AccountAuth {
     taskError: d.task_error,
     contacts: featureFromDto(d.contacts),
     calendar: featureFromDto(d.calendar),
+    davSyncing: d.dav_syncing,
+    davLastSync: d.dav_last_sync,
+    davLastError: d.dav_last_error,
   };
 }
 

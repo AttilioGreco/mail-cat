@@ -327,6 +327,7 @@ impl DavLoop {
             features,
             probe,
         } = self;
+        let wake = providers.waker(id);
         let mut registered = probe.is_none();
         let mut failures = 0u32;
         if registered {
@@ -338,7 +339,8 @@ impl DavLoop {
                 _ = stop.cancelled() => break,
                 () = gate.ready() => {}
             }
-            let mut failed = false;
+            gate.dav_pass_started();
+            let mut error = None;
             if let Some(probe) = probe.as_ref().filter(|_| !registered) {
                 let found = tokio::select! {
                     _ = stop.cancelled() => break,
@@ -353,11 +355,12 @@ impl DavLoop {
                     // Looked up again only when the account restarts.
                     Ok(false) => {
                         tracing::info!("No CardDAV or CalDAV server found for '{name}'");
+                        gate.dav_pass_finished(Ok(()));
                         break;
                     }
                     Err(e) => {
                         tracing::warn!("DAV discovery failed for '{name}': {e}");
-                        failed = true;
+                        error = Some(e.to_string());
                     }
                 }
             }
@@ -368,12 +371,17 @@ impl DavLoop {
                 };
                 if let Err(e) = synced {
                     tracing::error!("Contacts and calendars sync failed for '{name}': {e}");
-                    failed = true;
+                    error = Some(e.to_string());
                 }
             }
-            failures = if failed { failures + 1 } else { 0 };
-            if !sleep_or_stop(&stop, dav_delay(failures)).await {
-                break;
+            failures = if error.is_some() { failures + 1 } else { 0 };
+            gate.dav_pass_finished(error.map_or(Ok(()), Err));
+            // A wake ends the wait whatever the backoff; one that came during
+            // the pass is still pending and starts the next pass at once.
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                () = wake.notified() => {}
+                _ = tokio::time::sleep(dav_delay(failures)) => {}
             }
         }
         tracing::info!("Contacts and calendars loop stopped for '{name}'");

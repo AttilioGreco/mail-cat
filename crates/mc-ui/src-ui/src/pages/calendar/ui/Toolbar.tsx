@@ -2,6 +2,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { format, isSameMonth, isSameYear } from 'date-fns';
 import { cn } from '@/shared/lib/utils';
 import { Button } from '@/shared/ui/button';
+import { SyncDavButton } from '@/features/sync-dav';
 import { LOCALE, type View } from '../lib/time';
 import { useCalendarView } from '../model/view-store';
 
@@ -29,6 +30,7 @@ export function Toolbar({ days }: { days: Date[] }) {
       <Button variant="ghost" size="icon-sm" aria-label="Precedente" onClick={() => step(-1)}><ChevronLeft /></Button>
       <Button variant="ghost" size="icon-sm" aria-label="Successivo" onClick={() => step(1)}><ChevronRight /></Button>
       <h2 className="min-w-0 flex-1 truncate text-sm font-semibold capitalize">{title(view, days, date)}</h2>
+      <SyncDavButton feature="calendar" />
       <div className="flex rounded-lg border border-border p-0.5">
         {VIEWS.map((v) => (
           <button

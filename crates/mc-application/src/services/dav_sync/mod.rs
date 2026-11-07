@@ -13,6 +13,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
+use tokio::sync::Notify;
 use tracing::warn;
 
 pub(crate) use events::resource_events;
@@ -107,30 +108,58 @@ impl DavStatus {
 
 /// The DAV backend of each account that has one, with the features it serves.
 #[derive(Default)]
-pub struct DavProviders(RwLock<HashMap<AccountId, Registered>>);
+pub struct DavProviders {
+    backends: RwLock<HashMap<AccountId, Registered>>,
+    wakes: Mutex<HashMap<AccountId, Arc<Notify>>>,
+}
 
 type Registered = (Arc<dyn DavBackend>, DavStatus);
 
 impl DavProviders {
     pub fn register(&self, account: AccountId, backend: Arc<dyn DavBackend>, features: DavStatus) {
-        self.0
+        self.backends
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(account, (backend, features));
     }
 
     pub fn remove(&self, account: &AccountId) {
-        self.0
+        self.backends
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(account);
+        self.wakes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(account);
+    }
+
+    /// What the account's DAV loop waits on besides its period. A wake sent
+    /// while a pass runs is kept (one at most), so the loop runs one more pass
+    /// right after instead of a second concurrent one.
+    pub fn waker(&self, account: AccountId) -> Arc<Notify> {
+        self.wakes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(account)
+            .or_default()
+            .clone()
+    }
+
+    /// Wakes one account's DAV loop, or every one that has a loop.
+    pub fn wake(&self, account: Option<AccountId>) {
+        let wakes = self.wakes.lock().unwrap_or_else(|e| e.into_inner());
+        match account {
+            Some(id) => wakes.get(&id).into_iter().for_each(|n| n.notify_one()),
+            None => wakes.values().for_each(|n| n.notify_one()),
+        }
     }
 
     fn get(
         &self,
         account: &AccountId,
     ) -> Result<(Arc<dyn DavBackend>, DavStatus), ApplicationError> {
-        self.0
+        self.backends
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(account)

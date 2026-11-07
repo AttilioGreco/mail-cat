@@ -10,7 +10,9 @@ pub mod tagging;
 
 pub use account_locks::AccountLocks;
 pub use account_provisioner::{AccountLifecycle, AccountProvisioner, ProvisionParams};
-pub use auth_gate::{AuthGate, AuthGates, AuthState, AuthStatus, Backoff, Credential, RefreshFn};
+pub use auth_gate::{
+    AuthGate, AuthGates, AuthState, AuthStatus, Backoff, Credential, DavPass, RefreshFn,
+};
 pub use dav_sync::{
     DavBackend, DavProviders, DavStatus, DavStore, DavSyncService, FeatureState, FeatureStatus,
 };

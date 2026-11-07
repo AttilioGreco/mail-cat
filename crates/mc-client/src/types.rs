@@ -59,6 +59,11 @@ pub struct AuthStatus {
     /// Contacts and calendars are separate features; neither affects `state`.
     pub contacts: FeatureStatus,
     pub calendar: FeatureStatus,
+    /// A contacts and calendars pass is running.
+    pub dav_syncing: bool,
+    /// When the last pass finished; forgotten when the server restarts.
+    pub dav_last_sync: Option<DateTime<Utc>>,
+    pub dav_last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

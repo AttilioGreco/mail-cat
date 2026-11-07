@@ -14,10 +14,11 @@ use crate::grpc::proto::{
     CreateEventRequest, CreateEventResponse, DavChange, DavKind, DeleteEventRequest,
     DeleteEventResponse, EventDetail, GetDavStatusRequest, GetDavStatusResponse, GetEventRequest,
     ListCalendarsRequest, ListCalendarsResponse, ListEventsRequest, ListEventsResponse,
-    UpdateEventRequest, UpdateEventResponse, WatchDavChangesRequest,
-    calendar_service_server::CalendarService,
+    SyncDavNowRequest, SyncDavNowResponse, UpdateEventRequest, UpdateEventResponse,
+    WatchDavChangesRequest, calendar_service_server::CalendarService,
 };
 use mc_application::{
+    DavProviders,
     bus::{CommandBus, EventSubscriber, InProcessEventBus},
     commands::{Command, CommandResult},
 };
@@ -35,6 +36,7 @@ pub struct CalendarServiceImpl<C: CommandBus + 'static> {
     command_bus: Arc<C>,
     dav: Arc<dyn DavReadRepository>,
     event_bus: Arc<InProcessEventBus>,
+    providers: Arc<DavProviders>,
 }
 
 impl<C: CommandBus + 'static> CalendarServiceImpl<C> {
@@ -42,11 +44,13 @@ impl<C: CommandBus + 'static> CalendarServiceImpl<C> {
         command_bus: Arc<C>,
         dav: Arc<dyn DavReadRepository>,
         event_bus: Arc<InProcessEventBus>,
+        providers: Arc<DavProviders>,
     ) -> Self {
         Self {
             command_bus,
             dav,
             event_bus,
+            providers,
         }
     }
 
@@ -220,6 +224,20 @@ impl<C: CommandBus + 'static> CalendarService for CalendarServiceImpl<C> {
             pending_changes: pending.len() as u32,
             failed_changes: pending.iter().filter(|p| p.failure.is_some()).count() as u32,
         }))
+    }
+
+    async fn sync_dav_now(
+        &self,
+        request: Request<SyncDavNowRequest>,
+    ) -> Result<Response<SyncDavNowResponse>, Status> {
+        let account = request
+            .into_inner()
+            .account_id
+            .as_deref()
+            .map(parse_account_id)
+            .transpose()?;
+        self.providers.wake(account);
+        Ok(Response::new(SyncDavNowResponse {}))
     }
 
     type WatchDavChangesStream = ReceiverStream<Result<DavChange, Status>>;
