@@ -47,4 +47,14 @@ eq([iso(m.start), m.start.getHours(), m.start.getMinutes(), m.end.getHours()], [
 eq(resized(ev, -120).end.getTime(), d(2026, 11, 10, 9, 15).getTime(), 'resize floor');
 eq(atMinute(d(2026, 11, 10, 15), 90).getHours(), 1, 'atMinute');
 
+// DST days (23h in March, 25h in October in Europe): the grid is wall clock.
+for (const day of [d(2026, 3, 29), d(2026, 10, 25)]) {
+  const at = atMinute(day, 600);
+  eq([at.getHours(), at.getMinutes()], [10, 0], `atMinute on ${iso(day)}`);
+}
+// 02:00-03:00 does not exist that night in Rome: 03:30 does everywhere.
+const dstNight = { start: d(2026, 3, 29, 1), end: d(2026, 3, 29, 3, 30), allDay: false };
+eq(moved(dstNight, 0, 180).start.getHours(), 4, 'move across DST');
+eq([resized(dstNight, 60).end.getHours(), resized(dstNight, 60).end.getMinutes()], [4, 30], 'resize across DST');
+
 console.log('time.check: ok');

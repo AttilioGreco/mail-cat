@@ -89,14 +89,22 @@ export const snap = (minutes: number) => Math.round(minutes / SNAP_MINUTES) * SN
 
 /** Moving keeps the duration; `days` is whole local days and `minutes` is already snapped. */
 export function moved(e: Timed, days: number, minutes: number): { start: Date; end: Date } {
-  return { start: addMinutes(addDays(e.start, days), minutes), end: addMinutes(addDays(e.end, days), minutes) };
+  const start = atMinute(addDays(e.start, days), minutesOf(e.start) + minutes);
+  return { start, end: new Date(start.getTime() + (e.end.getTime() - e.start.getTime())) };
 }
 
 /** Resizing moves only the end, and never below one snap step. */
 export function resized(e: Timed, minutes: number): { start: Date; end: Date } {
-  const end = addMinutes(e.end, minutes);
+  const end = atMinute(e.end, minutesOf(e.end) + minutes);
   const min = addMinutes(e.start, SNAP_MINUTES);
   return { start: e.start, end: end < min ? min : end };
 }
 
-export const atMinute = (day: Date, minutes: number) => addMinutes(startOfDay(day), minutes);
+/** The wall-clock minute of `day`, as the grid draws it. Adding elapsed
+ *  minutes to midnight would be an hour off after a DST change. Overflow
+ *  past either end of the day rolls into the neighbouring day. */
+export const atMinute = (day: Date, minutes: number) => {
+  const at = startOfDay(day);
+  at.setHours(Math.floor(minutes / 60), ((minutes % 60) + 60) % 60);
+  return at;
+};
