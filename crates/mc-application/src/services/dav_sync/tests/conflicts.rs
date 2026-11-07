@@ -215,3 +215,33 @@ async fn a_create_the_server_named_itself_is_bound_by_uid_in_the_pull() {
     assert_eq!(env.fake.hrefs().len(), 1);
     assert_eq!(env.contact_count().await, 1);
 }
+
+#[tokio::test]
+async fn an_edit_made_while_a_conflict_is_settled_is_not_replaced() {
+    let (env, a) = conflicted(&vcard("a", "Remote", Some(FAR_AHEAD))).await;
+    let in_flight = env.pending().await.remove(0);
+    // The user saves again while the server is being asked about "Local".
+    env.edit_local(a, "Later").await;
+    let ctx = Ctx {
+        account: env.account,
+        backend: env.fake.clone(),
+    };
+    let remote = mc_domain::ContactsProvider::fetch_contacts(
+        env.fake.as_ref(),
+        &env.target().collection,
+        &[Href::new("/book/a.vcf")],
+    )
+    .await
+    .unwrap()
+    .remove(0);
+
+    env.svc
+        .remote_wins(&ctx, &env.target(), &in_flight, Some(&remote))
+        .await
+        .unwrap();
+
+    let pending = env.pending().await;
+    assert_eq!(pending.len(), 1, "the newer edit is still to push");
+    assert!(matches!(&pending[0].change, PendingChange::Put { raw } if raw.contains("FN:Later")));
+    assert!(env.contact(a).await.raw.unwrap().contains("Later"));
+}

@@ -134,7 +134,7 @@ impl DavSyncService {
         collection: Key,
     ) -> Result<(), ApplicationError> {
         for p in self.pending(ctx, target).await? {
-            self.record_loss(ctx, target.kind, &p).await?;
+            self.record_loss(ctx, target.kind, &p, None).await?;
         }
         let removed = ctx.collection_removed(target);
         self.append(&collection, None, vec![removed]).await?;

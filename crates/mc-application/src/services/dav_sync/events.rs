@@ -122,6 +122,7 @@ impl DavSyncService {
         ctx: &Ctx,
         kind: Kind,
         p: &PendingPush,
+        expected: Option<u64>,
     ) -> Result<(), ApplicationError> {
         let key = Key::of_pending(kind, ctx.account, p)?;
         let local_raw = match &p.change {
@@ -139,7 +140,27 @@ impl DavSyncService {
                 local_raw,
             },
         };
-        self.append(&key, None, vec![event]).await
+        self.append(&key, expected, vec![event]).await
+    }
+
+    /// The stream's sequence while `p` is still the latest local edit, `None`
+    /// once a newer one landed: an answer about an older edit must not
+    /// replace it. Appending at the returned sequence closes the rest.
+    pub(super) async fn still_pending(
+        &self,
+        ctx: &Ctx,
+        t: &Target,
+        p: &PendingPush,
+    ) -> Result<Option<u64>, ApplicationError> {
+        let latest = self
+            .pending(ctx, t)
+            .await?
+            .into_iter()
+            .find(|q| q.aggregate_id == p.aggregate_id);
+        if latest.is_none_or(|q| q.sequence != p.sequence) {
+            return Ok(None);
+        }
+        Ok(Some(self.events.current_sequence(&p.aggregate_id).await?))
     }
 
     /// The server acknowledged the local version at `sequence`.
@@ -204,6 +225,15 @@ impl DavSyncService {
             resource_events(t.kind, existing, binding, &remote.raw, Origin::Remote)?;
         self.append(&key, expected.filter(|_| existing.is_some()), events)
             .await
+    }
+}
+
+/// A local edit landed between the decision and its append: it stays
+/// pending, and the next pass decides again.
+pub(super) fn superseded(result: Result<(), ApplicationError>) -> Result<(), ApplicationError> {
+    match result {
+        Err(ApplicationError::Domain(DomainError::ConcurrencyConflict { .. })) => Ok(()),
+        result => result,
     }
 }
 

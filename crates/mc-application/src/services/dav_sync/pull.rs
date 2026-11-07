@@ -12,7 +12,7 @@ use mc_domain::{
     RemoteResource,
 };
 
-use super::events::{modified_at, same_body, uid_of};
+use super::events::{modified_at, same_body, superseded, uid_of};
 use super::{Ctx, DavSyncService, Key, Kind, Target};
 use crate::error::ApplicationError;
 
@@ -178,6 +178,9 @@ impl DavSyncService {
         }
         // Edited after the create, or rewritten by the server: the local text
         // stays the one to push, now on top of the server's version.
+        let Some(at) = self.still_pending(ctx, t, create).await? else {
+            return Ok(());
+        };
         let key = Key::of_pending(t.kind, ctx.account, create)?;
         let event = DomainEvent::ContactUpdated {
             contact_id: key.contact.expect("a contact key"),
@@ -198,6 +201,6 @@ impl DavSyncService {
                 origin: Origin::Local,
             }),
         };
-        self.append(&key, None, vec![event]).await
+        superseded(self.append(&key, Some(at), vec![event]).await)
     }
 }

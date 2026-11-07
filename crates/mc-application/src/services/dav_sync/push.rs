@@ -8,7 +8,7 @@ use mc_domain::{
     ResourcePut,
 };
 
-use super::events::{modified_at, same_body, uid_of};
+use super::events::{modified_at, same_body, superseded, uid_of};
 use super::{Ctx, DavSyncService, Key, Target, stops};
 use crate::error::ApplicationError;
 
@@ -190,13 +190,10 @@ impl DavSyncService {
             return Ok(());
         };
         let stored = RemoteResource { href, etag, raw };
-        match self
-            .apply_remote(ctx, t, Some(&key), Some(at + 1), &stored)
-            .await
-        {
-            Err(ApplicationError::Domain(DomainError::ConcurrencyConflict { .. })) => Ok(()),
-            result => result,
-        }
+        superseded(
+            self.apply_remote(ctx, t, Some(&key), Some(at + 1), &stored)
+                .await,
+        )
     }
 
     /// The server's version replaces the local edit, which stays in the
@@ -208,23 +205,27 @@ impl DavSyncService {
         p: &PendingPush,
         remote: Option<&RemoteResource>,
     ) -> Result<(), ApplicationError> {
+        let Some(mut at) = self.still_pending(ctx, t, p).await? else {
+            return Ok(());
+        };
         let key = Key::of_pending(t.kind, ctx.account, p)?;
         let both_deleted = p.change == PendingChange::Delete && remote.is_none();
         if !both_deleted {
-            self.record_loss(ctx, t.kind, p).await?;
+            superseded(self.record_loss(ctx, t.kind, p, Some(at)).await)?;
+            at += 1;
         }
         let removed = self.removed_event(ctx, &key, &p.binding.href);
-        match (&p.change, remote) {
+        superseded(match (&p.change, remote) {
             (PendingChange::Put { .. }, Some(remote)) => {
-                self.apply_remote(ctx, t, Some(&key), None, remote).await
+                self.apply_remote(ctx, t, Some(&key), Some(at), remote).await
             }
-            (_, None) => self.append(&key, None, vec![removed]).await,
+            (_, None) => self.append(&key, Some(at), vec![removed]).await,
             // The removal clears the pending delete; the resource comes back
             // as a new one.
             (PendingChange::Delete, Some(remote)) => {
-                self.append(&key, None, vec![removed]).await?;
+                self.append(&key, Some(at), vec![removed]).await?;
                 self.apply_remote(ctx, t, None, None, remote).await
             }
-        }
+        })
     }
 }
