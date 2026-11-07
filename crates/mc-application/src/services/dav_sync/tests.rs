@@ -41,7 +41,7 @@ pub(super) fn env() -> Env {
     let account = AccountId::new();
     let fake = Arc::new(Fake::for_account(account));
     let providers = Arc::new(DavProviders::default());
-    providers.register(account, fake.clone());
+    providers.register(account, fake.clone(), DavStatus::all_enabled());
     let svc = Arc::new(DavSyncService::new(repo.clone(), events.clone(), providers));
     Env {
         _dir: dir,

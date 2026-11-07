@@ -130,12 +130,24 @@ pub async fn run_calendars(cmd: CalendarsCmd, client: MailCatClient, format: For
         CalendarsCmd::Status { account } => {
             let account = find_account(&client, &account).await?;
             let status = client.dav_status(&account.id).await?;
-            let dav_error = account.auth.and_then(|a| a.dav_error);
+            let (contacts, calendar) = account
+                .auth
+                .map_or((None, None), |a| (Some(a.contacts), Some(a.calendar)));
             if format == Format::Json {
-                return print_json(&serde_json::json!({ "davError": dav_error, "status": status }));
+                return print_json(
+                    &serde_json::json!({ "contacts": contacts, "calendar": calendar, "status": status }),
+                );
             }
+            let describe = |f: &Option<mc_client::FeatureStatus>| match f {
+                Some(f) if !f.missing_scopes.is_empty() => {
+                    format!("{} ({})", f.state.as_str(), f.missing_scopes.join(", "))
+                }
+                Some(f) => f.state.as_str().to_owned(),
+                None => String::new(),
+            };
             let mut t = Toon::default();
-            t.field("dav_error", s(dav_error.as_deref().unwrap_or_default()))
+            t.field("contacts", s(&describe(&contacts)))
+                .field("calendar", s(&describe(&calendar)))
                 .field("pending_changes", n(status.pending_changes))
                 .field("failed_changes", n(status.failed_changes))
                 .field("conflicts_lost", n(status.conflicts_lost))

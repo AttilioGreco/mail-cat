@@ -11,9 +11,11 @@ import {
   useSecondsUntil,
   type Account,
   type AuthState,
+  type FeatureStatus,
   type BodyBatch,
 } from '@/entities/account';
 import {
+  useOAuthLogin,
   useRemoveAccount,
   useRestartAccount,
   useSetAccountPassword,
@@ -93,6 +95,9 @@ function AccountCard({
   const syncNow = useSyncNow();
   const removeAccount = useRemoveAccount();
   const restartAccount = useRestartAccount();
+  const { reauth, event: reauthEvent, pending: reauthPending } = useOAuthLogin();
+  // The oauth:event stream is global: only the card that started the login shows its progress.
+  const [reauthStarted, setReauthStarted] = useState(false);
   const [confirming, setConfirming] = useState(false);
   // A rejected password is what the user came here to fix.
   const [editingPassword, setEditingPassword] = useState(() => authState(account) === 'credentials_rejected');
@@ -141,6 +146,19 @@ function AccountCard({
           >
             <RotateCw size={13} className={restartAccount.isPending ? 'animate-spin' : undefined} />
           </button>
+          {account.auth?.oauthProvider && (
+            <button
+              type="button"
+              disabled={reauthStarted && reauthPending}
+              onClick={() => {
+                setReauthStarted(true);
+                reauth(account.id);
+              }}
+              className="flex items-center gap-1.5 rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground hover:bg-surface-hover disabled:opacity-50"
+            >
+              {reauthStarted && reauthPending ? 'Apri il browser…' : 'Ri-autentica'}
+            </button>
+          )}
           <button
             type="button"
             title="Aggiorna password"
@@ -188,7 +206,13 @@ function AccountCard({
         <p className="mt-2 text-xs text-destructive">{String(restartAccount.error)}</p>
       )}
 
+      {reauthStarted && reauthEvent?.kind === 'failed' && (
+        <p className="mt-2 text-xs text-destructive">{reauthEvent.message}</p>
+      )}
+
       <MailboxModelField account={account} />
+
+      {account.auth && <DavFeatures contacts={account.auth.contacts} calendar={account.auth.calendar} />}
 
       {progress && (
         <p className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
@@ -243,6 +267,35 @@ function AccountCard({
         </div>
       )}
     </article>
+  );
+}
+
+function DavFeatures({ contacts, calendar }: { contacts: FeatureStatus; calendar: FeatureStatus }) {
+  const missing = [contacts, calendar].some((f) => f.state === 'missing_permission');
+  return (
+    <div className="mt-3 space-y-1">
+      <FeatureLine label="Contatti" feature={contacts} />
+      <FeatureLine label="Calendario" feature={calendar} />
+      {missing && (
+        <p className="text-[11px] text-muted">
+          Ri-autenticati e concedi il permesso mancante per attivare la funzione.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function FeatureLine({ label, feature }: { label: string; feature: FeatureStatus }) {
+  const text = {
+    enabled: 'attivo',
+    missing_permission: `permesso mancante: ${feature.missingScopes.join(', ')}`,
+    unavailable: 'non disponibile',
+  }[feature.state];
+  return (
+    <p className="flex items-center gap-1.5 text-xs text-foreground">
+      <span>{label}</span>
+      <span className={feature.state === 'missing_permission' ? 'text-amber-500' : 'text-muted'}>{text}</span>
+    </p>
   );
 }
 

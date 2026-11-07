@@ -60,7 +60,7 @@ pub enum AccountsCmd {
     },
     /// Sign in again with Google/Microsoft for an account (opens your browser).
     /// Also grants the contacts and calendars scopes to an active account whose
-    /// `calendars status` shows a dav_error.
+    /// `calendars status` shows a missing permission.
     Reauth {
         /// Account name, email or ID
         account: String,

@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { Account, AccountAuth, AccountStats, AccountStatus, AuthState, MailboxModel, OAuthProviderId } from './types';
+import type { Account, AccountAuth, FeatureStatus, AccountStats, AccountStatus, AuthState, MailboxModel, OAuthProviderId } from './types';
 
 interface AuthStatusDto {
   account_id: string;
@@ -15,7 +15,19 @@ interface AuthStatusDto {
   token_expires_at: string | null;
   smtp_error: string | null;
   task_error: string | null;
+  contacts: FeatureStatusDto;
+  calendar: FeatureStatusDto;
 }
+
+interface FeatureStatusDto {
+  state: FeatureStatus['state'];
+  missing_scopes: string[];
+}
+
+const featureFromDto = (d: FeatureStatusDto): FeatureStatus => ({
+  state: d.state,
+  missingScopes: d.missing_scopes,
+});
 
 interface AccountDto {
   id: string;
@@ -38,6 +50,8 @@ function authFromDto(d: AuthStatusDto): AccountAuth {
     tokenExpiresAt: d.token_expires_at,
     smtpError: d.smtp_error,
     taskError: d.task_error,
+    contacts: featureFromDto(d.contacts),
+    calendar: featureFromDto(d.calendar),
   };
 }
 

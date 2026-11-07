@@ -63,7 +63,7 @@ impl OAuthLoginTrigger for ReauthTrigger {
                 if let OAuthLoginProgress::Succeeded { email } = &event {
                     match gates.by_email(email) {
                         Some(gate) => {
-                            let lacked_dav = gate.status().dav_error.is_some();
+                            let lacked_dav = gate.status().dav.lacks_permission();
                             apply_fresh_tokens(&gate, secret_store.as_ref()).await;
                             // The DAV loop is chosen at start, from the scopes
                             // the keychain's token then has.

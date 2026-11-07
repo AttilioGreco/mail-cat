@@ -18,6 +18,14 @@ export type AuthState =
 
 export type OAuthProviderId = 'google' | 'microsoft';
 
+export type FeatureState = 'enabled' | 'missing_permission' | 'unavailable';
+
+export interface FeatureStatus {
+  state: FeatureState;
+  /** The OAuth scopes the login lacks; re-authenticating grants them. */
+  missingScopes: string[];
+}
+
 export interface AccountAuth {
   state: AuthState;
   /** Why the account is in `state`; null while active. */
@@ -34,6 +42,9 @@ export interface AccountAuth {
   smtpError: string | null;
   /** A background task crashed for good; restarting the account revives it. */
   taskError: string | null;
+  /** Contacts and calendars are separate features; neither affects mail. */
+  contacts: FeatureStatus;
+  calendar: FeatureStatus;
 }
 
 /** How an account's mailboxes are presented: a folder tree, or labels on messages. */

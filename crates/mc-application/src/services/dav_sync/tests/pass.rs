@@ -217,3 +217,35 @@ async fn an_empty_collection_list_is_believed_only_when_the_next_pass_agrees() {
     env.sync().await;
     assert_eq!(env.contact_count().await, 0);
 }
+
+#[tokio::test]
+async fn a_disabled_kind_is_never_listed_or_requested() {
+    let env = Env::with_book();
+    let only = |contacts: bool, calendar: bool| {
+        let on = |enabled| {
+            if enabled {
+                FeatureStatus::enabled()
+            } else {
+                FeatureStatus::default()
+            }
+        };
+        DavStatus {
+            contacts: on(contacts),
+            calendar: on(calendar),
+        }
+    };
+
+    env.svc
+        .providers
+        .register(env.account, env.fake.clone(), only(true, false));
+    env.sync().await;
+    assert_eq!(env.fake.calls_to("list books"), 1);
+    assert_eq!(env.fake.calls_to("list calendars"), 0);
+
+    env.svc
+        .providers
+        .register(env.account, env.fake.clone(), only(false, true));
+    env.sync().await;
+    assert_eq!(env.fake.calls_to("list books"), 1, "contacts now skipped");
+    assert_eq!(env.fake.calls_to("list calendars"), 1);
+}

@@ -131,10 +131,22 @@ message AccountAuthStatus {
   // crashed repeatedly and was given up on. `state` stays as it was; cleared
   // by RestartAccount.
   optional string task_error = 10;
-  // Why contacts and calendars do not sync while mail does (a Google token
-  // granted before the DAV scopes existed). `state` stays as it was; a new
-  // login (ReauthAccount) clears it.
-  optional string dav_error = 11;
+  // Contacts and calendars are independent features; neither ever changes
+  // `state`. A missing permission is fixed by a new login (ReauthAccount).
+  FeatureStatus contacts = 11;
+  FeatureStatus calendar = 12;
+}
+
+enum FeatureState {
+  FEATURE_STATE_UNAVAILABLE = 0;
+  FEATURE_STATE_ENABLED = 1;
+  FEATURE_STATE_MISSING_PERMISSION = 2;
+}
+
+message FeatureStatus {
+  FeatureState state = 1;
+  // The OAuth scopes the login lacks; set for MISSING_PERMISSION.
+  repeated string missing_scopes = 2;
 }
 
 message WatchAuthStatusRequest {}

@@ -284,7 +284,21 @@ pub fn auth_status_to_proto(status: &mc_application::AuthStatus) -> proto::Accou
         token_expires_at: status.token_expires_at.as_ref().map(datetime_to_timestamp),
         smtp_error: status.smtp_error.clone(),
         task_error: status.task_error.clone(),
-        dav_error: status.dav_error.clone(),
+        contacts: Some(feature_status_to_proto(&status.dav.contacts)),
+        calendar: Some(feature_status_to_proto(&status.dav.calendar)),
+    }
+}
+
+fn feature_status_to_proto(f: &mc_application::FeatureStatus) -> proto::FeatureStatus {
+    use mc_application::FeatureState;
+
+    proto::FeatureStatus {
+        state: match f.state {
+            FeatureState::Enabled => proto::FeatureState::Enabled,
+            FeatureState::MissingPermission => proto::FeatureState::MissingPermission,
+            FeatureState::Unavailable => proto::FeatureState::Unavailable,
+        } as i32,
+        missing_scopes: f.missing_scopes.clone(),
     }
 }
 
@@ -358,5 +372,37 @@ mod tests {
         let mut bad = proto;
         bad.dav.as_mut().unwrap().caldav = Some("not a url".into());
         assert!(proto_connection_to_domain(&bad).is_err());
+    }
+
+    #[test]
+    fn dav_features_reach_proto_each_with_its_own_state() {
+        use mc_application::{DavStatus, FeatureStatus};
+
+        let dav = DavStatus {
+            contacts: FeatureStatus::enabled(),
+            calendar: FeatureStatus::missing("calendar-scope"),
+        };
+        let status = mc_application::AuthStatus {
+            account_id: mc_domain::AccountId::new(),
+            state: mc_application::AuthState::Active,
+            reason: None,
+            last_error: None,
+            since: chrono::Utc::now(),
+            oauth_provider: None,
+            token_expires_at: None,
+            smtp_error: None,
+            task_error: None,
+            dav,
+        };
+        let proto = auth_status_to_proto(&status);
+        let contacts = proto.contacts.unwrap();
+        let calendar = proto.calendar.unwrap();
+        assert_eq!(contacts.state, proto::FeatureState::Enabled as i32);
+        assert!(contacts.missing_scopes.is_empty());
+        assert_eq!(
+            calendar.state,
+            proto::FeatureState::MissingPermission as i32
+        );
+        assert_eq!(calendar.missing_scopes, ["calendar-scope"]);
     }
 }

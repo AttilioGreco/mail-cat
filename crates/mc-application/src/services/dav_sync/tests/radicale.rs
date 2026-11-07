@@ -136,7 +136,9 @@ async fn contacts_and_events_round_trip_through_the_service() {
         )
         .unwrap(),
     );
-    env.svc.providers.register(env.account, provider.clone());
+    env.svc
+        .providers
+        .register(env.account, provider.clone(), DavStatus::all_enabled());
     let book = CollectionId::new("/alice/friends/");
 
     // Discovery and the first pull, then a contact created here.

@@ -56,8 +56,35 @@ pub struct AuthStatus {
     pub smtp_error: Option<String>,
     /// A background task crashed for good; `mc accounts restart` revives it.
     pub task_error: Option<String>,
-    /// Why contacts and calendars are not syncing; never affects `state`.
-    pub dav_error: Option<String>,
+    /// Contacts and calendars are separate features; neither affects `state`.
+    pub contacts: FeatureStatus,
+    pub calendar: FeatureStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureState {
+    Enabled,
+    /// The login lacks scopes; `mc accounts reauth` grants them.
+    MissingPermission,
+    Unavailable,
+}
+
+impl FeatureState {
+    /// Machine-readable tag, used as the wire value towards the desktop UI.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::MissingPermission => "missing_permission",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FeatureStatus {
+    pub state: FeatureState,
+    pub missing_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

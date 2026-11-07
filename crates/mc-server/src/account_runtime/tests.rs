@@ -1,5 +1,5 @@
 use super::*;
-use mc_application::QueryBus;
+use mc_application::{FeatureState, QueryBus};
 use mc_domain::{AccountSecrets, ProviderRegistry};
 use std::collections::HashMap;
 
@@ -481,36 +481,58 @@ fn dav_provisioning_decision_table() {
     };
 
     let both = [GOOGLE_CARDDAV, GOOGLE_CALENDAR];
-    assert!(matches!(
-        plan(&google, &both, None),
-        tasks::DavSetup::Known(_)
-    ));
-    assert!(matches!(
-        plan(&google, &[], None),
-        tasks::DavSetup::NeedsScopes
-    ));
-    assert!(matches!(
-        plan(&google, &[GOOGLE_CARDDAV], None),
-        tasks::DavSetup::NeedsScopes
-    ));
+    let state = |setup: &tasks::DavSetup| match setup {
+        tasks::DavSetup::Known(_, s) | tasks::DavSetup::None(s) => {
+            Some((s.contacts.state, s.calendar.state))
+        }
+        tasks::DavSetup::Discover(_) => None,
+    };
+    let (on, missing, off) = (
+        FeatureState::Enabled,
+        FeatureState::MissingPermission,
+        FeatureState::Unavailable,
+    );
 
-    assert!(matches!(
-        plan(ACCOUNT_TOML, &[], Some(url("https://dav.example.com/"))),
-        tasks::DavSetup::Known(_)
-    ));
-    assert!(matches!(
-        plan(ACCOUNT_TOML, &[], None),
-        tasks::DavSetup::Discover(_)
-    ));
-    assert!(matches!(
-        plan(ACCOUNT_TOML, &[], Some(Default::default())),
-        tasks::DavSetup::Discover(_)
-    ));
+    assert_eq!(state(&plan(&google, &both, None)), Some((on, on)));
+    assert_eq!(
+        state(&plan(&google, &[GOOGLE_CARDDAV], None)),
+        Some((on, missing))
+    );
+    assert_eq!(
+        state(&plan(&google, &[GOOGLE_CALENDAR], None)),
+        Some((missing, on))
+    );
+    let none = plan(&google, &[], None);
+    assert!(matches!(none, tasks::DavSetup::None(_)));
+    assert_eq!(state(&none), Some((missing, missing)));
+    let tasks::DavSetup::None(none) = none else {
+        unreachable!()
+    };
+    assert_eq!(none.calendar.missing_scopes, [GOOGLE_CALENDAR]);
 
-    assert!(matches!(
-        plan(&oauth_toml("microsoft"), &both, None),
-        tasks::DavSetup::None
-    ));
+    assert_eq!(
+        state(&plan(
+            ACCOUNT_TOML,
+            &[],
+            Some(url("https://dav.example.com/"))
+        )),
+        Some((on, off)),
+        "a generic account serves what it has an endpoint for"
+    );
+    assert_eq!(
+        state(&plan(ACCOUNT_TOML, &[], None)),
+        None,
+        "discovery decides"
+    );
+    assert_eq!(
+        state(&plan(ACCOUNT_TOML, &[], Some(Default::default()))),
+        None
+    );
+
+    assert_eq!(
+        state(&plan(&oauth_toml("microsoft"), &both, None)),
+        Some((off, off))
+    );
 }
 
 #[tokio::test]
@@ -523,7 +545,8 @@ async fn a_google_account_without_dav_scopes_keeps_mail_and_reports_it() {
 
     let status = runtime.deps.auth_gates.get(&id).unwrap().status();
 
-    assert!(status.dav_error.is_some());
+    assert_eq!(status.dav.contacts.state, FeatureState::MissingPermission);
+    assert_eq!(status.dav.calendar.state, FeatureState::MissingPermission);
     assert!(!status.state.is_paused(), "mail keeps working");
     assert!(
         runtime.deps.dav.sync_account(&id).await.is_err(),
@@ -626,7 +649,7 @@ fn start_dav_loop(f: &Fixture, id: AccountId, backend: Arc<dyn mc_application::D
         stop: running[&id].stop.clone(),
         tasks: running[&id].tasks.clone(),
     };
-    runtime.spawn_dav_task(ctx, backend, None);
+    runtime.spawn_dav_task(ctx, backend, mc_application::DavStatus::all_enabled(), None);
 }
 
 async fn until(what: &str, mut done: impl FnMut() -> bool) {

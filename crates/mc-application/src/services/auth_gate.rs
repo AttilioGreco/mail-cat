@@ -23,6 +23,8 @@ use mc_domain::{
     OAuthProvider, OAuthSecrets, SecretStore,
 };
 
+use super::dav_sync::DavStatus;
+
 /// A token this close to expiry is refreshed before a login presents it.
 const REFRESH_MARGIN: TimeDelta = TimeDelta::minutes(5);
 
@@ -110,10 +112,9 @@ pub struct AuthStatus {
     /// A background task of the account crashed for good: it looks active but
     /// part of it no longer runs, until the account is restarted.
     pub task_error: Option<String>,
-    /// Why contacts and calendars do not sync while mail does, e.g. a Google
-    /// token granted before the DAV scopes existed: only a new login fixes it,
-    /// yet it never pauses the account.
-    pub dav_error: Option<String>,
+    /// Which of contacts and calendars sync. A missing permission only a new
+    /// login fixes, yet it never pauses the account.
+    pub dav: DavStatus,
 }
 
 /// Exchanges a refresh token for fresh tokens at the provider.
@@ -141,7 +142,7 @@ struct Tracked {
     last_throttled: Option<DateTime<Utc>>,
     smtp_error: Option<String>,
     task_error: Option<String>,
-    dav_error: Option<String>,
+    dav: DavStatus,
 }
 
 /// What an offline or throttled gate has accumulated, so a successor gate
@@ -202,7 +203,7 @@ impl AuthGate {
             token_expires_at,
             smtp_error: tracked.smtp_error.clone(),
             task_error: tracked.task_error.clone(),
-            dav_error: tracked.dav_error.clone(),
+            dav: tracked.dav.clone(),
         }
     }
 
@@ -212,9 +213,9 @@ impl AuthGate {
         let _ = self.changes.send(self.account_id);
     }
 
-    /// Shows clients why the account has no contacts and calendars sync.
-    pub fn dav_unavailable(&self, reason: String) {
-        self.tracked.send_modify(|t| t.dav_error = Some(reason));
+    /// Shows clients which of contacts and calendars sync.
+    pub fn set_dav(&self, dav: DavStatus) {
+        self.tracked.send_modify(|t| t.dav = dav);
         let _ = self.changes.send(self.account_id);
     }
 
@@ -733,7 +734,7 @@ impl AuthGates {
                 last_throttled: None,
                 smtp_error: None,
                 task_error: None,
-                dav_error: None,
+                dav: DavStatus::default(),
             }),
             refresh: self.refresh.clone(),
             secret_store: self.secret_store.clone(),

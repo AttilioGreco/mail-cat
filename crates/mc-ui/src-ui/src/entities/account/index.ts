@@ -3,6 +3,7 @@ export { authLabel, authState, useSecondsUntil } from './model/auth-label';
 export type {
   Account,
   AccountAuth,
+  FeatureStatus,
   AccountStats,
   AccountStatus,
   MailboxModel,

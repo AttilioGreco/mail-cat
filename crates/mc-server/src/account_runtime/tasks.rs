@@ -8,9 +8,11 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use mc_application::{AuthGate, AuthState, DavBackend, DavProviders, DavSyncService};
+use mc_application::{
+    AuthGate, AuthState, DavBackend, DavProviders, DavStatus, DavSyncService, FeatureStatus,
+};
 use mc_domain::model::account::DavConfig;
-use mc_domain::{AccountId, AccountSecrets, DomainError, LoginGate};
+use mc_domain::{AccountId, AccountSecrets, DomainError, LoginGate, OAuthSecrets};
 use mc_infrastructure::oauth::{GOOGLE_CALENDAR, GOOGLE_CARDDAV};
 use mc_infrastructure::{DavProfile, DavProvider, SqliteEventStore};
 
@@ -173,12 +175,21 @@ async fn sleep_or_stop(stop: &CancellationToken, wait: Duration) -> bool {
 /// What an account gets for contacts and calendars.
 pub(super) enum DavSetup {
     /// The endpoints are known: Google's fixed ones or the account's own.
-    Known(DavProvider),
+    Known(DavProvider, DavStatus),
     /// A generic server with no URL configured: discovery decides.
     Discover(DavProvider),
-    /// A Google token granted before the DAV scopes: mail only.
-    NeedsScopes,
-    None,
+    /// Neither feature is available; `DavStatus` says why.
+    None(DavStatus),
+}
+
+/// Google lets the user untick single scopes, so each feature is judged by
+/// its own scope.
+fn google_feature(tokens: Option<&OAuthSecrets>, scope: &str) -> FeatureStatus {
+    if tokens.is_some_and(|t| t.grants_all(&[scope])) {
+        FeatureStatus::enabled()
+    } else {
+        FeatureStatus::missing(scope)
+    }
 }
 
 pub(super) fn dav_setup(
@@ -188,23 +199,37 @@ pub(super) fn dav_setup(
     dav: Option<&DavConfig>,
     gate: Arc<dyn LoginGate>,
 ) -> Result<DavSetup, DomainError> {
-    let profile = match config.oauth_provider {
+    let (profile, status) = match config.oauth_provider {
         // ponytail: Graph contacts/calendars are phase 3.
-        Some(OAuthProviderConfig::Microsoft) => return Ok(DavSetup::None),
+        Some(OAuthProviderConfig::Microsoft) => return Ok(DavSetup::None(DavStatus::default())),
         Some(OAuthProviderConfig::Google) => {
-            let granted = secrets
-                .oauth
-                .as_ref()
-                .is_some_and(|t| t.grants_all(&[GOOGLE_CARDDAV, GOOGLE_CALENDAR]));
-            if !granted {
-                return Ok(DavSetup::NeedsScopes);
-            }
-            DavProfile::Google
+            let status = DavStatus {
+                contacts: google_feature(secrets.oauth.as_ref(), GOOGLE_CARDDAV),
+                calendar: google_feature(secrets.oauth.as_ref(), GOOGLE_CALENDAR),
+            };
+            (DavProfile::Google, status)
         }
-        None => DavProfile::Generic,
+        None => {
+            let has = |url: fn(&DavConfig) -> bool| {
+                if dav.is_some_and(url) {
+                    FeatureStatus::enabled()
+                } else {
+                    FeatureStatus::default()
+                }
+            };
+            let status = DavStatus {
+                contacts: has(|d| d.carddav.is_some()),
+                calendar: has(|d| d.caldav.is_some()),
+            };
+            (DavProfile::Generic, status)
+        }
     };
-    let known = profile == DavProfile::Google
-        || dav.is_some_and(|d| d.carddav.is_some() || d.caldav.is_some());
+    if profile == DavProfile::Google
+        && !status.contacts.is_enabled()
+        && !status.calendar.is_enabled()
+    {
+        return Ok(DavSetup::None(status));
+    }
     let provider = DavProvider::new(
         account,
         &config.email,
@@ -213,11 +238,13 @@ pub(super) fn dav_setup(
         dav,
         profile,
     )?;
-    Ok(if known {
-        DavSetup::Known(provider)
-    } else {
-        DavSetup::Discover(provider)
-    })
+    Ok(
+        if profile == DavProfile::Google || status != DavStatus::default() {
+            DavSetup::Known(provider, status)
+        } else {
+            DavSetup::Discover(provider)
+        },
+    )
 }
 
 #[derive(Clone)]
@@ -229,6 +256,7 @@ struct DavLoop {
     sync: Arc<DavSyncService>,
     providers: Arc<DavProviders>,
     backend: Arc<dyn DavBackend>,
+    features: DavStatus,
     /// Set while the server's DAV endpoints are still to be discovered.
     probe: Option<Arc<DavProvider>>,
 }
@@ -236,32 +264,30 @@ struct DavLoop {
 impl AccountRuntime {
     /// Starts the account's contacts and calendars loop, if its setup has one.
     pub(super) fn spawn_dav_loop(&self, ctx: TaskCtx, setup: DavSetup) {
-        let (provider, discover) = match setup {
-            DavSetup::Known(provider) => (Arc::new(provider), false),
+        let (provider, features, probe) = match setup {
+            DavSetup::Known(provider, features) => (Arc::new(provider), features, None),
             DavSetup::Discover(_) if !self.dav_discovery.load(Ordering::Relaxed) => return,
-            DavSetup::Discover(provider) => (Arc::new(provider), true),
-            DavSetup::NeedsScopes => {
-                tracing::info!(
-                    "'{}' has no contacts and calendars sync until it logs in again",
-                    ctx.name
-                );
-                ctx.gate.dav_unavailable(
-                    "contacts and calendars need a new login to grant access".into(),
-                );
+            DavSetup::Discover(provider) => {
+                let provider = Arc::new(provider);
+                (provider.clone(), DavStatus::all_enabled(), Some(provider))
+            }
+            DavSetup::None(features) => {
+                tracing::info!("'{}' has no contacts and calendars sync", ctx.name);
+                ctx.gate.set_dav(features);
                 return;
             }
-            DavSetup::None => return,
         };
-        let probe = discover.then(|| provider.clone());
-        self.spawn_dav_task(ctx, provider, probe);
+        self.spawn_dav_task(ctx, provider, features, probe);
     }
 
     /// `probe` is set while the server's DAV endpoints are still to be
-    /// discovered: the backend is registered only once it answers.
+    /// discovered: the backend is registered, and `features` shown, only once
+    /// it answers.
     pub(super) fn spawn_dav_task(
         &self,
         ctx: TaskCtx,
         backend: Arc<dyn DavBackend>,
+        features: DavStatus,
         probe: Option<Arc<DavProvider>>,
     ) {
         let task = DavLoop {
@@ -272,6 +298,7 @@ impl AccountRuntime {
             sync: self.deps.dav.clone(),
             providers: self.deps.dav_providers.clone(),
             backend,
+            features,
             probe,
         };
         supervise(
@@ -297,12 +324,14 @@ impl DavLoop {
             sync,
             providers,
             backend,
+            features,
             probe,
         } = self;
         let mut registered = probe.is_none();
         let mut failures = 0u32;
         if registered {
-            providers.register(id, backend.clone());
+            providers.register(id, backend.clone(), features.clone());
+            gate.set_dav(features.clone());
         }
         loop {
             tokio::select! {
@@ -317,7 +346,8 @@ impl DavLoop {
                 };
                 match found {
                     Ok(true) => {
-                        providers.register(id, backend.clone());
+                        providers.register(id, backend.clone(), features.clone());
+                        gate.set_dav(features.clone());
                         registered = true;
                     }
                     // Looked up again only when the account restarts.

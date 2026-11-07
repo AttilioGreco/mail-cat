@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use mc_client::{
     Account, AuthStatus, ClientError, ComposeAttachment, ComposeInput, ComposeView, ContactHit,
-    ConversationSummary, ImapAccountParams, MailCatClient, Mailbox, MailboxModel,
+    ConversationSummary, FeatureStatus, ImapAccountParams, MailCatClient, Mailbox, MailboxModel,
     MailboxNotificationKind, MessageBody, MessageFlag, MessageSummary, OAuthLoginEvent,
     OAuthProvider, SearchHit, Suggestion, SyncPhase, SyncProgress, ThreadMessage,
 };
@@ -152,6 +152,10 @@ pub struct AuthStatusDto {
     /// Why the last SMTP login was refused; sending only.
     pub smtp_error: Option<String>,
     pub task_error: Option<String>,
+    /// Contacts and calendars are separate features; a missing permission is
+    /// fixed by re-authenticating.
+    pub contacts: FeatureStatus,
+    pub calendar: FeatureStatus,
 }
 
 /// Download progress for one account.
@@ -267,6 +271,8 @@ fn auth_status_to_dto(s: AuthStatus) -> AuthStatusDto {
         token_expires_at: s.token_expires_at.map(|t| t.to_rfc3339()),
         smtp_error: s.smtp_error,
         task_error: s.task_error,
+        contacts: s.contacts,
+        calendar: s.calendar,
     }
 }
 

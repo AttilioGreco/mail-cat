@@ -56,7 +56,20 @@ pub fn auth_status_from_proto(s: pb::AccountAuthStatus) -> AuthStatus {
         token_expires_at: time(s.token_expires_at),
         smtp_error: s.smtp_error,
         task_error: s.task_error,
-        dav_error: s.dav_error,
+        contacts: feature_from_proto(s.contacts),
+        calendar: feature_from_proto(s.calendar),
+    }
+}
+
+fn feature_from_proto(f: Option<pb::FeatureStatus>) -> FeatureStatus {
+    let f = f.unwrap_or_default();
+    FeatureStatus {
+        state: match pb::FeatureState::try_from(f.state) {
+            Ok(pb::FeatureState::Enabled) => FeatureState::Enabled,
+            Ok(pb::FeatureState::MissingPermission) => FeatureState::MissingPermission,
+            _ => FeatureState::Unavailable,
+        },
+        missing_scopes: f.missing_scopes,
     }
 }
 

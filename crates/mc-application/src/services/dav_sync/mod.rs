@@ -39,16 +39,84 @@ pub trait DavBackend: ContactsProvider + CalendarProvider {}
 
 impl<T: ContactsProvider + CalendarProvider> DavBackend for T {}
 
-/// The DAV backend of each account that has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FeatureState {
+    Enabled,
+    /// The login lacks the scopes; a new login grants them.
+    MissingPermission,
+    #[default]
+    Unavailable,
+}
+
+/// Whether one feature syncs and, if not, what it lacks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FeatureStatus {
+    pub state: FeatureState,
+    pub missing_scopes: Vec<String>,
+}
+
+impl FeatureStatus {
+    pub fn enabled() -> Self {
+        Self {
+            state: FeatureState::Enabled,
+            missing_scopes: Vec::new(),
+        }
+    }
+
+    pub fn missing(scope: &str) -> Self {
+        Self {
+            state: FeatureState::MissingPermission,
+            missing_scopes: vec![scope.to_owned()],
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.state == FeatureState::Enabled
+    }
+}
+
+/// Contacts and calendars are independent features: each one syncs only
+/// while its own status is enabled, and neither ever affects mail.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DavStatus {
+    pub contacts: FeatureStatus,
+    pub calendar: FeatureStatus,
+}
+
+impl DavStatus {
+    pub fn all_enabled() -> Self {
+        Self {
+            contacts: FeatureStatus::enabled(),
+            calendar: FeatureStatus::enabled(),
+        }
+    }
+
+    pub fn lacks_permission(&self) -> bool {
+        [&self.contacts, &self.calendar]
+            .iter()
+            .any(|f| f.state == FeatureState::MissingPermission)
+    }
+
+    fn serves(&self, kind: Kind) -> bool {
+        match kind {
+            Kind::Contacts => self.contacts.is_enabled(),
+            Kind::Calendar => self.calendar.is_enabled(),
+        }
+    }
+}
+
+/// The DAV backend of each account that has one, with the features it serves.
 #[derive(Default)]
-pub struct DavProviders(RwLock<HashMap<AccountId, Arc<dyn DavBackend>>>);
+pub struct DavProviders(RwLock<HashMap<AccountId, Registered>>);
+
+type Registered = (Arc<dyn DavBackend>, DavStatus);
 
 impl DavProviders {
-    pub fn register(&self, account: AccountId, backend: Arc<dyn DavBackend>) {
+    pub fn register(&self, account: AccountId, backend: Arc<dyn DavBackend>, features: DavStatus) {
         self.0
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(account, backend);
+            .insert(account, (backend, features));
     }
 
     pub fn remove(&self, account: &AccountId) {
@@ -58,7 +126,10 @@ impl DavProviders {
             .remove(account);
     }
 
-    fn get(&self, account: &AccountId) -> Result<Arc<dyn DavBackend>, ApplicationError> {
+    fn get(
+        &self,
+        account: &AccountId,
+    ) -> Result<(Arc<dyn DavBackend>, DavStatus), ApplicationError> {
         self.0
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -258,11 +329,15 @@ impl DavSyncService {
     /// collections not reached untouched; any other failure skips just the
     /// collection it hit.
     pub async fn sync_account(&self, account: &AccountId) -> Result<(), ApplicationError> {
+        let (backend, features) = self.providers.get(account)?;
         let ctx = Ctx {
             account: *account,
-            backend: self.providers.get(account)?,
+            backend,
         };
         for kind in [Kind::Contacts, Kind::Calendar] {
+            if !features.serves(kind) {
+                continue;
+            }
             let Some(listed) = self.reconcile_collections(&ctx, kind).await? else {
                 continue;
             };
@@ -332,7 +407,7 @@ impl DavSyncService {
     ) -> Result<(), ApplicationError> {
         let ctx = Ctx {
             account: *account,
-            backend: self.providers.get(account)?,
+            backend: self.providers.get(account)?.0,
         };
         let _pushing = self.push_locks.lock(account).await;
         // Under the lock: a pass may have pushed it while this waited.
