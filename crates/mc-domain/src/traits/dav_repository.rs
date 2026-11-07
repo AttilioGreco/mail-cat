@@ -46,6 +46,18 @@ pub struct Occurrence {
     pub event: EventFields,
 }
 
+/// A contact bound to a server resource, with the state of its sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteContact {
+    pub id: ContactId,
+    pub binding: RemoteBinding,
+    pub raw: String,
+    /// A local edit the server has not acknowledged.
+    pub dirty: bool,
+    /// Why the server refused the last push, if it did.
+    pub push_error: Option<String>,
+}
+
 /// Read side of the DAV projections: what the sync service diffs against and
 /// what the API lists.
 #[async_trait]
@@ -84,6 +96,15 @@ pub trait DavReadRepository: Send + Sync {
         account: &AccountId,
         calendar: &CollectionId,
     ) -> Result<HashMap<Href, Etag>, DomainError>;
+
+    /// Contacts bound to a server, of one address book or of all the account's.
+    async fn remote_contacts(
+        &self,
+        account: &AccountId,
+        book: Option<&CollectionId>,
+    ) -> Result<Vec<RemoteContact>, DomainError>;
+
+    async fn remote_contact(&self, id: &ContactId) -> Result<Option<RemoteContact>, DomainError>;
 
     /// The contact bound to a server resource.
     async fn contact_at(

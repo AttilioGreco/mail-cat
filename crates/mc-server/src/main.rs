@@ -36,10 +36,10 @@ use mc_interfaces::grpc::services::{RESTART_EXIT_CODE, ServerServiceImpl};
 use wiring::AppContext;
 
 use mc_interfaces::grpc::proto::{
-    account_service_server::AccountServiceServer, contact_service_server::ContactServiceServer,
-    mailbox_service_server::MailboxServiceServer, message_service_server::MessageServiceServer,
-    search_service_server::SearchServiceServer, server_service_server::ServerServiceServer,
-    tagging_service_server::TaggingServiceServer,
+    account_service_server::AccountServiceServer, calendar_service_server::CalendarServiceServer,
+    contact_service_server::ContactServiceServer, mailbox_service_server::MailboxServiceServer,
+    message_service_server::MessageServiceServer, search_service_server::SearchServiceServer,
+    server_service_server::ServerServiceServer, tagging_service_server::TaggingServiceServer,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -197,6 +197,7 @@ async fn run() -> anyhow::Result<()> {
     let server = Server::builder()
         .add_service(AccountServiceServer::new(app_ctx.account_service))
         .add_service(ContactServiceServer::new(app_ctx.contact_service))
+        .add_service(CalendarServiceServer::new(app_ctx.calendar_service))
         .add_service(MailboxServiceServer::new(app_ctx.mailbox_service))
         .add_service(
             // Compose requests carry attachments; tonic's 4 MB default would reject them.

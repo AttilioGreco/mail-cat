@@ -56,6 +56,7 @@ pub fn auth_status_from_proto(s: pb::AccountAuthStatus) -> AuthStatus {
         token_expires_at: time(s.token_expires_at),
         smtp_error: s.smtp_error,
         task_error: s.task_error,
+        dav_error: s.dav_error,
     }
 }
 

@@ -1,5 +1,8 @@
 pub mod account_service;
+pub mod calendar_service;
 pub mod contact_service;
+#[cfg(test)]
+mod dav_fakes;
 pub mod mailbox_service;
 pub mod message_service;
 pub mod search_service;
@@ -7,6 +10,7 @@ pub mod server_service;
 pub mod tagging_service;
 
 pub use account_service::AccountServiceImpl;
+pub use calendar_service::CalendarServiceImpl;
 pub use contact_service::ContactServiceImpl;
 pub use mailbox_service::MailboxServiceImpl;
 pub use message_service::MessageServiceImpl;

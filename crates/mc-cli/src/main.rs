@@ -30,8 +30,8 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Output format: table, json or toon (compact, for assistants; only the
-    /// `labels` commands have it, the others print tables)
+    /// Output format: table, json or toon (compact, for assistants; the `labels`,
+    /// `calendars`, `events` and synced `contacts` commands print it by default, the others print tables)
     #[arg(long, global = true, value_enum)]
     format: Option<commands::Format>,
 
@@ -48,6 +48,14 @@ enum Command {
     /// Manage contacts and the contact search index
     #[command(subcommand)]
     Contacts(commands::contacts::ContactsCmd),
+
+    /// Calendars synced with a server, and their sync health
+    #[command(subcommand)]
+    Calendars(commands::calendars::CalendarsCmd),
+
+    /// List, read and edit calendar events
+    #[command(subcommand)]
+    Events(commands::calendars::EventsCmd),
 
     /// List mailboxes for an account
     #[command(subcommand)]
@@ -104,7 +112,9 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Accounts(cmd) => commands::accounts::run(cmd, client, json).await,
-        Command::Contacts(cmd) => commands::contacts::run(cmd, client).await,
+        Command::Contacts(cmd) => commands::contacts::run(cmd, client, format).await,
+        Command::Calendars(cmd) => commands::calendars::run_calendars(cmd, client, format).await,
+        Command::Events(cmd) => commands::calendars::run_events(cmd, client, format).await,
         Command::Mailboxes(cmd) => commands::mailboxes::run(cmd, client, json).await,
         Command::Labels(cmd) => commands::labels::run(cmd, client, format).await,
         Command::Messages(cmd) => commands::messages::run(cmd, client, json).await,

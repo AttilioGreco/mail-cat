@@ -2,11 +2,13 @@
 
 pub mod account;
 pub mod common;
+pub mod dav;
 pub mod mailbox;
 pub mod message;
 
 pub use account::*;
 pub use common::*;
+pub use dav::*;
 pub use mailbox::*;
 pub use message::*;
 

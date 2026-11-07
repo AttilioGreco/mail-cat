@@ -191,6 +191,44 @@ macro_rules! dav_conformance {
         }
 
         #[tokio::test]
+        async fn remote_contacts_list_by_book_with_their_sync_state() {
+            let (_guard, _es, repo) = $make;
+            let account = AccountId::new();
+            let (a, b) = (ContactId::new(), ContactId::new());
+            let at = |book: &str, name: &str| {
+                dav_binding(account, book, &format!("{book}{name}.vcf"), None)
+            };
+            let added = |id, binding| {
+                remote_contact_added(id, card(binding, "raw", Origin::Local), &["x@example.com"])
+            };
+            project_all(
+                &repo,
+                [
+                    added(a, at("/one/", "a")),
+                    added(b, at("/two/", "b")),
+                    DomainEvent::ContactPushFailed {
+                        contact_id: a,
+                        reason: "403".into(),
+                    },
+                ],
+            )
+            .await;
+
+            let all = repo.remote_contacts(&account, None).await.unwrap();
+            assert_eq!(all.len(), 2);
+            let one = repo
+                .remote_contacts(&account, Some(&CollectionId::new("/one/")))
+                .await
+                .unwrap();
+            assert_eq!(one.len(), 1);
+            assert!(one[0].dirty);
+            assert_eq!(one[0].push_error.as_deref(), Some("403"));
+            assert_eq!(one[0].raw, "raw");
+            assert!(repo.remote_contact(&b).await.unwrap().is_some());
+            assert!(repo.remote_contact(&ContactId::new()).await.unwrap().is_none());
+        }
+
+        #[tokio::test]
         async fn acknowledging_an_older_push_leaves_a_newer_edit_dirty() {
             let (_guard, _es, repo) = $make;
             let (account, id) = (AccountId::new(), ContactId::new());

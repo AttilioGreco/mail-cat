@@ -58,6 +58,13 @@ pub enum AccountsCmd {
         #[arg(long)]
         password_stdin: bool,
     },
+    /// Sign in again with Google/Microsoft for an account (opens your browser).
+    /// Also grants the contacts and calendars scopes to an active account whose
+    /// `calendars status` shows a dav_error.
+    Reauth {
+        /// Account name, email or ID
+        account: String,
+    },
     /// Present an account's mailboxes as labels or as folders (data is not touched)
     SetModel {
         /// Account name, email or ID
@@ -116,6 +123,7 @@ pub async fn run(cmd: AccountsCmd, client: MailCatClient, json: bool) -> Result<
     match cmd {
         AccountsCmd::List => list(client, json).await,
         AccountsCmd::Status => status(client).await,
+        AccountsCmd::Reauth { account } => reauth(client, account).await,
         AccountsCmd::SetModel { account, model } => set_model(client, account, model).await,
         AccountsCmd::AddOauth {
             provider,
@@ -267,11 +275,27 @@ async fn add_oauth(
     name: Option<String>,
 ) -> Result<()> {
     let display_name = name.unwrap_or_else(|| email.clone());
-    let mut stream = client
+    let stream = client
         .start_oauth_login(&display_name, &email, provider)
         .await
         .context("starting OAuth login")?;
+    follow_login(stream, "aggiunto e attivo").await
+}
 
+async fn reauth(client: MailCatClient, wanted: String) -> Result<()> {
+    let account = find_account(&client, &wanted).await?;
+    let stream = client
+        .reauth_account(&account.id)
+        .await
+        .context("starting OAuth re-login")?;
+    follow_login(stream, "ri-autenticato").await
+}
+
+async fn follow_login(
+    stream: impl tokio_stream::Stream<Item = mc_client::Result<OAuthLoginEvent>>,
+    done: &str,
+) -> Result<()> {
+    tokio::pin!(stream);
     while let Some(event) = stream.next().await {
         match event.context("reading OAuth login progress")? {
             OAuthLoginEvent::AwaitingBrowser { authorize_url } => {
@@ -289,7 +313,7 @@ async fn add_oauth(
                 }
             }
             OAuthLoginEvent::Succeeded { email } => {
-                println!("{} account {} aggiunto e attivo.", "✓".green(), email);
+                println!("{} account {} {done}.", "✓".green(), email);
                 return Ok(());
             }
             OAuthLoginEvent::Failed { message } => {

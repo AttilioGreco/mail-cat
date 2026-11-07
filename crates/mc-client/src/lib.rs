@@ -10,6 +10,7 @@ mod proto {
 
 pub mod client;
 mod curation;
+mod dav;
 mod discovery;
 pub mod error;
 mod server;
@@ -18,6 +19,7 @@ pub mod types;
 
 pub use client::MailCatClient;
 pub use curation::*;
+pub use dav::*;
 pub use discovery::*;
 pub use error::{ClientError, Result};
 pub use server::*;

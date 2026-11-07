@@ -22,8 +22,8 @@ use mc_infrastructure::{
     SqliteRepository, SqliteTaggingStore, TantivySearchIndex,
 };
 use mc_interfaces::grpc::services::{
-    AccountServiceImpl, ContactServiceImpl, MailboxServiceImpl, MessageServiceImpl,
-    SearchServiceImpl, TaggingServiceImpl,
+    AccountServiceImpl, CalendarServiceImpl, ContactServiceImpl, MailboxServiceImpl,
+    MessageServiceImpl, SearchServiceImpl, TaggingServiceImpl,
 };
 
 use crate::account_runtime::{AccountRuntime, RuntimeDeps, create_account};
@@ -65,6 +65,7 @@ pub struct AppContext {
     pub message_service: MessageServiceImpl<CommandBusImpl, QueryBusImpl>,
     pub search_service: SearchServiceImpl<QueryBusImpl>,
     pub contact_service: ContactServiceImpl<QueryBusImpl, CommandBusImpl>,
+    pub calendar_service: CalendarServiceImpl<CommandBusImpl>,
     pub tagging_service: TaggingServiceImpl<SqliteTaggingStore, SqliteRepository, CommandBusImpl>,
     #[allow(dead_code)]
     pub sync_service: Arc<SyncServiceImpl>,
@@ -715,7 +716,14 @@ impl AppContext {
 
         let search_service = SearchServiceImpl::new(query_bus.clone());
 
-        let contact_service = ContactServiceImpl::new(query_bus.clone(), command_bus.clone());
+        let contact_service = ContactServiceImpl::new(
+            query_bus.clone(),
+            command_bus.clone(),
+            repository_arc.clone(),
+        );
+
+        let calendar_service =
+            CalendarServiceImpl::new(command_bus.clone(), repository_arc.clone());
 
         let tagging_service = TaggingServiceImpl::new(tagging);
 
@@ -727,6 +735,7 @@ impl AppContext {
             message_service,
             search_service,
             contact_service,
+            calendar_service,
             tagging_service,
             sync_service,
             provider_registry,

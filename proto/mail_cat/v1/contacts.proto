@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package mail_cat.v1;
 
+import "mail_cat/v1/common.proto";
+
 // Contact service — address book search, autocomplete, and merge.
 service ContactService {
   // Prefix-match search across display names and email addresses.
@@ -23,6 +25,21 @@ service ContactService {
   // Idempotent: existing contacts are left unchanged.
   // Use this after a fresh install to populate the address book from historical mail.
   rpc BackfillContactsFromMessages(BackfillContactsRequest) returns (BackfillContactsResponse);
+
+  // Address books a server holds for the account.
+  rpc ListAddressBooks(ListAddressBooksRequest) returns (ListAddressBooksResponse);
+
+  // Contacts synced with a server, with the raw vCard and the sync state.
+  rpc ListRemoteContacts(ListRemoteContactsRequest) returns (ListRemoteContactsResponse);
+
+  rpc GetRemoteContact(GetRemoteContactRequest) returns (RemoteContact);
+
+  // The address book is explicit: there is no default one.
+  rpc CreateRemoteContact(CreateRemoteContactRequest) returns (CreateRemoteContactResponse);
+
+  rpc UpdateRemoteContact(UpdateRemoteContactRequest) returns (UpdateRemoteContactResponse);
+
+  rpc DeleteRemoteContact(DeleteRemoteContactRequest) returns (DeleteRemoteContactResponse);
 }
 
 // A single result from contact autocomplete.
@@ -92,3 +109,87 @@ message BackfillContactsResponse {
   // Addresses that already had a contact entry (no-op).
   uint32 already_existed = 2;
 }
+
+message AddressBook {
+  string collection = 1;
+  string name       = 2;
+  optional string description = 3;
+  bool   read_only  = 4;
+}
+
+message ListAddressBooksRequest {
+  string account_id = 1;
+}
+
+message ListAddressBooksResponse {
+  repeated AddressBook address_books = 1;
+}
+
+message RemoteContact {
+  string id            = 1;
+  string account_id    = 2;
+  string address_book  = 3;
+  string href          = 4;
+  // Extracted from the vCard.
+  string display_name  = 5;
+  repeated string emails = 6;
+  repeated string phones = 7;
+  optional string organization = 8;
+  optional string notes = 9;
+  string raw           = 10;
+  // A local edit the server has not acknowledged.
+  bool   dirty         = 11;
+  // Why the server refused the last push.
+  optional string push_failed = 12;
+}
+
+message ListRemoteContactsRequest {
+  string account_id = 1;
+  // Unset: every address book of the account.
+  optional string address_book = 2;
+}
+
+message ListRemoteContactsResponse {
+  repeated RemoteContact contacts = 1;
+}
+
+message GetRemoteContactRequest {
+  string contact_id = 1;
+}
+
+message StringList {
+  repeated string items = 1;
+}
+
+// Unset fields are left as they are; for organization and notes an empty
+// string clears the field.
+message ContactFields {
+  optional string display_name = 1;
+  optional StringList emails   = 2;
+  optional StringList phones   = 3;
+  optional string organization = 4;
+  optional string notes        = 5;
+}
+
+message CreateRemoteContactRequest {
+  string account_id   = 1;
+  string address_book = 2;
+  ContactFields fields = 3;
+}
+
+message CreateRemoteContactResponse {
+  string contact_id = 1;
+}
+
+message UpdateRemoteContactRequest {
+  string contact_id = 1;
+  ContactFields fields = 2;
+}
+
+message UpdateRemoteContactResponse {}
+
+message DeleteRemoteContactRequest {
+  string contact_id = 1;
+}
+
+message DeleteRemoteContactResponse {}

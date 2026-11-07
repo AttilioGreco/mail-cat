@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod calendars;
 pub mod contacts;
 pub mod conversations;
 pub mod labels;

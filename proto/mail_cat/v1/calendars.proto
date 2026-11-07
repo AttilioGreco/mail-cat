@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package mail_cat.v1;
+
+import "mail_cat/v1/common.proto";
+
+// Calendars and events synced with a server.
+service CalendarService {
+  rpc ListCalendars(ListCalendarsRequest) returns (ListCalendarsResponse);
+
+  // Occurrences overlapping [from, to), recurrence expanded, ordered by start.
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+
+  rpc GetEvent(GetEventRequest) returns (EventDetail);
+
+  // The calendar is explicit: there is no default one.
+  rpc CreateEvent(CreateEventRequest) returns (CreateEventResponse);
+
+  rpc UpdateEvent(UpdateEventRequest) returns (UpdateEventResponse);
+
+  rpc DeleteEvent(DeleteEventRequest) returns (DeleteEventResponse);
+
+  // Sync health of the account's contacts and calendars.
+  rpc GetDavStatus(GetDavStatusRequest) returns (GetDavStatusResponse);
+}
+
+enum CalendarOwnership {
+  CALENDAR_OWNERSHIP_OWN          = 0;
+  CALENDAR_OWNERSHIP_SHARED       = 1;
+  CALENDAR_OWNERSHIP_SUBSCRIPTION = 2;
+}
+
+message Calendar {
+  string collection = 1;
+  string name       = 2;
+  optional string color    = 3;
+  optional string timezone = 4;
+  bool   read_only  = 5;
+  CalendarOwnership ownership = 6;
+  // False for a collection holding only tasks: listed but not synced.
+  bool   holds_events = 7;
+}
+
+message ListCalendarsRequest {
+  string account_id = 1;
+}
+
+message ListCalendarsResponse {
+  repeated Calendar calendars = 1;
+}
+
+message EventOccurrence {
+  string calendar = 1;
+  string href     = 2;
+  string summary  = 3;
+  Timestamp start = 4;
+  Timestamp end   = 5;
+  bool   all_day  = 6;
+  bool   recurring = 7;
+  optional string location = 8;
+  optional string status   = 9;
+}
+
+message ListEventsRequest {
+  string account_id = 1;
+  // Empty: every calendar of the account.
+  repeated string calendars = 2;
+  Timestamp from = 3;
+  Timestamp to   = 4;
+}
+
+message ListEventsResponse {
+  repeated EventOccurrence occurrences = 1;
+}
+
+message GetEventRequest {
+  string account_id = 1;
+  string href       = 2;
+}
+
+message EventDetail {
+  string calendar = 1;
+  string href     = 2;
+  string raw      = 3;
+  // Unset for a resource without a VEVENT (a task), which is kept as it is.
+  optional EventOccurrence first = 4;
+}
+
+// A time is an RFC 3339 instant, or a YYYY-MM-DD date for an all-day event.
+message CreateEventRequest {
+  string account_id = 1;
+  string calendar   = 2;
+  string summary    = 3;
+  string start      = 4;
+  string end        = 5;
+  optional string location = 6;
+}
+
+message CreateEventResponse {
+  string href = 1;
+}
+
+// Unset fields are left as they are; an empty location clears it.
+message UpdateEventRequest {
+  string account_id = 1;
+  string href       = 2;
+  optional string summary  = 3;
+  optional string location = 4;
+  optional string start    = 5;
+  optional string end      = 6;
+}
+
+message UpdateEventResponse {}
+
+message DeleteEventRequest {
+  string account_id = 1;
+  string href       = 2;
+}
+
+message DeleteEventResponse {}
+
+message GetDavStatusRequest {
+  string account_id = 1;
+}
+
+message GetDavStatusResponse {
+  // Local edits discarded by last-write-wins, ever.
+  uint64 conflicts_lost = 1;
+  // Local edits (contacts and events) the server has not acknowledged.
+  uint32 pending_changes = 2;
+  // Of those, the ones the server refused.
+  uint32 failed_changes = 3;
+}

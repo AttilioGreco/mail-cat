@@ -56,6 +56,8 @@ pub struct AuthStatus {
     pub smtp_error: Option<String>,
     /// A background task crashed for good; `mc accounts restart` revives it.
     pub task_error: Option<String>,
+    /// Why contacts and calendars are not syncing; never affects `state`.
+    pub dav_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

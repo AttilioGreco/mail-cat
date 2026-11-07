@@ -1,8 +1,44 @@
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use colored::Colorize;
-use mc_client::MailCatClient;
+use mc_client::{ContactFields, MailCatClient, RemoteContact};
 use tabled::{Table, Tabled};
+
+use super::accounts::find_account;
+use super::{Format, print_json};
+use crate::toon::{Toon, l, n, s};
+
+/// What `add` and `update` set on a contact. A flag left out keeps the field
+/// (`update`) or leaves it empty (`add`); `--org ""` and `--notes ""` clear.
+#[derive(Args, Default)]
+pub struct ContactFlags {
+    /// Display name
+    #[arg(long)]
+    name: Option<String>,
+    /// Email address; repeat for several (the first is the primary one)
+    #[arg(long)]
+    email: Vec<String>,
+    /// Phone number; repeat for several
+    #[arg(long)]
+    phone: Vec<String>,
+    #[arg(long)]
+    org: Option<String>,
+    #[arg(long)]
+    notes: Option<String>,
+}
+
+impl From<ContactFlags> for ContactFields {
+    fn from(flags: ContactFlags) -> Self {
+        let list = |items: Vec<String>| Some(items).filter(|items| !items.is_empty());
+        Self {
+            display_name: flags.name,
+            emails: list(flags.email),
+            phones: list(flags.phone),
+            organization: flags.org,
+            notes: flags.notes,
+        }
+    }
+}
 
 #[derive(Subcommand)]
 pub enum ContactsCmd {
@@ -32,6 +68,46 @@ pub enum ContactsCmd {
         account_id: Option<String>,
     },
 
+    /// List the address books the server holds for an account
+    Books {
+        /// Account name, email or ID
+        account: String,
+    },
+
+    /// List contacts synced with a server, with their sync state (dirty =
+    /// local edit not yet acknowledged, push_failed = why the server refused it)
+    List {
+        /// Account name, email or ID
+        account: String,
+        /// Only this address book (see `books`)
+        #[arg(long)]
+        book: Option<String>,
+    },
+
+    /// Show a synced contact with its raw vCard
+    Show { id: String },
+
+    /// Create a contact in an address book of the account
+    Add {
+        /// Account name, email or ID
+        account: String,
+        /// Address book collection (see `books`); there is no default
+        #[arg(long)]
+        book: String,
+        #[command(flatten)]
+        flags: ContactFlags,
+    },
+
+    /// Edit a synced contact; what the app does not model is kept
+    Update {
+        id: String,
+        #[command(flatten)]
+        flags: ContactFlags,
+    },
+
+    /// Delete a synced contact (on the server too)
+    Delete { id: String },
+
     /// Rebuild the Tantivy contact search index from stored contact data.
     ///
     /// Use this when the index is out of sync with the stored contacts
@@ -44,8 +120,33 @@ pub enum ContactsCmd {
     },
 }
 
-pub async fn run(cmd: ContactsCmd, client: MailCatClient) -> Result<()> {
+pub async fn run(cmd: ContactsCmd, client: MailCatClient, format: Format) -> Result<()> {
     match cmd {
+        ContactsCmd::Books { account } => books(&client, &account, format).await,
+        ContactsCmd::List { account, book } => list(&client, &account, book, format).await,
+        ContactsCmd::Show { id } => show(&client, &id, format).await,
+        ContactsCmd::Add {
+            account,
+            book,
+            flags,
+        } => {
+            let account = find_account(&client, &account).await?;
+            let id = client
+                .create_remote_contact(&account.id, &book, flags.into())
+                .await?;
+            println!("{} created {id}", "✓".green());
+            Ok(())
+        }
+        ContactsCmd::Update { id, flags } => {
+            client.update_remote_contact(&id, flags.into()).await?;
+            println!("{} updated {id}", "✓".green());
+            Ok(())
+        }
+        ContactsCmd::Delete { id } => {
+            client.delete_remote_contact(&id).await?;
+            println!("{} deleted {id}", "✓".green());
+            Ok(())
+        }
         ContactsCmd::Search {
             query,
             limit,
@@ -158,5 +259,85 @@ async fn rebuild_index(account_id: Option<String>, client: MailCatClient) -> Res
         indexed_count.to_string().bold(),
     );
 
+    Ok(())
+}
+
+// ── synced contacts ───────────────────────────────────────────────────────────
+
+async fn books(client: &MailCatClient, account: &str, format: Format) -> Result<()> {
+    let account = find_account(client, account).await?;
+    let books = client.list_address_books(&account.id).await?;
+    if format == Format::Json {
+        return print_json(&books);
+    }
+    let rows: Vec<_> = books
+        .iter()
+        .map(|b| vec![s(&b.collection), s(&b.name), n(b.read_only)])
+        .collect();
+    Toon::default()
+        .table("books", &["collection", "name", "read_only"], &rows)
+        .print();
+    Ok(())
+}
+
+async fn list(
+    client: &MailCatClient,
+    account: &str,
+    book: Option<String>,
+    format: Format,
+) -> Result<()> {
+    let account = find_account(client, account).await?;
+    let contacts = client.list_remote_contacts(&account.id, book).await?;
+    if format == Format::Json {
+        return print_json(&contacts);
+    }
+    let rows: Vec<_> = contacts
+        .iter()
+        .map(|c| {
+            vec![
+                s(&c.id),
+                s(&c.display_name),
+                l(&c.emails),
+                l(&c.phones),
+                s(c.organization.as_deref().unwrap_or_default()),
+                s(&c.address_book),
+                n(c.dirty),
+                s(c.push_failed.as_deref().unwrap_or_default()),
+            ]
+        })
+        .collect();
+    let fields = [
+        "id",
+        "name",
+        "emails",
+        "phones",
+        "org",
+        "book",
+        "dirty",
+        "push_failed",
+    ];
+    Toon::default().table("contacts", &fields, &rows).print();
+    Ok(())
+}
+
+async fn show(client: &MailCatClient, id: &str, format: Format) -> Result<()> {
+    let c: RemoteContact = client.get_remote_contact(id).await?;
+    if format == Format::Json {
+        return print_json(&c);
+    }
+    let mut t = Toon::default();
+    t.field("id", s(&c.id))
+        .field("book", s(&c.address_book))
+        .field("href", s(&c.href))
+        .field("name", s(&c.display_name))
+        .list("emails", &c.emails)
+        .list("phones", &c.phones)
+        .field("org", s(c.organization.as_deref().unwrap_or_default()))
+        .field("notes", s(c.notes.as_deref().unwrap_or_default()))
+        .field("dirty", n(c.dirty));
+    if let Some(reason) = &c.push_failed {
+        t.field("push_failed", s(reason));
+    }
+    t.field("raw", s(&c.raw)).print();
     Ok(())
 }

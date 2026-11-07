@@ -6,6 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/mail_cat/v1/messages.proto",
         "../../proto/mail_cat/v1/search.proto",
         "../../proto/mail_cat/v1/contacts.proto",
+        "../../proto/mail_cat/v1/calendars.proto",
         "../../proto/mail_cat/v1/tagging.proto",
         "../../proto/mail_cat/v1/server.proto",
     ];

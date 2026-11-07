@@ -46,7 +46,9 @@ pub use traits::dav_provider::{
     CalendarProvider, CollectionChanges, ContactsProvider, DeleteOutcome, PutOutcome,
     RemoteResource, ResourcePut,
 };
-pub use traits::dav_repository::{DavReadRepository, Occurrence, PendingChange, PendingPush};
+pub use traits::dav_repository::{
+    DavReadRepository, Occurrence, PendingChange, PendingPush, RemoteContact,
+};
 pub use traits::email_provider::{
     EmailProvider, Existing, MailboxChanges, MailboxCounts, MessageBodyResult,
     MessageEnvelopeSummary, ProviderNotification, Reset, SendOutcome, SentCopy,

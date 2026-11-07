@@ -1,33 +1,42 @@
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
-use crate::grpc::mappers::application_error_to_status;
+use crate::grpc::mappers::{
+    address_book_to_proto, application_error_to_status, contact_fields_from_proto,
+    domain_error_to_status, parse_account_id, remote_contact_to_proto,
+};
 use crate::grpc::proto::{
     BackfillContactsRequest, BackfillContactsResponse, ContactDuplicatePair,
-    ContactSearchHit as ProtoContactSearchHit, FindContactDuplicatesRequest,
-    FindContactDuplicatesResponse, MergeContactsRequest, MergeContactsResponse,
-    RebuildContactIndexRequest, RebuildContactIndexResponse, SearchContactsRequest,
-    SearchContactsResponse, contact_service_server::ContactService,
+    ContactSearchHit as ProtoContactSearchHit, CreateRemoteContactRequest,
+    CreateRemoteContactResponse, DeleteRemoteContactRequest, DeleteRemoteContactResponse,
+    FindContactDuplicatesRequest, FindContactDuplicatesResponse, GetRemoteContactRequest,
+    ListAddressBooksRequest, ListAddressBooksResponse, ListRemoteContactsRequest,
+    ListRemoteContactsResponse, MergeContactsRequest, MergeContactsResponse,
+    RebuildContactIndexRequest, RebuildContactIndexResponse, RemoteContact, SearchContactsRequest,
+    SearchContactsResponse, UpdateRemoteContactRequest, UpdateRemoteContactResponse,
+    contact_service_server::ContactService,
 };
 use mc_application::{
     bus::{CommandBus, QueryBus},
-    commands::Command,
+    commands::{Command, CommandResult},
     queries::Query,
 };
-use mc_domain::{AccountId, ContactId};
+use mc_domain::{AccountId, CollectionId, ContactId, DavReadRepository};
 
 /// Contact service implementation — exposes address-book search, duplicate
 /// detection, and merge over gRPC.
 pub struct ContactServiceImpl<Q: QueryBus + 'static, C: CommandBus + 'static> {
     query_bus: Arc<Q>,
     command_bus: Arc<C>,
+    dav: Arc<dyn DavReadRepository>,
 }
 
 impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactServiceImpl<Q, C> {
-    pub fn new(query_bus: Arc<Q>, command_bus: Arc<C>) -> Self {
+    pub fn new(query_bus: Arc<Q>, command_bus: Arc<C>, dav: Arc<dyn DavReadRepository>) -> Self {
         Self {
             query_bus,
             command_bus,
+            dav,
         }
     }
 }
@@ -180,6 +189,105 @@ impl<Q: QueryBus + 'static, C: CommandBus + 'static> ContactService for ContactS
             already_existed,
         }))
     }
+
+    async fn list_address_books(
+        &self,
+        request: Request<ListAddressBooksRequest>,
+    ) -> Result<Response<ListAddressBooksResponse>, Status> {
+        let account = parse_account_id(&request.into_inner().account_id)?;
+        let books = self
+            .dav
+            .list_address_books(&account)
+            .await
+            .map_err(domain_error_to_status)?;
+        Ok(Response::new(ListAddressBooksResponse {
+            address_books: books.iter().map(address_book_to_proto).collect(),
+        }))
+    }
+
+    async fn list_remote_contacts(
+        &self,
+        request: Request<ListRemoteContactsRequest>,
+    ) -> Result<Response<ListRemoteContactsResponse>, Status> {
+        let req = request.into_inner();
+        let account = parse_account_id(&req.account_id)?;
+        let book = req.address_book.map(CollectionId::new);
+        let contacts = self
+            .dav
+            .remote_contacts(&account, book.as_ref())
+            .await
+            .map_err(domain_error_to_status)?;
+        Ok(Response::new(ListRemoteContactsResponse {
+            contacts: contacts.iter().map(remote_contact_to_proto).collect(),
+        }))
+    }
+
+    async fn get_remote_contact(
+        &self,
+        request: Request<GetRemoteContactRequest>,
+    ) -> Result<Response<RemoteContact>, Status> {
+        let id = parse_contact_id(&request.into_inner().contact_id)?;
+        let contact = self
+            .dav
+            .remote_contact(&id)
+            .await
+            .map_err(domain_error_to_status)?
+            .ok_or_else(|| Status::not_found(format!("contact {id} not found")))?;
+        Ok(Response::new(remote_contact_to_proto(&contact)))
+    }
+
+    async fn create_remote_contact(
+        &self,
+        request: Request<CreateRemoteContactRequest>,
+    ) -> Result<Response<CreateRemoteContactResponse>, Status> {
+        let req = request.into_inner();
+        let fields = contact_fields_from_proto(req.fields.unwrap_or_default())
+            .map_err(Status::invalid_argument)?;
+        let result = self
+            .command_bus
+            .dispatch(Command::AddRemoteContact {
+                account_id: parse_account_id(&req.account_id)?,
+                book: CollectionId::new(req.address_book),
+                fields,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        let CommandResult::ContactAdded { contact_id } = result else {
+            return Err(Status::internal("unexpected command result"));
+        };
+        Ok(Response::new(CreateRemoteContactResponse {
+            contact_id: contact_id.to_string(),
+        }))
+    }
+
+    async fn update_remote_contact(
+        &self,
+        request: Request<UpdateRemoteContactRequest>,
+    ) -> Result<Response<UpdateRemoteContactResponse>, Status> {
+        let req = request.into_inner();
+        let fields = contact_fields_from_proto(req.fields.unwrap_or_default())
+            .map_err(Status::invalid_argument)?;
+        self.command_bus
+            .dispatch(Command::UpdateRemoteContact {
+                contact_id: parse_contact_id(&req.contact_id)?,
+                fields,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(UpdateRemoteContactResponse {}))
+    }
+
+    async fn delete_remote_contact(
+        &self,
+        request: Request<DeleteRemoteContactRequest>,
+    ) -> Result<Response<DeleteRemoteContactResponse>, Status> {
+        let contact_id = parse_contact_id(&request.into_inner().contact_id)?;
+        self.command_bus
+            .dispatch(Command::RemoveRemoteContact { contact_id })
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(DeleteRemoteContactResponse {}))
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -201,3 +309,6 @@ fn parse_contact_id(s: &str) -> Result<ContactId, Status> {
         .map(ContactId::from_uuid)
         .map_err(|_| Status::invalid_argument(format!("invalid contact id: {s}")))
 }
+
+#[cfg(test)]
+mod tests;

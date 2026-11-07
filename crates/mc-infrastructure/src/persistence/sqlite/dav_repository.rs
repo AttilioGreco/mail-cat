@@ -11,7 +11,7 @@ use uuid::Uuid;
 use mc_domain::{
     AccountId, AddressBook, AggregateType, Calendar, CalendarEvent, CollectionId, ContactId,
     DavReadRepository, DomainError, Etag, EventFields, Href, Occurrence, PendingChange,
-    PendingPush, RemoteBinding, formats,
+    PendingPush, RemoteBinding, RemoteContact, formats,
 };
 
 use super::repository::{
@@ -63,6 +63,19 @@ fn event_from_row(row: &Row) -> rusqlite::Result<CalendarEvent> {
         binding: binding_from_row(row, 0)?,
         raw: row.get(5)?,
         fields: fields_from_row(row, 6)?,
+    })
+}
+
+const REMOTE_CONTACT_COLUMNS: &str = "id, remote_account, remote_collection, remote_href, \
+     remote_etag, remote_modified, raw, dirty, push_error";
+
+fn remote_contact_from_row(row: &Row) -> rusqlite::Result<RemoteContact> {
+    Ok(RemoteContact {
+        id: ContactId::from_uuid(row.get(0)?),
+        binding: binding_from_row(row, 1)?,
+        raw: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        dirty: row.get(7)?,
+        push_error: row.get(8)?,
     })
 }
 
@@ -255,6 +268,46 @@ impl DavReadRepository for SqliteRepository {
                          AND collection = ?2 AND etag IS NOT NULL",
                     account,
                     &calendar,
+                )
+            })
+            .await
+    }
+
+    async fn remote_contacts(
+        &self,
+        account: &AccountId,
+        book: Option<&CollectionId>,
+    ) -> Result<Vec<RemoteContact>, DomainError> {
+        let (account, book) = (*account.as_uuid(), book.map(ToString::to_string));
+        self.db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    &format!(
+                        "SELECT {REMOTE_CONTACT_COLUMNS} FROM contacts \
+                         WHERE remote_account = ?1 AND remote_href IS NOT NULL \
+                           AND (?2 IS NULL OR remote_collection = ?2) \
+                         ORDER BY display_name, id"
+                    ),
+                    params![account, book],
+                    remote_contact_from_row,
+                )
+            })
+            .await
+    }
+
+    async fn remote_contact(&self, id: &ContactId) -> Result<Option<RemoteContact>, DomainError> {
+        let id = *id.as_uuid();
+        self.db
+            .read(move |conn| {
+                query_one(
+                    conn,
+                    &format!(
+                        "SELECT {REMOTE_CONTACT_COLUMNS} FROM contacts \
+                         WHERE id = ?1 AND remote_href IS NOT NULL"
+                    ),
+                    [id],
+                    remote_contact_from_row,
                 )
             })
             .await
