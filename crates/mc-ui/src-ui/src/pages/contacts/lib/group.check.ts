@@ -1,6 +1,6 @@
 // Run with `bun run src/pages/contacts/lib/group.check.ts`.
 import type { ContactCard, ContactGroup, RemoteContact } from '@/entities/contact';
-import { buildRows } from './group';
+import { buildRows, mergeHarvested } from './group';
 
 const eq = (actual: unknown, expected: unknown, what: string) => {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -31,3 +31,9 @@ eq(shape(buildRows([group], [harvested], ' ALV ')), ['Work', 'Rubrica', 'Álvaro
 eq(shape(buildRows([group], [harvested], 'zzz')), [], 'nothing found');
 const missing: ContactGroup = { ...group, feature: { state: 'missing_permission', missingScopes: ['s'] }, books: [], contacts: [] };
 eq(buildRows([missing], [], 'x').map((r) => r.kind === 'account' && r.notice), ['missing_permission'], 'notice survives a search');
+
+// One harvested copy per account that saw the address: listed once.
+const copy = (id: string, displayName: string, email: string): ContactCard => ({ ...harvested, id, displayName, emails: [email] });
+const merged = mergeHarvested([copy('1', 'h@x.it', 'h@x.it'), copy('2', 'Harvey', 'H@x.it'), copy('3', 'Other', 'o@x.it')], new Set());
+eq(merged.map((c) => [c.displayName, c.emails]), [['Harvey', ['h@x.it']], ['Other', ['o@x.it']]], 'merged by address');
+eq(mergeHarvested([copy('1', 'Ann', 'ann@x.it')], new Set(['ann@x.it'])), [], 'a synced address is not listed again');

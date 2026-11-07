@@ -31,6 +31,29 @@ const matches = (c: Listed, q: string) =>
   [c.displayName, c.organization ?? '', ...c.emails, ...c.phones].some((v) => v.toLowerCase().includes(q));
 
 /**
+ * The server keeps one harvested contact per account that saw the address, so
+ * the same person arrives once per account. Listed once, by address, with the
+ * names and addresses of every copy; one already in a synced address book is
+ * left out, the synced card being the real one.
+ */
+export function mergeHarvested(harvested: ContactCard[], synced: Set<string>): ContactCard[] {
+  const byAddress = new Map<string, ContactCard>();
+  for (const c of harvested) {
+    const address = (c.emails[0] ?? '').toLowerCase();
+    if (!address || synced.has(address)) continue;
+    const seen = byAddress.get(address);
+    if (!seen) {
+      byAddress.set(address, { ...c, emails: [...c.emails] });
+      continue;
+    }
+    if (!seen.displayName || seen.displayName === address) seen.displayName = c.displayName;
+    seen.organization ??= c.organization;
+    for (const e of c.emails) if (!seen.emails.some((s) => s.toLowerCase() === e.toLowerCase())) seen.emails.push(e);
+  }
+  return [...byAddress.values()];
+}
+
+/**
  * The list as flat rows (headers and contacts) so it can be virtualised. While
  * searching, groups with no match disappear, except an account whose notice must stay.
  */
@@ -73,7 +96,8 @@ export function buildRows(groups: ContactGroup[], harvested: ContactCard[], quer
     }
   }
 
-  const fromMail = harvested
+  const synced = new Set(groups.flatMap((g) => g.contacts.flatMap((c) => c.emails.map((e) => e.toLowerCase()))));
+  const fromMail = mergeHarvested(harvested, synced)
     .map((c): Listed => ({
       key: `harvested::${c.id}`,
       displayName: c.displayName,
