@@ -60,3 +60,16 @@ export const timesChanged = (a: EventForm, b: EventForm) =>
   a.startDate !== b.startDate ||
   a.endDate !== b.endDate ||
   (!a.allDay && (a.startTime !== b.startTime || a.endTime !== b.endTime));
+
+/** Applies a start change and moves the end by the same amount, so the duration survives (as Outlook does). */
+export function withStart(f: EventForm, patch: Partial<Pick<EventForm, 'startDate' | 'startTime'>>): EventForm {
+  const next = { ...f, ...patch };
+  const at = (d: string, t: string) => new Date(`${d}T${f.allDay ? '00:00' : t}`);
+  const span = +at(f.endDate, f.endTime) - +at(f.startDate, f.startTime);
+  const start = at(next.startDate, next.startTime);
+  if (Number.isNaN(span) || Number.isNaN(+start)) return next;
+  const end = new Date(+start + span);
+  // Date arithmetic in ms would be an hour off across DST, so all-day spans are re-anchored by calendar day.
+  const endDay = f.allDay ? addDays(start, Math.round(span / 864e5)) : end;
+  return { ...next, endDate: format(endDay, DATE), endTime: format(end, TIME) };
+}

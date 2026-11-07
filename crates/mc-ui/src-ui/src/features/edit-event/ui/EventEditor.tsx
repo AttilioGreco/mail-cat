@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/shared/ui/button';
+import { DatePicker } from '@/shared/ui/date-picker';
 import { Input } from '@/shared/ui/input';
+import { TimePicker } from '@/shared/ui/time-picker';
 import { SimpleSelect } from '@/shared/ui/select';
 import { DialogFooter } from '@/shared/ui/dialog';
 import {
@@ -13,7 +15,7 @@ import {
   calendarKey, useCalendarGroups, useCalendarVisibility, useCreateEvent, useDeleteEvent, useUpdateEvent,
   type AccountEvent,
 } from '@/entities/calendar';
-import { timesChanged, wireTimes, type EventForm } from '../lib/form';
+import { timesChanged, wireTimes, withStart, type EventForm } from '../lib/form';
 
 const TEXTAREA =
   'min-h-16 w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30';
@@ -58,6 +60,11 @@ export function EventEditor({ initial, event, onClose }: Props) {
 
   const readOnly = event?.readOnly ?? false;
   const times = wireTimes(form);
+  const durationFromStart = (time: string) => {
+    const start = new Date(`${form.startDate}T${form.startTime}`);
+    const minutes = (+new Date(`${form.endDate}T${time}`) - +start) / 60_000;
+    return minutes > 0 ? minutes : null;
+  };
   const target = choices.find((c) => c.value === calendar);
   const busy = create.isPending || update.isPending || remove.isPending;
   const canSave = !readOnly && times !== null && (event !== undefined || target !== undefined) && !busy;
@@ -148,19 +155,19 @@ export function EventEditor({ initial, event, onClose }: Props) {
 
       <div className="grid grid-cols-[1fr_auto] gap-2">
         <Field label="Inizio">
-          <Input type="date" value={form.startDate} disabled={readOnly} onChange={(e) => set('startDate', e.target.value)} />
+          <DatePicker value={form.startDate} disabled={readOnly} onChange={(v) => setForm((f) => withStart(f, { startDate: v }))} />
         </Field>
         {!form.allDay && (
           <Field label="Ora">
-            <Input type="time" value={form.startTime} disabled={readOnly} onChange={(e) => set('startTime', e.target.value)} />
+            <TimePicker value={form.startTime} disabled={readOnly} onChange={(v) => setForm((f) => withStart(f, { startTime: v }))} />
           </Field>
         )}
         <Field label="Fine">
-          <Input type="date" value={form.endDate} disabled={readOnly} onChange={(e) => set('endDate', e.target.value)} />
+          <DatePicker value={form.endDate} disabled={readOnly} onChange={(v) => set('endDate', v)} />
         </Field>
         {!form.allDay && (
           <Field label="Ora">
-            <Input type="time" value={form.endTime} disabled={readOnly} onChange={(e) => set('endTime', e.target.value)} />
+            <TimePicker value={form.endTime} disabled={readOnly} durationOf={durationFromStart} onChange={(v) => set('endTime', v)} />
           </Field>
         )}
       </div>
