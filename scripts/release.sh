@@ -132,7 +132,7 @@ git commit -q -m "chore: release ${TAG}"
 RELEASE_COMMIT=$(git rev-parse HEAD)
 success "Commit created"
 
-git tag -a "$TAG" -m "Release ${TAG}"
+git tag -s "$TAG" -m "Release ${TAG}"
 TAGGED=true
 success "Tag created: ${TAG}"
 
