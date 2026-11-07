@@ -1,5 +1,7 @@
 import { HotkeysProvider } from '@tanstack/react-hotkeys';
 import { MainPage } from '@/pages/main';
+import { CalendarPage } from '@/pages/calendar';
+import { ContactsPage } from '@/pages/contacts';
 import { LabelsPage } from '@/pages/labels';
 import { SettingsPage } from '@/pages/settings';
 import { useSettingsStore } from '@/features/manage-settings';
@@ -9,7 +11,7 @@ import { useServerAutostartError } from '@/features/server-autostart';
 import { useLabelsPage } from '@/features/manage-labels';
 import { useComposeStore } from '@/features/compose-message';
 import { useSyncNow } from '@/features/manage-accounts';
-import { useSessionStore } from '@/entities/session';
+import { useSectionStore, useSessionStore } from '@/entities/session';
 import { useAuthStatusWatch, useSyncProgress } from '@/entities/account';
 import { useDavChangesWatch } from '@/entities/calendar';
 import { Toaster } from '@/shared/ui/sonner';
@@ -38,6 +40,7 @@ function Router() {
   const { labelsOpen, closeLabels } = useLabelsPage();
   const openCompose = useComposeStore((s) => s.openCompose);
   const selectedAccountId = useSessionStore((s) => s.selectedAccountId);
+  const setSection = useSectionStore((s) => s.setSection);
   const syncNow = useSyncNow();
   const toggleHelp = useShortcutsStore((s) => s.toggleHelp);
   // Mounted above both screens: switching to settings must not drop the
@@ -57,6 +60,9 @@ function Router() {
       if (selectedAccountId) syncNow.mutate(selectedAccountId);
     },
     showShortcuts: toggleHelp,
+    goMail: () => setSection('mail'),
+    goCalendar: () => setSection('calendar'),
+    goContacts: () => setSection('contacts'),
   });
   return (
     <>
@@ -65,7 +71,7 @@ function Router() {
       ) : labelsOpen ? (
         <LabelsPage onClose={closeLabels} />
       ) : (
-        <MainPage />
+        <MainPage calendar={<CalendarPage />} contacts={<ContactsPage />} />
       )}
       {/* Above both screens: the list of what's bound must be reachable anywhere. */}
       <ShortcutsOverlay />

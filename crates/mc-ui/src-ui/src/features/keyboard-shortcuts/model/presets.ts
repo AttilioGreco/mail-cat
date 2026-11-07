@@ -46,6 +46,9 @@ export type ShortcutAction =
   | 'goArchive'
   | 'goSpam'
   | 'goTrash'
+  | 'goMail'
+  | 'goCalendar'
+  | 'goContacts'
   // writing
   | 'compose'
   | 'reply'
@@ -89,6 +92,9 @@ export const ACTION_META: Record<
   goArchive: { label: 'Archivio', category: 'Navigazione' },
   goSpam: { label: 'Spam', category: 'Navigazione' },
   goTrash: { label: 'Cestino', category: 'Navigazione' },
+  goMail: { label: 'Sezione Posta', category: 'Navigazione' },
+  goCalendar: { label: 'Sezione Calendario', category: 'Navigazione' },
+  goContacts: { label: 'Sezione Contatti', category: 'Navigazione' },
 
   compose: { label: 'Nuovo messaggio', category: 'Scrittura' },
   reply: { label: 'Rispondi', category: 'Scrittura' },
@@ -127,6 +133,9 @@ const VIM: Keymap = {
   goArchive: seq('G', 'A'),
   goSpam: seq('G', 'S'),
   goTrash: seq('G', 'D'),
+  goMail: 'Mod+1',
+  goCalendar: 'Mod+2',
+  goContacts: 'Mod+3',
 
   compose: 'C',
   reply: 'R',
@@ -161,6 +170,9 @@ const OUTLOOK: Keymap = {
   goArchive: 'Mod+Shift+A',
   goSpam: 'Mod+Shift+J',
   goTrash: 'Mod+Shift+D',
+  goMail: 'Mod+1',
+  goCalendar: 'Mod+2',
+  goContacts: 'Mod+3',
 
   compose: 'Mod+N',
   reply: 'Mod+R',

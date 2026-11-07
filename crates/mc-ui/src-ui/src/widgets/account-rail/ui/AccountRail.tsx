@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Plus, RefreshCw, Settings } from 'lucide-react';
+import { AlertCircle, CalendarDays, Mail, Plus, RefreshCw, Settings, Users } from 'lucide-react';
 import { cn } from '@/shared/lib/utils';
-import { useSessionStore } from '@/entities/session';
+import { useSectionStore, useSessionStore, type Section } from '@/entities/session';
 import { authState, useAccounts, type Account } from '@/entities/account';
 import { subscribedOnly, useMailboxes } from '@/entities/mailbox';
 import { useInboxWatcher } from '@/features/watch-mailbox';
@@ -16,6 +16,8 @@ export function AccountRail() {
   const resetSearch = useSearchStore((s) => s.setSearchQuery);
   const { data: accounts = [], isLoading, error } = useAccounts();
   const [addOpen, setAddOpen] = useState(false);
+  const section = useSectionStore((s) => s.section);
+  const setSection = useSectionStore((s) => s.setSection);
 
   // Land on an account at startup: the persisted one if it still exists, else the first.
   useEffect(() => {
@@ -26,6 +28,13 @@ export function AccountRail() {
 
   return (
     <nav className="flex h-full w-14 shrink-0 flex-col items-center gap-2 border-r border-border bg-background py-2">
+      <div className="flex flex-col items-center gap-1 border-b border-border-subtle px-2 pb-2">
+        {SECTIONS.map(({ id, label, Icon }) => (
+          <RailButton key={id} label={label} active={section === id} onClick={() => setSection(id)}>
+            <Icon size={18} />
+          </RailButton>
+        ))}
+      </div>
       {isLoading && <RefreshCw size={14} className="mt-2 animate-spin text-muted" />}
       {error && <AlertCircle size={14} className="mt-2 text-destructive" aria-label="Server non raggiungibile" />}
       <div className="flex min-h-0 flex-1 flex-col items-center gap-2 overflow-y-auto overflow-x-hidden p-2">
@@ -35,6 +44,7 @@ export function AccountRail() {
             account={account}
             isSelected={selectedAccountId === account.id}
             onSelect={() => {
+              setSection('mail');
               selectAccount(account.id);
               resetSearch(null);
             }}
@@ -52,14 +62,34 @@ export function AccountRail() {
   );
 }
 
-function RailButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
+const SECTIONS: { id: Section; label: string; Icon: typeof Mail }[] = [
+  { id: 'mail', label: 'Posta', Icon: Mail },
+  { id: 'calendar', label: 'Calendario', Icon: CalendarDays },
+  { id: 'contacts', label: 'Contatti', Icon: Users },
+];
+
+function RailButton({
+  label,
+  onClick,
+  active = false,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+  children: React.ReactNode;
+}) {
   return (
     <button
       type="button"
       title={label}
       aria-label={label}
       onClick={onClick}
-      className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
+      aria-pressed={active}
+      className={cn(
+        'flex h-8 w-8 items-center justify-center rounded-lg transition-colors',
+        active ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-surface-hover hover:text-foreground',
+      )}
     >
       {children}
     </button>

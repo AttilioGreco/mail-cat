@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { useSessionStore } from '@/entities/session';
+import { useSectionStore, useSessionStore } from '@/entities/session';
 
 interface DeepLink {
   accountId: string;
@@ -26,6 +26,7 @@ export function useDeepLink() {
 
     const apply = (link: DeepLink | null) => {
       if (cancelled || !link) return;
+      useSectionStore.getState().setSection('mail');
       openMessageAt(link.accountId, link.mailboxId, link.messageId);
     };
 
