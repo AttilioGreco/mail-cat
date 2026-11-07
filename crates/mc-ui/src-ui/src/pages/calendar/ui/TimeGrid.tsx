@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { format, isSameDay } from 'date-fns';
 import { cn } from '@/shared/lib/utils';
 import { isEditable, type AccountEvent } from '@/entities/calendar';
-import { LOCALE, atMinute, coversDay, dayMinutes, layoutColumns, snap } from '../lib/time';
+import { slotAt, type MenuTarget } from '../lib/menu';
+import { LOCALE, coversDay, dayMinutes, layoutColumns } from '../lib/time';
 import { useGridGestures } from '../model/useGridGestures';
 import { EventChip, SyncMarker, eventStyle, eventTitle, timeRange } from './EventBlock';
 
@@ -17,9 +18,10 @@ interface Props {
   onCreate: (start: Date, end: Date, allDay: boolean) => void;
   onOpen: (event: AccountEvent) => void;
   onReschedule: (event: AccountEvent, start: Date, end: Date) => void;
+  onMenu: (e: React.MouseEvent, target: MenuTarget) => void;
 }
 
-export function TimeGrid({ days, events, onCreate, onOpen, onReschedule }: Props) {
+export function TimeGrid({ days, events, onCreate, onOpen, onReschedule, onMenu }: Props) {
   const columns = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const now = useNow();
@@ -61,9 +63,10 @@ export function TimeGrid({ days, events, onCreate, onOpen, onReschedule }: Props
               key={+day}
               className="flex min-h-6 flex-1 flex-col gap-px border-l border-border-subtle p-px"
               onDoubleClick={() => onCreate(day, day, true)}
+              onContextMenu={(e) => onMenu(e, { kind: 'slot', day, start: day, end: day, allDay: true })}
             >
               {allDay.filter((e) => coversDay(e, day)).map((e) => (
-                <EventChip key={`${e.accountId}|${e.href}|${e.calendar}`} event={e} onOpen={onOpen} />
+                <EventChip key={`${e.accountId}|${e.href}|${e.calendar}`} event={e} onOpen={onOpen} onMenu={onMenu} />
               ))}
             </div>
           ))}
@@ -89,11 +92,12 @@ export function TimeGrid({ days, events, onCreate, onOpen, onReschedule }: Props
               onPointerDown={(e) => e.target === e.currentTarget && startCreate(e)}
               onDoubleClick={(e) => {
                 if (e.target !== e.currentTarget) return;
-                const y = e.clientY - e.currentTarget.getBoundingClientRect().top;
-                const start = atMinute(day, Math.floor(y / PX_PER_MINUTE / 15) * 15);
-                onCreate(start, atMinute(day, snap(start.getHours() * 60 + start.getMinutes() + 60)), false);
+                const { start, end } = slotAt(day, minuteAt(e));
+                onCreate(start, end, false);
               }}
+              onContextMenu={(e) => e.target === e.currentTarget && onMenu(e, { kind: 'slot', day, allDay: false, ...slotAt(day, minuteAt(e)) })}
               onOpen={onOpen}
+              onMenu={onMenu}
               startMove={startMove}
               startResize={startResize}
             />
@@ -111,12 +115,14 @@ interface ColumnProps {
   ghost: { top: number; bottom: number } | null;
   onPointerDown: React.PointerEventHandler<HTMLDivElement>;
   onDoubleClick: React.MouseEventHandler<HTMLDivElement>;
+  onContextMenu: React.MouseEventHandler<HTMLDivElement>;
   onOpen: (event: AccountEvent) => void;
+  onMenu: (e: React.MouseEvent, target: MenuTarget) => void;
   startMove: (e: React.PointerEvent, event: AccountEvent) => void;
   startResize: (e: React.PointerEvent, event: AccountEvent) => void;
 }
 
-function DayColumn({ day, now, events, ghost, onPointerDown, onDoubleClick, onOpen, startMove, startResize }: ColumnProps) {
+function DayColumn({ day, now, events, ghost, onPointerDown, onDoubleClick, onContextMenu, onOpen, onMenu, startMove, startResize }: ColumnProps) {
   const blocks = events.map((e) => dayMinutes(e, day));
   const placed = layoutColumns(blocks);
   return (
@@ -129,6 +135,7 @@ function DayColumn({ day, now, events, ghost, onPointerDown, onDoubleClick, onOp
       }}
       onPointerDown={onPointerDown}
       onDoubleClick={onDoubleClick}
+      onContextMenu={onContextMenu}
     >
       {events.map((e, i) => {
         const { top, bottom } = blocks[i];
@@ -154,6 +161,7 @@ function DayColumn({ day, now, events, ghost, onPointerDown, onDoubleClick, onOp
             onPointerDown={(ev) => (editable ? startMove(ev, e) : ev.stopPropagation())}
             onClick={() => !editable && onOpen(e)}
             onDoubleClick={(ev) => ev.stopPropagation()}
+            onContextMenu={(ev) => onMenu(ev, { kind: 'event', event: e })}
             onKeyDown={(ev) => ev.key === 'Enter' && onOpen(e)}
           >
             <div className="flex items-center gap-1 font-medium">
@@ -181,6 +189,9 @@ function DayColumn({ day, now, events, ghost, onPointerDown, onDoubleClick, onOp
     </div>
   );
 }
+
+/** Minutes from the top of the column for a mouse event on it, as the gestures measure them. */
+const minuteAt = (e: React.MouseEvent<HTMLElement>) => (e.clientY - e.currentTarget.getBoundingClientRect().top) / PX_PER_MINUTE;
 
 function useNow(): Date {
   const [now, setNow] = useState(() => new Date());

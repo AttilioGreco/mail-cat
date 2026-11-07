@@ -1,6 +1,7 @@
 import { format, isSameDay, isSameMonth } from 'date-fns';
 import { cn } from '@/shared/lib/utils';
 import type { AccountEvent } from '@/entities/calendar';
+import type { MenuTarget } from '../lib/menu';
 import { LOCALE, atMinute, coversDay } from '../lib/time';
 import { EventChip } from './EventBlock';
 
@@ -13,12 +14,13 @@ interface Props {
   events: AccountEvent[];
   onCreate: (start: Date, end: Date, allDay: boolean) => void;
   onOpen: (event: AccountEvent) => void;
+  onMenu: (e: React.MouseEvent, target: MenuTarget) => void;
   onPickDay: (day: Date) => void;
 }
 
 const byStart = (a: AccountEvent, b: AccountEvent) => Number(b.allDay) - Number(a.allDay) || +a.start - +b.start;
 
-export function MonthGrid({ days, date, events, onCreate, onOpen, onPickDay }: Props) {
+export function MonthGrid({ days, date, events, onCreate, onOpen, onMenu, onPickDay }: Props) {
   const today = new Date();
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -36,6 +38,7 @@ export function MonthGrid({ days, date, events, onCreate, onOpen, onPickDay }: P
               key={+day}
               className="flex min-h-0 flex-col gap-px overflow-hidden border-b border-l border-border-subtle p-0.5"
               onDoubleClick={() => onCreate(atMinute(day, 9 * 60), atMinute(day, 10 * 60), false)}
+              onContextMenu={(e) => onMenu(e, { kind: 'slot', day, start: day, end: day, allDay: true })}
             >
               <span
                 className={cn(
@@ -46,7 +49,7 @@ export function MonthGrid({ days, date, events, onCreate, onOpen, onPickDay }: P
                 {format(day, 'd')}
               </span>
               {list.slice(0, MAX_CHIPS).map((e) => (
-                <EventChip key={`${e.accountId}|${e.href}|${e.calendar}|${+e.start}`} event={e} onOpen={onOpen} />
+                <EventChip key={`${e.accountId}|${e.href}|${e.calendar}|${+e.start}`} event={e} onOpen={onOpen} onMenu={onMenu} />
               ))}
               {hidden > 0 && (
                 <button

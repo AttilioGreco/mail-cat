@@ -3,6 +3,9 @@ import { AlertTriangle, RefreshCw } from 'lucide-react';
 import { format } from 'date-fns';
 import { cn } from '@/shared/lib/utils';
 import type { AccountEvent } from '@/entities/calendar';
+import type { MenuTarget } from '../lib/menu';
+
+type MouseEvent = React.MouseEvent;
 
 /** The tint is mixed with the page background so it stays readable in light and dark. */
 export const eventStyle = (color: string): CSSProperties => ({
@@ -25,7 +28,7 @@ export const eventTitle = (e: AccountEvent) =>
   [e.summary || 'Senza titolo', e.location, e.pushFailed && `Non inviato: ${e.pushFailed}`].filter(Boolean).join('\n');
 
 /** The one-line chip used in the all-day strip and the month cells. */
-export function EventChip({ event, onOpen, className }: { event: AccountEvent; onOpen: (e: AccountEvent) => void; className?: string }) {
+export function EventChip({ event, onOpen, onMenu, className }: { event: AccountEvent; onOpen: (e: AccountEvent) => void; onMenu: (e: MouseEvent, target: MenuTarget) => void; className?: string }) {
   return (
     <button
       type="button"
@@ -35,6 +38,7 @@ export function EventChip({ event, onOpen, className }: { event: AccountEvent; o
         onOpen(event);
       }}
       onDoubleClick={(ev) => ev.stopPropagation()}
+      onContextMenu={(ev) => onMenu(ev, { kind: 'event', event })}
       style={eventStyle(event.color)}
       className={cn('flex w-full items-center gap-1 truncate rounded px-1.5 py-px text-left text-[11px] leading-4 hover:brightness-95 dark:hover:brightness-125', className)}
     >

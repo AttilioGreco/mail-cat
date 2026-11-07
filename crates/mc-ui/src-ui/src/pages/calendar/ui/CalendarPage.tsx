@@ -1,9 +1,11 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useAccounts } from '@/entities/account';
 import { useVisibleEvents } from '@/entities/calendar';
 import { useEventEditor, useReschedule } from '@/features/edit-event';
+import type { MenuTarget } from '../lib/menu';
 import { rangeOf, viewDays } from '../lib/time';
 import { useCalendarView } from '../model/view-store';
+import { CalendarMenu, type MenuState } from './CalendarMenu';
 import { CalendarSidebar } from './CalendarSidebar';
 import { MonthGrid } from './MonthGrid';
 import { TimeGrid } from './TimeGrid';
@@ -17,9 +19,16 @@ export function CalendarPage() {
   const { events, failed } = useVisibleEvents(accounts, rangeOf(days));
   const openEditor = useEventEditor((s) => s.open);
   const reschedule = useReschedule();
+  const [menu, setMenu] = useState<MenuState | null>(null);
 
   const onCreate = (start: Date, end: Date, allDay: boolean) => openEditor({ mode: 'create', start, end, allDay });
   const onOpen = (event: (typeof events)[number]) => openEditor({ mode: 'edit', event });
+
+  const onMenu = (e: React.MouseEvent, target: MenuTarget) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ x: e.clientX, y: e.clientY, target });
+  };
 
   return (
     <div className="flex min-w-0 flex-1 overflow-hidden">
@@ -38,15 +47,17 @@ export function CalendarPage() {
             events={events}
             onCreate={onCreate}
             onOpen={onOpen}
+            onMenu={onMenu}
             onPickDay={(day) => {
               setDate(day);
               setView('day');
             }}
           />
         ) : (
-          <TimeGrid days={days} events={events} onCreate={onCreate} onOpen={onOpen} onReschedule={reschedule} />
+          <TimeGrid days={days} events={events} onCreate={onCreate} onOpen={onOpen} onReschedule={reschedule} onMenu={onMenu} />
         )}
       </section>
+      <CalendarMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   );
 }
