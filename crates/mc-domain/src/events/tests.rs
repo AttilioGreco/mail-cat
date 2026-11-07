@@ -139,3 +139,58 @@ fn account_reauthenticated_aggregate_type_and_name() {
     assert_eq!(event.aggregate_type(), AggregateType::Account);
     assert_eq!(event.event_name(), "AccountReauthenticated");
 }
+
+#[test]
+fn dav_events_map_to_their_aggregates_and_name_their_account() {
+    let account = AccountId::new();
+    let removed = DomainEvent::CalendarEventRemoved {
+        account_id: account,
+        href: Href::new("/cal/a.ics"),
+        origin: Origin::Remote,
+    };
+    assert_eq!(removed.aggregate_type(), AggregateType::CalendarEvent);
+    assert_eq!(removed.account_id(), Some(account));
+    assert_eq!(removed.event_name(), "CalendarEventRemoved");
+
+    let lost = DomainEvent::ContactConflictLost {
+        contact_id: ContactId::new(),
+        local_raw: "BEGIN:VCARD".into(),
+    };
+    assert_eq!(lost.aggregate_type(), AggregateType::Contact);
+
+    let json = serde_json::to_string(&removed).unwrap();
+    assert!(matches!(
+        serde_json::from_str::<DomainEvent>(&json).unwrap(),
+        DomainEvent::CalendarEventRemoved {
+            origin: Origin::Remote,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn contact_events_written_before_remote_binding_still_load() {
+    let id = ContactId::new();
+    let json = serde_json::to_string(&DomainEvent::ContactRemoved {
+        contact_id: id,
+        origin: Origin::Local,
+    })
+    .unwrap()
+    .replace(",\"origin\":\"Local\"", "");
+    assert!(matches!(
+        serde_json::from_str::<DomainEvent>(&json).unwrap(),
+        DomainEvent::ContactRemoved {
+            origin: Origin::Local,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn path_ids_are_distinct_per_aggregate_type() {
+    let account = AccountId::new();
+    assert_ne!(
+        AggregateType::Calendar.path_id(account, "/x/"),
+        AggregateType::AddressBook.path_id(account, "/x/")
+    );
+}

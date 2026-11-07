@@ -22,6 +22,7 @@ macro_rules! contacts_conformance {
                 source: ContactSource::LocalEmail,
                 external_id: None,
                 account_scope: Some(account),
+                remote: None,
             };
             let send_to = |to: &str, minutes| DomainEvent::MessageSent {
                 message_id: MessageId::new(),
@@ -129,6 +130,7 @@ macro_rules! contacts_conformance {
                     source: ContactSource::Local,
                     external_id: None,
                     account_scope: Some(account),
+                    remote: None,
                 }],
             )
             .await;
@@ -187,6 +189,7 @@ macro_rules! contacts_conformance {
                     phones: None,
                     organization: Some(Some("Analytical".into())),
                     notes: None,
+                    remote: None,
                 }],
             )
             .await;
@@ -217,6 +220,7 @@ macro_rules! contacts_conformance {
                 &repo,
                 [DomainEvent::ContactRemoved {
                     contact_id: contact,
+                    origin: mc_domain::Origin::Local,
                 }],
             )
             .await;
@@ -246,6 +250,7 @@ macro_rules! contacts_conformance {
                     source: ContactSource::LocalEmail,
                     external_id: None,
                     account_scope: Some(scope),
+                    remote: None,
                 }
             };
             let shared = || ContactEmail::primary(email("shared@example.com"));

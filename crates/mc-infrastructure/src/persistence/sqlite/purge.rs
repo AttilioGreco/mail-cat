@@ -102,6 +102,7 @@ impl SqliteRepository {
                     )?;
                 }
                 exec(&tx, "DELETE FROM tag_members WHERE account_id = ?1", [id])?;
+                super::dav_projection::drop_account(&tx, &account_id)?;
                 exec(&tx, "DELETE FROM accounts WHERE id = ?1", [id])?;
                 if let Some(email) = email {
                     exec(

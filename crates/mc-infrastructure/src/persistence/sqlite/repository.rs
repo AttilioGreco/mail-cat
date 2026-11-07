@@ -105,7 +105,7 @@ fn email_col(row: &Row, idx: usize) -> rusqlite::Result<EmailAddress> {
     EmailAddress::new(&text).map_err(|e| conversion_err(idx, Type::Text, e))
 }
 
-fn time_col(row: &Row, idx: usize) -> rusqlite::Result<DateTime<Utc>> {
+pub(super) fn time_col(row: &Row, idx: usize) -> rusqlite::Result<DateTime<Utc>> {
     Ok(DateTime::from_timestamp_nanos(row.get(idx)?))
 }
 
@@ -1417,9 +1417,12 @@ impl ContactReadRepository for SqliteRepository {
         let id = *id.as_uuid();
         self.db
             .read(move |conn| {
-                query_one(conn, &select_contacts("WHERE c.id = ?1"), [id], |r| {
-                    contact_from_row(r, 0)
-                })
+                query_one(
+                    conn,
+                    &select_contacts("WHERE c.id = ?1 AND c.primary_email <> ''"),
+                    [id],
+                    |r| contact_from_row(r, 0),
+                )
             })
             .await
     }
@@ -1432,10 +1435,16 @@ impl ContactReadRepository for SqliteRepository {
         let (limit, offset) = page_bounds(&pagination);
         self.db
             .read(move |conn| {
-                let total = count_rows(conn, "SELECT COUNT(*) FROM contacts", [])?;
+                let total = count_rows(
+                    conn,
+                    "SELECT COUNT(*) FROM contacts WHERE primary_email <> ''",
+                    [],
+                )?;
                 let items = query_all(
                     conn,
-                    &select_contacts("ORDER BY c.id LIMIT ?1 OFFSET ?2"),
+                    &select_contacts(
+                        "WHERE c.primary_email <> '' ORDER BY c.id LIMIT ?1 OFFSET ?2",
+                    ),
                     params![limit, offset],
                     |r| contact_from_row(r, 0),
                 )?;

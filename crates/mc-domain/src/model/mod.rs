@@ -1,5 +1,6 @@
 pub mod account;
 pub mod attachment;
+pub mod collection;
 pub mod contact;
 pub mod conversation;
 pub mod discovery;

@@ -91,6 +91,7 @@ macro_rules! replay_conformance {
                         source: ContactSource::LocalEmail,
                         external_id: None,
                         account_scope: Some(account),
+                        remote: None,
                     },
                     DomainEvent::ContactUpdated {
                         contact_id: contact,
@@ -99,6 +100,7 @@ macro_rules! replay_conformance {
                         phones: None,
                         organization: Some(Some("Analytical".into())),
                         notes: None,
+                        remote: None,
                     },
                 ],
             )
@@ -183,6 +185,7 @@ macro_rules! replay_conformance {
                 source: ContactSource::LocalEmail,
                 external_id: None,
                 account_scope: Some(account),
+                remote: None,
             };
             let log = append_all(
                 store.as_ref(),
@@ -271,6 +274,7 @@ macro_rules! replay_conformance {
                     contact(removed, "bob@example.com"),
                     DomainEvent::ContactRemoved {
                         contact_id: removed,
+                        origin: mc_domain::Origin::Local,
                     },
                 ],
             )

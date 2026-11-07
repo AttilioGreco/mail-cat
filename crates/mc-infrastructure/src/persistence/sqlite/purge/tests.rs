@@ -236,6 +236,7 @@ async fn purge_leaves_no_row_of_the_account_and_touches_nothing_else() {
             source: ContactSource::Local,
             external_id: None,
             account_scope: None,
+            remote: None,
         },
     )
     .await;

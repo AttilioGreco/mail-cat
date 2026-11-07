@@ -46,6 +46,9 @@ async-graphql = "7"
 async-graphql-axum = "7"
 axum = "0.8"
 
+# vCard / iCalendar parsing and recurrence expansion (pure, no JMAP conversions)
+calcard = { version = "0.3", default-features = false }
+
 # Email
 async-imap = "0.12.0"
 async-native-tls = "0.6"

@@ -1,5 +1,6 @@
 pub mod error;
 pub mod events;
+pub mod formats;
 pub mod model;
 pub mod traits;
 pub mod value_objects;
@@ -22,11 +23,15 @@ pub use value_objects::flag::Flag;
 pub use value_objects::mailbox_path::MailboxPath;
 pub use value_objects::message_id::MessageId;
 pub use value_objects::message_key::MessageKey;
+pub use value_objects::remote::{CollectionId, Etag, Href, Origin, RemoteBinding};
 pub use value_objects::remote_id::RemoteId;
 pub use value_objects::sync_cursor::SyncCursor;
 
 // Trait re-exports
-pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource};
+pub use model::collection::{
+    AddressBook, Calendar, CalendarComponent, CalendarEvent, EventFields, EventStatus, Ownership,
+};
+pub use model::contact::{Contact, ContactEmail, ContactEmailLabel, ContactSource, RemoteCard};
 pub use model::conversation::Conversation;
 pub use model::discovery::{DiscoveryPoint, Proposal, ProposalId, ProposalSample, ProposalStatus};
 pub use model::embedding::{EmbedPurpose, ModelId, ModelOption, ModelProfile, TargetOption};
@@ -37,6 +42,11 @@ pub use model::tagging::{
 };
 pub use traits::account_event_source::AccountEventSource;
 pub use traits::contact_index::ContactSearchHit;
+pub use traits::dav_provider::{
+    CalendarProvider, CollectionChanges, ContactsProvider, DeleteOutcome, PutOutcome,
+    RemoteResource, ResourcePut,
+};
+pub use traits::dav_repository::{DavReadRepository, Occurrence, PendingChange, PendingPush};
 pub use traits::email_provider::{
     EmailProvider, Existing, MailboxChanges, MailboxCounts, MessageBodyResult,
     MessageEnvelopeSummary, ProviderNotification, Reset, SendOutcome, SentCopy,

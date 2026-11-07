@@ -45,6 +45,37 @@ macro_rules! event_store_conformance {
         }
 
         #[tokio::test]
+        async fn dav_aggregates_round_trip_under_their_own_types() {
+            let (_guard, store) = $make;
+            let account = AccountId::new();
+            let collection = mc_domain::CollectionId::new("/cal/");
+            let id = AggregateType::Calendar.path_id(account, collection.as_str());
+            let removed = DomainEvent::CalendarRemoved {
+                account_id: account,
+                collection,
+            };
+            store
+                .append(&id, AggregateType::Calendar, 0, vec![removed])
+                .await
+                .unwrap();
+
+            let calendars: Vec<EventEnvelope> = store
+                .load_all_events(Some(AggregateType::Calendar), 0)
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(calendars.len(), 1);
+            assert_eq!(calendars[0].aggregate_id, id);
+            assert_eq!(calendars[0].aggregate_type, AggregateType::Calendar);
+            let events: Vec<EventEnvelope> = store
+                .load_all_events(Some(AggregateType::CalendarEvent), 0)
+                .try_collect()
+                .await
+                .unwrap();
+            assert!(events.is_empty());
+        }
+
+        #[tokio::test]
         async fn load_events_from_sequence() {
             let (_guard, store) = $make;
             store

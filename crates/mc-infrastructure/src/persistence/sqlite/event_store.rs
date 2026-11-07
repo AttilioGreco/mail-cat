@@ -44,6 +44,9 @@ fn type_code(t: AggregateType) -> i64 {
         AggregateType::Mailbox => 1,
         AggregateType::Message => 2,
         AggregateType::Contact => 3,
+        AggregateType::AddressBook => 4,
+        AggregateType::Calendar => 5,
+        AggregateType::CalendarEvent => 6,
     }
 }
 
@@ -53,6 +56,9 @@ fn type_from_code(code: i64) -> Result<AggregateType, DomainError> {
         1 => AggregateType::Mailbox,
         2 => AggregateType::Message,
         3 => AggregateType::Contact,
+        4 => AggregateType::AddressBook,
+        5 => AggregateType::Calendar,
+        6 => AggregateType::CalendarEvent,
         other => return Err(store_err(format!("unknown aggregate type code {other}"))),
     })
 }
@@ -98,16 +104,13 @@ fn max_sequence(conn: &Connection, aggregate_id: &str) -> Result<u64, DomainErro
 
 /// The account an aggregate's events belong to, so a purge can find the ones
 /// that do not name it (a flag change only knows its message). The aggregate's
-/// first event always names it; later appends inherit it.
+/// first event always names it; later appends inherit it. A harvested contact
+/// belongs to none, and only a remote-bound one names its account.
 fn account_of(
     conn: &Connection,
     aggregate_id: &str,
-    aggregate_type: AggregateType,
     events: &[DomainEvent],
 ) -> Result<Option<String>, DomainError> {
-    if aggregate_type == AggregateType::Contact {
-        return Ok(None);
-    }
     if let Some(account_id) = events.iter().find_map(DomainEvent::account_id) {
         return Ok(Some(account_id.to_string()));
     }
@@ -148,7 +151,7 @@ impl EventStore for SqliteEventStore {
                         actual: current,
                     });
                 }
-                let account_id = account_of(&tx, &aggregate_id, aggregate_type, &events)?;
+                let account_id = account_of(&tx, &aggregate_id, &events)?;
                 let mut envelopes = Vec::with_capacity(events.len());
                 {
                     let mut insert = tx

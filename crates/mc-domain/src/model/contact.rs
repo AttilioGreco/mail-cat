@@ -11,6 +11,7 @@ use crate::events::DomainEvent;
 use crate::model::account::AccountId;
 use crate::value_objects::contact_id::ContactId;
 use crate::value_objects::email_address::EmailAddress;
+use crate::value_objects::remote::{Origin, RemoteBinding};
 
 // ── ContactEmailLabel ────────────────────────────────────────────────────────
 
@@ -56,18 +57,26 @@ impl ContactEmail {
 
 /// Where a contact was imported from / is synced with.
 ///
-/// Only `Local` and `LocalEmail` are currently implemented.
-/// Future backends (Google, CardDAV, etc.) are planned but not yet active.
+/// `CardDav` and `MicrosoftGraph` contacts are bound to a server resource
+/// (see [`RemoteCard`]); `Local` and `LocalEmail` never leave this machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContactSource {
     /// Manually added by the user inside mail-cat.
     Local,
     /// Auto-created from observed email activity (sender / recipients).
     LocalEmail,
-    // Future (not yet implemented):
-    // GoogleContacts,
-    // CardDav { server_url: String },
-    // MicrosoftGraph,
+    /// Synced with a CardDAV server (Google included).
+    CardDav,
+    MicrosoftGraph,
+}
+
+/// The server side of a remote-bound contact, carried by its events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteCard {
+    pub binding: RemoteBinding,
+    /// The whole vCard, as the new source of truth.
+    pub raw: String,
+    pub origin: Origin,
 }
 
 // ── Contact aggregate ─────────────────────────────────────────────────────────
@@ -92,6 +101,10 @@ pub struct Contact {
     /// The account this contact belongs to.
     /// `None` means the contact is shared across all accounts.
     pub account_scope: Option<AccountId>,
+    /// Full vCard of a remote-bound contact: what is written back to the
+    /// server, with edits applied to it.
+    pub raw: Option<String>,
+    pub remote: Option<RemoteBinding>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -130,6 +143,7 @@ impl Contact {
             source: source.clone(),
             external_id: external_id.clone(),
             account_scope,
+            remote: None,
         };
 
         let contact = Self {
@@ -142,6 +156,8 @@ impl Contact {
             source,
             external_id,
             account_scope,
+            raw: None,
+            remote: None,
             created_at: now,
             updated_at: now,
         };
@@ -192,6 +208,7 @@ impl Contact {
             phones,
             organization,
             notes,
+            remote: None,
         })
     }
 
@@ -199,6 +216,7 @@ impl Contact {
     pub fn remove(&self) -> DomainEvent {
         DomainEvent::ContactRemoved {
             contact_id: self.id,
+            origin: Origin::Local,
         }
     }
 
@@ -250,8 +268,13 @@ impl Contact {
                 phones,
                 organization,
                 notes,
+                remote,
                 ..
             } => {
+                if let Some(card) = remote {
+                    self.raw = Some(card.raw.clone());
+                    self.remote = Some(card.binding.clone());
+                }
                 if let Some(name) = display_name {
                     self.display_name = name.clone();
                 }
@@ -293,6 +316,7 @@ impl Contact {
             source,
             external_id,
             account_scope,
+            remote,
         } = first
         else {
             return None;
@@ -309,6 +333,8 @@ impl Contact {
             source: source.clone(),
             external_id: external_id.clone(),
             account_scope: *account_scope,
+            raw: remote.as_ref().map(|c| c.raw.clone()),
+            remote: remote.as_ref().map(|c| c.binding.clone()),
             created_at: now,
             updated_at: now,
         };

@@ -15,6 +15,7 @@ use mc_domain::{
     MessageId, MessageKey, ReadModelProjector, RemoteId,
 };
 
+use super::dav_projection;
 use super::repo_err;
 use super::repository::{
     Addresses, SqliteRepository, exec, json, nanos, query_all, query_one, save_checkpoint_in,
@@ -121,6 +122,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 "DELETE FROM sync_cursors WHERE account_id = ?1",
                 [account_id.as_uuid()],
             )?;
+            dav_projection::drop_account(tx, account_id)?;
         }
         DomainEvent::AccountAuthExpired { account_id, error } => {
             set_account_status(
@@ -497,6 +499,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             emails,
             source,
             account_scope,
+            remote,
             ..
         } => {
             exec(
@@ -509,19 +512,23 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 params![
                     contact_id.as_uuid(),
                     display_name,
-                    primary_email(emails)?,
+                    primary_email(emails, remote.is_some())?,
                     json(source)?,
                     account_scope.map(|a| *a.as_uuid()),
                     json(emails)?
                 ],
             )?;
             index_contact_emails(tx, contact_id, emails)?;
+            if let Some(card) = remote {
+                dav_projection::bind_contact(tx, contact_id, card, event.occurred_at)?;
+            }
         }
         DomainEvent::ContactUpdated {
             contact_id,
             display_name,
             emails,
             organization,
+            remote,
             ..
         } => {
             if let Some(name) = display_name {
@@ -532,7 +539,7 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                 )?;
             }
             if let Some(emails) = emails {
-                set_contact_emails(tx, contact_id, emails)?;
+                set_contact_emails(tx, contact_id, emails, remote.is_some())?;
             }
             if let Some(organization) = organization {
                 exec(
@@ -541,8 +548,12 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
                     params![contact_id.as_uuid(), organization],
                 )?;
             }
+            if let Some(card) = remote {
+                dav_projection::bind_contact(tx, contact_id, card, event.occurred_at)?;
+            }
         }
-        DomainEvent::ContactRemoved { contact_id } => {
+        DomainEvent::ContactRemoved { contact_id, origin } => {
+            dav_projection::contact_removed(tx, contact_id, *origin, event.occurred_at)?;
             exec(
                 tx,
                 "DELETE FROM contacts WHERE id = ?1",
@@ -554,13 +565,29 @@ fn apply(tx: &Connection, event: &EventEnvelope) -> Result<(), DomainError> {
             discarded_id,
             merged_emails,
         } => {
-            set_contact_emails(tx, kept_id, merged_emails)?;
+            set_contact_emails(tx, kept_id, merged_emails, false)?;
             exec(
                 tx,
                 "DELETE FROM contacts WHERE id = ?1",
                 [discarded_id.as_uuid()],
             )?;
         }
+
+        DomainEvent::ContactPushedToServer { .. }
+        | DomainEvent::ContactConflictLost { .. }
+        | DomainEvent::ContactPushFailed { .. }
+        | DomainEvent::AddressBookDiscovered { .. }
+        | DomainEvent::AddressBookUpdated { .. }
+        | DomainEvent::AddressBookRemoved { .. }
+        | DomainEvent::CalendarDiscovered { .. }
+        | DomainEvent::CalendarUpdated { .. }
+        | DomainEvent::CalendarRemoved { .. }
+        | DomainEvent::CalendarEventAdded { .. }
+        | DomainEvent::CalendarEventUpdated { .. }
+        | DomainEvent::CalendarEventRemoved { .. }
+        | DomainEvent::CalendarEventPushedToServer { .. }
+        | DomainEvent::CalendarEventConflictLost { .. }
+        | DomainEvent::CalendarEventPushFailed { .. } => dav_projection::apply(tx, event)?,
     }
     Ok(())
 }
@@ -954,12 +981,15 @@ fn delete_message(tx: &Connection, id: &MessageId) -> Result<(), DomainError> {
     Ok(())
 }
 
-fn primary_email(emails: &[ContactEmail]) -> Result<&str, DomainError> {
+/// A contact synced from a server may have no email (a phone-only card): its
+/// row exists to track the resource, and reads skip rows with no primary email.
+fn primary_email(emails: &[ContactEmail], remote: bool) -> Result<&str, DomainError> {
     emails
         .iter()
         .find(|e| e.is_primary)
         .or_else(|| emails.first())
         .map(|e| e.address.as_str())
+        .or(remote.then_some(""))
         .ok_or_else(|| {
             DomainError::Validation("a contact must have at least one email address".into())
         })
@@ -970,11 +1000,16 @@ fn set_contact_emails(
     tx: &Connection,
     contact_id: &ContactId,
     emails: &[ContactEmail],
+    remote: bool,
 ) -> Result<(), DomainError> {
     let updated = exec(
         tx,
         "UPDATE contacts SET emails = ?2, primary_email = ?3 WHERE id = ?1",
-        params![contact_id.as_uuid(), json(emails)?, primary_email(emails)?],
+        params![
+            contact_id.as_uuid(),
+            json(emails)?,
+            primary_email(emails, remote)?
+        ],
     )?;
     if updated == 1 {
         index_contact_emails(tx, contact_id, emails)?;

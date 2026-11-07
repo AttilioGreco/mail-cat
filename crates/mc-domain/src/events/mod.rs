@@ -4,7 +4,8 @@ use uuid::Uuid;
 
 use crate::model::account::{AccountId, ConnectionConfig, MailboxModel, ProviderType};
 use crate::model::attachment::Attachment;
-use crate::model::contact::{ContactEmail, ContactSource};
+use crate::model::collection::{AddressBook, Calendar, CalendarEvent};
+use crate::model::contact::{ContactEmail, ContactSource, RemoteCard};
 use crate::model::mailbox::{MailboxId, MailboxType};
 use crate::model::message::{Envelope, ListHeaders, Membership};
 use crate::value_objects::contact_id::ContactId;
@@ -13,6 +14,7 @@ use crate::value_objects::flag::Flag;
 use crate::value_objects::mailbox_path::MailboxPath;
 use crate::value_objects::message_id::MessageId;
 use crate::value_objects::message_key::MessageKey;
+use crate::value_objects::remote::{CollectionId, Etag, Href, Origin};
 use crate::value_objects::remote_id::RemoteId;
 
 /// Metadata wrapper for all domain events.
@@ -58,6 +60,21 @@ pub enum AggregateType {
     Mailbox,
     Message,
     Contact,
+    /// Keyed by account and collection path.
+    AddressBook,
+    /// Keyed by account and collection path.
+    Calendar,
+    /// Keyed by account and resource href.
+    CalendarEvent,
+}
+
+impl AggregateType {
+    /// Aggregate id of a thing identified by its server path. Prefixed with
+    /// the type because ids are unique across the whole event store, and
+    /// a collection path can be a prefix of its resources'.
+    pub fn path_id(self, account: AccountId, path: &str) -> String {
+        format!("{self}:{account}:{path}")
+    }
 }
 
 impl std::fmt::Display for AggregateType {
@@ -67,6 +84,9 @@ impl std::fmt::Display for AggregateType {
             Self::Mailbox => write!(f, "mailbox"),
             Self::Message => write!(f, "message"),
             Self::Contact => write!(f, "contact"),
+            Self::AddressBook => write!(f, "address_book"),
+            Self::Calendar => write!(f, "calendar"),
+            Self::CalendarEvent => write!(f, "calendar_event"),
         }
     }
 }
@@ -108,10 +128,14 @@ pub enum DomainEvent {
     },
 
     /// An account was removed.
-    AccountRemoved { account_id: AccountId },
+    AccountRemoved {
+        account_id: AccountId,
+    },
 
     /// A sync operation started for an account.
-    AccountSyncStarted { account_id: AccountId },
+    AccountSyncStarted {
+        account_id: AccountId,
+    },
 
     /// A sync operation completed successfully.
     AccountSyncCompleted {
@@ -142,7 +166,9 @@ pub enum DomainEvent {
 
     /// The user fixed an account flagged `AccountAuthExpired` or
     /// `AccountCredentialsRejected`: a fresh OAuth login or a new password.
-    AccountReauthenticated { account_id: AccountId },
+    AccountReauthenticated {
+        account_id: AccountId,
+    },
 
     // ── Mailbox Events ──────────────────────────────────────────────
     /// A new mailbox was discovered during sync.
@@ -288,7 +314,9 @@ pub enum DomainEvent {
     },
 
     /// A draft was discarded.
-    DraftDiscarded { message_id: MessageId },
+    DraftDiscarded {
+        message_id: MessageId,
+    },
 
     // ── Contact Events ──────────────────────────────────────────────
     /// A new contact was added to the address book.
@@ -300,6 +328,9 @@ pub enum DomainEvent {
         external_id: Option<String>,
         /// Account this contact is scoped to. `None` = shared across all accounts.
         account_scope: Option<AccountId>,
+        /// Set when the contact lives on a CardDAV/Graph server.
+        #[serde(default)]
+        remote: Option<RemoteCard>,
     },
 
     /// An existing contact was updated.
@@ -312,10 +343,40 @@ pub enum DomainEvent {
         organization: Option<Option<String>>,
         /// `Some(Some(note))` = set, `Some(None)` = clear, `None` = no change
         notes: Option<Option<String>>,
+        /// The new vCard, when the contact is remote-bound.
+        #[serde(default)]
+        remote: Option<RemoteCard>,
     },
 
     /// A contact was removed from the address book.
-    ContactRemoved { contact_id: ContactId },
+    ContactRemoved {
+        contact_id: ContactId,
+        /// `Local` on a remote-bound contact leaves a delete to push.
+        #[serde(default)]
+        origin: Origin,
+    },
+
+    /// The server accepted the local version of a contact.
+    ContactPushedToServer {
+        contact_id: ContactId,
+        href: Href,
+        etag: Etag,
+    },
+
+    /// The local version lost to the server's (last write wins). Kept so the
+    /// discarded edit stays in the history.
+    ContactConflictLost {
+        contact_id: ContactId,
+        local_raw: String,
+    },
+
+    /// The server refused a push for this contact (a 4xx). Transient like the
+    /// sync lifecycle: projected, never appended, so a retry every pass does
+    /// not grow the log.
+    ContactPushFailed {
+        contact_id: ContactId,
+        reason: String,
+    },
 
     /// Two contacts were merged: `discarded_id` was absorbed into `kept_id`.
     /// After this event `discarded_id` no longer exists.
@@ -324,6 +385,62 @@ pub enum DomainEvent {
         discarded_id: ContactId,
         /// Union of emails from both contacts, stored on the surviving contact.
         merged_emails: Vec<ContactEmail>,
+    },
+
+    // ── Address Book Events ─────────────────────────────────────────
+    AddressBookDiscovered {
+        book: AddressBook,
+    },
+    AddressBookUpdated {
+        book: AddressBook,
+    },
+    AddressBookRemoved {
+        account_id: AccountId,
+        collection: CollectionId,
+    },
+
+    // ── Calendar Events ─────────────────────────────────────────────
+    CalendarDiscovered {
+        calendar: Calendar,
+    },
+    CalendarUpdated {
+        calendar: Calendar,
+    },
+    CalendarRemoved {
+        account_id: AccountId,
+        collection: CollectionId,
+    },
+
+    CalendarEventAdded {
+        event: CalendarEvent,
+        origin: Origin,
+    },
+    CalendarEventUpdated {
+        event: CalendarEvent,
+        origin: Origin,
+    },
+    CalendarEventRemoved {
+        account_id: AccountId,
+        href: Href,
+        origin: Origin,
+    },
+    /// The server accepted the local version of an event.
+    CalendarEventPushedToServer {
+        account_id: AccountId,
+        href: Href,
+        etag: Etag,
+    },
+    /// See [`DomainEvent::ContactConflictLost`].
+    CalendarEventConflictLost {
+        account_id: AccountId,
+        href: Href,
+        local_raw: String,
+    },
+    /// See [`DomainEvent::ContactPushFailed`].
+    CalendarEventPushFailed {
+        account_id: AccountId,
+        href: Href,
+        reason: String,
     },
 }
 
@@ -362,7 +479,25 @@ impl DomainEvent {
             Self::ContactAdded { .. }
             | Self::ContactUpdated { .. }
             | Self::ContactRemoved { .. }
-            | Self::ContactMerged { .. } => AggregateType::Contact,
+            | Self::ContactMerged { .. }
+            | Self::ContactPushedToServer { .. }
+            | Self::ContactConflictLost { .. }
+            | Self::ContactPushFailed { .. } => AggregateType::Contact,
+
+            Self::AddressBookDiscovered { .. }
+            | Self::AddressBookUpdated { .. }
+            | Self::AddressBookRemoved { .. } => AggregateType::AddressBook,
+
+            Self::CalendarDiscovered { .. }
+            | Self::CalendarUpdated { .. }
+            | Self::CalendarRemoved { .. } => AggregateType::Calendar,
+
+            Self::CalendarEventAdded { .. }
+            | Self::CalendarEventUpdated { .. }
+            | Self::CalendarEventRemoved { .. }
+            | Self::CalendarEventPushedToServer { .. }
+            | Self::CalendarEventConflictLost { .. }
+            | Self::CalendarEventPushFailed { .. } => AggregateType::CalendarEvent,
         }
     }
 
@@ -385,7 +520,25 @@ impl DomainEvent {
             | Self::MailboxDeleted { account_id, .. }
             | Self::MessageReceived { account_id, .. }
             | Self::MessageSent { account_id, .. }
-            | Self::DraftSaved { account_id, .. } => Some(*account_id),
+            | Self::DraftSaved { account_id, .. }
+            | Self::AddressBookRemoved { account_id, .. }
+            | Self::CalendarRemoved { account_id, .. }
+            | Self::CalendarEventRemoved { account_id, .. }
+            | Self::CalendarEventPushedToServer { account_id, .. }
+            | Self::CalendarEventConflictLost { account_id, .. }
+            | Self::CalendarEventPushFailed { account_id, .. } => Some(*account_id),
+            Self::AddressBookDiscovered { book: b } | Self::AddressBookUpdated { book: b } => {
+                Some(b.account)
+            }
+            Self::CalendarDiscovered { calendar: c } | Self::CalendarUpdated { calendar: c } => {
+                Some(c.account)
+            }
+            Self::CalendarEventAdded { event, .. } | Self::CalendarEventUpdated { event, .. } => {
+                Some(event.binding.account)
+            }
+            Self::ContactAdded {
+                remote: Some(card), ..
+            } => Some(card.binding.account),
             _ => None,
         }
     }
@@ -422,6 +575,21 @@ impl DomainEvent {
             Self::ContactUpdated { .. } => "ContactUpdated",
             Self::ContactRemoved { .. } => "ContactRemoved",
             Self::ContactMerged { .. } => "ContactMerged",
+            Self::ContactPushedToServer { .. } => "ContactPushedToServer",
+            Self::ContactConflictLost { .. } => "ContactConflictLost",
+            Self::ContactPushFailed { .. } => "ContactPushFailed",
+            Self::AddressBookDiscovered { .. } => "AddressBookDiscovered",
+            Self::AddressBookUpdated { .. } => "AddressBookUpdated",
+            Self::AddressBookRemoved { .. } => "AddressBookRemoved",
+            Self::CalendarDiscovered { .. } => "CalendarDiscovered",
+            Self::CalendarUpdated { .. } => "CalendarUpdated",
+            Self::CalendarRemoved { .. } => "CalendarRemoved",
+            Self::CalendarEventAdded { .. } => "CalendarEventAdded",
+            Self::CalendarEventUpdated { .. } => "CalendarEventUpdated",
+            Self::CalendarEventRemoved { .. } => "CalendarEventRemoved",
+            Self::CalendarEventPushedToServer { .. } => "CalendarEventPushedToServer",
+            Self::CalendarEventConflictLost { .. } => "CalendarEventConflictLost",
+            Self::CalendarEventPushFailed { .. } => "CalendarEventPushFailed",
         }
     }
 }

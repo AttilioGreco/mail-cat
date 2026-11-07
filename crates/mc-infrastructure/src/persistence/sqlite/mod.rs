@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use mc_domain::DomainError;
 use rusqlite::{Connection, OpenFlags};
 
+mod dav_projection;
+mod dav_repository;
 pub mod event_store;
 mod pending_rename;
 mod projector;
@@ -271,6 +273,79 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // 13: a label's color (a palette key), kept here because mail servers
     // have none. Shared by the label's whole training group.
     "ALTER TABLE tag_settings ADD COLUMN color TEXT;",
+    // 14: server-synced contacts and calendars. A contact bound to a server
+    // keeps its whole vCard and the place it lives; `dirty` is derived from
+    // the events (last local one not yet pushed) and `edited_at` is when it
+    // happened. A resource the user deleted has no row left to be dirty, so
+    // its pending DELETE waits in `pending_deletes` until the server
+    // acknowledges it. `conflicts_lost` is keyed by event id so that
+    // re-projecting an event cannot count it twice.
+    "ALTER TABLE contacts ADD COLUMN raw TEXT;
+    ALTER TABLE contacts ADD COLUMN remote_account BLOB;
+    ALTER TABLE contacts ADD COLUMN remote_collection TEXT;
+    ALTER TABLE contacts ADD COLUMN remote_href TEXT;
+    ALTER TABLE contacts ADD COLUMN remote_etag TEXT;
+    ALTER TABLE contacts ADD COLUMN remote_modified INTEGER;
+    ALTER TABLE contacts ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE contacts ADD COLUMN edited_at INTEGER;
+    ALTER TABLE contacts ADD COLUMN push_error TEXT;
+    CREATE INDEX contacts_remote ON contacts(remote_account, remote_collection)
+        WHERE remote_href IS NOT NULL;
+    CREATE TABLE address_books (
+        account_id  BLOB NOT NULL,
+        collection  TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        description TEXT,
+        read_only   INTEGER NOT NULL,
+        PRIMARY KEY (account_id, collection)
+    ) WITHOUT ROWID;
+    CREATE TABLE calendars (
+        account_id BLOB NOT NULL,
+        collection TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        color      TEXT,
+        timezone   TEXT,
+        read_only  INTEGER NOT NULL,
+        ownership  TEXT NOT NULL,
+        components TEXT NOT NULL,
+        PRIMARY KEY (account_id, collection)
+    ) WITHOUT ROWID;
+    CREATE TABLE calendar_events (
+        account_id      BLOB NOT NULL,
+        href            TEXT NOT NULL,
+        collection      TEXT NOT NULL,
+        etag            TEXT,
+        remote_modified INTEGER,
+        raw             TEXT NOT NULL,
+        summary         TEXT,
+        start_at        INTEGER,
+        end_at          INTEGER,
+        all_day         INTEGER NOT NULL DEFAULT 0,
+        recurring       INTEGER NOT NULL DEFAULT 0,
+        location        TEXT,
+        status          TEXT,
+        dirty           INTEGER NOT NULL DEFAULT 0,
+        edited_at       INTEGER,
+        push_error      TEXT,
+        PRIMARY KEY (account_id, href)
+    ) WITHOUT ROWID;
+    CREATE INDEX calendar_events_collection ON calendar_events(account_id, collection, start_at);
+    CREATE TABLE pending_deletes (
+        aggregate_id TEXT PRIMARY KEY,
+        kind         TEXT NOT NULL,
+        account_id   BLOB NOT NULL,
+        collection   TEXT NOT NULL,
+        href         TEXT NOT NULL,
+        etag         TEXT NOT NULL,
+        edited_at    INTEGER NOT NULL,
+        push_error   TEXT
+    ) WITHOUT ROWID;
+    CREATE INDEX pending_deletes_collection ON pending_deletes(account_id, collection, kind);
+    CREATE TABLE conflicts_lost (
+        event_id   BLOB PRIMARY KEY,
+        account_id BLOB NOT NULL
+    ) WITHOUT ROWID;
+    CREATE INDEX conflicts_lost_account ON conflicts_lost(account_id);",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

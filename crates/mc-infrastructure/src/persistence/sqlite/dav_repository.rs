@@ -1,0 +1,352 @@
+//! `DavReadRepository` over SQLite.
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use rusqlite::types::{Type, ValueRef};
+use rusqlite::{Connection, Row, params};
+use uuid::Uuid;
+
+use mc_domain::{
+    AccountId, AddressBook, AggregateType, Calendar, CalendarEvent, CollectionId,
+    DavReadRepository, DomainError, Etag, EventFields, Href, Occurrence, PendingChange,
+    PendingPush, RemoteBinding, formats,
+};
+
+use super::repository::{
+    SqliteRepository, conversion_err, json_col, query_all, query_one, time_col,
+};
+
+fn opt_time(row: &Row, idx: usize) -> rusqlite::Result<Option<DateTime<Utc>>> {
+    Ok(row
+        .get::<_, Option<i64>>(idx)?
+        .map(DateTime::from_timestamp_nanos))
+}
+
+/// Columns: account_id, collection, href, etag, remote_modified.
+fn binding_from_row(row: &Row, at: usize) -> rusqlite::Result<RemoteBinding> {
+    Ok(RemoteBinding {
+        account: AccountId::from_uuid(row.get(at)?),
+        collection: CollectionId::new(row.get::<_, String>(at + 1)?),
+        href: Href::new(row.get::<_, String>(at + 2)?),
+        etag: row.get::<_, Option<String>>(at + 3)?.map(Etag::new),
+        remote_modified: opt_time(row, at + 4)?,
+    })
+}
+
+const EVENT_COLUMNS: &str = "account_id, collection, href, etag, remote_modified, raw, \
+     summary, start_at, end_at, all_day, recurring, location, status";
+
+fn fields_from_row(row: &Row, at: usize) -> rusqlite::Result<Option<EventFields>> {
+    let Some(summary) = row.get::<_, Option<String>>(at)? else {
+        return Ok(None);
+    };
+    Ok(Some(EventFields {
+        summary,
+        start: time_col(row, at + 1)?,
+        end: time_col(row, at + 2)?,
+        all_day: row.get(at + 3)?,
+        recurring: row.get(at + 4)?,
+        location: row.get(at + 5)?,
+        status: match row.get::<_, Option<String>>(at + 6)? {
+            Some(text) => Some(
+                serde_json::from_str(&text).map_err(|e| conversion_err(at + 6, Type::Text, e))?,
+            ),
+            None => None,
+        },
+    }))
+}
+
+fn event_from_row(row: &Row) -> rusqlite::Result<CalendarEvent> {
+    Ok(CalendarEvent {
+        binding: binding_from_row(row, 0)?,
+        raw: row.get(5)?,
+        fields: fields_from_row(row, 6)?,
+    })
+}
+
+fn pending(
+    conn: &Connection,
+    account: Uuid,
+    collection: &str,
+    kind: &str,
+    dirty_sql: &str,
+) -> Result<Vec<PendingPush>, DomainError> {
+    // Columns: aggregate id, binding (5), raw, edited_at, push_error.
+    let map = |r: &Row, change: Option<PendingChange>| -> rusqlite::Result<PendingPush> {
+        let binding = binding_from_row(r, 1)?;
+        let aggregate_id = match r.get_ref(0)? {
+            ValueRef::Blob(id) => Uuid::from_slice(id)
+                .map_err(|e| conversion_err(0, Type::Blob, e))?
+                .to_string(),
+            ValueRef::Text(id) => String::from_utf8_lossy(id).into_owned(),
+            _ => AggregateType::CalendarEvent.path_id(binding.account, binding.href.as_str()),
+        };
+        Ok(PendingPush {
+            aggregate_id,
+            binding,
+            change: match change {
+                Some(change) => change,
+                None => PendingChange::Put { raw: r.get(6)? },
+            },
+            edited_at: time_col(r, 7)?,
+            failure: r.get(8)?,
+        })
+    };
+    let mut found = query_all(conn, dirty_sql, params![account, collection], |r| {
+        map(r, None)
+    })?;
+    found.extend(query_all(
+        conn,
+        "SELECT aggregate_id, account_id, collection, href, etag, NULL, NULL, edited_at, push_error \
+         FROM pending_deletes WHERE account_id = ?1 AND collection = ?2 AND kind = ?3",
+        params![account, collection, kind],
+        |r| map(r, Some(PendingChange::Delete)),
+    )?);
+    found.sort_by_key(|p| p.edited_at);
+    Ok(found)
+}
+
+fn etags(
+    conn: &Connection,
+    sql: &str,
+    account: Uuid,
+    collection: &str,
+) -> Result<HashMap<Href, Etag>, DomainError> {
+    Ok(query_all(conn, sql, params![account, collection], |r| {
+        Ok((
+            Href::new(r.get::<_, String>(0)?),
+            Etag::new(r.get::<_, String>(1)?),
+        ))
+    })?
+    .into_iter()
+    .collect())
+}
+
+#[async_trait]
+impl DavReadRepository for SqliteRepository {
+    async fn list_address_books(
+        &self,
+        account: &AccountId,
+    ) -> Result<Vec<AddressBook>, DomainError> {
+        let account = *account.as_uuid();
+        self.db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    "SELECT account_id, collection, name, description, read_only \
+                     FROM address_books WHERE account_id = ?1 ORDER BY name, collection",
+                    [account],
+                    |r| {
+                        Ok(AddressBook {
+                            account: AccountId::from_uuid(r.get(0)?),
+                            collection: CollectionId::new(r.get::<_, String>(1)?),
+                            name: r.get(2)?,
+                            description: r.get(3)?,
+                            read_only: r.get(4)?,
+                        })
+                    },
+                )
+            })
+            .await
+    }
+
+    async fn list_calendars(&self, account: &AccountId) -> Result<Vec<Calendar>, DomainError> {
+        let account = *account.as_uuid();
+        self.db
+            .read(move |conn| {
+                query_all(
+                    conn,
+                    "SELECT account_id, collection, name, color, timezone, read_only, ownership, \
+                         components FROM calendars WHERE account_id = ?1 ORDER BY name, collection",
+                    [account],
+                    |r| {
+                        Ok(Calendar {
+                            account: AccountId::from_uuid(r.get(0)?),
+                            collection: CollectionId::new(r.get::<_, String>(1)?),
+                            name: r.get(2)?,
+                            color: r.get(3)?,
+                            timezone: r.get(4)?,
+                            read_only: r.get(5)?,
+                            ownership: json_col(r, 6)?,
+                            components: json_col(r, 7)?,
+                        })
+                    },
+                )
+            })
+            .await
+    }
+
+    async fn pending_contacts(
+        &self,
+        account: &AccountId,
+        book: &CollectionId,
+    ) -> Result<Vec<PendingPush>, DomainError> {
+        let (account, book) = (*account.as_uuid(), book.to_string());
+        self.db
+            .read(move |conn| {
+                pending(
+                    conn,
+                    account,
+                    &book,
+                    "contact",
+                    "SELECT id, remote_account, remote_collection, remote_href, \
+                         remote_etag, remote_modified, raw, edited_at, push_error \
+                     FROM contacts \
+                     WHERE remote_account = ?1 AND remote_collection = ?2 AND dirty = 1",
+                )
+            })
+            .await
+    }
+
+    async fn pending_events(
+        &self,
+        account: &AccountId,
+        calendar: &CollectionId,
+    ) -> Result<Vec<PendingPush>, DomainError> {
+        let (account, calendar) = (*account.as_uuid(), calendar.to_string());
+        self.db
+            .read(move |conn| {
+                pending(
+                    conn,
+                    account,
+                    &calendar,
+                    "event",
+                    "SELECT NULL, account_id, collection, href, etag, remote_modified, raw, \
+                         edited_at, push_error \
+                     FROM calendar_events WHERE account_id = ?1 AND collection = ?2 AND dirty = 1",
+                )
+            })
+            .await
+    }
+
+    async fn contact_etags(
+        &self,
+        account: &AccountId,
+        book: &CollectionId,
+    ) -> Result<HashMap<Href, Etag>, DomainError> {
+        let (account, book) = (*account.as_uuid(), book.to_string());
+        self.db
+            .read(move |conn| {
+                etags(
+                    conn,
+                    "SELECT remote_href, remote_etag FROM contacts WHERE remote_account = ?1 \
+                         AND remote_collection = ?2 AND remote_etag IS NOT NULL",
+                    account,
+                    &book,
+                )
+            })
+            .await
+    }
+
+    async fn event_etags(
+        &self,
+        account: &AccountId,
+        calendar: &CollectionId,
+    ) -> Result<HashMap<Href, Etag>, DomainError> {
+        let (account, calendar) = (*account.as_uuid(), calendar.to_string());
+        self.db
+            .read(move |conn| {
+                etags(
+                    conn,
+                    "SELECT href, etag FROM calendar_events WHERE account_id = ?1 \
+                         AND collection = ?2 AND etag IS NOT NULL",
+                    account,
+                    &calendar,
+                )
+            })
+            .await
+    }
+
+    async fn get_event(
+        &self,
+        account: &AccountId,
+        href: &Href,
+    ) -> Result<Option<CalendarEvent>, DomainError> {
+        let (account, href) = (*account.as_uuid(), href.to_string());
+        self.db
+            .read(move |conn| {
+                query_one(
+                    conn,
+                    &format!(
+                        "SELECT {EVENT_COLUMNS} FROM calendar_events \
+                         WHERE account_id = ?1 AND href = ?2"
+                    ),
+                    params![account, href],
+                    event_from_row,
+                )
+            })
+            .await
+    }
+
+    async fn events_in_range(
+        &self,
+        account: &AccountId,
+        calendars: &[CollectionId],
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<Occurrence>, DomainError> {
+        let account = *account.as_uuid();
+        let calendars = calendars.to_vec();
+        self.db
+            .read(move |conn| {
+                // A recurring resource can reach into the range from any
+                // start, so those are all loaded and expanded.
+                // ponytail: bound them by their first start and UNTIL when
+                // an account has enough recurring events for this to show.
+                let rows = query_all(
+                    conn,
+                    &format!(
+                        "SELECT {EVENT_COLUMNS} FROM calendar_events \
+                         WHERE account_id = ?1 AND start_at IS NOT NULL AND (recurring = 1 \
+                             OR (start_at < ?3 AND (end_at > ?2 OR start_at >= ?2)))"
+                    ),
+                    params![account, super::repository::nanos(from), super::repository::nanos(to)],
+                    event_from_row,
+                )?;
+                let mut found = Vec::new();
+                for event in rows {
+                    let calendar = event.binding.collection.clone();
+                    if !calendars.is_empty() && !calendars.contains(&calendar) {
+                        continue;
+                    }
+                    let Some(fields) = event.fields else { continue };
+                    let expanded = if fields.recurring {
+                        match formats::occurrences(&event.raw, from, to) {
+                            Ok(expanded) => expanded,
+                            Err(e) => {
+                                tracing::warn!(href = %event.binding.href, "skipping unreadable event: {e}");
+                                continue;
+                            }
+                        }
+                    } else {
+                        vec![fields]
+                    };
+                    found.extend(expanded.into_iter().map(|event_fields| Occurrence {
+                        calendar: calendar.clone(),
+                        href: event.binding.href.clone(),
+                        event: event_fields,
+                    }));
+                }
+                found.sort_by_key(|o| o.event.start);
+                Ok(found)
+            })
+            .await
+    }
+
+    async fn conflicts_lost(&self, account: &AccountId) -> Result<u64, DomainError> {
+        let account = *account.as_uuid();
+        self.db
+            .read(move |conn| {
+                query_one(
+                    conn,
+                    "SELECT COUNT(*) FROM conflicts_lost WHERE account_id = ?1",
+                    [account],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|n| n.unwrap_or(0) as u64)
+            })
+            .await
+    }
+}

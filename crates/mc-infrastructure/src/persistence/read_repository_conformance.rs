@@ -4,6 +4,7 @@ pub(crate) mod accounts;
 pub(crate) mod bodies;
 pub(crate) mod contacts;
 pub(crate) mod conversations;
+pub(crate) mod dav;
 pub(crate) mod mailboxes;
 pub(crate) mod memberships;
 pub(crate) mod messages;
@@ -306,6 +307,7 @@ macro_rules! read_repository_conformance {
         $crate::persistence::read_repository_conformance::accounts::accounts_conformance!($make);
         $crate::persistence::read_repository_conformance::bodies::bodies_conformance!($make);
         $crate::persistence::read_repository_conformance::contacts::contacts_conformance!($make);
+        $crate::persistence::read_repository_conformance::dav::dav_conformance!($make);
         $crate::persistence::read_repository_conformance::conversations::conversations_conformance!(
             $make
         );

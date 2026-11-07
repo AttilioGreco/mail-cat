@@ -4,6 +4,8 @@
 /// The domain and application layers depend only on these abstractions.
 pub mod account_event_source;
 pub mod contact_index;
+pub mod dav_provider;
+pub mod dav_repository;
 pub mod email_provider;
 pub mod embedder;
 pub mod event_store;

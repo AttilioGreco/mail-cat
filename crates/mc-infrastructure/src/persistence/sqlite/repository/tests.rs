@@ -208,6 +208,7 @@ async fn failed_batch_rolls_back_projection_and_checkpoint() {
         source: mc_domain::ContactSource::Local,
         external_id: None,
         account_scope: None,
+        remote: None,
     };
 
     let result = repo
