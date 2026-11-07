@@ -12,6 +12,7 @@ pub mod client;
 mod curation;
 mod discovery;
 pub mod error;
+mod server;
 mod tagging;
 pub mod types;
 
@@ -19,5 +20,6 @@ pub use client::MailCatClient;
 pub use curation::*;
 pub use discovery::*;
 pub use error::{ClientError, Result};
+pub use server::*;
 pub use tagging::*;
 pub use types::*;

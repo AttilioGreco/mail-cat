@@ -10,6 +10,13 @@ const show = (message: string) =>
     duration: Infinity,
   });
 
+const showMismatch = (message: string) =>
+  toast.warning('Il server non è aggiornato', {
+    id: 'server-version',
+    description: message,
+    duration: Infinity,
+  });
+
 /**
  * The app registers and starts its background server on launch. When that
  * fails, say so — otherwise the user just sees an empty, unreachable client.
@@ -25,11 +32,20 @@ export function useServerAutostartError() {
       })
       .catch((e) => console.error('server autostart: failed to read error', e));
 
-    const unlisten = listen<string>('server-service-error', (event) => show(event.payload));
+    invoke<string | null>('take_server_version_mismatch')
+      .then((message) => {
+        if (!cancelled && message) showMismatch(message);
+      })
+      .catch((e) => console.error('server version: failed to read mismatch', e));
+
+    const unlisten = [
+      listen<string>('server-service-error', (event) => show(event.payload)),
+      listen<string>('server-version-mismatch', (event) => showMismatch(event.payload)),
+    ];
 
     return () => {
       cancelled = true;
-      unlisten.then((off) => off()).catch(() => {});
+      unlisten.forEach((u) => u.then((off) => off()).catch(() => {}));
     };
   }, []);
 }

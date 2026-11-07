@@ -12,8 +12,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
+use tokio::sync::Notify;
 use tonic::transport::Server;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -30,12 +32,14 @@ mod tagging_tests;
 mod wiring;
 
 use config::ServerConfig;
+use mc_interfaces::grpc::services::{RESTART_EXIT_CODE, ServerServiceImpl};
 use wiring::AppContext;
 
 use mc_interfaces::grpc::proto::{
     account_service_server::AccountServiceServer, contact_service_server::ContactServiceServer,
     mailbox_service_server::MailboxServiceServer, message_service_server::MessageServiceServer,
-    search_service_server::SearchServiceServer, tagging_service_server::TaggingServiceServer,
+    search_service_server::SearchServiceServer, server_service_server::ServerServiceServer,
+    tagging_service_server::TaggingServiceServer,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -106,7 +110,9 @@ async fn run() -> anyhow::Result<()> {
     let mut filter = std::env::var("RUST_LOG")
         .ok()
         .or_else(|| config.log_level.clone())
-        .unwrap_or_else(|| "mc_server=info,mc_application=debug,mc_infrastructure=debug".into());
+        .unwrap_or_else(|| {
+            "mail_cat_server=info,mc_application=debug,mc_infrastructure=debug".into()
+        });
     if !filter.contains("tantivy") {
         filter.push_str(",tantivy=warn");
     }
@@ -166,6 +172,8 @@ async fn run() -> anyhow::Result<()> {
     .context("failed to initialize application context")?;
 
     let shutdown = app_ctx.shutdown.clone();
+    let restart = Arc::new(Notify::new());
+    let restarting = Arc::new(AtomicBool::new(false));
 
     // Parse gRPC address
     let addr = config.grpc_addr.parse().context("invalid gRPC address")?;
@@ -185,6 +193,7 @@ async fn run() -> anyhow::Result<()> {
 
     // Create gRPC server with all services
     let stopping = shutdown.clone();
+    let flag = restarting.clone();
     let server = Server::builder()
         .add_service(AccountServiceServer::new(app_ctx.account_service))
         .add_service(ContactServiceServer::new(app_ctx.contact_service))
@@ -197,8 +206,11 @@ async fn run() -> anyhow::Result<()> {
         )
         .add_service(SearchServiceServer::new(app_ctx.search_service))
         .add_service(TaggingServiceServer::new(app_ctx.tagging_service))
+        .add_service(ServerServiceServer::new(ServerServiceImpl::new(
+            restart.clone(),
+        )))
         .serve_with_shutdown(addr, async move {
-            shutdown_signal().await;
+            shutdown_signal(&restart, &flag).await;
             stopping.cancel();
         });
     // Graceful stop waits for every open call, and the UI's watch streams
@@ -223,14 +235,21 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!("Server shut down gracefully");
     // Force-exit is safe: every SQLite write is its own committed transaction
     // (WAL), so nothing buffered is lost; an uncommitted one rolls back on open.
-    std::process::exit(0);
+    std::process::exit(if restarting.load(Ordering::SeqCst) {
+        RESTART_EXIT_CODE
+    } else {
+        0
+    });
 }
 
 /// Wait for a shutdown signal: Ctrl+C (SIGINT) when run interactively, or
 /// SIGTERM (what `systemctl stop`/`restart` actually sends). Without a SIGTERM
 /// handler, systemd stopping the service bypasses this entire graceful path —
 /// the process is killed outright, with no chance to cancel background tasks.
-async fn shutdown_signal() {
+///
+/// A client's restart request takes the same path; `restarting` then makes the
+/// process exit non-zero so the supervisor relaunches it.
+async fn shutdown_signal(restart: &Notify, restarting: &AtomicBool) {
     // Windows has no SIGTERM: the Scheduled Task and the updater stop the server
     // by terminating the process, so Ctrl+C is the only graceful path there.
     #[cfg(unix)]
@@ -250,6 +269,10 @@ async fn shutdown_signal() {
         }
         _ = sigterm => {
             tracing::info!("Received SIGTERM, stopping server...");
+        }
+        () = restart.notified() => {
+            restarting.store(true, Ordering::SeqCst);
+            tracing::info!("Restart requested, stopping server...");
         }
     }
 }

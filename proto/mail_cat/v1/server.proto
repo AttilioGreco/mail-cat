@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package mail_cat.v1;
+
+// Lifecycle of the server process itself.
+service ServerService {
+  // Which build is answering, and where it lives.
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // Replies, then shuts down gracefully and exits with code 75 so a supervisor
+  // (systemd, launchd, the Windows task) relaunches it. A server started by
+  // hand has no supervisor and simply stays down.
+  rpc Restart(RestartRequest) returns (RestartResponse);
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+  string version = 1;
+  string executable_path = 2;
+  uint32 process_id = 3;
+  int64 started_at = 4;  // Unix timestamp
+}
+
+message RestartRequest {}
+
+message RestartResponse {}

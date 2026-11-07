@@ -758,28 +758,6 @@ async fn pump_oauth_events(
     }
 }
 
-/// Restart the mail-cat server. Adding an account no longer needs it; removing
-/// one still does, and so does a rejected OAuth client.
-// ponytail: assumes the packaged systemd --user unit (see packaging/systemd).
-// If the server is started some other way, surface the error and let the user
-// restart it by hand.
-#[tauri::command]
-pub async fn restart_server() -> Result<(), String> {
-    let output = tokio::process::Command::new("systemctl")
-        .args(["--user", "restart", "mail-cat-server"])
-        .output()
-        .await
-        .map_err(|e| format!("could not run systemctl: {e}"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(format!(
-        "systemctl --user restart mail-cat-server failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
-}
-
 #[tauri::command]
 pub async fn list_mailboxes(
     account_id: String,

@@ -8,18 +8,155 @@ use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::AppState;
-use mc_client::MailCatClient;
+use mc_client::{MailCatClient, ServerInfo};
 
 /// Emitted when the server could not be registered or started.
 const ERROR_EVENT: &str = "server-service-error";
 
+/// Emitted when the server still runs another version after a restart.
+const VERSION_EVENT: &str = "server-version-mismatch";
+
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How long the old process gets to go away once asked to restart.
+const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+const START_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The start-up check runs in the background; the webview may not be listening
-/// yet when it fails, so the message is also kept for the UI to pull.
+/// yet when it fails, so the messages are also kept for the UI to pull.
 #[derive(Default)]
-pub struct ServiceState(Mutex<Option<String>>);
+pub struct ServiceState {
+    error: Mutex<Option<String>>,
+    version_mismatch: Mutex<Option<String>>,
+}
+
+/// What answers on the server URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Probe {
+    Down,
+    /// Reachable but predates `GetServerInfo`, so it cannot restart itself.
+    Legacy,
+    Running(ServerInfo),
+}
+
+impl Probe {
+    fn is_current(&self) -> bool {
+        matches!(self, Probe::Running(i) if i.version == APP_VERSION)
+    }
+
+    fn needs_restart(&self) -> bool {
+        !matches!(self, Probe::Down) && !self.is_current()
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerStatus {
+    app_version: &'static str,
+    /// `down`, `legacy` or `running`.
+    state: &'static str,
+    info: Option<ServerInfo>,
+}
+
+impl From<Probe> for ServerStatus {
+    fn from(probe: Probe) -> Self {
+        let (state, info) = match probe {
+            Probe::Down => ("down", None),
+            Probe::Legacy => ("legacy", None),
+            Probe::Running(info) => ("running", Some(info)),
+        };
+        Self {
+            app_version: APP_VERSION,
+            state,
+            info,
+        }
+    }
+}
+
+async fn probe(url: &str) -> Probe {
+    let Ok(client) = MailCatClient::connect(url).await else {
+        return Probe::Down;
+    };
+    match client.server_info().await {
+        Ok(Some(info)) => Probe::Running(info),
+        Ok(None) => Probe::Legacy,
+        // Answering badly is as good as not answering: nothing can be asked of it.
+        Err(_) => Probe::Down,
+    }
+}
+
+/// Polls until `done` holds or the timeout passes; returns the last probe.
+async fn wait_probe(url: &str, timeout: Duration, done: impl Fn(&Probe) -> bool) -> Probe {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let p = probe(url).await;
+        if done(&p) || tokio::time::Instant::now() >= deadline {
+            return p;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+fn mismatch_message(probe: &Probe) -> String {
+    match probe {
+        Probe::Running(i) => format!(
+            "Il server in {} è alla versione {}, ma l'app è alla {APP_VERSION}. \
+             Reinstalla mail-cat per aggiornarlo.",
+            i.executable_path, i.version
+        ),
+        _ => format!(
+            "Il server in esecuzione è una versione precedente alla {APP_VERSION} \
+             e non si è riavviato. Reinstalla mail-cat per aggiornarlo."
+        ),
+    }
+}
+
+/// The one restart path, for the launch check and the settings button. The
+/// `service start` at the end is what makes Windows quick: its task would
+/// otherwise relaunch the exited server only after a minute.
+async fn restart_flow(url: &str) -> Result<Probe, String> {
+    let before = probe(url).await;
+    match &before {
+        Probe::Down => {}
+        Probe::Running(old) => {
+            let client = MailCatClient::connect(url)
+                .await
+                .map_err(|e| e.to_string())?;
+            client.restart_server().await.map_err(|e| e.to_string())?;
+            let old_pid = old.process_id;
+            let after = wait_probe(
+                url,
+                STOP_TIMEOUT,
+                |p| !matches!(p, Probe::Running(i) if i.process_id == old_pid),
+            )
+            .await;
+            if matches!(after, Probe::Running(_)) {
+                return Err("il server non si è fermato".into());
+            }
+        }
+        // No restart RPC: the supervisor's stop is the only way to end it.
+        Probe::Legacy => {
+            tauri::async_runtime::spawn_blocking(|| run_ok(&service_binary()?, "stop"))
+                .await
+                .map_err(|e| e.to_string())??;
+            wait_probe(url, STOP_TIMEOUT, |p| matches!(p, Probe::Down)).await;
+        }
+    }
+    if enabled() {
+        tauri::async_runtime::spawn_blocking(|| run_ok(&service_binary()?, "start"))
+            .await
+            .map_err(|e| e.to_string())??;
+    }
+    let after = wait_probe(url, START_TIMEOUT, |p| !matches!(p, Probe::Down)).await;
+    if matches!(after, Probe::Down) {
+        return Err("il server non è tornato raggiungibile".into());
+    }
+    Ok(after)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
@@ -155,6 +292,15 @@ fn run_ok(server: &Path, subcommand: &str) -> Result<(), String> {
     ))
 }
 
+/// The server `service` subcommands go through: the AppImage's stable copy when
+/// it exists, otherwise the bundled one.
+fn service_binary() -> Result<PathBuf, String> {
+    let bundled = bundled_server()?;
+    Ok(appimage_copy(&bundled)
+        .filter(|c| c.is_file())
+        .unwrap_or(bundled))
+}
+
 /// Whether anything was registered or started (the server then needs a moment).
 fn ensure_blocking() -> Result<bool, String> {
     let server = registrable_server()?;
@@ -172,11 +318,33 @@ fn ensure_blocking() -> Result<bool, String> {
 }
 
 async fn wait_until_reachable(url: &str) {
-    for _ in 0..40 {
-        if MailCatClient::connect(url).await.is_ok() {
-            return;
+    wait_probe(url, Duration::from_secs(20), |p| !matches!(p, Probe::Down)).await;
+}
+
+/// A server left over from an older install keeps serving until it is replaced:
+/// restart it once, and say so if it still is not this app's version.
+async fn align_server_version(app: &AppHandle, url: &str) {
+    let before = probe(url).await;
+    if !before.needs_restart() {
+        return;
+    }
+    let after = match restart_flow(url).await {
+        Ok(after) => after,
+        Err(e) => {
+            tracing::warn!("server restart: {e}");
+            probe(url).await
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    // Anything connected before the restart talked to the process that just exited.
+    *app.state::<AppState>().client.lock().await = None;
+    if !after.needs_restart() {
+        return;
+    }
+    let message = mismatch_message(&after);
+    tracing::error!("server version: {message}");
+    *app.state::<ServiceState>().version_mismatch.lock().unwrap() = Some(message.clone());
+    if let Err(e) = app.emit(VERSION_EVENT, message) {
+        tracing::warn!("Failed to emit {VERSION_EVENT}: {e}");
     }
 }
 
@@ -197,11 +365,15 @@ pub fn spawn_ensure(app: &AppHandle) {
             .map_err(|e| e.to_string())
             .and_then(|r| r);
         match outcome {
-            Ok(true) => wait_until_reachable(&state.server_url).await,
-            Ok(false) => {}
+            Ok(started) => {
+                if started {
+                    wait_until_reachable(&state.server_url).await;
+                }
+                align_server_version(&app, &state.server_url).await;
+            }
             Err(message) => {
                 tracing::error!("server autostart: {message}");
-                *app.state::<ServiceState>().0.lock().unwrap() = Some(message.clone());
+                *app.state::<ServiceState>().error.lock().unwrap() = Some(message.clone());
                 if let Err(e) = app.emit(ERROR_EVENT, message) {
                     tracing::warn!("Failed to emit {ERROR_EVENT}: {e}");
                 }
@@ -213,7 +385,27 @@ pub fn spawn_ensure(app: &AppHandle) {
 
 #[tauri::command]
 pub fn take_server_service_error(state: State<'_, ServiceState>) -> Option<String> {
-    state.0.lock().unwrap().take()
+    state.error.lock().unwrap().take()
+}
+
+#[tauri::command]
+pub fn take_server_version_mismatch(state: State<'_, ServiceState>) -> Option<String> {
+    state.version_mismatch.lock().unwrap().take()
+}
+
+#[tauri::command]
+pub async fn server_status(state: State<'_, AppState>) -> Result<ServerStatus, String> {
+    Ok(probe(&state.server_url).await.into())
+}
+
+/// Restarts the server onto the installed build. Needs a supervisor to relaunch
+/// it (autostart service); a hand-started server stays down.
+#[tauri::command]
+pub async fn restart_server(state: State<'_, AppState>) -> Result<ServerStatus, String> {
+    let after = restart_flow(&state.server_url).await?;
+    // The old connection died with the old process.
+    *state.client.lock().await = None;
+    Ok(after.into())
 }
 
 /// Windows cannot replace an executable that is running, so the updater stops the
@@ -223,15 +415,9 @@ pub async fn stop_server_service() -> Result<(), String> {
     if !enabled() {
         return Ok(());
     }
-    tauri::async_runtime::spawn_blocking(|| {
-        let bundled = bundled_server()?;
-        let server = appimage_copy(&bundled)
-            .filter(|c| c.is_file())
-            .unwrap_or(bundled);
-        run_ok(&server, "stop")
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(|| run_ok(&service_binary()?, "stop"))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Re-runs the start-up check, for when an update failed after the server was stopped.
@@ -242,8 +428,26 @@ pub fn ensure_server_service(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, plan};
+    use super::{APP_VERSION, Action, Probe, plan};
+    use mc_client::ServerInfo;
     use std::path::Path;
+
+    fn running(version: &str) -> Probe {
+        Probe::Running(ServerInfo {
+            version: version.into(),
+            executable_path: "/x/mail-cat-server".into(),
+            process_id: 1,
+            started_at: 0,
+        })
+    }
+
+    #[test]
+    fn only_a_different_or_legacy_server_is_restarted() {
+        assert!(!running(APP_VERSION).needs_restart());
+        assert!(running("0.0.1").needs_restart());
+        assert!(Probe::Legacy.needs_restart());
+        assert!(!Probe::Down.needs_restart());
+    }
 
     const EXE: &str = "/usr/bin/mail-cat-server";
 
