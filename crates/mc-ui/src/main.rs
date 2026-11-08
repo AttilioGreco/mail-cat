@@ -162,6 +162,8 @@ async fn main() {
             commands::dav::create_event,
             commands::dav::update_event,
             commands::dav::delete_event,
+            commands::dav::subscribe_calendar,
+            commands::dav::unsubscribe_calendar,
             commands::dav::sync_dav_now,
             commands::dav::list_address_books,
             commands::dav::list_remote_contacts,

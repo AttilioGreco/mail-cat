@@ -131,6 +131,7 @@ async fn contacts_and_events_round_trip_through_the_service() {
             Some(&DavConfig {
                 carddav: Some(home.clone()),
                 caldav: Some(home),
+                ..DavConfig::default()
             }),
             DavProfile::Generic,
         )

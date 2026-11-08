@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use mc_domain::{
     AccountId, AddressBook, Calendar, CalendarProvider, CollectionChanges, CollectionId,
     ContactsProvider, DeleteOutcome, DomainError, Etag, Href, PutOutcome, RemoteResource,
-    ResourcePut, SyncCursor,
+    ResourcePut, Subscribed, SyncCursor,
 };
 
 #[derive(Clone, Copy)]
@@ -44,6 +44,8 @@ struct State {
     puts: VecDeque<Script>,
     changes_fail: Option<(CollectionId, fn() -> DomainError)>,
     calls: Vec<String>,
+    /// What `subscribe` answers.
+    subscription: Option<Subscribed>,
 }
 
 #[derive(Default)]
@@ -73,6 +75,10 @@ impl Fake {
             calendar.account = s.account.unwrap();
             s.calendars.push(calendar);
         });
+    }
+
+    pub fn subscribes_to(&self, subscribed: Subscribed) {
+        self.with(|s| s.subscription = Some(subscribed));
     }
 
     pub fn remove_book(&self, collection: &str) {
@@ -366,5 +372,15 @@ impl CalendarProvider for Fake {
         if_match: &Etag,
     ) -> Result<DeleteOutcome, DomainError> {
         Ok(self.delete_if_match(href, if_match))
+    }
+
+    async fn subscribe(&self, _email: &str) -> Result<Subscribed, DomainError> {
+        self.with(|s| s.subscription.clone())
+            .ok_or_else(|| DomainError::NotFound("nobody".into()))
+    }
+
+    async fn unsubscribe(&self, calendar: &CollectionId) -> Result<(), DomainError> {
+        self.with(|s| s.calls.push(format!("unsubscribe {calendar}")));
+        Ok(())
     }
 }

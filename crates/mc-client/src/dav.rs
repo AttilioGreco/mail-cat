@@ -476,6 +476,29 @@ impl MailCatClient {
         Ok(())
     }
 
+    /// Adds the calendars `email` shares with the account. The server answers
+    /// `NotFound` for an unknown user and `PermissionDenied` when nothing is
+    /// shared.
+    pub async fn subscribe_calendar(&self, account_id: &str, email: &str) -> Result<()> {
+        self.calendars()
+            .subscribe_calendar(pb::SubscribeCalendarRequest {
+                account_id: account_id.to_owned(),
+                email: email.to_owned(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unsubscribe_calendar(&self, account_id: &str, collection: &str) -> Result<()> {
+        self.calendars()
+            .unsubscribe_calendar(pb::UnsubscribeCalendarRequest {
+                account_id: account_id.to_owned(),
+                collection_id: collection.to_owned(),
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Wakes the contacts and calendars loop of one account, or of every one;
     /// returns before the pass runs.
     pub async fn sync_dav_now(&self, account_id: Option<&str>) -> Result<()> {

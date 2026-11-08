@@ -182,6 +182,10 @@ pub struct ConnectionConfig {
 pub struct DavConfig {
     pub carddav: Option<url::Url>,
     pub caldav: Option<url::Url>,
+    /// Calendars of other principals the user added on a generic CalDAV
+    /// server, which only lists its own calendar home.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscribed: Vec<url::Url>,
 }
 
 /// Account aggregate root.
@@ -234,16 +238,21 @@ impl Account {
         (account, event)
     }
 
-    /// Apply an AccountUpdated event to update the account's state.
+    /// Apply an AccountUpdated event to update the account's state. The
+    /// calendars subscribed to survive a new config: the settings that send
+    /// one do not know about them.
     pub fn apply_update(
         &mut self,
         name: Option<String>,
-        connection_config: Option<ConnectionConfig>,
+        mut connection_config: Option<ConnectionConfig>,
     ) -> DomainEvent {
         if let Some(ref new_name) = name {
             self.name = new_name.clone();
         }
-        if let Some(ref new_config) = connection_config {
+        if let Some(new_config) = connection_config.as_mut() {
+            if let Some(kept) = self.subscribed().filter(|s| !s.is_empty()) {
+                new_config.dav.get_or_insert_default().subscribed = kept.to_vec();
+            }
             self.connection_config = new_config.clone();
         }
         self.updated_at = Utc::now();
@@ -252,6 +261,24 @@ impl Account {
             account_id: self.id,
             name,
             connection_config,
+        }
+    }
+
+    pub fn subscribed(&self) -> Option<&[url::Url]> {
+        Some(&self.connection_config.dav.as_ref()?.subscribed)
+    }
+
+    /// Replaces the calendars subscribed to, which `apply_update` would keep.
+    pub fn set_subscribed(&mut self, subscribed: Vec<url::Url>) -> DomainEvent {
+        self.connection_config
+            .dav
+            .get_or_insert_default()
+            .subscribed = subscribed;
+        self.updated_at = Utc::now();
+        DomainEvent::AccountUpdated {
+            account_id: self.id,
+            name: None,
+            connection_config: Some(self.connection_config.clone()),
         }
     }
 

@@ -123,6 +123,12 @@ impl mc_domain::CalendarProvider for Counting {
     ) -> Result<mc_domain::DeleteOutcome, DomainError> {
         unreachable!()
     }
+    async fn subscribe(&self, _: &str) -> Result<mc_domain::Subscribed, DomainError> {
+        unreachable!()
+    }
+    async fn unsubscribe(&self, _: &mc_domain::CollectionId) -> Result<(), DomainError> {
+        unreachable!()
+    }
 }
 
 struct Fixture {

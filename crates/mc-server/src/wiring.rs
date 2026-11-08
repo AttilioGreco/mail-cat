@@ -165,7 +165,10 @@ impl AppContext {
             )
             .with_resync_requests(resync_tx)
             .with_sync_locks(account_locks.clone())
-            .with_dav(DavCommandHandler::new(dav_sync.clone())),
+            .with_dav(DavCommandHandler::new(
+                dav_sync.clone(),
+                repository_arc.clone(),
+            )),
         );
         tracing::info!("Initialized command bus");
 

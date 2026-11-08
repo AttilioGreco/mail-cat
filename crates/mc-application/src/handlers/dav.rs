@@ -11,8 +11,8 @@ use tracing::{info, warn};
 
 use mc_domain::formats::{self, ContactEdit, EventEdit};
 use mc_domain::{
-    AccountId, CollectionId, Contact, ContactEmail, ContactId, DomainEvent, Href, Origin,
-    RemoteBinding,
+    AccountId, AccountWriteRepository, CollectionId, Contact, ContactEmail, ContactId, DomainEvent,
+    Href, Origin, Ownership, RemoteBinding, Subscribed,
 };
 use uuid::Uuid;
 
@@ -33,11 +33,13 @@ pub struct ContactFields {
 
 pub struct DavCommandHandler {
     dav: Arc<DavSyncService>,
+    /// Where a subscription the server does not remember is kept.
+    accounts: Arc<dyn AccountWriteRepository>,
 }
 
 impl DavCommandHandler {
-    pub fn new(dav: Arc<DavSyncService>) -> Self {
-        Self { dav }
+    pub fn new(dav: Arc<DavSyncService>, accounts: Arc<dyn AccountWriteRepository>) -> Self {
+        Self { dav, accounts }
     }
 
     pub async fn handle_add_contact(
@@ -209,6 +211,85 @@ impl DavCommandHandler {
         info!(%href, "event removed");
         self.push_soon(account, Kind::Calendar, calendar, &key);
         Ok(CommandResult::CalendarEventRemoved)
+    }
+
+    pub async fn handle_subscribe_calendar(
+        &self,
+        account: AccountId,
+        email: String,
+    ) -> Result<CommandResult, ApplicationError> {
+        let email = email.trim();
+        if email.is_empty() {
+            return Err(ApplicationError::PreconditionFailed(
+                "an email address is required".into(),
+            ));
+        }
+        let (backend, _) = self.dav.providers.get(&account)?;
+        if let Subscribed::Local(added) = backend.subscribe(email).await? {
+            self.edit_subscribed(account, |kept| {
+                for url in added {
+                    if !kept.contains(&url) {
+                        kept.push(url);
+                    }
+                }
+            })
+            .await?;
+        }
+        info!(%account, "calendar subscribed");
+        self.dav.providers.wake(Some(account));
+        Ok(CommandResult::CalendarSubscribed)
+    }
+
+    pub async fn handle_unsubscribe_calendar(
+        &self,
+        account: AccountId,
+        collection: CollectionId,
+    ) -> Result<CommandResult, ApplicationError> {
+        let calendar = self
+            .dav
+            .store
+            .list_calendars(&account)
+            .await?
+            .into_iter()
+            .find(|c| c.collection == collection)
+            .ok_or_else(|| ApplicationError::NotFound("Collection", collection.to_string()))?;
+        if calendar.ownership == Ownership::Own {
+            return Err(ApplicationError::PreconditionFailed(format!(
+                "{collection} is the account's own calendar"
+            )));
+        }
+        let (backend, _) = self.dav.providers.get(&account)?;
+        backend.unsubscribe(&collection).await?;
+        let path = collection.as_str().trim_end_matches('/');
+        self.edit_subscribed(account, |kept| {
+            kept.retain(|u| u.path().trim_end_matches('/') != path);
+        })
+        .await?;
+        info!(%account, %collection, "calendar unsubscribed");
+        self.dav.providers.wake(Some(account));
+        Ok(CommandResult::CalendarUnsubscribed)
+    }
+
+    /// Saves the account's `DavConfig.subscribed` after `edit`, if it changed.
+    async fn edit_subscribed(
+        &self,
+        account: AccountId,
+        edit: impl FnOnce(&mut Vec<url::Url>),
+    ) -> Result<(), ApplicationError> {
+        let mut stored = self
+            .accounts
+            .load(&account)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("Account", account.to_string()))?;
+        let before = stored.subscribed().unwrap_or_default().to_vec();
+        let mut subscribed = before.clone();
+        edit(&mut subscribed);
+        if subscribed == before {
+            return Ok(());
+        }
+        let event = stored.set_subscribed(subscribed);
+        self.accounts.save(&stored, vec![event]).await?;
+        Ok(())
     }
 
     /// The contact as its stream leaves it, and that stream's last sequence.

@@ -41,6 +41,19 @@ pub(super) fn principal_and_home(kind: Kind) -> String {
     ))
 }
 
+pub(super) fn principal_collections() -> String {
+    propfind("<D:principal-collection-set/>")
+}
+
+/// RFC 3744 §9.4: the principals whose address set holds `email`, with the
+/// calendar home of each.
+pub(super) fn principal_search(email: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?><D:principal-property-search {NAMESPACES}><D:property-search><D:prop><C:calendar-user-address-set/></D:prop><D:match>mailto:{}</D:match></D:property-search><D:prop><C:calendar-home-set/></D:prop></D:principal-property-search>"#,
+        escape(email)
+    )
+}
+
 pub(super) fn collection_listing(kind: Kind) -> String {
     let specific = match kind {
         Kind::Contacts => "<A:addressbook-description/>",

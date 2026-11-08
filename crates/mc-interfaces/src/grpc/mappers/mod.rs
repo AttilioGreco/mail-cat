@@ -22,7 +22,9 @@ pub fn domain_error_to_status(error: DomainError) -> Status {
     match error {
         DomainError::AccountNotFound(msg)
         | DomainError::MailboxNotFound(msg)
-        | DomainError::MessageNotFound(msg) => Status::not_found(msg),
+        | DomainError::MessageNotFound(msg)
+        | DomainError::NotFound(msg) => Status::not_found(msg),
+        DomainError::Forbidden(msg) => Status::permission_denied(msg),
         DomainError::InvalidEmailAddress(msg)
         | DomainError::InvalidMailboxPath(msg)
         | DomainError::Validation(msg) => Status::invalid_argument(msg),

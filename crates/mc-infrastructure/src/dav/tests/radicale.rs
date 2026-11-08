@@ -13,7 +13,7 @@ use mc_domain::error::DomainError;
 use mc_domain::model::account::{AccountId, DavConfig};
 use mc_domain::model::collection::{CalendarComponent, Ownership};
 use mc_domain::traits::dav_provider::{
-    CalendarProvider, ContactsProvider, DeleteOutcome, PutOutcome, ResourcePut,
+    CalendarProvider, ContactsProvider, DeleteOutcome, PutOutcome, ResourcePut, Subscribed,
 };
 use mc_domain::traits::login_gate::LoginSecret;
 use mc_domain::value_objects::remote::{CollectionId, Href};
@@ -213,6 +213,7 @@ async fn a_manual_url_skips_discovery() {
     let dav = DavConfig {
         carddav: Some(server.base.join("/alice/").unwrap()),
         caldav: None,
+        ..DavConfig::default()
     };
     // The origin is unreachable on purpose: only the override may be used.
     let provider = DavProvider::with_origin(
@@ -432,6 +433,7 @@ async fn a_collection_shared_read_only_reports_it_and_refuses_writes() {
     let dav = DavConfig {
         carddav: None,
         caldav: Some(server.base.join("/bob/").unwrap()),
+        ..DavConfig::default()
     };
     let provider = server.provider("alice", Some(&dav));
 
@@ -448,4 +450,64 @@ async fn a_collection_shared_read_only_reports_it_and_refuses_writes() {
         .await
         .unwrap_err();
     assert!(matches!(err, DomainError::Provider(_)), "{err}");
+}
+
+#[tokio::test]
+#[ignore = "needs docker"]
+async fn subscribing_finds_a_colleagues_calendars_and_a_refused_one_drops_out() {
+    let server = Radicale::start().await;
+    server.calendar("alice", "work", &["VEVENT"]).await;
+    server.calendar("bob", "team", &["VEVENT"]).await;
+    server.calendar("carol", "secret", &["VEVENT"]).await;
+    let provider = server.provider("alice", None);
+
+    // Radicale cannot search principals: `bob@127.0.0.1` is refused, `bob` found.
+    let Subscribed::Local(added) = provider.subscribe("bob@127.0.0.1").await.unwrap() else {
+        panic!("a generic server does not remember subscriptions");
+    };
+    assert_eq!(added, [server.base.join("/bob/team/").unwrap()]);
+
+    let calendars = provider.list_calendars().await.unwrap();
+    let team = calendars
+        .iter()
+        .find(|c| c.collection.as_str() == "/bob/team/")
+        .unwrap_or_else(|| panic!("{calendars:?}"));
+    assert_eq!(team.ownership, Ownership::Shared);
+    assert!(team.read_only);
+    assert!(
+        calendars
+            .iter()
+            .any(|c| c.collection.as_str() == "/alice/work/")
+    );
+
+    let err = provider.subscribe("carol@127.0.0.1").await.unwrap_err();
+    assert!(matches!(err, DomainError::Forbidden(_)), "{err}");
+
+    // A configured href the server now refuses is left out of the listing.
+    let dav = DavConfig {
+        subscribed: vec![
+            server.base.join("/bob/team/").unwrap(),
+            server.base.join("/carol/secret/").unwrap(),
+        ],
+        ..DavConfig::default()
+    };
+    let listed = server
+        .provider("alice", Some(&dav))
+        .list_calendars()
+        .await
+        .unwrap();
+    let paths: Vec<_> = listed.iter().map(|c| c.collection.as_str()).collect();
+    assert!(paths.contains(&"/bob/team/"), "{paths:?}");
+    assert!(!paths.contains(&"/carol/secret/"), "{paths:?}");
+
+    provider
+        .unsubscribe(&CollectionId::new("/bob/team/"))
+        .await
+        .unwrap();
+    let calendars = provider.list_calendars().await.unwrap();
+    assert!(
+        calendars
+            .iter()
+            .all(|c| c.collection.as_str() != "/bob/team/")
+    );
 }

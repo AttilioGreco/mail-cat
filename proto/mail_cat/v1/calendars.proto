@@ -20,6 +20,15 @@ service CalendarService {
 
   rpc DeleteEvent(DeleteEventRequest) returns (DeleteEventResponse);
 
+  // Adds the calendars a colleague shares with the account. NOT_FOUND when
+  // the server has no such user, PERMISSION_DENIED when nothing is shared.
+  // The calendars appear once the sync pass it triggers has run.
+  rpc SubscribeCalendar(SubscribeCalendarRequest) returns (SubscribeCalendarResponse);
+
+  // Removes a calendar added by SubscribeCalendar. FAILED_PRECONDITION for the
+  // account's own calendars.
+  rpc UnsubscribeCalendar(UnsubscribeCalendarRequest) returns (UnsubscribeCalendarResponse);
+
   // Sync health of the account's contacts and calendars.
   rpc GetDavStatus(GetDavStatusRequest) returns (GetDavStatusResponse);
 
@@ -143,6 +152,20 @@ message DeleteEventRequest {
 }
 
 message DeleteEventResponse {}
+
+message SubscribeCalendarRequest {
+  string account_id = 1;
+  string email      = 2;
+}
+
+message SubscribeCalendarResponse {}
+
+message UnsubscribeCalendarRequest {
+  string account_id = 1;
+  string collection_id = 2;
+}
+
+message UnsubscribeCalendarResponse {}
 
 message GetDavStatusRequest {
   string account_id = 1;

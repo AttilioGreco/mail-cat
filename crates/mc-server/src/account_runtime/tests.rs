@@ -478,6 +478,7 @@ fn dav_provisioning_decision_table() {
     let url = |u: &str| mc_domain::model::account::DavConfig {
         carddav: Some(u.parse().unwrap()),
         caldav: None,
+        ..Default::default()
     };
 
     let both = [GOOGLE_CARDDAV, GOOGLE_CALENDAR];
@@ -639,6 +640,12 @@ impl mc_domain::CalendarProvider for Failing {
         _: &mc_domain::Href,
         _: &mc_domain::Etag,
     ) -> Result<mc_domain::DeleteOutcome, DomainError> {
+        unreachable!()
+    }
+    async fn subscribe(&self, _: &str) -> Result<mc_domain::Subscribed, DomainError> {
+        unreachable!()
+    }
+    async fn unsubscribe(&self, _: &mc_domain::CollectionId) -> Result<(), DomainError> {
         unreachable!()
     }
 }

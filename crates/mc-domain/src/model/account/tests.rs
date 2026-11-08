@@ -239,6 +239,7 @@ fn dav_config_survives_serde_and_old_configs_load_without_it() {
     config.dav = Some(DavConfig {
         carddav: Some("https://dav.example.com/card/".parse().unwrap()),
         caldav: None,
+        ..DavConfig::default()
     });
     let json = serde_json::to_string(&config).unwrap();
     assert_eq!(
@@ -252,4 +253,22 @@ fn dav_config_survives_serde_and_old_configs_load_without_it() {
         serde_json::from_value::<ConnectionConfig>(old).unwrap().dav,
         None
     );
+}
+
+#[test]
+fn a_settings_update_keeps_the_calendars_subscribed_to() {
+    let (mut account, added) = Account::create(
+        "Test".into(),
+        EmailAddress::new("user@example.com").unwrap(),
+        ProviderType::Imap,
+        test_connection_config(),
+        test_identity(),
+    );
+    let bob: url::Url = "https://dav.example.com/bob/work/".parse().unwrap();
+    let subscribed = account.set_subscribed(vec![bob.clone()]);
+    let update = account.apply_update(None, Some(test_connection_config()));
+
+    assert_eq!(account.subscribed(), Some([bob.clone()].as_slice()));
+    let rebuilt = Account::rehydrate(&[added, subscribed, update]).unwrap();
+    assert_eq!(rebuilt.subscribed(), Some([bob].as_slice()));
 }

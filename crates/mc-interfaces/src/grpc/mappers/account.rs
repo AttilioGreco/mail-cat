@@ -208,6 +208,7 @@ pub fn proto_connection_to_domain(
             Ok::<_, String>(DavConfig {
                 carddav: url(&dav.carddav)?,
                 caldav: url(&dav.caldav)?,
+                subscribed: Vec::new(),
             })
         })
         .transpose()?;

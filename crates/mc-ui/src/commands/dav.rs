@@ -3,8 +3,8 @@
 
 use chrono::{DateTime, Utc};
 use mc_client::{
-    AddressBook, Calendar, ContactCard, ContactFields, EventChanges, EventDetail, EventOccurrence,
-    NewEvent, RemoteContact,
+    AddressBook, Calendar, ClientError, ContactCard, ContactFields, EventChanges, EventDetail,
+    EventOccurrence, NewEvent, RemoteContact,
 };
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
@@ -17,6 +17,15 @@ use super::{
 
 fn err(e: impl ToString) -> String {
     e.to_string()
+}
+
+/// The two refusals the UI words itself; anything else is shown as it is.
+fn subscription_err(e: ClientError) -> String {
+    match e {
+        ClientError::Grpc(s) if s.code() == tonic::Code::NotFound => "not_found".into(),
+        ClientError::Grpc(s) if s.code() == tonic::Code::PermissionDenied => "forbidden".into(),
+        e => e.to_string(),
+    }
 }
 
 /// Times are RFC 3339 instants, or `YYYY-MM-DD` for an all-day event.
@@ -146,6 +155,33 @@ pub async fn update_event(
     get_or_connect(&state)
         .await?
         .update_event(&account_id, &href, changes)
+        .await
+        .map_err(err)
+}
+
+/// Returns before the calendars show up: they come with the sync pass this starts.
+#[tauri::command]
+pub async fn subscribe_calendar(
+    account_id: String,
+    email: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    get_or_connect(&state)
+        .await?
+        .subscribe_calendar(&account_id, &email)
+        .await
+        .map_err(subscription_err)
+}
+
+#[tauri::command]
+pub async fn unsubscribe_calendar(
+    account_id: String,
+    collection: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    get_or_connect(&state)
+        .await?
+        .unsubscribe_calendar(&account_id, &collection)
         .await
         .map_err(err)
 }

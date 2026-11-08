@@ -6,6 +6,7 @@ mod conflicts;
 mod fake;
 mod pass;
 mod radicale;
+mod subscriptions;
 
 use std::sync::Arc;
 
@@ -45,7 +46,7 @@ pub(super) fn env() -> Env {
     let svc = Arc::new(DavSyncService::new(repo.clone(), events.clone(), providers));
     Env {
         _dir: dir,
-        handler: DavCommandHandler::new(svc.clone()),
+        handler: DavCommandHandler::new(svc.clone(), repo.clone()),
         svc,
         fake,
         repo,

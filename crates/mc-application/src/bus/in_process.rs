@@ -424,6 +424,19 @@ where
             Command::RemoveCalendarEvent { account_id, href } => {
                 self.dav()?.handle_remove_event(account_id, href).await
             }
+            Command::SubscribeCalendar { account_id, email } => {
+                self.dav()?
+                    .handle_subscribe_calendar(account_id, email)
+                    .await
+            }
+            Command::UnsubscribeCalendar {
+                account_id,
+                collection,
+            } => {
+                self.dav()?
+                    .handle_unsubscribe_calendar(account_id, collection)
+                    .await
+            }
             Command::RebuildContactIndex { account_id } => {
                 self.contact_handler.handle_rebuild_index(account_id).await
             }

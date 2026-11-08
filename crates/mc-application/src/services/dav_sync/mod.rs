@@ -155,7 +155,7 @@ impl DavProviders {
         }
     }
 
-    fn get(
+    pub(crate) fn get(
         &self,
         account: &AccountId,
     ) -> Result<(Arc<dyn DavBackend>, DavStatus), ApplicationError> {
@@ -314,7 +314,7 @@ fn stops(e: &ApplicationError) -> bool {
 pub struct DavSyncService {
     pub(crate) store: Arc<dyn DavStore>,
     pub(crate) events: Arc<dyn EventStore>,
-    providers: Arc<DavProviders>,
+    pub(crate) providers: Arc<DavProviders>,
     publisher: Option<Arc<dyn EventPublisher>>,
     /// Held while resources are pushed, so the fast path of a local edit and
     /// the sync pass never send the same one at once.

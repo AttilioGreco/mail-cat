@@ -5,6 +5,8 @@ export {
   useCreateEvent,
   useUpdateEvent,
   useDeleteEvent,
+  useSubscribeCalendar,
+  useUnsubscribeCalendar,
 } from './model/useCalendar';
 export { useCalendarGroups, type CalendarAccount, type CalendarGroup } from './model/useCalendarGroups';
 export { useVisibleEvents, isEditable, type AccountEvent } from './model/useVisibleEvents';

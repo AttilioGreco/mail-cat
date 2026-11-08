@@ -101,6 +101,15 @@ pub trait ContactsProvider: Send + Sync {
     ) -> Result<DeleteOutcome, DomainError>;
 }
 
+/// Where a subscription is remembered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Subscribed {
+    /// The server remembers it (Google's calendar list).
+    Remote,
+    /// We must: the calendar collections to keep in the account config.
+    Local(Vec<url::Url>),
+}
+
 /// Calendars of one account; same contract as [`ContactsProvider`].
 #[async_trait]
 pub trait CalendarProvider: Send + Sync {
@@ -130,4 +139,12 @@ pub trait CalendarProvider: Send + Sync {
         href: &Href,
         if_match: &Etag,
     ) -> Result<DeleteOutcome, DomainError>;
+
+    /// Adds the calendars `email` lets us read. `NotFound` when the server has
+    /// no such user, `Forbidden` when nothing is shared with us.
+    async fn subscribe(&self, email: &str) -> Result<Subscribed, DomainError>;
+
+    /// Removes a calendar added by `subscribe`. On a server that does not
+    /// remember subscriptions there is nothing to undo remotely.
+    async fn unsubscribe(&self, calendar: &CollectionId) -> Result<(), DomainError>;
 }

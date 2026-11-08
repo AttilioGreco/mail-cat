@@ -113,3 +113,18 @@ export function useDeleteEvent() {
     onSuccess: (_, { accountId }) => invalidate(accountId),
   });
 }
+
+/** The calendars appear with the sync pass the server starts, announced by `dav:changed`. */
+export function useSubscribeCalendar() {
+  return useMutation({
+    mutationFn: ({ accountId, email }: { accountId: string; email: string }) =>
+      invoke<void>('subscribe_calendar', { accountId, email }),
+  });
+}
+
+export function useUnsubscribeCalendar() {
+  return useMutation({
+    mutationFn: ({ accountId, collection }: { accountId: string; collection: string }) =>
+      invoke<void>('unsubscribe_calendar', { accountId, collection }),
+  });
+}

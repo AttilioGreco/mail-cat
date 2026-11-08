@@ -6,7 +6,7 @@ export interface CalendarAccount {
   id: string;
   name: string;
   email: string;
-  auth: { calendar: FeatureStatus } | null;
+  auth: { calendar: FeatureStatus; oauthProvider: string | null } | null;
 }
 
 interface FeatureStatus {

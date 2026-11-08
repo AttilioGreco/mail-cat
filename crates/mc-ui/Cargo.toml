@@ -22,6 +22,7 @@ chrono = { workspace = true }
 
 # Client SDK
 mc-client = { workspace = true }
+tonic = { workspace = true }
 mc-shared = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true }

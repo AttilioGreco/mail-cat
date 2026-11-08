@@ -29,7 +29,7 @@ fn home_prop(kind: Kind) -> &'static str {
     }
 }
 
-fn first_href(response: &Response, prop: &str) -> Option<String> {
+pub(super) fn first_href(response: &Response, prop: &str) -> Option<String> {
     response.props.get(prop)?.hrefs.first().cloned()
 }
 
@@ -83,7 +83,7 @@ fn bad_href(e: url::ParseError) -> DomainError {
 }
 
 /// Failures that say something about the account, not about this step.
-fn stops_discovery(e: &DomainError) -> bool {
+pub(super) fn stops_discovery(e: &DomainError) -> bool {
     matches!(
         e,
         DomainError::AuthenticationFailed(_) | DomainError::Throttled(_)

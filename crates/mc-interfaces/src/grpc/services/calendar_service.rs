@@ -14,8 +14,9 @@ use crate::grpc::proto::{
     CreateEventRequest, CreateEventResponse, DavChange, DavKind, DeleteEventRequest,
     DeleteEventResponse, EventDetail, GetDavStatusRequest, GetDavStatusResponse, GetEventRequest,
     ListCalendarsRequest, ListCalendarsResponse, ListEventsRequest, ListEventsResponse,
-    SyncDavNowRequest, SyncDavNowResponse, UpdateEventRequest, UpdateEventResponse,
-    WatchDavChangesRequest, calendar_service_server::CalendarService,
+    SubscribeCalendarRequest, SubscribeCalendarResponse, SyncDavNowRequest, SyncDavNowResponse,
+    UnsubscribeCalendarRequest, UnsubscribeCalendarResponse, UpdateEventRequest,
+    UpdateEventResponse, WatchDavChangesRequest, calendar_service_server::CalendarService,
 };
 use mc_application::{
     DavProviders,
@@ -206,6 +207,36 @@ impl<C: CommandBus + 'static> CalendarService for CalendarServiceImpl<C> {
             .await
             .map_err(application_error_to_status)?;
         Ok(Response::new(DeleteEventResponse {}))
+    }
+
+    async fn subscribe_calendar(
+        &self,
+        request: Request<SubscribeCalendarRequest>,
+    ) -> Result<Response<SubscribeCalendarResponse>, Status> {
+        let req = request.into_inner();
+        self.command_bus
+            .dispatch(Command::SubscribeCalendar {
+                account_id: parse_account_id(&req.account_id)?,
+                email: req.email,
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(SubscribeCalendarResponse {}))
+    }
+
+    async fn unsubscribe_calendar(
+        &self,
+        request: Request<UnsubscribeCalendarRequest>,
+    ) -> Result<Response<UnsubscribeCalendarResponse>, Status> {
+        let req = request.into_inner();
+        self.command_bus
+            .dispatch(Command::UnsubscribeCalendar {
+                account_id: parse_account_id(&req.account_id)?,
+                collection: CollectionId::new(req.collection_id),
+            })
+            .await
+            .map_err(application_error_to_status)?;
+        Ok(Response::new(UnsubscribeCalendarResponse {}))
     }
 
     async fn get_dav_status(

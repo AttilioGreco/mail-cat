@@ -11,7 +11,7 @@ mod tests;
 mod write;
 mod xml;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use mc_domain::model::account::{AccountId, DavConfig};
 use mc_domain::model::collection::{AddressBook, Calendar};
 use mc_domain::traits::dav_provider::{
     CalendarProvider, CollectionChanges, ContactsProvider, DeleteOutcome, PutOutcome,
-    RemoteResource, ResourcePut,
+    RemoteResource, ResourcePut, Subscribed,
 };
 use mc_domain::traits::login_gate::LoginGate;
 use mc_domain::value_objects::remote::{CollectionId, Etag, Href};
@@ -113,6 +113,12 @@ pub struct DavProvider {
     caldav: Option<Url>,
     contacts_home: OnceCell<Home>,
     calendar_home: OnceCell<Home>,
+    /// Google's Calendar REST API, where its calendar list is edited.
+    api: Url,
+    /// Calendars of other principals, listed besides our own home. Starts from
+    /// the account config; `subscribe` and `unsubscribe` keep it current so the
+    /// next listing needs no restart.
+    subscribed: Mutex<Vec<Url>>,
 }
 
 impl DavProvider {
@@ -170,6 +176,9 @@ impl DavProvider {
             caldav,
             contacts_home: OnceCell::new(),
             calendar_home: OnceCell::new(),
+            api: Url::parse("https://www.googleapis.com/calendar/v3/")
+                .map_err(|e| DomainError::Provider(format!("Calendar API URL: {e}")))?,
+            subscribed: Mutex::new(dav.map(|d| d.subscribed.clone()).unwrap_or_default()),
         })
     }
 
@@ -305,5 +314,23 @@ impl CalendarProvider for DavProvider {
         if_match: &Etag,
     ) -> Result<DeleteOutcome, DomainError> {
         self.delete(Kind::Calendar, href, if_match).await
+    }
+
+    async fn subscribe(&self, email: &str) -> Result<Subscribed, DomainError> {
+        if self.profile == Profile::Google {
+            return self.google_subscribe(email).await;
+        }
+        self.caldav_subscribe(email).await
+    }
+
+    async fn unsubscribe(&self, calendar: &CollectionId) -> Result<(), DomainError> {
+        if self.profile == Profile::Google {
+            self.google_unsubscribe(calendar).await?;
+        }
+        self.subscribed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|u| u.path().trim_end_matches('/') != calendar.as_str().trim_end_matches('/'));
+        Ok(())
     }
 }

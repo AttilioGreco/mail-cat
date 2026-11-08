@@ -16,6 +16,22 @@ pub enum CalendarsCmd {
         account: String,
     },
 
+    /// Add the calendars a colleague shares with the account
+    Subscribe {
+        /// Account name, email or ID
+        account: String,
+        /// The colleague's email address
+        email: String,
+    },
+
+    /// Remove a calendar added with `subscribe`
+    Unsubscribe {
+        /// Account name, email or ID
+        account: String,
+        /// Calendar collection, as `list` prints it
+        collection: String,
+    },
+
     /// Sync health of an account's contacts and calendars: the DAV error (a
     /// Google token without the DAV scopes), local edits waiting for the
     /// server, and edits discarded by last-write-wins
@@ -137,6 +153,23 @@ pub async fn run_calendars(cmd: CalendarsCmd, client: MailCatClient, format: For
                 "holds_events",
             ];
             Toon::default().table("calendars", &fields, &rows).print();
+            Ok(())
+        }
+        CalendarsCmd::Subscribe { account, email } => {
+            let account = find_account(&client, &account).await?;
+            client.subscribe_calendar(&account.id, &email).await?;
+            println!("Subscribed; the calendars appear after the next sync");
+            Ok(())
+        }
+        CalendarsCmd::Unsubscribe {
+            account,
+            collection,
+        } => {
+            let account = find_account(&client, &account).await?;
+            client
+                .unsubscribe_calendar(&account.id, &collection)
+                .await?;
+            println!("Unsubscribed");
             Ok(())
         }
         CalendarsCmd::Sync { account } => {

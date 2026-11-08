@@ -44,7 +44,7 @@ pub use traits::account_event_source::AccountEventSource;
 pub use traits::contact_index::ContactSearchHit;
 pub use traits::dav_provider::{
     CalendarProvider, CollectionChanges, ContactsProvider, DeleteOutcome, PutOutcome,
-    RemoteResource, ResourcePut,
+    RemoteResource, ResourcePut, Subscribed,
 };
 pub use traits::dav_repository::{
     DavReadRepository, EventSync, Occurrence, PendingChange, PendingPush, RemoteContact,

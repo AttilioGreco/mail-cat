@@ -260,6 +260,19 @@ pub enum Command {
         href: Href,
     },
 
+    /// Add the calendars a colleague shares with the account.
+    SubscribeCalendar {
+        account_id: AccountId,
+        email: String,
+    },
+
+    /// Stop showing a calendar added by `SubscribeCalendar`. Refused for the
+    /// account's own calendars.
+    UnsubscribeCalendar {
+        account_id: AccountId,
+        collection: CollectionId,
+    },
+
     /// Rebuild the contact search index from the stored contact read models.
     /// Useful after a fresh install or when the Tantivy index is lost/corrupted.
     /// If `account_id` is given, only contacts scoped to that account are indexed;
@@ -339,6 +352,8 @@ pub enum CommandResult {
     },
     CalendarEventUpdated,
     CalendarEventRemoved,
+    CalendarSubscribed,
+    CalendarUnsubscribed,
     ContactsMerged,
     /// Number of contacts that were successfully (re-)indexed.
     ContactIndexRebuilt {

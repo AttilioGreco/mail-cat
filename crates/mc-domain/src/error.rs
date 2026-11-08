@@ -26,6 +26,14 @@ pub enum DomainError {
     #[error("Message not found: {0}")]
     MessageNotFound(String),
 
+    /// The server has no such principal or calendar.
+    #[error("Not found: {0}")]
+    NotFound(String),
+
+    /// The server knows the target but does not let this user read it.
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
+
     // ── Provider Errors ─────────────────────────────────────────────
     #[error("Provider error: {0}")]
     Provider(String),

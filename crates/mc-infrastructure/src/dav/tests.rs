@@ -1,11 +1,16 @@
+use std::sync::Arc;
+
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use url::Url;
 
 use mc_domain::error::DomainError;
+use mc_domain::traits::dav_provider::{CalendarProvider, Subscribed};
 
 use super::client::{DavView, classify, etag};
 use super::xml::parse_multistatus;
 use super::{Cursor, xml};
+use super::{DavProvider, Profile};
 
 mod radicale;
 
@@ -227,4 +232,128 @@ async fn dav_failures_never_reach_the_account_state() {
     );
     assert!(!view.login_failed(&token, &refused, true).await);
     assert_eq!(*gate.0.lock().unwrap(), ["refresh"]);
+}
+
+/// Answers each request with the next of `statuses` and keeps what it was
+/// sent: request line, headers and body as text.
+async fn google_api(statuses: Vec<u16>) -> (Url, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!(
+        "http://{}/calendar/v3/",
+        listener.local_addr().unwrap()
+    ))
+    .unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        for status in statuses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 4096];
+            // One read holds a request this small.
+            let n = socket.read(&mut chunk).await.unwrap();
+            request.extend_from_slice(&chunk[..n]);
+            log.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&request).into_owned());
+            let reply =
+                format!("HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    (url, seen)
+}
+
+fn google(api: Url) -> DavProvider {
+    let mut provider = DavProvider::with_origin(
+        mc_domain::AccountId::new(),
+        Url::parse("https://example.com/").unwrap(),
+        "me@example.com",
+        "me@example.com".into(),
+        Arc::new(mc_domain::LoginSecret::OAuthToken("tok".into())),
+        None,
+        Profile::Google,
+    )
+    .unwrap();
+    provider.api = api;
+    provider
+}
+
+#[tokio::test]
+async fn google_subscribe_inserts_into_the_calendar_list_and_maps_refusals() {
+    let (api, seen) = google_api(vec![200, 409, 404, 403]).await;
+    let provider = google(api);
+
+    assert_eq!(
+        provider.subscribe("bob@example.com").await.unwrap(),
+        Subscribed::Local(vec![
+            Url::parse("https://apidata.googleusercontent.com/caldav/v2/bob%40example.com/events/")
+                .unwrap()
+        ])
+    );
+    let request = seen.lock().unwrap()[0].to_lowercase();
+    assert!(
+        request.starts_with("post /calendar/v3/users/me/calendarlist "),
+        "{request}"
+    );
+    assert!(request.contains("authorization: bearer tok"), "{request}");
+    assert!(
+        request.ends_with(r#"{"id":"bob@example.com"}"#),
+        "{request}"
+    );
+
+    assert_eq!(
+        provider.subscribe("bob@example.com").await.unwrap(),
+        Subscribed::Local(vec![
+            Url::parse("https://apidata.googleusercontent.com/caldav/v2/bob%40example.com/events/")
+                .unwrap()
+        ]),
+        "already in the list"
+    );
+    let err = provider.subscribe("nobody@example.com").await.unwrap_err();
+    assert!(matches!(err, DomainError::NotFound(_)), "{err}");
+    let err = provider.subscribe("private@example.com").await.unwrap_err();
+    assert!(matches!(err, DomainError::Forbidden(_)), "{err}");
+    assert_eq!(
+        provider.subscribed.lock().unwrap().len(),
+        1,
+        "remembered once"
+    );
+}
+
+#[tokio::test]
+async fn google_unsubscribe_deletes_the_decoded_calendar_id() {
+    let (api, seen) = google_api(vec![204]).await;
+    let provider = google(api);
+    let collection = mc_domain::CollectionId::new("/caldav/v2/bob%40example.com/events/");
+
+    provider.subscribed.lock().unwrap().push(
+        Url::parse("https://apidata.googleusercontent.com/caldav/v2/bob%40example.com/events/")
+            .unwrap(),
+    );
+    provider.unsubscribe(&collection).await.unwrap();
+    assert!(provider.subscribed.lock().unwrap().is_empty());
+
+    let request = seen.lock().unwrap()[0].clone();
+    assert!(
+        request.starts_with("DELETE /calendar/v3/users/me/calendarList/bob@example.com "),
+        "{request}"
+    );
+    let err = provider
+        .unsubscribe(&mc_domain::CollectionId::new("/elsewhere/"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::Validation(_)), "{err}");
+}
+
+#[test]
+fn a_google_calendar_id_is_the_decoded_segment_after_caldav_v2() {
+    use super::collections::google_calendar_id;
+    assert_eq!(
+        google_calendar_id("/caldav/v2/a%2Bb%40x.com/events/").as_deref(),
+        Some("a+b@x.com")
+    );
+    assert_eq!(google_calendar_id("/caldav/v2/id").as_deref(), Some("id"));
+    assert_eq!(google_calendar_id("/caldav/v2//events/"), None);
 }
