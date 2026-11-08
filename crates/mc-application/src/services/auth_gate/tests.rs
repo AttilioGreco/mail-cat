@@ -231,8 +231,10 @@ async fn the_offline_schedule_is_fast_first_and_resets_on_success() {
     let gate = h.password();
     let down = DomainError::ConnectionFailed("TCP connection failed".into());
     let secret = LoginSecret::Password("hunter2".into());
-    let delay = |gate: &AuthGate| match gate.status().state {
-        AuthState::Offline { next_retry } => (next_retry - Utc::now()).num_milliseconds(),
+    // Measured from before the call, so a slow run (loaded CI) can't shave
+    // the delay below its whole second.
+    let delay = |gate: &AuthGate, before: chrono::DateTime<Utc>| match gate.status().state {
+        AuthState::Offline { next_retry } => (next_retry - before).num_seconds(),
         other => panic!("not offline: {other:?}"),
     };
 
@@ -244,19 +246,22 @@ async fn the_offline_schedule_is_fast_first_and_resets_on_success() {
                 *next_retry = Utc::now();
             }
         });
+        let before = Utc::now();
         assert!(!gate.login_failed(&secret, &down, false).await);
-        delays.push((delay(&gate) + 500) / 1000);
+        delays.push(delay(&gate, before));
     }
     assert_eq!(delays, [2, 5, 10, 30, 60, 120, 300, 300]);
 
     // A failure before the retry is due does not advance the schedule.
+    let pending = gate.status().state;
     gate.login_failed(&secret, &down, false).await;
-    assert_eq!((delay(&gate) + 500) / 1000, 300);
+    assert_eq!(gate.status().state, pending);
 
     gate.login_succeeded();
     assert_eq!(gate.status().state, AuthState::Active);
+    let before = Utc::now();
     gate.login_failed(&secret, &down, false).await;
-    assert_eq!((delay(&gate) + 500) / 1000, 2, "the schedule starts over");
+    assert_eq!(delay(&gate, before), 2, "the schedule starts over");
     assert!(h.event_names().is_empty(), "offline is not persisted");
 }
 
