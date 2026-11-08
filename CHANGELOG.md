@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Contacts and calendars: two-way CardDAV/CalDAV sync (Google included), with a calendar section, agenda pane, contact card and contacts section.
+- Subscribe to colleagues' calendars.
+- Calendar reminders as desktop notifications.
+- Sync contacts and calendars on demand (button, F9), with the last sync time.
+- Per-feature contacts/calendar permissions, with re-authorization from settings.
+- `mc` CLI: contacts and calendars commands.
+
+### Changed
+- The server no longer listens on a network port: the app, the CLI and the server talk over a local socket (Unix socket, named pipe on Windows), usable only by the user who runs the server.
+- Config key `grpc_addr` replaced by the optional `socket_path`; `MAILCAT_SERVER_URL` replaced by `MAILCAT_SOCKET`, and `mc --server` by `mc --socket`.
+
+### Fixed
+- Calendar events no longer shift by an hour on DST days.
+- Recurring series split by the server are read correctly, and unreadable events are kept.
+- A local contact/event edit is never overwritten while a sync conflict is being resolved.
+
 ## [0.1.3-rc.3] - 2026-11-07
 
 ## [0.1.3-rc.2] - 2026-11-07
