@@ -21,13 +21,13 @@ a single mailbox and `mc accounts add ... --password-stdin`.
 
 ## Never touch the real mail-cat
 
-The user's server runs on `127.0.0.1:50051` with real accounts. The harness
-server listens on **`127.0.0.1:50061`**, reads `tests/itest/.state/config.toml`,
+The user's server listens on the default per-user socket with real accounts. The harness
+server listens on **`.state/mail-cat.sock`**, reads `tests/itest/.state/config.toml`,
 keeps its DB and index in `.state/mc/`, runs with `HOME` set to `.state/home`,
 and gets a private D-Bus session with its own unlocked gnome-keyring, so the
 password it moves into "the keychain" never reaches the real one. `reset.sh`
 only kills the pid it started, and only if that pid runs the binary it built.
-Always pass `--server http://127.0.0.1:50061` to `mc` by hand.
+Always pass `--socket tests/itest/.state/mail-cat.sock` to `mc` by hand.
 
 ## Ports and credentials
 

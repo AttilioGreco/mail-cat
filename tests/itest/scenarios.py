@@ -27,7 +27,7 @@ HERE = imapctl.HERE
 ROOT = HERE.parent.parent
 LOGS = HERE / ".logs"
 TARGET = os.environ.get("CARGO_TARGET_DIR", ROOT / "target")
-MC = [os.path.join(TARGET, "debug/mc"), "--server", "http://127.0.0.1:50061"]
+MC = [os.path.join(TARGET, "debug/mc"), "--socket", str(HERE / ".state/mail-cat.sock")]
 ENV = {**os.environ, "NO_COLOR": "1"}
 
 

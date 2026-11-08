@@ -41,7 +41,7 @@ async fn fixture(accounts_toml: &str) -> Fixture {
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, accounts_toml).unwrap();
     let config = ServerConfig {
-        grpc_addr: "127.0.0.1:0".into(),
+        socket_path: None,
         db_path: dir.path().join("mail-cat.db").display().to_string(),
         index_path: dir.path().join("index").display().to_string(),
         accounts: vec![],

@@ -19,6 +19,7 @@ tokio-util = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 tonic = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
 anyhow = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
@@ -37,5 +38,6 @@ zbus = "6"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+mc-client = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

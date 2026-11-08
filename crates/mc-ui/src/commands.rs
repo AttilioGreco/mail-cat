@@ -18,7 +18,7 @@ use mc_client::{
 /// Tauri managed state — single shared client instance.
 pub struct AppState {
     pub client: Mutex<Option<MailCatClient>>,
-    pub server_url: String,
+    pub socket_path: std::path::PathBuf,
     /// Set while the start-up check may still be registering or launching the
     /// server, so early connects wait for it instead of failing.
     pub starting: AtomicBool,
@@ -414,7 +414,7 @@ pub(crate) async fn get_or_connect(state: &State<'_, AppState>) -> Result<MailCa
     if guard.is_none() {
         let deadline = std::time::Instant::now() + STARTUP_CONNECT_GRACE;
         let client = loop {
-            match MailCatClient::connect(&state.server_url).await {
+            match MailCatClient::connect(&state.socket_path).await {
                 Ok(client) => break client,
                 Err(_)
                     if state.starting.load(Ordering::SeqCst)

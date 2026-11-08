@@ -1,5 +1,9 @@
+use std::path::Path;
+
+use hyper_util::rt::TokioIo;
 use tokio_stream::Stream;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint, Uri};
+use tower::service_fn;
 
 use crate::{
     convert::*,
@@ -16,6 +20,26 @@ use crate::{
 /// Must match the server's limit.
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
+#[cfg(unix)]
+async fn open(path: &Path) -> std::io::Result<tokio::net::UnixStream> {
+    tokio::net::UnixStream::connect(path).await
+}
+
+#[cfg(windows)]
+async fn open(path: &Path) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    // windows-sys ERROR_PIPE_BUSY: all instances are momentarily taken by other clients.
+    const ERROR_PIPE_BUSY: i32 = 231;
+    loop {
+        match ClientOptions::new().open(path) {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            res => return res,
+        }
+    }
+}
+
 /// The main entry point for frontends. Wraps tonic clients and exposes clean async methods.
 #[derive(Clone)]
 pub struct MailCatClient {
@@ -27,18 +51,19 @@ impl MailCatClient {
         self.channel.clone()
     }
 
-    /// Connect to a running mc-server instance.
-    pub async fn connect(endpoint: impl Into<String>) -> Result<Self> {
-        let endpoint = endpoint.into();
-        let channel = Channel::from_shared(endpoint.clone())
-            .map_err(|e| ClientError::Connection {
-                endpoint: endpoint.clone(),
-                reason: e.to_string(),
-            })?
-            .connect()
+    /// Connect to a running mc-server instance over its local socket
+    /// (Unix socket, or named pipe on Windows).
+    pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self> {
+        let path = socket_path.as_ref().to_owned();
+        // The URI is required by the API but never used: the connector ignores it.
+        let channel = Endpoint::from_static("http://[::]:50051")
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let path = path.clone();
+                async move { open(&path).await.map(TokioIo::new) }
+            }))
             .await
             .map_err(|e| ClientError::Connection {
-                endpoint,
+                endpoint: socket_path.as_ref().display().to_string(),
                 reason: e.to_string(),
             })?;
 

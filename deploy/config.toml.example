@@ -1,9 +1,11 @@
 # mail-cat server configuration
 # Copia questo file in ~/.config/mail-cat/config.toml e modifica i valori.
 
-# Indirizzo su cui il server gRPC ascolta.
-# Default: 127.0.0.1:50051
-grpc_addr = "127.0.0.1:50051"
+# Socket locale su cui il server gRPC ascolta (named pipe su Windows).
+# Default: $XDG_RUNTIME_DIR/mail-cat.sock su Linux,
+# ~/Library/Application Support/mail-cat/mail-cat.sock su macOS,
+# \\.\pipe\mail-cat-<utente> su Windows.
+# socket_path = "/run/user/1000/mail-cat.sock"
 
 # Path del database sled.
 # Default: ~/.local/share/mail-cat/db

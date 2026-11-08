@@ -256,7 +256,7 @@ mod tests {
     fn append_oauth_account_writes_expected_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "grpc_addr = \"127.0.0.1:50051\"\n").unwrap();
+        std::fs::write(&path, "log_level = \"info\"\n").unwrap();
 
         append_oauth_account(&path, "Work Gmail", "me@gmail.com", OAuthProvider::Google).unwrap();
 
@@ -276,7 +276,7 @@ mod tests {
     fn append_oauth_account_is_idempotent_for_existing_email() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "grpc_addr = \"127.0.0.1:50051\"\n").unwrap();
+        std::fs::write(&path, "log_level = \"info\"\n").unwrap();
 
         append_oauth_account(&path, "Work Gmail", "me@gmail.com", OAuthProvider::Google).unwrap();
         append_oauth_account(&path, "Work Gmail", "me@gmail.com", OAuthProvider::Google).unwrap();
@@ -370,7 +370,7 @@ mod tests {
         // the trigger's AwaitingBrowser → terminal-event shape holds without a browser.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "grpc_addr = \"127.0.0.1:50051\"\n").unwrap();
+        std::fs::write(&path, "log_level = \"info\"\n").unwrap();
         let manager = OAuthChallengeManager::new(path, Arc::new(MockStore::default()));
 
         let mut rx =

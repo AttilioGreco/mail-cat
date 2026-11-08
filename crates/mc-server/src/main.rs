@@ -22,6 +22,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod account_provisioner;
 mod account_runtime;
 mod config;
+mod ipc;
 mod notifications;
 mod oauth_login;
 mod oauth_reauth;
@@ -104,6 +105,10 @@ async fn run() -> anyhow::Result<()> {
     // Load configuration (before tracing init: log_level is a fallback filter directive)
     let config_path = ServerConfig::default_path();
     let config = ServerConfig::load_or_default(&config_path);
+    let socket_path = config
+        .socket_path
+        .clone()
+        .unwrap_or_else(mc_shared::ipc::default_socket_path);
 
     // Initialize tracing. RUST_LOG always wins; otherwise config.log_level;
     // otherwise the hardcoded default. Tantivy logs every segment commit at
@@ -129,7 +134,7 @@ async fn run() -> anyhow::Result<()> {
 
     tracing::info!("Starting mail-cat-server {VERSION} ({GIT_SHA}, {BUILD_DATE}) [{RUSTC}]");
     tracing::info!("Config:  {}", config_path);
-    tracing::info!("gRPC:    {}", config.grpc_addr);
+    tracing::info!("Socket:  {}", socket_path.display());
     tracing::info!("DB:      {}", config.db_path);
     tracing::info!("Index:   {}", config.index_path);
     if config.accounts.is_empty() {
@@ -176,21 +181,17 @@ async fn run() -> anyhow::Result<()> {
     let restart = Arc::new(Notify::new());
     let restarting = Arc::new(AtomicBool::new(false));
 
-    // Parse gRPC address
-    let addr = config.grpc_addr.parse().context("invalid gRPC address")?;
-
-    // Fail fast with a clear message instead of a raw transport error chain
-    // if another process (e.g. a previous server instance) already holds the port.
-    if let Err(e) = std::net::TcpListener::bind(addr) {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
-            tracing::error!("Port {addr} is already in use by another process, shutting down.");
-            return Ok(());
-        }
-        return Err(e).context("failed to bind gRPC address");
-    }
+    // Fail fast with a clear message if a previous server instance already owns the socket.
+    let Some(incoming) = ipc::listen(&socket_path)? else {
+        tracing::error!(
+            "{} is already served by another instance, shutting down.",
+            socket_path.display()
+        );
+        return Ok(());
+    };
 
     tracing::info!("All components initialized successfully");
-    tracing::info!("Starting gRPC server on {}...", addr);
+    tracing::info!("Starting gRPC server...");
 
     // Create gRPC server with all services
     let stopping = shutdown.clone();
@@ -211,9 +212,15 @@ async fn run() -> anyhow::Result<()> {
         .add_service(ServerServiceServer::new(ServerServiceImpl::new(
             restart.clone(),
         )))
-        .serve_with_shutdown(addr, async move {
-            shutdown_signal(&restart, &flag).await;
-            stopping.cancel();
+        .serve_with_incoming_shutdown(incoming, {
+            let socket_path = socket_path.clone();
+            async move {
+                shutdown_signal(&restart, &flag).await;
+                // Unlink now, not after the stream grace: a server started
+                // meanwhile would take the path over and lose it to our cleanup.
+                ipc::cleanup(&socket_path);
+                stopping.cancel();
+            }
         });
     // Graceful stop waits for every open call, and the UI's watch streams
     // (sync progress, mailboxes, auth) never end on their own: without a cap

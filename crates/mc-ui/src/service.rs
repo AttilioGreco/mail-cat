@@ -77,7 +77,7 @@ impl From<Probe> for ServerStatus {
     }
 }
 
-async fn probe(url: &str) -> Probe {
+async fn probe(url: &Path) -> Probe {
     let Ok(client) = MailCatClient::connect(url).await else {
         return Probe::Down;
     };
@@ -90,7 +90,7 @@ async fn probe(url: &str) -> Probe {
 }
 
 /// Polls until `done` holds or the timeout passes; returns the last probe.
-async fn wait_probe(url: &str, timeout: Duration, done: impl Fn(&Probe) -> bool) -> Probe {
+async fn wait_probe(url: &Path, timeout: Duration, done: impl Fn(&Probe) -> bool) -> Probe {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let p = probe(url).await;
@@ -118,7 +118,7 @@ fn mismatch_message(probe: &Probe) -> String {
 /// The one restart path, for the launch check and the settings button. The
 /// `service start` at the end is what makes Windows quick: its task would
 /// otherwise relaunch the exited server only after a minute.
-async fn restart_flow(url: &str) -> Result<Probe, String> {
+async fn restart_flow(url: &Path) -> Result<Probe, String> {
     let before = probe(url).await;
     match &before {
         Probe::Down => {}
@@ -204,13 +204,13 @@ fn plan(code: Option<i32>, stdout: &str, exe: &Path) -> Result<Action, String> {
     }
 }
 
-/// Dev builds are run from the justfile, and a custom server URL means the user
+/// Dev builds are run from the justfile, and a custom socket means the user
 /// manages that server themselves.
 fn enabled() -> bool {
     if std::env::var_os("MAILCAT_MANAGE_SERVICE").is_some() {
         return true;
     }
-    !cfg!(debug_assertions) && std::env::var_os("MAILCAT_SERVER_URL").is_none()
+    !cfg!(debug_assertions) && std::env::var_os("MAILCAT_SOCKET").is_none()
 }
 
 fn is_ephemeral(p: &Path) -> bool {
@@ -317,13 +317,13 @@ fn ensure_blocking() -> Result<bool, String> {
     }
 }
 
-async fn wait_until_reachable(url: &str) {
+async fn wait_until_reachable(url: &Path) {
     wait_probe(url, Duration::from_secs(20), |p| !matches!(p, Probe::Down)).await;
 }
 
 /// A server left over from an older install keeps serving until it is replaced:
 /// restart it once, and say so if it still is not this app's version.
-async fn align_server_version(app: &AppHandle, url: &str) {
+async fn align_server_version(app: &AppHandle, url: &Path) {
     let before = probe(url).await;
     if !before.needs_restart() {
         return;
@@ -367,9 +367,9 @@ pub fn spawn_ensure(app: &AppHandle) {
         match outcome {
             Ok(started) => {
                 if started {
-                    wait_until_reachable(&state.server_url).await;
+                    wait_until_reachable(&state.socket_path).await;
                 }
-                align_server_version(&app, &state.server_url).await;
+                align_server_version(&app, &state.socket_path).await;
             }
             Err(message) => {
                 tracing::error!("server autostart: {message}");
@@ -395,14 +395,14 @@ pub fn take_server_version_mismatch(state: State<'_, ServiceState>) -> Option<St
 
 #[tauri::command]
 pub async fn server_status(state: State<'_, AppState>) -> Result<ServerStatus, String> {
-    Ok(probe(&state.server_url).await.into())
+    Ok(probe(&state.socket_path).await.into())
 }
 
 /// Restarts the server onto the installed build. Needs a supervisor to relaunch
 /// it (autostart service); a hand-started server stays down.
 #[tauri::command]
 pub async fn restart_server(state: State<'_, AppState>) -> Result<ServerStatus, String> {
-    let after = restart_flow(&state.server_url).await?;
+    let after = restart_flow(&state.socket_path).await?;
     // The old connection died with the old process.
     *state.client.lock().await = None;
     Ok(after.into())

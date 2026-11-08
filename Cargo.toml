@@ -115,6 +115,9 @@ futures = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
 tokio-stream = "0.1"
+# Already pulled in by tonic; used for the local-socket client connector.
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 bytes = "1"
 async-compat = "0.2"

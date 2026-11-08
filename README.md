@@ -81,7 +81,7 @@ The server reads `~/.config/mail-cat/config.toml`. Start from
 [`deploy/config.toml.example`](deploy/config.toml.example), which documents every key:
 
 ```toml
-grpc_addr = "127.0.0.1:50051"
+# socket_path = "/run/user/1000/mail-cat.sock"   # default: per-user local socket
 # db_path    = "~/.local/share/mail-cat/db"      # sled event store
 # index_path = "~/.local/share/mail-cat/index"   # Tantivy index
 
@@ -125,7 +125,7 @@ just cli -- sync <account-id> --full
 just cli -- watch <mailbox-id>        # live IMAP IDLE events
 ```
 
-`mc` connects to `http://localhost:50051` by default (`--server` or `MAILCAT_SERVER_URL`).
+`mc` connects to the per-user local socket by default (`--socket` or `MAILCAT_SOCKET`).
 
 ## Install
 

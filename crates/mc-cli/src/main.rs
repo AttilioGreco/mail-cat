@@ -18,13 +18,9 @@ use mc_client::MailCatClient;
     ),
 )]
 struct Cli {
-    /// gRPC server URL
-    #[arg(
-        long,
-        env = "MAILCAT_SERVER_URL",
-        default_value = "http://localhost:50051"
-    )]
-    server: String,
+    /// Server socket path (default: the per-user mail-cat socket)
+    #[arg(long, env = "MAILCAT_SOCKET")]
+    socket: Option<std::path::PathBuf>,
 
     /// Print list/show results as JSON instead of tables (same as --format json)
     #[arg(long, global = true)]
@@ -102,10 +98,13 @@ async fn main() -> Result<()> {
     };
     let json = format == commands::Format::Json;
 
-    let client = MailCatClient::connect(&cli.server).await.map_err(|e| {
+    let socket = cli
+        .socket
+        .unwrap_or_else(mc_shared::ipc::default_socket_path);
+    let client = MailCatClient::connect(&socket).await.map_err(|e| {
         anyhow::anyhow!(
             "Cannot connect to server at {}: {}\nIs `just server` running?",
-            cli.server,
+            socket.display(),
             e
         )
     })?;

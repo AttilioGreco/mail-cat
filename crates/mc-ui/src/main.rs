@@ -52,10 +52,12 @@ async fn main() {
 
     tracing_subscriber::fmt::init();
 
-    let server_url =
-        std::env::var("MAILCAT_SERVER_URL").unwrap_or_else(|_| "http://localhost:50051".to_owned());
+    let socket_path = std::env::var_os("MAILCAT_SOCKET").map_or_else(
+        mc_shared::ipc::default_socket_path,
+        std::path::PathBuf::from,
+    );
 
-    tracing::info!("Connecting to mc-server at {server_url}");
+    tracing::info!("Connecting to mc-server at {}", socket_path.display());
 
     // A notification click launches us with `--open-message <a>/<m>/<msg>`. On a
     // cold start the webview is not listening yet, so stash it and let the
@@ -101,7 +103,7 @@ async fn main() {
         })
         .manage(AppState {
             client: Mutex::new(None), // lazy connect on first command
-            server_url,
+            socket_path,
             starting: AtomicBool::new(false),
         })
         .manage(service::ServiceState::default())

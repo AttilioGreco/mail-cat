@@ -137,7 +137,7 @@ mod tests {
         }
     }
 
-    const CONFIG: &str = r#"grpc_addr = "127.0.0.1:50051"
+    const CONFIG: &str = r#"log_level = "info"
 
 [[accounts]]
 name = "Test"

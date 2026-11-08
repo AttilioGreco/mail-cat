@@ -31,7 +31,7 @@ The release body links to `docs/install.md` (first launch without code signing).
 
 - Every bundle carries `mail-cat-server` and `mc` next to the UI executable: `/usr/bin` for deb/rpm, `usr/bin` inside the AppImage, `Contents/MacOS` in the .app, the install folder on Windows. On macOS and Windows they are Tauri `externalBin` entries (`tauri.macos.conf.json`, `tauri.windows.conf.json`), so the workflow copies them to `crates/mc-ui/binaries/<name>-<target-triple>` before bundling. Linux uses explicit `files` mappings from `target/release`. A local macOS/Windows build needs the same `binaries/` files first (`cargo check` there fails without them). The per-OS files are merged over `tauri.conf.json` automatically.
 - ONNX Runtime is statically linked into `mail-cat-server` (the `ort` download is a static library), so no extra library ships.
-- At launch the UI runs `mail-cat-server service status` and installs or starts the autostart when needed. Debug builds skip this unless `MAILCAT_MANAGE_SERVICE=1`; a custom `MAILCAT_SERVER_URL` also skips it.
+- At launch the UI runs `mail-cat-server service status` and installs or starts the autostart when needed. Debug builds skip this unless `MAILCAT_MANAGE_SERVICE=1`; a custom `MAILCAT_SOCKET` also skips it.
 - An update stops the server (`service stop`), installs, relaunches; the relaunched UI re-registers the server from the new files.
 
 ## Not covered

@@ -5,7 +5,7 @@ each as a new label, named from its keywords. These commands let a person or an
 external assistant do a second pass: merge duplicates, rename, reject noise,
 reuse existing labels, then accept. mail-cat never calls an AI itself.
 
-Global flags: `--server <url>` (or `MAILCAT_SERVER_URL`), `--format
+Global flags: `--socket <path>` (or `MAILCAT_SOCKET`), `--format
 table|json|toon` (`--json` is an alias of `--format json`; `toon` is described
 below and exists for the `labels` commands only). Errors exit non-zero with the
 message on stderr. Ids are full UUIDs. `--account` takes an

@@ -1,4 +1,4 @@
-grpc_addr = "127.0.0.1:50051"
+# socket_path = "/run/user/1000/mail-cat.sock"  # default: per-user socket
 db_path = "./data/mail-cat.db"
 index_path = "./data/search-index"
 

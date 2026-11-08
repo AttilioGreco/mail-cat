@@ -12,12 +12,15 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true }
+hyper-util = { workspace = true }
+tower = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 
 [dev-dependencies]
+mc-shared = { workspace = true }
 anyhow = { workspace = true }
 
 [build-dependencies]

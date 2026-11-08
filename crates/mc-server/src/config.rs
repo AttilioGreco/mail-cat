@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 /// Server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// gRPC server address and port.
-    #[serde(default = "default_grpc_addr")]
-    pub grpc_addr: String,
+    /// Local socket the gRPC server listens on (named pipe on Windows).
+    /// Unset: `mc_shared::ipc::default_socket_path()`.
+    #[serde(default)]
+    pub socket_path: Option<PathBuf>,
 
     /// Path to the SQLite database file.
     #[serde(default = "default_db_path")]
@@ -148,7 +149,7 @@ impl From<OAuthProviderConfig> for mc_domain::OAuthProvider {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            grpc_addr: default_grpc_addr(),
+            socket_path: None,
             db_path: default_db_path(),
             index_path: default_index_path(),
             accounts: vec![],
@@ -156,10 +157,6 @@ impl Default for ServerConfig {
             log_level: None,
         }
     }
-}
-
-fn default_grpc_addr() -> String {
-    "127.0.0.1:50051".to_string()
 }
 
 fn default_db_path() -> String {
@@ -254,7 +251,7 @@ mod tests {
     #[test]
     fn default_config() {
         let config = ServerConfig::default();
-        assert_eq!(config.grpc_addr, "127.0.0.1:50051");
+        assert_eq!(config.socket_path, None);
         assert!(config.db_path.ends_with("mail-cat.db"));
     }
 
@@ -290,7 +287,7 @@ security = "start_tls"
     #[test]
     fn serialize_deserialize() {
         let config = ServerConfig {
-            grpc_addr: "0.0.0.0:9000".into(),
+            socket_path: Some("/run/custom.sock".into()),
             db_path: "/var/lib/mail-cat".into(),
             index_path: "/var/lib/mail-cat/index".into(),
             accounts: vec![AccountConfig {
@@ -320,7 +317,7 @@ security = "start_tls"
         let toml = toml::to_string_pretty(&config).unwrap();
         let parsed: ServerConfig = toml::from_str(&toml).unwrap();
 
-        assert_eq!(parsed.grpc_addr, config.grpc_addr);
+        assert_eq!(parsed.socket_path, config.socket_path);
         assert_eq!(parsed.accounts.len(), 1);
         assert_eq!(parsed.accounts[0].name, "Test Account");
     }

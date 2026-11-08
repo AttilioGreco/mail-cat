@@ -4,7 +4,7 @@ use super::*;
 async fn sync_service_integrated_in_app_context() {
     let dir = tempfile::tempdir().unwrap();
     let config = ServerConfig {
-        grpc_addr: "127.0.0.1:50051".to_string(),
+        socket_path: None,
         db_path: dir.path().join("mail-cat.db").display().to_string(),
         index_path: dir.path().join("index").display().to_string(),
         accounts: vec![],

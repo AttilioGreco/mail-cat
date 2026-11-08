@@ -193,7 +193,7 @@ mod tests {
     fn appends_account_without_writing_the_password() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "grpc_addr = \"127.0.0.1:50051\"\n").unwrap();
+        std::fs::write(&path, "log_level = \"info\"\n").unwrap();
 
         append_account(&path, &params("me@example.com")).unwrap();
 

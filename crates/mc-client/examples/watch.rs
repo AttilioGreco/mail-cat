@@ -2,18 +2,20 @@
 //!
 //! Usage:
 //!   cargo run -p mc-client --example watch
-//!   MAIL_CAT_ENDPOINT=http://[::1]:50051 cargo run -p mc-client --example watch
+//!   MAILCAT_SOCKET=/path/to/mail-cat.sock cargo run -p mc-client --example watch
 
 use mc_client::{MailCatClient, MailboxNotificationKind};
 use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let endpoint =
-        std::env::var("MAIL_CAT_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
+    let socket = std::env::var_os("MAILCAT_SOCKET").map_or_else(
+        mc_shared::ipc::default_socket_path,
+        std::path::PathBuf::from,
+    );
 
-    println!("Connecting to {}...", endpoint);
-    let client = MailCatClient::connect(&endpoint).await?;
+    println!("Connecting to {}...", socket.display());
+    let client = MailCatClient::connect(&socket).await?;
     println!("Connected.\n");
 
     let accounts = client.list_accounts().await?;
