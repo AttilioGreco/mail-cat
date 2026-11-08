@@ -413,6 +413,7 @@ def jmap_write(w):
     mail from another client then appears through push, without `mc sync`."""
     bob = account_id("bob")
     run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
+    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
 
     def server(path, user="bob"):
@@ -469,6 +470,7 @@ def jmap_write(w):
         raise Fail("the sent mail was left in Drafts")
 
     # What mail-cat believes after all that matches the server.
+    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
     for path, name in (("INBOX", "Inbox"), ("Archive", "Archive"), ("Trash", "Trash")):
         got = sorted(tag for tag, (p, _) in msgs.items() if p == name and tag is not None)
@@ -489,6 +491,7 @@ def jmap_labels(w):
     another client. Switching the model changes no data."""
     bob = account_id("bob")
     run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
+    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
     inbox, archive, projects = (boxes[n]["id"] for n in ("Inbox", "Archive", "Projects"))
 
@@ -520,8 +523,10 @@ def jmap_labels(w):
     mc("messages", "labels", msg(1), "--add", projects)
     if where(1) != ["INBOX", "Projects"]:
         raise Fail(f"tag 1 after adding a label: {where(1)}")
+    jmap_sync_all(bob)
     if rows(1) != (1, 2):
         raise Fail(f"tag 1 has (message rows, mailbox rows) {rows(1)}, expected (1, 2)")
+    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
     if int(boxes["Projects"]["total_messages"]) != 2 or rows(1) != (1, 2):
         raise Fail("syncing after a label change duplicated or lost a row")
@@ -546,6 +551,7 @@ def jmap_labels(w):
     mc("messages", "archive", msg(2))
     if where(2) != ["Projects"]:
         raise Fail(f"tag 2 after archive: {where(2)}")
+    jmap_sync_all(bob)
     if rows(4) != (1, 1) or rows(2) != (1, 1):
         raise Fail(f"rows after archive: tag 4 {rows(4)}, tag 2 {rows(2)}")
 
@@ -563,6 +569,7 @@ def jmap_labels(w):
     mc("messages", "tag", msg(1), "--add", "work")
     wait(lambda: any(f.lower() == "work" for f in server_flags(1)), "tag work on the server")
     imapctl.main(["--user", "bob", "store", "INBOX", "tag:1", "+phone"])
+    jmap_sync_all(bob)
     if sorted(tags(1)) != ["phone", "work"]:
         raise Fail(f"tags of tag 1 after the phone added one: {tags(1)}")
     mc("messages", "tag", msg(1), "--remove", "work")
@@ -662,6 +669,7 @@ def subscriptions_jmap(w):
     unsubscription of Archive arrives with the next sync."""
     bob = account_id("bob")
     run([sys.executable, str(HERE / "seed.py"), "--user", "bob", "-n", "6"])
+    jmap_sync_all(bob)
     boxes, msgs = jmap_snapshot(bob)
     if "Projects" not in subscribed_on_server("bob") or not boxes["Projects"]["subscribed"]:
         raise Fail("expected Projects subscribed to start with")
