@@ -1,7 +1,9 @@
 //! Local-socket listener: Unix domain socket, or a named pipe on Windows.
 
+#[cfg(unix)]
 use std::path::Path;
 
+#[cfg(unix)]
 use futures::Stream;
 
 /// Bind the socket, or `None` when another server instance already owns it.
@@ -79,9 +81,9 @@ mod windows {
 
     use anyhow::Context as _;
     use futures::Stream;
+    use mc_shared::ipc::windows::OwnerOnly;
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-    use mc_shared::ipc::windows::OwnerOnly;
     use tonic::transport::server::Connected;
 
     pub struct Pipe(NamedPipeServer);

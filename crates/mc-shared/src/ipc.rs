@@ -37,7 +37,7 @@ pub fn current_uid() -> u32 {
 pub mod windows {
     use std::ffi::c_void;
     use std::io;
-    use std::os::windows::io::RawHandle;
+    use std::os::windows::io::AsRawHandle;
     use std::ptr;
 
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
@@ -89,7 +89,13 @@ pub mod windows {
         let mut len = size_of::<[u64; 16]>() as u32;
         // SAFETY: the buffer is `len` bytes long.
         let ok = unsafe {
-            GetTokenInformation(token.0, TokenUser, user.0.as_mut_ptr().cast(), len, &mut len)
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                user.0.as_mut_ptr().cast(),
+                len,
+                &mut len,
+            )
         };
         if ok == 0 {
             return Err(io::Error::last_os_error());
@@ -119,7 +125,9 @@ pub mod windows {
                 text
             };
             // Protected DACL (no inherited ACEs), generic-all for that SID only.
-            let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid_text})\0").encode_utf16().collect();
+            let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid_text})\0")
+                .encode_utf16()
+                .collect();
             let mut descriptor = ptr::null_mut();
             // SAFETY: `sddl` is NUL-terminated; the descriptor is freed in Drop.
             let ok = unsafe {
@@ -156,10 +164,10 @@ pub mod windows {
     /// Whether the process serving the connected pipe runs as the current user.
     /// Pipe names are predictable, so another user can create the pipe first.
     /// Fails closed: a process we cannot inspect is not ours.
-    pub fn pipe_server_is_current_user(pipe: RawHandle) -> io::Result<bool> {
+    pub fn pipe_server_is_current_user(pipe: &impl AsRawHandle) -> io::Result<bool> {
         let mut pid = 0;
-        // SAFETY: `pipe` is a connected client pipe handle.
-        if unsafe { GetNamedPipeServerProcessId(pipe, &mut pid) } == 0 {
+        // SAFETY: the handle is owned by `pipe`, which outlives the call.
+        if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } == 0 {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: plain call; a null result is handled.

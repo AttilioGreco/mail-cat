@@ -8,9 +8,19 @@ use tokio::net::TcpListener;
 /// The page the browser lands on after the provider redirects back.
 fn page(ok: bool) -> String {
     let (mark, color, title, text) = if ok {
-        ("✓", "#2f9e5b", "Login completato", "Puoi chiudere questa scheda e tornare a mail-cat.")
+        (
+            "✓",
+            "#2f9e5b",
+            "Login completato",
+            "Puoi chiudere questa scheda e tornare a mail-cat.",
+        )
     } else {
-        ("✕", "#d9534f", "Login non completato", "L'accesso è stato annullato o rifiutato. Chiudi questa scheda e riprova da mail-cat.")
+        (
+            "✕",
+            "#d9534f",
+            "Login non completato",
+            "L'accesso è stato annullato o rifiutato. Chiudi questa scheda e riprova da mail-cat.",
+        )
     };
     format!(
         r#"<!doctype html><html lang="it"><head><meta charset="utf-8"><title>mail-cat</title>

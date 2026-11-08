@@ -41,7 +41,6 @@ async fn open_as(path: &Path, uid: u32) -> std::io::Result<tokio::net::UnixStrea
 
 #[cfg(windows)]
 async fn open(path: &Path) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
-    use std::os::windows::io::AsRawHandle;
     use tokio::net::windows::named_pipe::ClientOptions;
     // windows-sys ERROR_PIPE_BUSY: all instances are momentarily taken by other clients.
     const ERROR_PIPE_BUSY: i32 = 231;
@@ -55,7 +54,7 @@ async fn open(path: &Path) -> std::io::Result<tokio::net::windows::named_pipe::N
             }
             Ok(pipe) => {
                 // Pipe names are predictable: another user may have created it first.
-                if !mc_shared::ipc::windows::pipe_server_is_current_user(pipe.as_raw_handle())? {
+                if !mc_shared::ipc::windows::pipe_server_is_current_user(&pipe)? {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::PermissionDenied,
                         "pipe is served by another user",
