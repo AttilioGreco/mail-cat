@@ -25,7 +25,7 @@ export const moveTargets = (e: AccountEvent, calendars: Calendar[]) =>
   calendars.filter((c) => !c.readOnly && c.collection !== e.calendar);
 
 /** The copy's wire form. An all-day event is held as UTC midnights with an exclusive end, and goes out as dates. */
-export function copyOf(e: AccountEvent, calendar: string): EventInput {
+export function copyOf(e: AccountEvent, calendar: string, reminders: number[]): EventInput {
   const [start, end] = e.allDay
     ? [format(utcDay(e.start), 'yyyy-MM-dd'), format(utcDay(e.end), 'yyyy-MM-dd')]
     : [e.start.toISOString(), e.end.toISOString()];
@@ -36,5 +36,6 @@ export function copyOf(e: AccountEvent, calendar: string): EventInput {
     end,
     location: e.location ?? undefined,
     description: e.description ?? undefined,
+    reminders,
   };
 }

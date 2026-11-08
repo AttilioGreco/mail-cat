@@ -1,6 +1,7 @@
 //! `DavReadRepository` over SQLite.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -14,8 +15,9 @@ use mc_domain::{
     PendingChange, PendingPush, RemoteBinding, RemoteContact, formats,
 };
 
+use super::SqliteDb;
 use super::repository::{
-    SqliteRepository, conversion_err, json_col, query_all, query_one, time_col,
+    SqliteRepository, conversion_err, exec, json_col, nanos, query_all, query_one, time_col,
 };
 
 fn opt_time(row: &Row, idx: usize) -> rusqlite::Result<Option<DateTime<Utc>>> {
@@ -469,6 +471,66 @@ impl DavReadRepository for SqliteRepository {
                     |r| r.get::<_, i64>(0),
                 )
                 .map(|n| n.unwrap_or(0) as u64)
+            })
+            .await
+    }
+}
+
+/// The calendar reminders that already rang.
+#[derive(Clone)]
+pub struct ReminderLog {
+    db: Arc<SqliteDb>,
+}
+
+impl ReminderLog {
+    /// Kept this long after the occurrence ended, in case a sync moves it back.
+    const RETENTION: chrono::TimeDelta = chrono::TimeDelta::days(1);
+
+    pub fn new(db: Arc<SqliteDb>) -> Self {
+        Self { db }
+    }
+
+    /// Records the reminder as shown. False when it already was: the caller
+    /// must not show it again.
+    pub async fn record(
+        &self,
+        account: &AccountId,
+        href: &Href,
+        occurrence: (DateTime<Utc>, DateTime<Utc>),
+        trigger_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, DomainError> {
+        let (account, href, key) = (*account.as_uuid(), href.to_string(), trigger_key.to_owned());
+        self.db
+            .write(move |conn| {
+                exec(
+                    conn,
+                    "INSERT OR IGNORE INTO fired_reminders \
+                     (account_id, href, occurrence_start, trigger_key, occurrence_end, fired_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        account,
+                        href,
+                        nanos(occurrence.0),
+                        key,
+                        nanos(occurrence.1),
+                        nanos(now)
+                    ],
+                )
+                .map(|inserted| inserted == 1)
+            })
+            .await
+    }
+
+    pub async fn prune(&self, now: DateTime<Utc>) -> Result<(), DomainError> {
+        self.db
+            .write(move |conn| {
+                exec(
+                    conn,
+                    "DELETE FROM fired_reminders WHERE occurrence_end < ?1",
+                    [nanos(now - Self::RETENTION)],
+                )
+                .map(drop)
             })
             .await
     }

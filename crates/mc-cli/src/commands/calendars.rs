@@ -272,6 +272,7 @@ pub async fn run_events(cmd: EventsCmd, client: MailCatClient, format: Format) -
                 end,
                 location,
                 description,
+                reminders: vec![],
             };
             let href = client.create_event(&account.id, event).await?;
             println!("{} created {href}", "✓".green());
@@ -301,6 +302,7 @@ pub async fn run_events(cmd: EventsCmd, client: MailCatClient, format: Format) -
                 start,
                 end,
                 description,
+                reminders: None,
             };
             client.update_event(&account.id, &href, changes).await?;
             println!("{} updated {href}", "✓".green());

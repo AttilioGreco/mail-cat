@@ -39,6 +39,8 @@ export interface EventDetail {
   raw: string;
   /** Null for a resource without an event (a task). */
   first: EventOccurrence | null;
+  /** Seconds relative to the start, iCalendar TRIGGER sign: negative is before. */
+  reminders: number[];
 }
 
 /** A time is an RFC 3339 instant, or `YYYY-MM-DD` for an all-day event. */
@@ -49,6 +51,7 @@ export interface EventInput {
   end: string;
   location?: string;
   description?: string;
+  reminders: number[];
 }
 
 /** Absent fields are left as they are; an empty location or description clears it. */
@@ -58,6 +61,8 @@ export interface EventChanges {
   start?: string;
   end?: string;
   description?: string;
+  /** Replaces the reminders; absent leaves them alone. */
+  reminders?: number[];
 }
 
 export interface DateRange {

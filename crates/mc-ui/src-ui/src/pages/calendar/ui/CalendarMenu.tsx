@@ -7,7 +7,7 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/shared/ui/alert-dialog';
 import { useAccounts } from '@/entities/account';
-import { useCalendarGroups, useCreateEvent, useDeleteEvent, type AccountEvent } from '@/entities/calendar';
+import { useCalendarGroups, useCreateEvent, useDeleteEvent, useEventReminders, type AccountEvent } from '@/entities/calendar';
 import { useEventEditor } from '@/features/edit-event';
 import { copyOf, eventActions, moveTargets, type MenuTarget } from '../lib/menu';
 import { useCalendarView } from '../model/view-store';
@@ -22,6 +22,7 @@ export function CalendarMenu({ menu, onClose }: { menu: MenuState | null; onClos
   const today = useCalendarView((s) => s.today);
   const groups = useCalendarGroups(useAccounts().data ?? []);
   const create = useCreateEvent();
+  const reminders = useEventReminders();
   const remove = useDeleteEvent();
   const [confirming, setConfirming] = useState<AccountEvent | null>(null);
 
@@ -32,7 +33,7 @@ export function CalendarMenu({ menu, onClose }: { menu: MenuState | null; onClos
 
   const duplicate = async (e: AccountEvent) => {
     try {
-      const href = await create.mutateAsync({ accountId: e.accountId, event: copyOf(e, e.calendar) });
+      const href = await create.mutateAsync({ accountId: e.accountId, event: copyOf(e, e.calendar, await reminders(e.accountId, e.href)) });
       openEditor({ mode: 'edit', event: { ...e, href, dirty: true } });
     } catch (err) {
       toast.error(`Impossibile duplicare l'evento: ${String(err)}`);
@@ -41,7 +42,7 @@ export function CalendarMenu({ menu, onClose }: { menu: MenuState | null; onClos
 
   const move = async (e: AccountEvent, calendar: string) => {
     try {
-      await create.mutateAsync({ accountId: e.accountId, event: copyOf(e, calendar) });
+      await create.mutateAsync({ accountId: e.accountId, event: copyOf(e, calendar, await reminders(e.accountId, e.href)) });
     } catch (err) {
       toast.error(`Impossibile spostare l'evento: ${String(err)}`);
       return;

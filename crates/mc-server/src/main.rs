@@ -25,6 +25,7 @@ mod config;
 mod notifications;
 mod oauth_login;
 mod oauth_reauth;
+mod reminders;
 mod secret_ingest;
 mod service;
 #[cfg(test)]

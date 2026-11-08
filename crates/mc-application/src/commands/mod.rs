@@ -247,6 +247,8 @@ pub enum Command {
         end: EventWhen,
         location: Option<String>,
         description: Option<String>,
+        /// Relative to the start; negative is before.
+        reminders: Vec<chrono::Duration>,
     },
 
     UpdateCalendarEvent {

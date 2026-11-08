@@ -2,6 +2,7 @@ export {
   useCalendars,
   useEvents,
   useEvent,
+  useEventReminders,
   useCreateEvent,
   useUpdateEvent,
   useDeleteEvent,
@@ -13,6 +14,7 @@ export { useVisibleEvents, isEditable, type AccountEvent } from './model/useVisi
 export { useCalendarVisibility } from './model/visibility-store';
 export { calendarColor, calendarKey } from './lib/color';
 export { utcDay, coversDay } from './lib/dates';
+export { usePendingEvent } from './model/pending-event-store';
 export { useAgendaPane } from './model/agenda-store';
 export { useDavChangesWatch } from './model/useDavWatch';
 export type {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::grpc::mappers::datetime_to_timestamp;
+use crate::grpc::proto::{Reminder, ReminderList};
 use crate::grpc::services::dav_fakes::{FakeDav, RecordingBus};
 use chrono::{TimeZone, Utc};
 use mc_application::bus::EventPublisher;
@@ -173,6 +174,11 @@ async fn create_update_and_delete_dispatch_the_commands() {
             start: "2026-11-10".into(),
             end: "2026-11-11".into(),
             location: Some(String::new()),
+            reminders: Some(ReminderList {
+                reminders: vec![Reminder {
+                    before_seconds: -600,
+                }],
+            }),
         }))
         .await
         .unwrap()
@@ -197,12 +203,14 @@ async fn create_update_and_delete_dispatch_the_commands() {
     let seen = bus.seen.lock().unwrap();
     assert!(matches!(
         &seen[0],
-        Command::AddCalendarEvent { calendar, summary, start: EventWhen::Date(_), location: None, .. }
+        Command::AddCalendarEvent { calendar, summary, start: EventWhen::Date(_), location: None, reminders, .. }
             if calendar.as_str() == "/cal/" && summary == "Dentist"
+                && *reminders == [chrono::Duration::minutes(-10)]
     ));
     assert!(matches!(
         &seen[1],
-        Command::UpdateCalendarEvent { edit, .. } if edit.summary.as_deref() == Some("Dentist 2")
+        Command::UpdateCalendarEvent { edit, .. }
+            if edit.summary.as_deref() == Some("Dentist 2") && edit.reminders.is_none()
     ));
     assert!(matches!(&seen[2], Command::RemoveCalendarEvent { href: h, .. } if *h == href));
 }
@@ -219,6 +227,7 @@ async fn bad_event_time_is_refused_before_any_command() {
             start: "tomorrow".into(),
             end: "2026-11-11".into(),
             location: None,
+            reminders: None,
         }))
         .await
         .unwrap_err();

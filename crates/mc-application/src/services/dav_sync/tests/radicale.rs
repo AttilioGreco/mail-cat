@@ -215,6 +215,7 @@ async fn contacts_and_events_round_trip_through_the_service() {
             "Lunch".into(),
             (start, end),
             (None, None),
+            vec![],
         )
         .await
         .unwrap();

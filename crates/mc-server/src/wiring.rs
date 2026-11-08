@@ -455,6 +455,8 @@ impl AppContext {
         //     notification still up for that message. Covers reading the mail in
         //     another client (remote flag change → MessageFlagged) as well as
         //     acting on it from the notification itself.
+        //   • Calendar reminders are scanned by `reminders`, which shows its
+        //     notifications through the same center.
         //   • AccountSyncFailed – error alert (no actions)
         //   • AccountAuthExpired – error alert with "Ri-autentica" action:
         //       drives OAuthChallengeManager::start_login() in-process, opens the
@@ -469,6 +471,16 @@ impl AppContext {
             center.clone().spawn_action_loop(
                 notif_cmd_bus.clone(),
                 notif_q_bus.clone(),
+                notif_ui_bin.clone(),
+                shutdown.clone(),
+            );
+            Arc::new(crate::reminders::Reminders::new(
+                repository_arc.clone(),
+                mc_infrastructure::ReminderLog::new(db.clone()),
+            ))
+            .spawn(
+                auth_gates.clone(),
+                center.clone(),
                 notif_ui_bin.clone(),
                 shutdown.clone(),
             );
@@ -540,14 +552,21 @@ impl AppContext {
                                     // on; it survives the banner being swept into the
                                     // notification panel, and keeping the id lets us
                                     // dismiss the notification once the mail is read.
-                                    center.track(handle.id(), target);
+                                    center.track(
+                                        handle.id(),
+                                        crate::notifications::Notified::Message(target),
+                                    );
                                     return;
                                 }
                                 // Fallback (no session bus): one-shot listener, actions
                                 // only work while the notification is on screen.
                                 handle.wait_for_action(move |action| {
                                     rt.block_on(crate::notifications::run_action(
-                                        action, target, &cmd, &q, &ui_bin,
+                                        action,
+                                        crate::notifications::Notified::Message(target),
+                                        &cmd,
+                                        &q,
+                                        &ui_bin,
                                     ));
                                 });
                             });
@@ -857,7 +876,7 @@ async fn append_account_event(
 /// because libnotify accepts absolute paths directly and renders them at full
 /// fidelity regardless of whether `gtk-update-icon-cache` has run.
 /// Falls back to the theme name `"mail-cat"` (works after `just install`).
-fn app_icon_path() -> String {
+pub(crate) fn app_icon_path() -> String {
     dirs::data_dir()
         .map(|d| d.join("icons/hicolor/128x128/apps/mail-cat.png"))
         .filter(|p| p.exists())

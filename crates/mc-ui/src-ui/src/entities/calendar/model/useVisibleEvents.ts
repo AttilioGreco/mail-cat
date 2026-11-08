@@ -31,5 +31,5 @@ export function useVisibleEvents(accounts: CalendarAccount[], range: DateRange) 
       events.push({ ...o, accountId, color: calendarColor(accountId, calendar), readOnly: calendar.readOnly });
     }
   }
-  return { events, failed: results.filter((r) => r.error).map((r) => r.accountId) };
+  return { events, loading: results.some((r) => r.isLoading), failed: results.filter((r) => r.error).map((r) => r.accountId) };
 }

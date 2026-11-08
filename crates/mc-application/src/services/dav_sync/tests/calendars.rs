@@ -81,6 +81,7 @@ async fn events_sync_both_ways_and_task_calendars_are_left_alone() {
             "Lunch".into(),
             (when, end),
             (None, None),
+            vec![chrono::Duration::minutes(-10)],
         )
         .await
         .unwrap()
@@ -93,12 +94,8 @@ async fn events_sync_both_ways_and_task_calendars_are_left_alone() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert!(
-        env.fake
-            .raw(made.as_str())
-            .unwrap()
-            .contains("SUMMARY:Lunch")
-    );
+    let pushed = env.fake.raw(made.as_str()).unwrap();
+    assert!(pushed.contains("SUMMARY:Lunch") && pushed.contains("TRIGGER:-PT10M"));
 
     env.handler
         .handle_remove_event(env.account, href)

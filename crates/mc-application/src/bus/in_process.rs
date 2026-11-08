@@ -401,6 +401,7 @@ where
                 end,
                 location,
                 description,
+                reminders,
             } => {
                 self.dav()?
                     .handle_add_event(
@@ -409,6 +410,7 @@ where
                         summary,
                         (start, end),
                         (location, description),
+                        reminders,
                     )
                     .await
             }

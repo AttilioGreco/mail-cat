@@ -25,6 +25,6 @@ const day = new Date(2026, 10, 10);
 const slot = slotAt(day, 9 * 60 + 40);
 eq([slot.start.getHours(), slot.start.getMinutes(), slot.end.getHours(), slot.end.getMinutes()], [9, 30, 10, 30], 'slot snaps down');
 
-const allDay = copyOf(ev({ allDay: true, start: new Date(Date.UTC(2026, 10, 10)), end: new Date(Date.UTC(2026, 10, 12)), location: 'X' }), '/c2/');
+const allDay = copyOf(ev({ allDay: true, start: new Date(Date.UTC(2026, 10, 10)), end: new Date(Date.UTC(2026, 10, 12)), location: 'X' }), '/c2/', []);
 eq([allDay.start, allDay.end, allDay.location, allDay.calendar], ['2026-11-10', '2026-11-12', 'X', '/c2/'], 'all-day copy');
-eq(copyOf(ev(), '/c1/').start, '2026-11-10T09:00:00.000Z', 'timed copy');
+eq(copyOf(ev(), '/c1/', []).start, '2026-11-10T09:00:00.000Z', 'timed copy');

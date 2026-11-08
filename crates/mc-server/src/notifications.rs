@@ -24,11 +24,63 @@ pub struct NotifiedMessage {
     pub mailbox_id: MailboxId,
 }
 
+/// What a calendar reminder notification opens.
+#[derive(Clone)]
+pub struct NotifiedEvent {
+    /// The value of the UI's `--open-event` flag.
+    pub deep_link: String,
+    /// Offered as the "Unisciti" action when there is one.
+    pub meeting_url: Option<String>,
+}
+
+/// What a notification on screen refers to, whichever kind it is.
+#[derive(Clone)]
+pub enum Notified {
+    Message(NotifiedMessage),
+    Event(NotifiedEvent),
+}
+
 /// Runs the action a user picked on a new-mail notification.
 ///
 /// Shared by the D-Bus listener and the notify-rust fallback so both platforms
 /// behave identically.
 pub async fn run_action(
+    action: &str,
+    target: Notified,
+    command_bus: &Arc<dyn CommandBus>,
+    query_bus: &Arc<dyn QueryBus>,
+    ui_bin: &str,
+) {
+    match target {
+        Notified::Message(message) => {
+            run_message_action(action, message, command_bus, query_bus, ui_bin).await;
+        }
+        Notified::Event(event) => run_event_action(action, &event, ui_bin),
+    }
+}
+
+/// "default" is the body click; "open-event" the explicit button.
+pub fn run_event_action(action: &str, event: &NotifiedEvent, ui_bin: &str) {
+    match (action, &event.meeting_url) {
+        ("default" | "open-event", _) => {
+            if let Err(e) = std::process::Command::new(ui_bin)
+                .arg("--open-event")
+                .arg(&event.deep_link)
+                .spawn()
+            {
+                tracing::warn!("Failed to open Mail Cat (ui_bin='{ui_bin}'): {e}");
+            }
+        }
+        ("join", Some(url)) => {
+            if let Err(e) = mc_shared::browser::open_browser(url) {
+                tracing::warn!("Failed to open the meeting link: {e}");
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn run_message_action(
     action: &str,
     target: NotifiedMessage,
     command_bus: &Arc<dyn CommandBus>,
@@ -105,7 +157,7 @@ pub async fn run_action(
 /// notification id the daemon handed back.
 #[derive(Default)]
 pub struct NotificationCenter {
-    live: Mutex<HashMap<u32, NotifiedMessage>>,
+    live: Mutex<HashMap<u32, Notified>>,
     #[cfg(target_os = "linux")]
     conn: Option<zbus::Connection>,
 }
@@ -144,7 +196,7 @@ impl NotificationCenter {
         }
     }
 
-    pub fn track(&self, notification_id: u32, target: NotifiedMessage) {
+    pub fn track(&self, notification_id: u32, target: Notified) {
         self.live
             .lock()
             .expect("notification registry poisoned")
@@ -159,7 +211,10 @@ impl NotificationCenter {
     pub async fn close_for_message(&self, message_id: &MessageId) {
         let id = {
             let mut live = self.live.lock().expect("notification registry poisoned");
-            let Some((&id, _)) = live.iter().find(|(_, t)| t.message_id == *message_id) else {
+            let Some((&id, _)) = live
+                .iter()
+                .find(|(_, t)| matches!(t, Notified::Message(m) if m.message_id == *message_id))
+            else {
                 return;
             };
             live.remove(&id);
@@ -234,7 +289,7 @@ impl NotificationCenter {
                             .lock()
                             .expect("notification registry poisoned")
                             .get(&id)
-                            .copied();
+                            .cloned();
                         if let Some(target) = target {
                             run_action(&action, target, &command_bus, &query_bus, &ui_bin).await;
                         }
@@ -284,12 +339,12 @@ async fn add_notification_matches(conn: &zbus::Connection) -> zbus::Result<()> {
 mod tests {
     use super::*;
 
-    fn target(message_id: MessageId) -> NotifiedMessage {
-        NotifiedMessage {
+    fn target(message_id: MessageId) -> Notified {
+        Notified::Message(NotifiedMessage {
             message_id,
             account_id: AccountId::new(),
             mailbox_id: MailboxId::new(),
-        }
+        })
     }
 
     /// Closing by message id must dismiss exactly the matching notification.

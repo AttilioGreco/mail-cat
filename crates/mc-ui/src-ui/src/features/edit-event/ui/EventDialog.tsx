@@ -19,21 +19,21 @@ export function EventDialog() {
   );
 }
 
-/** A series shows its master's times, which the clicked occurrence does not carry. */
+/** Loads the full event: a series shows its master's times, which the clicked occurrence does not carry, and reminders only come with the detail. */
 function Loaded() {
   const target = useEventEditor((s) => s.target);
   const close = useEventEditor((s) => s.close);
   const event = target?.mode === 'edit' ? target.event : null;
-  const series = useEvent(event?.recurring ? event.accountId : null, event?.recurring ? event.href : null);
+  const detail = useEvent(event?.accountId ?? null, event?.href ?? null);
 
   if (target?.mode === 'create') {
     return <EventEditor key="new" initial={formFromRange(target.start, target.end, target.allDay, '')} onClose={close} />;
   }
   if (!event) return null;
-  const source = event.recurring ? series.data?.first : event;
-  if (!source) {
-    return <p className="text-muted-foreground">{series.error ? 'Impossibile caricare la serie.' : 'Caricamento…'}</p>;
+  const source = event.recurring ? detail.data?.first : event;
+  if (!source || !detail.data) {
+    return <p className="text-muted-foreground">{detail.error ? "Impossibile caricare l'evento." : 'Caricamento…'}</p>;
   }
-  const initial = formFromOccurrence(source, calendarKey(event.accountId, event.calendar));
+  const initial = formFromOccurrence(source, calendarKey(event.accountId, event.calendar), detail.data.reminders);
   return <EventEditor key={event.href} initial={initial} event={event} onClose={close} />;
 }

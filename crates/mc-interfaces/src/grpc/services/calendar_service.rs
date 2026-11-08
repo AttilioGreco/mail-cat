@@ -8,7 +8,7 @@ use tonic::{Request, Response, Status};
 use crate::grpc::mappers::{
     application_error_to_status, calendar_to_proto, domain_error_to_status, event_edit_from_proto,
     event_to_proto, event_when_from_str, occurrence_to_proto, parse_account_id,
-    timestamp_to_datetime,
+    reminders_from_proto, timestamp_to_datetime,
 };
 use crate::grpc::proto::{
     CreateEventRequest, CreateEventResponse, DavChange, DavKind, DeleteEventRequest,
@@ -166,6 +166,11 @@ impl<C: CommandBus + 'static> CalendarService for CalendarServiceImpl<C> {
                 end: event_when_from_str(&req.end).map_err(Status::invalid_argument)?,
                 location: req.location.filter(|l| !l.is_empty()),
                 description: req.description.filter(|d| !d.is_empty()),
+                reminders: req
+                    .reminders
+                    .as_ref()
+                    .map(reminders_from_proto)
+                    .unwrap_or_default(),
             })
             .await
             .map_err(application_error_to_status)?;

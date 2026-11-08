@@ -4,6 +4,7 @@ pub(crate) mod event_store_conformance;
 pub(crate) mod read_repository_conformance;
 pub mod sqlite;
 
+pub use self::sqlite::ReminderLog;
 pub use self::sqlite::SqliteDb;
 pub use self::sqlite::event_store::SqliteEventStore;
 pub use self::sqlite::repository::{DownloadMeter, SqliteRepository};

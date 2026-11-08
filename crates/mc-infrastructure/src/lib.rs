@@ -18,7 +18,7 @@ pub use email::{
 };
 pub use embedding::{CATALOG, CatalogEmbedder, ExecutionTarget, LazyEmbedder, ModelSpec};
 pub use persistence::{
-    DownloadMeter, SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore,
+    DownloadMeter, ReminderLog, SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore,
 };
 pub use provider_registry::InMemoryProviderRegistry;
 pub use search::TantivySearchIndex;

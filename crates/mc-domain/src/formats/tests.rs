@@ -1,4 +1,6 @@
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use std::str::FromStr;
+
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 
 use super::*;
 use crate::model::contact::{ContactEmail, ContactEmailLabel};
@@ -230,6 +232,7 @@ fn event_edit_changes_the_master_and_keeps_everything_else() {
         // 15:00 CET: the zone of the old DTSTART is kept, not pinned to UTC.
         start: Some(EventWhen::At(at("2026-10-24T13:00:00Z"))),
         end: Some(EventWhen::At(at("2026-10-24T14:00:00Z"))),
+        reminders: None,
     };
     let edited = unfolded(&edit_event(SERIES, &edit, now).unwrap());
 
@@ -297,4 +300,208 @@ fn a_series_with_no_occurrence_left_is_kept_without_fields() {
     let parsed = parse_event(raw).unwrap();
     assert_eq!(parsed.uid.as_deref(), Some("gone"));
     assert!(parsed.fields.is_none());
+}
+
+fn event_with_alarms(start: &str, alarms: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:a\r\n{start}\r\n{alarms}\
+         SUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+fn alarm(trigger: &str) -> String {
+    format!("BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER{trigger}\r\nEND:VALARM\r\n")
+}
+
+fn rings(raw: &str, zone: &impl TimeZone) -> Vec<DateTime<Utc>> {
+    let found = alarms(
+        raw,
+        at("2026-01-01T00:00:00Z"),
+        at("2027-01-01T00:00:00Z"),
+        zone,
+    )
+    .unwrap();
+    found
+        .iter()
+        .flat_map(|o| o.alarms.iter().map(|a| a.fire_at))
+        .collect()
+}
+
+#[test]
+fn alarms_are_relative_to_the_start_or_the_end_or_absolute() {
+    let raw = event_with_alarms(
+        "DTSTART:20261110T140000Z\r\nDTEND:20261110T150000Z",
+        &[
+            alarm(":-PT10M"),
+            alarm(";RELATED=END:PT5M"),
+            alarm(";VALUE=DATE-TIME:20261110T120000Z"),
+            alarm(":garbage"),
+        ]
+        .concat(),
+    );
+    assert_eq!(
+        rings(&raw, &Utc),
+        [
+            at("2026-11-10T13:50:00Z"),
+            at("2026-11-10T15:05:00Z"),
+            at("2026-11-10T12:00:00Z")
+        ]
+    );
+}
+
+#[test]
+fn an_absolute_alarm_of_a_series_belongs_to_one_occurrence() {
+    let raw = event_with_alarms(
+        "DTSTART:20261110T140000Z\r\nDTEND:20261110T150000Z\r\nRRULE:FREQ=DAILY;COUNT=3",
+        &alarm(";VALUE=DATE-TIME:20261111T120000Z"),
+    );
+    let found = alarms(
+        &raw,
+        at("2026-11-01T00:00:00Z"),
+        at("2026-12-01T00:00:00Z"),
+        &Utc,
+    )
+    .unwrap();
+    let with_alarm: Vec<_> = found
+        .iter()
+        .filter(|o| !o.alarms.is_empty())
+        .map(|o| o.start)
+        .collect();
+    assert_eq!(with_alarm, [at("2026-11-11T14:00:00Z")]);
+}
+
+#[test]
+fn an_all_day_alarm_is_counted_from_local_midnight_across_dst() {
+    let rome = calcard::common::timezone::Tz::from_str("Europe/Rome").unwrap();
+    // Google's all-day default: 09:00 the day before.
+    let day =
+        |date: &str| event_with_alarms(&format!("DTSTART;VALUE=DATE:{date}"), &alarm(":-PT15H"));
+    assert_eq!(rings(&day("20261026"), &rome), [at("2026-10-25T08:00:00Z")]);
+    assert_eq!(rings(&day("20261025"), &rome), [at("2026-10-24T07:00:00Z")]);
+}
+
+#[test]
+fn an_override_has_its_own_alarms_or_else_the_masters() {
+    let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:s\r\n\
+        DTSTART:20261110T100000Z\r\nDTEND:20261110T110000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\n\
+        BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT10M\r\nEND:VALARM\r\nEND:VEVENT\r\n\
+        BEGIN:VEVENT\r\nUID:s\r\nRECURRENCE-ID:20261111T100000Z\r\n\
+        DTSTART:20261111T100000Z\r\nDTEND:20261111T110000Z\r\n\
+        BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT1H\r\nEND:VALARM\r\nEND:VEVENT\r\n\
+        BEGIN:VEVENT\r\nUID:s\r\nRECURRENCE-ID:20261112T100000Z\r\n\
+        DTSTART:20261112T120000Z\r\nDTEND:20261112T130000Z\r\nEND:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+    assert_eq!(
+        rings(raw, &Utc),
+        [
+            at("2026-11-10T09:50:00Z"),
+            at("2026-11-11T09:00:00Z"),
+            at("2026-11-12T11:50:00Z")
+        ]
+    );
+}
+
+#[test]
+fn the_meeting_link_comes_from_the_conference_property_then_the_url_then_the_text() {
+    let link = |props: &str| {
+        let raw = event_with_alarms(&format!("DTSTART:20261110T140000Z\r\n{props}"), "");
+        let found = alarms(
+            &raw,
+            at("2026-11-10T00:00:00Z"),
+            at("2026-11-11T00:00:00Z"),
+            &Utc,
+        )
+        .unwrap();
+        found[0].meeting_url.clone()
+    };
+    assert_eq!(
+        link("URL:https://example.com/page\r\nX-GOOGLE-CONFERENCE:https://meet.google.com/abc"),
+        Some("https://meet.google.com/abc".into())
+    );
+    assert_eq!(
+        link("URL:https://example.com/page"),
+        Some("https://example.com/page".into())
+    );
+    assert_eq!(link("URL:file:///etc/passwd"), None);
+    assert_eq!(
+        link("LOCATION:Room 2\\, https://acme.zoom.us/j/1?pwd=x. Bring a pen"),
+        Some("https://acme.zoom.us/j/1?pwd=x".into())
+    );
+    assert_eq!(
+        link(
+            "DESCRIPTION:see <https://teams.microsoft.com/l/meetup-join/1> or https://evil.com/zoom.us"
+        ),
+        Some("https://teams.microsoft.com/l/meetup-join/1".into())
+    );
+    assert_eq!(link("LOCATION:https://notzoom.us/j/1"), None);
+}
+
+#[test]
+fn editing_reminders_replaces_only_the_masters_relative_ones() {
+    let kept_alarms = [
+        alarm(";RELATED=END:PT5M"),
+        alarm(";VALUE=DATE-TIME:20261110T120000Z"),
+    ]
+    .concat();
+    let raw = event_with_alarms(
+        "DTSTART:20261110T140000Z\r\nDTEND:20261110T150000Z",
+        &[alarm(":-PT10M"), alarm(":-P1D"), kept_alarms.clone()].concat(),
+    );
+    assert_eq!(
+        reminders(&raw).unwrap(),
+        [Duration::minutes(-10), Duration::days(-1)]
+    );
+
+    let edit = EventEdit {
+        reminders: Some(vec![
+            Duration::minutes(-30),
+            Duration::zero(),
+            Duration::days(-7),
+            Duration::hours(-26),
+        ]),
+        ..EventEdit::default()
+    };
+    let edited = edit_event(&raw, &edit, at("2026-11-07T10:00:00Z")).unwrap();
+    assert!(edited.contains(&kept_alarms));
+    assert_eq!(edited.matches("BEGIN:VALARM").count(), 6);
+    assert_eq!(edited.matches("UID:").count(), 5);
+    assert!(edited.contains("TRIGGER:-PT30M\r\n") && edited.contains("TRIGGER:PT0S\r\n"));
+    assert!(edited.contains("TRIGGER:-P7D\r\n") && edited.contains("TRIGGER:-P1DT2H\r\n"));
+    assert!(!edited.contains("TRIGGER:-PT10M"));
+    assert_eq!(
+        reminders(&edited).unwrap(),
+        [
+            Duration::minutes(-30),
+            Duration::zero(),
+            Duration::days(-7),
+            Duration::hours(-26)
+        ]
+    );
+    assert_eq!(rings(&edited, &Utc).len(), 6);
+
+    let cleared = edit_event(
+        &edited,
+        &EventEdit {
+            reminders: Some(vec![]),
+            ..EventEdit::default()
+        },
+        at("2026-11-07T10:00:00Z"),
+    )
+    .unwrap();
+    assert_eq!(cleared.matches("BEGIN:VALARM").count(), 2);
+    assert!(reminders(&cleared).unwrap().is_empty());
+}
+
+#[test]
+fn editing_reminders_leaves_an_overrides_alarms_alone() {
+    let edit = EventEdit {
+        reminders: Some(vec![Duration::minutes(-5)]),
+        ..EventEdit::default()
+    };
+    let edited = unfolded(&edit_event(SERIES, &edit, at("2026-11-07T10:00:00Z")).unwrap());
+    // SERIES' master has a -PT10M alarm; its override has none.
+    assert!(!edited.contains("TRIGGER:-PT10M"));
+    assert!(edited.contains("TRIGGER:-PT5M"));
+    assert_eq!(edited.matches("BEGIN:VALARM").count(), 1);
+    assert!(edited.contains("SUMMARY:Standup (moved)\r\nEND:VEVENT\r\n"));
 }

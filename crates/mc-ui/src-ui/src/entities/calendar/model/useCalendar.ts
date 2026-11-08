@@ -66,15 +66,23 @@ export function useEvents(accountIds: string[], range: DateRange) {
   });
 }
 
+const eventQuery = (accountId: string | null, href: string | null) => ({
+  queryKey: ['event', accountId, href],
+  queryFn: async (): Promise<EventDetail> => {
+    const d = await invoke<EventDetailDto>('get_event', { accountId, href });
+    return { ...d, first: d.first && occurrenceFromDto(d.first) };
+  },
+});
+
 export function useEvent(accountId: string | null, href: string | null) {
-  return useQuery({
-    queryKey: ['event', accountId, href],
-    enabled: accountId !== null && href !== null,
-    queryFn: async (): Promise<EventDetail> => {
-      const d = await invoke<EventDetailDto>('get_event', { accountId, href });
-      return { ...d, first: d.first && occurrenceFromDto(d.first) };
-    },
-  });
+  return useQuery({ ...eventQuery(accountId, href), enabled: accountId !== null && href !== null });
+}
+
+/** For copying an event: the occurrence the grid holds does not carry its reminders. */
+export function useEventReminders() {
+  const queryClient = useQueryClient();
+  return async (accountId: string, href: string) =>
+    (await queryClient.fetchQuery({ ...eventQuery(accountId, href), staleTime: 0 })).reminders;
 }
 
 /** Local edits show up at once; the server's `dav:changed` follows once they are pushed. */

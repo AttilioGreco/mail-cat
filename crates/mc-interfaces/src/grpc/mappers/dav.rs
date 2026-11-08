@@ -1,12 +1,12 @@
 //! Contacts and calendars synced with a server, between domain and proto.
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use tonic::Status;
 
 use super::datetime_to_timestamp;
 use crate::grpc::proto;
 use mc_application::commands::ContactFields;
-use mc_domain::formats::{EventEdit, EventWhen, parse_event, parse_vcard};
+use mc_domain::formats::{self, EventEdit, EventWhen, parse_event, parse_vcard};
 use mc_domain::{
     AccountId, AddressBook, Calendar, CalendarEvent, ContactEmail, ContactEmailLabel,
     ContactSummary, EmailAddress, EventFields, EventSync, Occurrence, Ownership, RemoteContact,
@@ -182,7 +182,25 @@ pub fn event_to_proto(event: &CalendarEvent, sync: &EventSync) -> proto::EventDe
         calendar,
         href,
         raw: event.raw.clone(),
+        reminders: reminders_to_proto(&event.raw),
     }
+}
+
+fn reminders_to_proto(raw: &str) -> Vec<proto::Reminder> {
+    formats::reminders(raw)
+        .unwrap_or_default()
+        .iter()
+        .map(|r| proto::Reminder {
+            before_seconds: r.num_seconds(),
+        })
+        .collect()
+}
+
+pub fn reminders_from_proto(list: &proto::ReminderList) -> Vec<Duration> {
+    list.reminders
+        .iter()
+        .map(|r| Duration::seconds(r.before_seconds))
+        .collect()
 }
 
 /// A date is an all-day time, an RFC 3339 instant is a point in time.
@@ -209,6 +227,7 @@ pub fn event_edit_from_proto(req: &proto::UpdateEventRequest) -> Result<EventEdi
             .map(|d| Some(d).filter(|d| !d.is_empty())),
         start: when(&req.start)?,
         end: when(&req.end)?,
+        reminders: req.reminders.as_ref().map(reminders_from_proto),
     })
 }
 

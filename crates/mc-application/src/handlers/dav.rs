@@ -134,6 +134,7 @@ impl DavCommandHandler {
         summary: String,
         when: (formats::EventWhen, formats::EventWhen),
         (location, description): (Option<String>, Option<String>),
+        reminders: Vec<chrono::Duration>,
     ) -> Result<CommandResult, ApplicationError> {
         self.require_writable(account, Kind::Calendar, &calendar)
             .await?;
@@ -149,6 +150,7 @@ impl DavCommandHandler {
             description: Some(description),
             start: Some(when.0),
             end: Some(when.1),
+            reminders: Some(reminders),
         };
         let raw = formats::edit_event(&blank, &edit, now)?;
         let href = format!("{uid}.ics");

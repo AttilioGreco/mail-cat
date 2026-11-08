@@ -8,6 +8,7 @@ use rusqlite::{Connection, OpenFlags};
 
 mod dav_projection;
 mod dav_repository;
+pub use dav_repository::ReminderLog;
 pub mod event_store;
 mod pending_rename;
 mod projector;
@@ -352,6 +353,17 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX conflicts_lost_account ON conflicts_lost(account_id);",
     // 15: an event's DESCRIPTION, for the editor.
     "ALTER TABLE calendar_events ADD COLUMN description TEXT;",
+    // 16: reminders already shown, so a restart does not ring them again.
+    // `occurrence_end` keeps a long event's rows from being pruned mid-event.
+    "CREATE TABLE fired_reminders (
+        account_id       BLOB    NOT NULL,
+        href             TEXT    NOT NULL,
+        occurrence_start INTEGER NOT NULL,
+        trigger_key      TEXT    NOT NULL,
+        occurrence_end   INTEGER NOT NULL,
+        fired_at         INTEGER NOT NULL,
+        PRIMARY KEY (account_id, href, occurrence_start, trigger_key)
+    ) WITHOUT ROWID;",
 ];
 
 /// Idle read connections kept for reuse (spec §1: pool of 4). Each holds its

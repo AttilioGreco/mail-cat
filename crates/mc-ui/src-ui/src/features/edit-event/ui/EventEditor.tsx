@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import { PlusIcon, XIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/shared/ui/button';
 import { selectedFirst } from '@/shared/lib/utils';
@@ -17,7 +18,11 @@ import {
   calendarKey, useCalendarGroups, useCalendarVisibility, useCreateEvent, useDeleteEvent, useUpdateEvent,
   type AccountEvent,
 } from '@/entities/calendar';
-import { timesChanged, wireTimes, withStart, type EventForm } from '../lib/form';
+import { Popover, PopoverContent, PopoverTrigger } from '@/shared/ui/popover';
+import {
+  addReminder, ALL_DAY_REMINDERS, formatReminder, remindersChanged, TIMED_REMINDERS, timesChanged, wireTimes, withAllDay,
+  withStart, type EventForm,
+} from '../lib/form';
 
 const TEXTAREA =
   'min-h-16 w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30';
@@ -28,6 +33,67 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
       {label}
       {children}
     </label>
+  );
+}
+
+function ReminderRow({ form, onChange }: { form: EventForm; onChange: (reminders: number[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const [custom, setCustom] = useState('');
+  const offered = (form.allDay ? ALL_DAY_REMINDERS : TIMED_REMINDERS).filter((r) => !form.reminders.includes(r));
+  const add = (seconds: number) => {
+    onChange(addReminder(form.reminders, seconds));
+    setOpen(false);
+  };
+  const minutes = Number(custom);
+  return (
+    <div className="grid gap-1 text-xs text-muted-foreground">
+      Promemoria
+      <div className="flex flex-wrap items-center gap-1.5">
+        {form.reminders.map((r) => (
+          <span key={r} className="inline-flex items-center gap-1 rounded-full bg-muted py-0.5 pr-1 pl-2.5 text-sm text-foreground">
+            {formatReminder(r, form.allDay)}
+            <button
+              type="button"
+              aria-label="Rimuovi promemoria"
+              className="rounded-full p-0.5 hover:bg-foreground/10"
+              onClick={() => onChange(form.reminders.filter((x) => x !== r))}
+            >
+              <XIcon className="size-3" />
+            </button>
+          </span>
+        ))}
+        <Popover open={open} onOpenChange={setOpen}>
+          <PopoverTrigger render={<Button type="button" variant="ghost" size="sm" />}>
+            <PlusIcon /> Aggiungi
+          </PopoverTrigger>
+          <PopoverContent className="max-h-72 overflow-y-auto">
+            {offered.map((r) => (
+              <button key={r} type="button" className="w-full rounded-md px-2 py-1.5 text-left hover:bg-muted" onClick={() => add(r)}>
+                {formatReminder(r, form.allDay)}
+              </button>
+            ))}
+            <div className="flex items-center gap-1 border-t border-border p-1 pt-2">
+              <Input
+                type="number"
+                min={1}
+                placeholder="Personalizzato…"
+                value={custom}
+                onChange={(e) => setCustom(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  if (minutes >= 1) add(-Math.round(minutes) * 60);
+                }}
+              />
+              <span className="shrink-0">min prima</span>
+              <Button type="button" size="sm" disabled={!(minutes >= 1)} onClick={() => add(-Math.round(minutes) * 60)}>
+                OK
+              </Button>
+            </div>
+          </PopoverContent>
+        </Popover>
+      </div>
+    </div>
   );
 }
 
@@ -86,6 +152,7 @@ export function EventEditor({ initial, event, onClose }: Props) {
             description: form.description,
             // Untouched times are left out so saving a series never rewrites its recurrence.
             ...(timesChanged(form, initial) ? times : {}),
+            ...(remindersChanged(form, initial) ? { reminders: form.reminders } : {}),
           },
         });
       } else if (target) {
@@ -96,6 +163,7 @@ export function EventEditor({ initial, event, onClose }: Props) {
             summary: form.summary.trim() || 'Senza titolo',
             location: form.location.trim() || undefined,
             description: form.description || undefined,
+            reminders: form.reminders,
             ...times,
           },
         });
@@ -155,7 +223,7 @@ export function EventEditor({ initial, event, onClose }: Props) {
           className="accent-accent"
           checked={form.allDay}
           disabled={readOnly}
-          onChange={(e) => set('allDay', e.target.checked)}
+          onChange={(e) => setForm((f) => withAllDay(f, e.target.checked, event === undefined))}
         />
         Tutto il giorno
       </label>
@@ -188,6 +256,8 @@ export function EventEditor({ initial, event, onClose }: Props) {
       <Field label="Descrizione">
         <textarea className={TEXTAREA} value={form.description} disabled={readOnly} onChange={(e) => set('description', e.target.value)} />
       </Field>
+
+      {!readOnly && <ReminderRow form={form} onChange={(r) => set('reminders', r)} />}
 
       <DialogFooter>
         {event && !readOnly && (

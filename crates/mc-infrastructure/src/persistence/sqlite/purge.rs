@@ -94,6 +94,7 @@ impl SqliteRepository {
                     "sync_cursors",
                     "sent_counted",
                     "pending_renames",
+                    "fired_reminders",
                 ] {
                     exec(
                         &tx,

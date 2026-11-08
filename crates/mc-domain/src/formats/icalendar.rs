@@ -15,7 +15,7 @@ use crate::model::collection::{EventFields, EventStatus};
 /// Occurrences produced per resource: the ceiling for a rule with no end.
 /// Daily since 2010 is ~6000, so this covers any real calendar.
 // ponytail: raise, or seed the expansion near `from`, if someone has a minutely rule.
-const EXPAND_LIMIT: usize = 20_000;
+pub(super) const EXPAND_LIMIT: usize = 20_000;
 /// Enough to get past a series' leading EXDATEs and overrides.
 const FIRST_OCCURRENCES: usize = 64;
 
@@ -29,7 +29,7 @@ pub struct ParsedEvent {
     pub last_modified: Option<DateTime<Utc>>,
 }
 
-fn text(comp: &ICalendarComponent, property: &ICalendarProperty) -> Option<String> {
+pub(super) fn text(comp: &ICalendarComponent, property: &ICalendarProperty) -> Option<String> {
     comp.property(property)?
         .values
         .first()?
@@ -38,7 +38,7 @@ fn text(comp: &ICalendarComponent, property: &ICalendarProperty) -> Option<Strin
 }
 
 /// The VEVENT that is not an override of another: the series itself.
-fn master(ical: &ICalendar) -> Option<(usize, &ICalendarComponent)> {
+pub(super) fn master(ical: &ICalendar) -> Option<(usize, &ICalendarComponent)> {
     let mut events = ical
         .components
         .iter()
@@ -53,17 +53,29 @@ fn master(ical: &ICalendar) -> Option<(usize, &ICalendarComponent)> {
     )
 }
 
-fn fields(comp: &ICalendarComponent, start: DateTime<Utc>, end: DateTime<Utc>) -> EventFields {
-    let all_day = comp
-        .property(&ICalendarProperty::Dtstart)
+pub(super) fn is_all_day(comp: &ICalendarComponent) -> bool {
+    comp.property(&ICalendarProperty::Dtstart)
         .and_then(|e| e.values.first())
         .and_then(|v| v.as_partial_date_time())
-        .is_some_and(|dt| !dt.has_time());
+        .is_some_and(|dt| !dt.has_time())
+}
+
+/// An instant (start == end) sits inside the range it starts in.
+pub(super) fn overlaps(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> bool {
+    start < to && (end > from || start >= from)
+}
+
+fn fields(comp: &ICalendarComponent, start: DateTime<Utc>, end: DateTime<Utc>) -> EventFields {
     EventFields {
         summary: text(comp, &ICalendarProperty::Summary).unwrap_or_default(),
         start,
         end,
-        all_day,
+        all_day: is_all_day(comp),
         recurring: comp.is_recurrent_or_override(),
         location: text(comp, &ICalendarProperty::Location).filter(|l| !l.is_empty()),
         status: comp.status().and_then(|s| match s {
@@ -76,7 +88,7 @@ fn fields(comp: &ICalendarComponent, start: DateTime<Utc>, end: DateTime<Utc>) -
     }
 }
 
-fn span(
+pub(super) fn span(
     start: DateTime<Tz>,
     end: TimeOrDelta<DateTime<Tz>, chrono::TimeDelta>,
 ) -> (DateTime<Utc>, DateTime<Utc>) {
@@ -91,7 +103,7 @@ fn span(
 /// calcard pairs an override with its occurrence only when their SEQUENCEs
 /// are equal, and clients do not keep them equal (an override often has none).
 /// Expansion has no use for SEQUENCE, so it is dropped before it can get in the way.
-fn parse_for_expansion(raw: &str) -> Result<ICalendar, DomainError> {
+pub(super) fn parse_for_expansion(raw: &str) -> Result<ICalendar, DomainError> {
     let mut ical = ICalendar::parse(raw).map_err(|_| invalid("iCalendar"))?;
     for comp in &mut ical.components {
         comp.entries
@@ -168,9 +180,7 @@ pub fn occurrences(
                 return None;
             }
             let (start, end) = span(event.start, event.end);
-            // An instant (start == end) sits inside the range it starts in.
-            let overlaps = start < to && (end > from || start >= from);
-            overlaps.then(|| fields(comp, start, end))
+            overlaps(start, end, from, to).then(|| fields(comp, start, end))
         })
         .collect();
     found.sort_by_key(|f| f.start);
@@ -193,6 +203,8 @@ pub struct EventEdit {
     pub description: Option<Option<String>>,
     pub start: Option<EventWhen>,
     pub end: Option<EventWhen>,
+    /// Replaces the master's relative-to-start reminders; negative is before.
+    pub reminders: Option<Vec<chrono::Duration>>,
 }
 
 /// Applies `edit` to the series' master and stamps `DTSTAMP`,
@@ -242,6 +254,11 @@ pub fn edit_event(raw: &str, edit: &EventEdit, now: DateTime<Utc>) -> Result<Str
     if edit.end.is_some() {
         // DTEND and DURATION exclude each other.
         set(&mut doc, "DURATION", &|_| vec![]);
+    }
+
+    if let Some(reminders) = &edit.reminders {
+        let scope = master_scope(&doc).expect("checked above");
+        super::alarms::set_reminders(&mut doc, &scope, reminders);
     }
 
     let scope = master_scope(&doc).expect("checked above");

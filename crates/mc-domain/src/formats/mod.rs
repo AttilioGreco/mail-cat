@@ -6,6 +6,7 @@
 //! write: it re-serializes, which normalizes and could drop what it does not
 //! model.
 
+mod alarms;
 mod icalendar;
 mod vcard;
 
@@ -13,6 +14,7 @@ use std::ops::Range;
 
 use chrono::{DateTime, Utc};
 
+pub use alarms::{Alarm, OccurrenceAlarms, alarms, reminders};
 pub use icalendar::{EventEdit, EventWhen, ParsedEvent, edit_event, occurrences, parse_event};
 pub use vcard::{ContactEdit, ParsedCard, edit_vcard, parse_vcard};
 

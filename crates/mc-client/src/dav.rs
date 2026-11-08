@@ -127,6 +127,9 @@ pub struct EventDetail {
     pub href: String,
     pub raw: String,
     pub first: Option<EventOccurrence>,
+    /// Seconds relative to the start, as in an iCalendar TRIGGER: negative is
+    /// before (-600 is "10 minutes before").
+    pub reminders: Vec<i64>,
 }
 
 /// Times are RFC 3339 instants, or `YYYY-MM-DD` for an all-day event.
@@ -138,6 +141,8 @@ pub struct NewEvent {
     pub end: String,
     pub location: Option<String>,
     pub description: Option<String>,
+    /// Seconds relative to the start; negative is before.
+    pub reminders: Vec<i64>,
 }
 
 /// `None` leaves the field as it is; an empty location or description clears it.
@@ -148,6 +153,8 @@ pub struct EventChanges {
     pub start: Option<String>,
     pub end: Option<String>,
     pub description: Option<String>,
+    /// Replaces the event's reminders (empty clears them); `None` keeps them.
+    pub reminders: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -156,6 +163,15 @@ pub struct DavStatus {
     pub conflicts_lost: u64,
     pub pending_changes: u32,
     pub failed_changes: u32,
+}
+
+fn reminder_list(seconds: Vec<i64>) -> pb::ReminderList {
+    pb::ReminderList {
+        reminders: seconds
+            .into_iter()
+            .map(|before_seconds| pb::Reminder { before_seconds })
+            .collect(),
+    }
 }
 
 fn timestamp(at: DateTime<Utc>) -> pb::Timestamp {
@@ -425,6 +441,11 @@ impl MailCatClient {
             href: resp.href,
             raw: resp.raw,
             first: resp.first.map(occurrence),
+            reminders: resp
+                .reminders
+                .into_iter()
+                .map(|r| r.before_seconds)
+                .collect(),
         })
     }
 
@@ -440,6 +461,7 @@ impl MailCatClient {
                 end: event.end,
                 location: event.location,
                 description: event.description,
+                reminders: Some(reminder_list(event.reminders)),
             })
             .await?
             .into_inner();
@@ -461,6 +483,7 @@ impl MailCatClient {
                 start: changes.start,
                 end: changes.end,
                 description: changes.description,
+                reminders: changes.reminders.map(reminder_list),
             })
             .await?;
         Ok(())

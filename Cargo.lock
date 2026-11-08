@@ -3720,6 +3720,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -3802,6 +3803,7 @@ dependencies = [
  "mc-interfaces",
  "mc-shared",
  "notify-rust",
+ "percent-encoding",
  "rusqlite",
  "serde",
  "tempfile",
@@ -3841,6 +3843,7 @@ dependencies = [
  "futures",
  "mc-client",
  "mc-shared",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tauri",

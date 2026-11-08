@@ -38,6 +38,10 @@ pub struct EventInput {
     end: String,
     location: Option<String>,
     description: Option<String>,
+    /// Seconds relative to the start; negative is before. No default is added
+    /// here: the editor decides what a new event starts with.
+    #[serde(default)]
+    reminders: Vec<i64>,
 }
 
 /// Absent fields are left as they are; an empty location or description
@@ -50,6 +54,9 @@ pub struct EventChangesInput {
     start: Option<String>,
     end: Option<String>,
     description: Option<String>,
+    /// Seconds relative to the start; absent keeps the reminders, present
+    /// (even empty) replaces them.
+    reminders: Option<Vec<i64>>,
 }
 
 /// Absent fields are left as they are; an empty organization or notes
@@ -130,6 +137,7 @@ pub async fn create_event(
         end: event.end,
         location: event.location,
         description: event.description,
+        reminders: event.reminders,
     };
     get_or_connect(&state)
         .await?
@@ -151,6 +159,7 @@ pub async fn update_event(
         start: changes.start,
         end: changes.end,
         description: changes.description,
+        reminders: changes.reminders,
     };
     get_or_connect(&state)
         .await?

@@ -26,15 +26,33 @@ pub struct AppState {
 
 /// Where a desktop notification wants the UI to navigate.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DeepLink {
-    pub account_id: String,
-    pub mailbox_id: String,
-    pub message_id: String,
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum DeepLink {
+    Message {
+        account_id: String,
+        mailbox_id: String,
+        message_id: String,
+    },
+    /// An occurrence of a calendar event; `start` is its Unix time in seconds.
+    Event {
+        account_id: String,
+        calendar: String,
+        href: String,
+        start: i64,
+    },
 }
 
 impl DeepLink {
-    /// Parse `--open-message <account>/<mailbox>/<message>` out of a process argv.
+    const MESSAGE_FLAG: &'static str = "--open-message";
+    const EVENT_FLAG: &'static str = "--open-event";
+
+    /// Parse `--open-message <account>/<mailbox>/<message>` or
+    /// `--open-event <account>/<calendar>/<href>/<start>` out of a process argv;
+    /// the calendar and href are percent-encoded, as they hold slashes.
     ///
     /// Returns `None` for anything malformed: a bad deep link must degrade to
     /// "just open the app", never abort startup.
@@ -46,11 +64,20 @@ impl DeepLink {
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             let arg = arg.as_ref();
-            // Accept both `--open-message VALUE` and `--open-message=VALUE`.
-            if let Some(value) = arg.strip_prefix(Self::FLAG) {
+            for (flag, parse) in [
+                (
+                    Self::MESSAGE_FLAG,
+                    Self::parse_message as fn(&str) -> Option<Self>,
+                ),
+                (Self::EVENT_FLAG, Self::parse_event),
+            ] {
+                // Accept both `--flag VALUE` and `--flag=VALUE`.
+                let Some(value) = arg.strip_prefix(flag) else {
+                    continue;
+                };
                 return match value.strip_prefix('=') {
-                    Some(inline) => Self::parse(inline),
-                    None if value.is_empty() => Self::parse(args.next()?.as_ref()),
+                    Some(inline) => parse(inline),
+                    None if value.is_empty() => parse(args.next()?.as_ref()),
                     None => None, // e.g. `--open-messageXYZ`
                 };
             }
@@ -58,34 +85,61 @@ impl DeepLink {
         None
     }
 
-    pub const FLAG: &'static str = "--open-message";
-
-    fn parse(value: &str) -> Option<Self> {
-        let mut parts = value.split('/');
-        let account_id = parts.next()?.trim().to_owned();
-        let mailbox_id = parts.next()?.trim().to_owned();
-        let message_id = parts.next()?.trim().to_owned();
-        if parts.next().is_some()
-            || account_id.is_empty()
-            || mailbox_id.is_empty()
-            || message_id.is_empty()
-        {
-            return None;
-        }
-        Some(Self {
+    fn parse_message(value: &str) -> Option<Self> {
+        let [account_id, mailbox_id, message_id] = non_empty_parts(value)?;
+        Some(Self::Message {
             account_id,
             mailbox_id,
             message_id,
         })
     }
 
-    /// Render back to the `<account>/<mailbox>/<message>` wire form.
-    pub fn to_arg_value(&self) -> String {
-        format!(
-            "{}/{}/{}",
-            self.account_id, self.mailbox_id, self.message_id
-        )
+    fn parse_event(value: &str) -> Option<Self> {
+        let [account_id, calendar, href, start] = non_empty_parts(value)?;
+        let decode = |text: String| {
+            percent_encoding::percent_decode_str(&text)
+                .decode_utf8()
+                .ok()
+                .map(|decoded| decoded.into_owned())
+        };
+        Some(Self::Event {
+            account_id,
+            calendar: decode(calendar)?,
+            href: decode(href)?,
+            start: start.parse().ok()?,
+        })
     }
+
+    /// Render back to the wire form of the flag that carries it.
+    pub fn to_arg_value(&self) -> String {
+        match self {
+            Self::Message {
+                account_id,
+                mailbox_id,
+                message_id,
+            } => format!("{account_id}/{mailbox_id}/{message_id}"),
+            Self::Event {
+                account_id,
+                calendar,
+                href,
+                start,
+            } => {
+                let encode = |text| {
+                    percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC)
+                };
+                format!("{account_id}/{}/{}/{start}", encode(calendar), encode(href))
+            }
+        }
+    }
+}
+
+/// `value` split on `/` into exactly `N` trimmed, non-empty parts.
+fn non_empty_parts<const N: usize>(value: &str) -> Option<[String; N]> {
+    let parts: Vec<String> = value.split('/').map(|p| p.trim().to_owned()).collect();
+    if parts.iter().any(String::is_empty) {
+        return None;
+    }
+    parts.try_into().ok()
 }
 
 /// Deep link captured at startup, waiting for the frontend to ask for it.

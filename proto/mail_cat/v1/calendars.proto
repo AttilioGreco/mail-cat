@@ -110,12 +110,25 @@ message GetEventRequest {
   string href       = 2;
 }
 
+// A reminder relative to the event's start, in the sign of an iCalendar
+// TRIGGER: negative is before the start (-600 is "10 minutes before").
+message Reminder {
+  int64 before_seconds = 1;
+}
+
+message ReminderList {
+  repeated Reminder reminders = 1;
+}
+
 message EventDetail {
   string calendar = 1;
   string href     = 2;
   string raw      = 3;
   // Unset for a resource without a VEVENT (a task), which is kept as it is.
   optional EventOccurrence first = 4;
+  // The master's reminders relative to the start. Absolute and end-relative
+  // ones are kept in the event but not listed.
+  repeated Reminder reminders = 5;
 }
 
 // A time is an RFC 3339 instant, or a YYYY-MM-DD date for an all-day event.
@@ -127,6 +140,8 @@ message CreateEventRequest {
   string end        = 5;
   optional string location = 6;
   optional string description = 7;
+  // Absent means none.
+  optional ReminderList reminders = 8;
 }
 
 message CreateEventResponse {
@@ -142,6 +157,8 @@ message UpdateEventRequest {
   optional string start    = 5;
   optional string end      = 6;
   optional string description = 7;
+  // Absent leaves them as they are; present replaces them (empty clears them).
+  optional ReminderList reminders = 8;
 }
 
 message UpdateEventResponse {}
