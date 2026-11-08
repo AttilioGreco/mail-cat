@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Wipe and rebuild the whole harness: a fresh Stalwart (volumes dropped) with
-# alice/bob, and a fresh isolated mail-cat-server on :50061 syncing alice (IMAP) and bob (JMAP).
+# alice/bob, and a fresh isolated mail-cat-server on .state/mail-cat.sock syncing alice (IMAP) and bob (JMAP).
 #
 # Never touches the real mail-cat (the default user socket, ~/.config/mail-cat,
 # ~/.local/share/mail-cat): the server gets its own config, data dir, HOME and

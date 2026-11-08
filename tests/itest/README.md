@@ -36,7 +36,6 @@ Always pass `--socket tests/itest/.state/mail-cat.sock` to `mc` by hand.
 | IMAPS (self-signed CA)| `localhost:19993`         |
 | SMTP submission (TLS) | `localhost:19465`         |
 | HTTP: JMAP, admin API | `http://127.0.0.1:18080`  |
-| mail-cat gRPC         | `127.0.0.1:50061`         |
 | Stalwart admin        | `admin` / `itest-admin-horse-battery` |
 | users                 | `alice@itest.local` / `alice-itest-horse-battery`, `bob@itest.local` / `bob-itest-horse-battery` |
 

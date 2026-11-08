@@ -123,7 +123,7 @@ lint:
 itest-up:
     docker compose -f tests/itest/compose.yaml up -d
 
-# azzera Stalwart (alice/bob, mailbox standard) e riavvia il mail-cat-server isolato su :50061
+# azzera Stalwart (alice/bob, mailbox standard) e riavvia il mail-cat-server isolato sul socket tests/itest/.state/mail-cat.sock
 itest-reset:
     tests/itest/reset.sh
 
