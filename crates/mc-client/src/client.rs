@@ -22,20 +22,48 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(unix)]
 async fn open(path: &Path) -> std::io::Result<tokio::net::UnixStream> {
-    tokio::net::UnixStream::connect(path).await
+    open_as(path, mc_shared::ipc::current_uid()).await
+}
+
+/// Anyone able to write the socket's directory can bind there first; talking to
+/// that impostor would hand it passwords and OAuth codes.
+#[cfg(unix)]
+async fn open_as(path: &Path, uid: u32) -> std::io::Result<tokio::net::UnixStream> {
+    let stream = tokio::net::UnixStream::connect(path).await?;
+    if stream.peer_cred()?.uid() != uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "socket is served by another user",
+        ));
+    }
+    Ok(stream)
 }
 
 #[cfg(windows)]
 async fn open(path: &Path) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use std::os::windows::io::AsRawHandle;
     use tokio::net::windows::named_pipe::ClientOptions;
     // windows-sys ERROR_PIPE_BUSY: all instances are momentarily taken by other clients.
     const ERROR_PIPE_BUSY: i32 = 231;
     loop {
-        match ClientOptions::new().open(path) {
+        match ClientOptions::new()
+            .security_qos_flags(mc_shared::ipc::windows::SECURITY_IDENTIFICATION)
+            .open(path)
+        {
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            res => return res,
+            Ok(pipe) => {
+                // Pipe names are predictable: another user may have created it first.
+                if !mc_shared::ipc::windows::pipe_server_is_current_user(pipe.as_raw_handle())? {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "pipe is served by another user",
+                    ));
+                }
+                return Ok(pipe);
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -912,4 +940,21 @@ fn message_refs(messages: Vec<(String, String)>) -> Vec<pb::MessageRef> {
             mailbox_id,
         })
         .collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn refuses_a_socket_served_by_another_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sock");
+        let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let me = mc_shared::ipc::current_uid();
+
+        assert!(open_as(&path, me).await.is_ok());
+        let err = open_as(&path, me + 1).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
 }
