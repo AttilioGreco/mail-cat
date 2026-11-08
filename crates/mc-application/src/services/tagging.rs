@@ -124,6 +124,9 @@ pub struct TaggingService<S, R, C> {
     /// Rouses the discovery worker: the embedding backlog was just cleared.
     discovery_wake: Notify,
     speed: Mutex<BackgroundSpeed>,
+    /// Held while a setting goes to the store and into its mirror, so the
+    /// load at startup cannot overwrite a change made meanwhile.
+    settings: tokio::sync::Mutex<()>,
     /// The model profile and execution target the user picked.
     model_choice: Mutex<(ModelProfile, String)>,
     /// Scopes being retrained right now: the embedding backlog gives way.
@@ -205,6 +208,7 @@ where
             discovering: AtomicBool::new(false),
             discovery_wake: Notify::new(),
             speed: Mutex::new(BackgroundSpeed::default()),
+            settings: tokio::sync::Mutex::new(()),
             model_choice: Mutex::new((ModelProfile::default(), "cpu".into())),
             retraining: AtomicUsize::new(0),
             activity: Mutex::default(),

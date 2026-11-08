@@ -104,6 +104,7 @@ where
     }
 
     async fn choose(&self, profile: ModelProfile, target: &str) -> Result<(), ApplicationError> {
+        let _settings = self.settings.lock().await;
         if let Some(embedder) = &self.embedder {
             embedder.select(profile, target)?;
         }
@@ -119,6 +120,7 @@ where
     }
 
     pub async fn set_embeddings(&self, enabled: bool) -> Result<(), ApplicationError> {
+        let _settings = self.settings.lock().await;
         self.store.set_embeddings_enabled(enabled).await?;
         self.embedding_on.store(enabled, Ordering::Relaxed);
         self.forget_pools();
@@ -138,6 +140,7 @@ where
         &self,
         speed: BackgroundSpeed,
     ) -> Result<(), ApplicationError> {
+        let _settings = self.settings.lock().await;
         self.store.set_background_speed(speed).await?;
         *self
             .speed
@@ -174,6 +177,7 @@ where
     }
 
     pub(super) async fn load_consent(&self) -> Result<(), ApplicationError> {
+        let _settings = self.settings.lock().await;
         let on = self.store.embeddings_enabled().await?;
         self.embedding_on.store(on, Ordering::Relaxed);
         *self
