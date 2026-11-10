@@ -418,9 +418,10 @@ fn the_meeting_link_comes_from_the_conference_property_then_the_url_then_the_tex
         link("URL:https://example.com/page\r\nX-GOOGLE-CONFERENCE:https://meet.google.com/abc"),
         Some("https://meet.google.com/abc".into())
     );
+    assert_eq!(link("URL:https://example.com/page"), None);
     assert_eq!(
-        link("URL:https://example.com/page"),
-        Some("https://example.com/page".into())
+        link("URL:https://acme.zoom.us/j/1"),
+        Some("https://acme.zoom.us/j/1".into())
     );
     assert_eq!(link("URL:file:///etc/passwd"), None);
     assert_eq!(
@@ -525,5 +526,10 @@ fn an_events_call_link_is_extracted_into_its_fields() {
         Some("https://acme.zoom.us/j/123?pwd=a".into())
     );
     assert_eq!(link("DESCRIPTION:see https://example.com/doc\r\n"), None);
+    assert_eq!(link("URL:https://example.com/agenda\r\n"), None);
+    assert_eq!(
+        link("URL:https://acme.zoom.us/j/9\r\n"),
+        Some("https://acme.zoom.us/j/9".into())
+    );
     assert_eq!(link(""), None);
 }

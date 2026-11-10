@@ -90,14 +90,18 @@ pub(super) fn meeting_url(event: &ICalendarComponent) -> Option<String> {
     CONFERENCE_PROPERTIES
         .iter()
         .map(|name| ICalendarProperty::Other((*name).into()))
-        .chain([ICalendarProperty::Conference, ICalendarProperty::Url])
+        .chain([ICalendarProperty::Conference])
         .filter_map(|p| text(event, &p))
         .find(|url| is_web(url))
         .or_else(|| {
-            [ICalendarProperty::Location, ICalendarProperty::Description]
-                .iter()
-                .filter_map(|p| text(event, p))
-                .find_map(|t| meeting_link(&t))
+            [
+                ICalendarProperty::Location,
+                ICalendarProperty::Description,
+                ICalendarProperty::Url,
+            ]
+            .iter()
+            .filter_map(|p| text(event, p))
+            .find_map(|t| meeting_link(&t))
         })
 }
 
