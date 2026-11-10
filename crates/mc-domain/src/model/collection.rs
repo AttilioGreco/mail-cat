@@ -68,6 +68,8 @@ pub struct EventFields {
     pub location: Option<String>,
     pub status: Option<EventStatus>,
     pub description: Option<String>,
+    /// Link to join the event's video call. Not stored: read from `raw`.
+    pub conference_url: Option<String>,
 }
 
 /// One iCalendar resource: a master and its overrides (a single `UID`).

@@ -225,6 +225,7 @@ fn the_body_says_when_and_where() {
             location: Some("Room 1".into()),
             status: None,
             description: None,
+            conference_url: None,
         },
         meeting_url: None,
     };

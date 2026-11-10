@@ -152,6 +152,7 @@ fn occurrence_parts(
             .status
             .map(|status| format!("{status:?}").to_lowercase()),
         description: fields.description.clone(),
+        conference_url: fields.conference_url.clone(),
         dirty: sync.dirty,
         push_failed: sync.push_failed.clone(),
     }

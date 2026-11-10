@@ -11,7 +11,7 @@ const eq = (actual: unknown, expected: unknown, what: string) => {
 const ev = (over: Partial<AccountEvent> = {}): AccountEvent => ({
   accountId: 'a', color: '#000', readOnly: false, calendar: '/c1/', href: '/c1/x.ics', summary: 'S',
   start: new Date('2026-11-10T09:00:00Z'), end: new Date('2026-11-10T10:00:00Z'), allDay: false,
-  recurring: false, location: null, status: null, description: null, dirty: false, pushFailed: null, ...over,
+  recurring: false, location: null, status: null, description: null, conferenceUrl: null, dirty: false, pushFailed: null, ...over,
 });
 
 eq(eventActions(ev()), ['open', 'duplicate', 'move', 'delete'], 'plain');

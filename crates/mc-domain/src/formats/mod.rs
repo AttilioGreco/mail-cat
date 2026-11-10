@@ -15,7 +15,7 @@ use std::ops::Range;
 use chrono::{DateTime, Utc};
 
 pub use alarms::{Alarm, OccurrenceAlarms, alarms, reminders};
-pub use icalendar::{EventEdit, EventWhen, ParsedEvent, edit_event, occurrences, parse_event};
+pub use icalendar::{EventEdit, conference_url, EventWhen, ParsedEvent, edit_event, occurrences, parse_event};
 pub use vcard::{ContactEdit, ParsedCard, edit_vcard, parse_vcard};
 
 use crate::error::DomainError;

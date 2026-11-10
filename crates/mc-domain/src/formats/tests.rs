@@ -505,3 +505,25 @@ fn editing_reminders_leaves_an_overrides_alarms_alone() {
     assert_eq!(edited.matches("BEGIN:VALARM").count(), 1);
     assert!(edited.contains("SUMMARY:Standup (moved)\r\nEND:VEVENT\r\n"));
 }
+
+#[test]
+fn an_events_call_link_is_extracted_into_its_fields() {
+    let link = |props: &str| {
+        let raw = event_with_alarms(&format!("DTSTART:20261110T140000Z\r\n{props}"), "");
+        parse_event(&raw).unwrap().fields.unwrap().conference_url
+    };
+    assert_eq!(
+        link("X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\r\n"),
+        Some("https://meet.google.com/abc-defg-hij".into())
+    );
+    assert_eq!(
+        link("X-MICROSOFT-SKYPETEAMSMEETINGURL:https://teams.microsoft.com/l/meetup-join/x\r\n"),
+        Some("https://teams.microsoft.com/l/meetup-join/x".into())
+    );
+    assert_eq!(
+        link("DESCRIPTION:Join at https://acme.zoom.us/j/123?pwd=a.\r\n"),
+        Some("https://acme.zoom.us/j/123?pwd=a".into())
+    );
+    assert_eq!(link("DESCRIPTION:see https://example.com/doc\r\n"), None);
+    assert_eq!(link(""), None);
+}

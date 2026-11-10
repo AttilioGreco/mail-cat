@@ -15,7 +15,7 @@ import {
 import { useAccounts } from '@/entities/account';
 import { useSessionStore } from '@/entities/session';
 import {
-  calendarKey, useCalendarGroups, useCalendarVisibility, useCreateEvent, useDeleteEvent, useUpdateEvent,
+  JoinButton, calendarKey, useCalendarGroups, useCalendarVisibility, useCreateEvent, useDeleteEvent, useUpdateEvent,
   type AccountEvent,
 } from '@/entities/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/shared/ui/popover';
@@ -260,6 +260,7 @@ export function EventEditor({ initial, event, onClose }: Props) {
       {!readOnly && <ReminderRow form={form} onChange={(r) => set('reminders', r)} />}
 
       <DialogFooter>
+        {event?.conferenceUrl && <JoinButton url={event.conferenceUrl} />}
         {event && !readOnly && (
           <Button type="button" variant="destructive" className="sm:mr-auto" disabled={busy} onClick={() => setConfirmDelete(true)}>
             Elimina

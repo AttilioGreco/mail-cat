@@ -2,7 +2,7 @@ import { addDays, format, isSameDay, isToday, startOfDay } from 'date-fns';
 import { it } from 'date-fns/locale';
 import { X } from 'lucide-react';
 import { useAccounts } from '@/entities/account';
-import { useAgendaPane, useCalendarGroups, useVisibleEvents, type AccountEvent } from '@/entities/calendar';
+import { JoinButton, useAgendaPane, useCalendarGroups, useVisibleEvents, type AccountEvent } from '@/entities/calendar';
 import { useEventEditor } from '@/features/edit-event';
 import { useOAuthLogin } from '@/features/manage-accounts';
 import { AGENDA_DAYS, bucketAgenda } from '../lib/days';
@@ -71,20 +71,19 @@ function EventRow({ event, day, calendar }: { event: AccountEvent; day: Date; ca
       : 'in corso';
 
   return (
-    <button
-      type="button"
-      onClick={() => open({ mode: 'edit', event })}
-      className="flex w-full gap-2 rounded px-1 py-1 text-left hover:bg-surface-hover"
-    >
-      <span className="w-1 shrink-0 rounded-full" style={{ backgroundColor: event.color }} />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm text-foreground">{event.summary || 'Senza titolo'}</span>
-        <span className="block truncate text-xs text-muted-foreground">
-          {time}
-          {calendar && ` · ${calendar}`}
+    <div className="flex items-center gap-1 rounded px-1 py-1 hover:bg-surface-hover">
+      <button type="button" onClick={() => open({ mode: 'edit', event })} className="flex min-w-0 flex-1 gap-2 text-left">
+        <span className="w-1 shrink-0 rounded-full" style={{ backgroundColor: event.color }} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-foreground">{event.summary || 'Senza titolo'}</span>
+          <span className="block truncate text-xs text-muted-foreground">
+            {time}
+            {calendar && ` · ${calendar}`}
+          </span>
         </span>
-      </span>
-    </button>
+      </button>
+      {event.conferenceUrl && <JoinButton url={event.conferenceUrl} compact />}
+    </div>
   );
 }
 

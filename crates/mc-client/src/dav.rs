@@ -115,6 +115,7 @@ pub struct EventOccurrence {
     pub location: Option<String>,
     pub status: Option<String>,
     pub description: Option<String>,
+    pub conference_url: Option<String>,
     /// A local edit the server has not acknowledged.
     pub dirty: bool,
     pub push_failed: Option<String>,
@@ -198,6 +199,7 @@ fn occurrence(o: pb::EventOccurrence) -> EventOccurrence {
         location: o.location,
         status: o.status,
         description: o.description,
+        conference_url: o.conference_url,
         dirty: o.dirty,
         push_failed: o.push_failed,
     }

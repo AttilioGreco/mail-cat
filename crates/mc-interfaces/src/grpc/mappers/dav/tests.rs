@@ -125,6 +125,7 @@ fn occurrence_and_calendar_map_their_flags() {
             location: None,
             status: Some(mc_domain::EventStatus::Confirmed),
             description: Some("Daily".into()),
+            conference_url: None,
         },
         sync: mc_domain::EventSync {
             dirty: true,

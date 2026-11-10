@@ -41,7 +41,7 @@ const EVENT_COLUMNS: &str = "account_id, collection, href, etag, remote_modified
      summary, start_at, end_at, all_day, recurring, location, status, description, \
      dirty, push_error";
 
-fn fields_from_row(row: &Row, at: usize) -> rusqlite::Result<Option<EventFields>> {
+fn fields_from_row(row: &Row, at: usize, raw: &str) -> rusqlite::Result<Option<EventFields>> {
     let Some(summary) = row.get::<_, Option<String>>(at)? else {
         return Ok(None);
     };
@@ -59,14 +59,16 @@ fn fields_from_row(row: &Row, at: usize) -> rusqlite::Result<Option<EventFields>
             None => None,
         },
         description: row.get(at + 7)?,
+        conference_url: formats::conference_url(raw),
     }))
 }
 
 fn event_from_row(row: &Row) -> rusqlite::Result<CalendarEvent> {
+    let raw: String = row.get(5)?;
     Ok(CalendarEvent {
         binding: binding_from_row(row, 0)?,
-        raw: row.get(5)?,
-        fields: fields_from_row(row, 6)?,
+        fields: fields_from_row(row, 6, &raw)?,
+        raw,
     })
 }
 

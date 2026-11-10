@@ -6,23 +6,13 @@ use calcard::icalendar::{
     ICalendarProperty, ICalendarRelated, ICalendarValue,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use url::Url;
 use uuid::Uuid;
 
 use super::icalendar::{
-    EXPAND_LIMIT, is_all_day, master, overlaps, parse_for_expansion, span, text,
+    EXPAND_LIMIT, is_all_day, master, meeting_url, overlaps, parse_for_expansion, span,
 };
 use super::{Doc, Line, content_line};
 use crate::error::DomainError;
-
-/// Hosts whose links in a LOCATION or DESCRIPTION are taken for a video call.
-const MEETING_HOSTS: [&str; 5] = [
-    "meet.google.com",
-    "zoom.us",
-    "teams.microsoft.com",
-    "teams.live.com",
-    "webex.com",
-];
 
 /// A reminder of one occurrence, resolved to the instant it rings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,42 +185,6 @@ fn read_in_zone<Z: TimeZone>(zone: &Z, at: DateTime<Utc>) -> Option<DateTime<Utc
             .earliest()?
             .with_timezone(&Utc),
     )
-}
-
-/// A web link to join the call: the conference property, the event's URL, or
-/// a known video-call link written in its location or description.
-fn meeting_url(event: &ICalendarComponent) -> Option<String> {
-    let conference = ICalendarProperty::Other("X-GOOGLE-CONFERENCE".into());
-    [conference, ICalendarProperty::Url]
-        .iter()
-        .filter_map(|p| text(event, p))
-        .find(|url| is_web(url))
-        .or_else(|| {
-            [ICalendarProperty::Location, ICalendarProperty::Description]
-                .iter()
-                .filter_map(|p| text(event, p))
-                .find_map(|t| meeting_link(&t))
-        })
-}
-
-fn is_web(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "https" | "http"))
-}
-
-fn meeting_link(text: &str) -> Option<String> {
-    text.split(|c: char| c.is_whitespace() || "<>\"'()".contains(c))
-        .filter(|word| word.starts_with("https://"))
-        .map(|word| word.trim_end_matches(['.', ',', ';']))
-        .find(|word| {
-            Url::parse(word).is_ok_and(|u| {
-                u.host_str().is_some_and(|host| {
-                    MEETING_HOSTS
-                        .iter()
-                        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
-                })
-            })
-        })
-        .map(str::to_owned)
 }
 
 /// Replaces the master's relative-to-start VALARMs with `reminders`. Absolute

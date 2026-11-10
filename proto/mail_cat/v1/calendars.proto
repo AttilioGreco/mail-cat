@@ -91,6 +91,7 @@ message EventOccurrence {
   bool   dirty = 11;
   // Why the server refused the last push.
   optional string push_failed = 12;
+  optional string conference_url = 13;
 }
 
 message ListEventsRequest {

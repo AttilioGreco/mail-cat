@@ -21,6 +21,7 @@ fn fields(summary: &str) -> EventFields {
         location: None,
         status: None,
         description: None,
+        conference_url: None,
     }
 }
 

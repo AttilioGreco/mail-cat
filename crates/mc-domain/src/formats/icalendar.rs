@@ -7,6 +7,7 @@ use calcard::icalendar::{
     ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarProperty, ICalendarStatus,
 };
 use chrono::{DateTime, NaiveDate, Utc};
+use url::Url;
 
 use super::{Doc, content_line, escape, invalid, timestamp};
 use crate::error::DomainError;
@@ -70,6 +71,62 @@ pub(super) fn overlaps(
     start < to && (end > from || start >= from)
 }
 
+/// Hosts whose links in a LOCATION or DESCRIPTION are taken for a video call.
+const MEETING_HOSTS: [&str; 5] = [
+    "meet.google.com",
+    "zoom.us",
+    "teams.microsoft.com",
+    "teams.live.com",
+    "webex.com",
+];
+
+/// Vendor properties that carry the join link of a call.
+const CONFERENCE_PROPERTIES: [&str; 2] =
+    ["X-GOOGLE-CONFERENCE", "X-MICROSOFT-SKYPETEAMSMEETINGURL"];
+
+/// A web link to join the call: a conference property, the event's URL, or
+/// a known video-call link written in its location or description.
+pub(super) fn meeting_url(event: &ICalendarComponent) -> Option<String> {
+    CONFERENCE_PROPERTIES
+        .iter()
+        .map(|name| ICalendarProperty::Other((*name).into()))
+        .chain([ICalendarProperty::Conference, ICalendarProperty::Url])
+        .filter_map(|p| text(event, &p))
+        .find(|url| is_web(url))
+        .or_else(|| {
+            [ICalendarProperty::Location, ICalendarProperty::Description]
+                .iter()
+                .filter_map(|p| text(event, p))
+                .find_map(|t| meeting_link(&t))
+        })
+}
+
+fn is_web(url: &str) -> bool {
+    Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "https" | "http"))
+}
+
+fn meeting_link(text: &str) -> Option<String> {
+    text.split(|c: char| c.is_whitespace() || "<>\"'()".contains(c))
+        .filter(|word| word.starts_with("https://"))
+        .map(|word| word.trim_end_matches(['.', ',', ';']))
+        .find(|word| {
+            Url::parse(word).is_ok_and(|u| {
+                u.host_str().is_some_and(|host| {
+                    MEETING_HOSTS
+                        .iter()
+                        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+                })
+            })
+        })
+        .map(str::to_owned)
+}
+
+/// The join link of the series' call, for callers that hold only the raw resource.
+pub fn conference_url(raw: &str) -> Option<String> {
+    let ical = parse_for_expansion(raw).ok()?;
+    meeting_url(master(&ical)?.1)
+}
+
 fn fields(comp: &ICalendarComponent, start: DateTime<Utc>, end: DateTime<Utc>) -> EventFields {
     EventFields {
         summary: text(comp, &ICalendarProperty::Summary).unwrap_or_default(),
@@ -85,6 +142,7 @@ fn fields(comp: &ICalendarComponent, start: DateTime<Utc>, end: DateTime<Utc>) -
             _ => None,
         }),
         description: text(comp, &ICalendarProperty::Description).filter(|d| !d.is_empty()),
+        conference_url: meeting_url(comp),
     }
 }
 

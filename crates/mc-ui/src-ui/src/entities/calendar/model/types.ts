@@ -27,6 +27,8 @@ export interface EventOccurrence {
   location: string | null;
   status: string | null;
   description: string | null;
+  /** Link to join the event's video call. */
+  conferenceUrl: string | null;
   /** A local edit the server has not acknowledged. */
   dirty: boolean;
   /** Why the server refused the last push. */
