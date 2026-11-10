@@ -524,6 +524,29 @@ impl ReminderLog {
             .await
     }
 
+    /// Takes a record back, so a reminder that could not be shown rings at
+    /// the next scan.
+    pub async fn forget(
+        &self,
+        account: &AccountId,
+        href: &Href,
+        occurrence: (DateTime<Utc>, DateTime<Utc>),
+        trigger_key: &str,
+    ) -> Result<(), DomainError> {
+        let (account, href, key) = (*account.as_uuid(), href.to_string(), trigger_key.to_owned());
+        self.db
+            .write(move |conn| {
+                exec(
+                    conn,
+                    "DELETE FROM fired_reminders WHERE account_id = ?1 AND href = ?2 \
+                     AND occurrence_start = ?3 AND trigger_key = ?4",
+                    params![account, href, nanos(occurrence.0), key],
+                )
+                .map(drop)
+            })
+            .await
+    }
+
     pub async fn prune(&self, now: DateTime<Utc>) -> Result<(), DomainError> {
         self.db
             .write(move |conn| {

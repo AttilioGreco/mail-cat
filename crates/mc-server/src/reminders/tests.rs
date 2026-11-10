@@ -106,6 +106,41 @@ async fn a_reminder_rings_when_due_and_only_once() {
 }
 
 #[tokio::test]
+async fn a_failed_show_is_retried_and_shown_once_after_success() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let env = Env::new().await;
+    env.event(
+        "/own/",
+        "/own/a.ics",
+        ics("20261110T140000Z", "20261110T150000Z", &["-PT10M"]),
+    )
+    .await;
+    let calls = AtomicUsize::new(0);
+    let shown = AtomicUsize::new(0);
+    let show = |_: Due| {
+        let failed = calls.fetch_add(1, Ordering::SeqCst) == 0;
+        if !failed {
+            shown.fetch_add(1, Ordering::SeqCst);
+        }
+        async move {
+            if failed {
+                Err("no bus".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+    };
+    for now in ["13:51:00", "13:51:15", "13:51:30"] {
+        let now = at(&format!("2026-11-10T{now}Z"));
+        env.reminders.tick(env.account, now, show).await;
+    }
+    assert_eq!(
+        (calls.load(Ordering::SeqCst), shown.load(Ordering::SeqCst)),
+        (2, 1)
+    );
+}
+
+#[tokio::test]
 async fn a_restart_does_not_ring_it_again() {
     let env = Env::new().await;
     env.event(
@@ -228,6 +263,9 @@ fn the_body_says_when_and_where() {
             conference_url: None,
         },
         meeting_url: None,
+        fire_at: start,
+        span: (start, end),
+        key: String::new(),
     };
     let now = Local
         .with_ymd_and_hms(2026, 11, 10, 9, 0, 0)

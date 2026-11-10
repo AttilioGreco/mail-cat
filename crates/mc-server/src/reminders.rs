@@ -18,7 +18,7 @@ use mc_infrastructure::ReminderLog;
 
 use crate::notifications::{NotificationCenter, NotifiedEvent, run_event_action};
 
-const TICK: Duration = Duration::from_secs(60);
+const TICK: Duration = Duration::from_secs(15);
 /// A `-P1W` trigger rings a week ahead of its event.
 const LOOKAHEAD: TimeDelta = TimeDelta::days(8);
 /// An all-day event of a zone behind UTC is still on after its UTC midnight.
@@ -35,6 +35,10 @@ pub struct Due {
     pub href: Href,
     pub event: EventFields,
     pub meeting_url: Option<String>,
+    pub fire_at: DateTime<Utc>,
+    /// With `key`, what the fired-reminders log knows this reminder by.
+    span: (DateTime<Utc>, DateTime<Utc>),
+    key: String,
 }
 
 pub struct Reminders {
@@ -105,8 +109,10 @@ impl Reminders {
                 }
                 for alarm in ring.alarms.iter().filter(|a| a.fire_at <= now) {
                     let span = (ring.start, ring.end);
-                    // Recorded before it is shown: a crash in between loses one
-                    // reminder instead of ringing it again at every restart.
+                    // Recorded before it is shown, and forgotten again if the
+                    // show fails: a crash in between loses one reminder instead
+                    // of ringing it again at every restart, while a failure
+                    // that is reported is retried at the next tick.
                     if !self
                         .log
                         .record(&account, &href, span, &alarm.key, now)
@@ -121,11 +127,43 @@ impl Reminders {
                         href: href.clone(),
                         event: occurrence.event.clone(),
                         meeting_url: ring.meeting_url.clone(),
+                        fire_at: alarm.fire_at,
+                        span,
+                        key: alarm.key.clone(),
                     });
                 }
             }
         }
         Ok(due)
+    }
+
+    /// Scans the account and shows what is due, giving back a reminder whose
+    /// show failed so that it is tried again.
+    async fn tick<F, Fut>(&self, account: AccountId, now: DateTime<Utc>, show: F)
+    where
+        F: Fn(Due) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let due = match self.scan(account, now).await {
+            Ok(due) => due,
+            Err(e) => return tracing::warn!("Calendar reminders scan failed: {e}"),
+        };
+        for d in due {
+            let (href, span, key) = (d.href.clone(), d.span, d.key.clone());
+            let (summary, fire_at) = (d.event.summary.clone(), d.fire_at);
+            match show(d).await {
+                Ok(()) => tracing::info!(
+                    %summary, %fire_at, delay = %(now - fire_at),
+                    "Calendar reminder shown"
+                ),
+                Err(e) => {
+                    tracing::warn!(%summary, %fire_at, "Calendar reminder not shown, will retry: {e}");
+                    if let Err(e) = self.log.forget(&account, &href, span, &key).await {
+                        tracing::warn!("Forgetting a reminder that failed to show failed: {e}");
+                    }
+                }
+            }
+        }
     }
 
     /// Scans every tick, the first one at start-up for what was missed. Only
@@ -152,10 +190,8 @@ impl Reminders {
                     .iter()
                     .filter(|s| s.dav.calendar.is_enabled())
                 {
-                    match self.scan(status.account_id, now).await {
-                        Ok(due) => due.into_iter().for_each(|d| show(d, now, &center, &ui_bin)),
-                        Err(e) => tracing::warn!("Calendar reminders scan failed: {e}"),
-                    }
+                    self.tick(status.account_id, now, |d| show(d, now, &center, &ui_bin))
+                        .await;
                 }
                 if let Err(e) = self.log.prune(now).await {
                     tracing::warn!("Pruning the fired reminders failed: {e}");
@@ -198,7 +234,12 @@ fn body(due: &Due, now: DateTime<Utc>) -> String {
     }
 }
 
-fn show(due: Due, now: DateTime<Utc>, center: &Arc<NotificationCenter>, ui_bin: &str) {
+async fn show(
+    due: Due,
+    now: DateTime<Utc>,
+    center: &Arc<NotificationCenter>,
+    ui_bin: &str,
+) -> Result<(), String> {
     let encode = |text: &str| utf8_percent_encode(text, NON_ALPHANUMERIC).to_string();
     let target = NotifiedEvent {
         deep_link: format!(
@@ -211,6 +252,7 @@ fn show(due: Due, now: DateTime<Utc>, center: &Arc<NotificationCenter>, ui_bin: 
         meeting_url: due.meeting_url.clone(),
     };
     let (center, ui_bin) = (center.clone(), ui_bin.to_owned());
+    let (shown, result) = tokio::sync::oneshot::channel();
     tokio::task::spawn_blocking(move || {
         let mut notification = notify_rust::Notification::new();
         notification
@@ -228,10 +270,11 @@ fn show(due: Due, now: DateTime<Utc>, center: &Arc<NotificationCenter>, ui_bin: 
         let handle = match notification.show() {
             Ok(handle) => handle,
             Err(e) => {
-                tracing::warn!("Desktop notification failed: {e}");
+                let _ = shown.send(Err(e.to_string()));
                 return;
             }
         };
+        let _ = shown.send(Ok(()));
         #[cfg(target_os = "linux")]
         if center.is_listening() {
             center.track(handle.id(), crate::notifications::Notified::Event(target));
@@ -239,6 +282,7 @@ fn show(due: Due, now: DateTime<Utc>, center: &Arc<NotificationCenter>, ui_bin: 
         }
         handle.wait_for_action(move |action| run_event_action(action, &target, &ui_bin));
     });
+    result.await.map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]

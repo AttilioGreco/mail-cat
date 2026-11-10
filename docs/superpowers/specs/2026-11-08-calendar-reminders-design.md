@@ -60,18 +60,20 @@ closed, and the option to add or remove reminders from mail-cat's own event edit
 
 ### Scheduler (mc-server)
 
-- A task in the account runtime, alongside DAV sync, ticks every 60 s.
+- One global task (started in `wiring.rs` beside the notification center) ticks every 15 s.
 - Each tick scans the own (non-subscribed) calendars of every account with calendar
   permission:
   - occurrences overlapping `[now, now + 8 days]` (8 days covers a `-P1W` trigger);
   - plus occurrences already started but not yet ended (missed reminders).
 - An alarm with `fire_at <= now`, its occurrence not yet ended, and not yet recorded fires,
-  and is recorded.
+  and is recorded before it is shown; if the show fails the record is dropped so the next
+  tick retries. Each shown reminder is logged at info with its delay.
 - Fired reminders live in a new SQLite table `fired_reminders(account_id, href,
-  occurrence_start, trigger_key, fired_at)` with a unique key on the first four. Rows whose
-  occurrence ended more than a day ago are pruned each tick (or hourly). No migration: the
+  occurrence_start, trigger_key, occurrence_end, fired_at)` with a unique key on the first four. Rows whose
+  occurrence ended more than a day ago are pruned every tick. No migration: the
   data folder is wiped on model changes (pre-1.0).
-- `trigger_key` is the normalized trigger text plus `RELATED`. If the user changes
+- `trigger_key` is the trigger's offset in seconds plus `S` or `E` for the start or end it is related to
+  (`@<epoch>` for an absolute trigger). If the user changes
   "10 min prima" to "30 min prima", the new reminder fires too.
 - After a sync applies remote changes, the next tick sees them. No extra wiring is needed.
 - *(Builder: reuse the existing occurrence-range query the `ListEvents` handler uses rather
