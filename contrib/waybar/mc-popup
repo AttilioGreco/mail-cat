@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Dropdown under Waybar: calendar on top, upcoming events below. Esc / click away closes; a second click on the module toggles."""
+import json, os, subprocess, sys
+from datetime import datetime
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import GLib, Gtk, Gdk, GtkLayerShell as LS
+
+here = os.path.dirname(os.path.realpath(__file__))
+events = json.loads(subprocess.run([f"{here}/mc-waybar", "json", "30"], capture_output=True, text=True).stdout or "[]")
+for e in events:
+    e["t"] = datetime.fromisoformat(e["start"].replace("Z", "+00:00")).astimezone()
+
+win = Gtk.Window()
+LS.init_for_window(win)
+LS.set_layer(win, LS.Layer.TOP)
+LS.set_anchor(win, LS.Edge.TOP, True)
+LS.set_margin(win, LS.Edge.TOP, 6)
+LS.set_keyboard_mode(win, LS.KeyboardMode.ON_DEMAND)
+win.connect("key-press-event", lambda _, k: Gtk.main_quit() if k.keyval == Gdk.KEY_Escape else None)
+t0 = GLib.get_monotonic_time()
+# sway bounces focus right after mapping a layer surface; only a later focus-out means "clicked away"
+win.connect("focus-out-event", lambda *_: Gtk.main_quit() if GLib.get_monotonic_time() - t0 > 700_000 else None)
+
+css = Gtk.CssProvider()
+css.load_from_data(b"""window { background: #24273a; color: #cad3f5; border-radius: 12px; }
+.day { color: #8aadf4; font-weight: bold; margin-top: 8px; } .time { color: #a5adcb; }
+.call { color: #a6e3a1; } button { background: none; border: 0; padding: 2px 6px; } button label { color: #cad3f5; } button label.call { color: #a6e3a1; }
+calendar { background: none; color: #cad3f5; } calendar:selected { background: #8aadf4; color: #24273a; }""")
+Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_USER)
+
+box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=14)
+box.set_size_request(400, -1)
+cal = Gtk.Calendar()
+for e in events:
+    if e["t"].month == datetime.now().month:
+        cal.mark_day(e["t"].day)
+box.pack_start(cal, False, False, 0)
+
+lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+last = None
+for e in events[:12]:
+    day = e["t"].strftime("%A %-d %B")
+    if day != last:
+        l = Gtk.Label(label=day, xalign=0); l.get_style_context().add_class("day"); lst.pack_start(l, False, False, 0); last = day
+    row = Gtk.Button(relief=Gtk.ReliefStyle.NONE)
+    call = e.get("conferenceUrl")
+    row.add(Gtk.Label(label=f"{e['t']:%H:%M}  {'󰍫 ' if call else ''}{e['summary']}", xalign=0))
+    if call:
+        row.get_child().get_style_context().add_class("call")
+        row.connect("clicked", lambda _, u=call: (subprocess.Popen(["xdg-open", u]), Gtk.main_quit()))
+    lst.pack_start(row, False, False, 0)
+if not events:
+    lst.pack_start(Gtk.Label(label="Niente in agenda"), False, False, 0)
+sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, min_content_height=240, max_content_height=320, propagate_natural_height=True)
+sc.add(lst)
+box.pack_start(sc, True, True, 0)
+win.add(box)
+win.show_all()
+Gtk.main()

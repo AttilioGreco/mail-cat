@@ -5,3 +5,5 @@ config.toml
 .superpowers/
 /crates/mc-ui/binaries
 graphify-out/
+
+/design/

@@ -1,0 +1,9 @@
+// add "custom/mc-agenda" and "custom/mc-mail" to a modules-* list, then:
+"custom/mc-agenda": {
+    "exec": "~/Develop/mail-cat/contrib/waybar/mc-waybar agenda",
+    "return-type": "json", "interval": 20, "on-click": "pkill -f [m]c-popup || /home/agreco/Develop/mail-cat/contrib/waybar/mc-popup"
+},
+"custom/mc-mail": {
+    "exec": "~/Develop/mail-cat/contrib/waybar/mc-waybar mail",
+    "return-type": "json", "interval": 60, "on-click": "gtk-launch mail-cat"
+}

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Waybar module for mail-cat: `mc-waybar agenda|mail|open|json [days]`. Polls `mc --json`,
+# the socket is gRPC-only and the server pushes no reminder events.
+set -u
+now=$(date -u +%FT%TZ)
+since=$(date -u -d '-3 hours' +%FT%TZ)
+
+accounts=$(mc --json accounts list 2>/dev/null) || accounts='[]'
+
+# Only calendars I own: no shared ones, holidays (virtual), meeting rooms or the colleagues' "Ferie" calendar.
+events() {
+  jq -r '.[].id' <<<"$accounts" | while read -r a; do
+    own=$(mc --json calendars list "$a" 2>/dev/null | jq -c '[.[]? | select(.ownership == "own" and (.name | test("^Ferie") | not) and (.collection | test("%40(virtual|resource\\.calendar\\.google\\.com)/") | not)) | .collection]') || continue
+    mc --json events list "$a" --from "$since" --to "$(date -u -d "+${1:-2} days" +%FT%TZ)" 2>/dev/null |
+      jq -c --argjson own "${own:-[]}" '.[]? | select(.calendar as $c | $own | index($c))'
+  done | jq -s --arg now "$now" '
+    map(select(.allDay == false and .status != "cancelled" and .end > $now))
+    | unique_by(.href + .start) | sort_by(.start)'
+}
+
+case ${1:-agenda} in
+agenda)
+  events | jq -c --arg now "$now" '
+    def mins: ((.start | fromdateiso8601) - ($now | fromdateiso8601)) / 60 | floor;
+    def hhmm: (.start | fromdateiso8601 | localtime | strftime("%H:%M"));
+    def rel: mins as $m | if $m <= 0 then "in corso" elif $m < 60 then "tra \($m) min" else hhmm end;
+    (.[0]) as $n
+    | if $n == null then {text: "", class: "empty", tooltip: "Niente in agenda"} else
+      ($n | mins) as $m
+      | ($n.conferenceUrl != null) as $call
+      | {text: "\(if $call then "󰍫" else "" end) \($n | rel) \($n.summary)",
+         class: (if $m <= 10 and $call then "meeting-now"
+                 elif $m <= 15 then "soon" else "later" end),
+         tooltip: (.[:8] | map("\(hhmm)  \(if .conferenceUrl then "󰍫 " else "" end)\(.summary)") | join("\n"))}
+      end'
+  ;;
+mail)
+  for a in $(jq -r '.[].id' <<<"$accounts"); do
+    mc --json mailboxes list "$a" 2>/dev/null
+  done | jq -sc --argjson acc "$accounts" '
+    add // [] | map(select(.mailbox_type == "Inbox" and .unread_messages > 0)) as $i
+    | ($i | map(.unread_messages) | add // 0) as $n
+    | {text: (if $n > 0 then "󰇮 \($n)" else "" end),
+       class: (if $n > 0 then "unread" else "empty" end),
+       tooltip: ($i | map(. as $m | "\(($acc | map(select(.id == $m.account_id))[0].name)): \($m.unread_messages)") | join("\n"))}'
+  ;;
+json) events "${2:-30}" ;; # for mc-popup
+open) # on-click: join the first call that is on now or within 15 min
+  url=$(events | jq -r --arg now "$now" 'map(select(.conferenceUrl != null and (.start | fromdateiso8601) < (($now | fromdateiso8601) + 900)))[0].conferenceUrl // empty')
+  [ -n "$url" ] && xdg-open "$url"
+  ;;
+esac
