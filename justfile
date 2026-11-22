@@ -228,5 +228,6 @@ install: build-release
     mkdir -p ~/.local/share/applications
     cp deploy/mail-cat.desktop ~/.local/share/applications/
     update-desktop-database ~/.local/share/applications; or true
+    xdg-mime default mail-cat.desktop x-scheme-handler/mailto; or true
 
     @echo "✓ mail-cat installato — server attivo via systemd user service"
