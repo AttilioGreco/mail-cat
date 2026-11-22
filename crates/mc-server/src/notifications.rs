@@ -59,15 +59,31 @@ pub async fn run_action(
     }
 }
 
+/// The server starts with the user's systemd manager, before the compositor
+/// exports DISPLAY/WAYLAND_DISPLAY, so a child inheriting our environment
+/// cannot reach the desktop. systemd-run starts it as a transient unit with
+/// the manager's current environment, outside our cgroup so a server restart
+/// leaves the window alone.
+fn spawn_in_session(program: &str, args: &[&str]) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("systemd-run");
+        cmd.args(["--user", "--collect", "--quiet", "--", program]);
+        cmd
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut cmd = std::process::Command::new(program);
+    let mut child = cmd.args(args).spawn()?;
+    // Reap it, or every click leaves a zombie behind.
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 /// "default" is the body click; "open-event" the explicit button.
 pub fn run_event_action(action: &str, event: &NotifiedEvent, ui_bin: &str) {
     match (action, &event.meeting_url) {
         ("default" | "open-event", _) => {
-            if let Err(e) = std::process::Command::new(ui_bin)
-                .arg("--open-event")
-                .arg(&event.deep_link)
-                .spawn()
-            {
+            if let Err(e) = spawn_in_session(ui_bin, &["--open-event", &event.deep_link]) {
                 tracing::warn!("Failed to open Mail Cat (ui_bin='{ui_bin}'): {e}");
             }
         }
@@ -141,11 +157,7 @@ async fn run_message_action(
         // these args to an already-running window instead of opening a second one.
         "default" | "open" => {
             let deep_link = format!("{}/{}/{}", account_id.as_uuid(), mailbox_id, message_id);
-            if let Err(e) = std::process::Command::new(ui_bin)
-                .arg("--open-message")
-                .arg(&deep_link)
-                .spawn()
-            {
+            if let Err(e) = spawn_in_session(ui_bin, &["--open-message", &deep_link]) {
                 tracing::warn!("Failed to open Mail Cat (ui_bin='{ui_bin}'): {e}");
             }
         }
