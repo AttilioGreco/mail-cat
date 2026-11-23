@@ -21,5 +21,5 @@ pub use persistence::{
     DownloadMeter, ReminderLog, SqliteDb, SqliteEventStore, SqliteRepository, SqliteTaggingStore,
 };
 pub use provider_registry::InMemoryProviderRegistry;
-pub use search::TantivySearchIndex;
+pub use search::{TantivySearchIndex, UsearchIndex};
 pub use secret::KeyringSecretStore;

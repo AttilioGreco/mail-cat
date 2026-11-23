@@ -581,14 +581,14 @@ async fn a_scopes_vectors_come_with_what_its_model_was_taught() {
         .put_vectors(MODEL, &[(taught, vec![1.0]), (untaught, vec![0.5])])
         .await
         .unwrap();
-    let found = f.store.scope_vectors(scope, MODEL).await.unwrap();
+    let found = f.store.scope_examples(scope, MODEL).await.unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].message_id, taught);
     assert_eq!(found[0].positives, vec!["newsletter"]);
     assert_eq!(found[0].negatives, vec!["lavoro"]);
     assert!(
         f.store
-            .scope_vectors(scope, "other")
+            .scope_examples(scope, "other")
             .await
             .unwrap()
             .is_empty()

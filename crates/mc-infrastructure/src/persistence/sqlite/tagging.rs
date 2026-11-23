@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use mc_domain::{
     AccountId, AutoApplied, BackgroundSpeed, DiscoveryPoint, DomainError, Example, GroupId,
-    LabelExamples, LabelMode, LabelSettings, LabelStats, LabelledVector, Lesson, MessageId,
+    LabelExamples, LabelMode, LabelSettings, LabelStats, LabelledExample, Lesson, MessageId,
     ModelProfile, ModelStats, Proposal, ProposalId, ProposalStatus, Scope, SourceFilter, TagSource,
     TaggingStore, TrainingGroup,
 };
@@ -809,14 +809,24 @@ impl TaggingStore for SqliteTaggingStore {
             .await
     }
 
-    async fn scope_vectors(
+    async fn scope_examples(
         &self,
         scope: Scope,
         model: &str,
-    ) -> Result<Vec<LabelledVector>, DomainError> {
+    ) -> Result<Vec<LabelledExample>, DomainError> {
         let model = model.to_owned();
         self.db
             .read(move |conn| vectors::scope(conn, scope, &model))
+            .await
+    }
+
+    async fn rejections(
+        &self,
+        ids: &[MessageId],
+    ) -> Result<HashMap<MessageId, Vec<String>>, DomainError> {
+        let ids: Vec<Uuid> = ids.iter().map(|i| *i.as_uuid()).collect();
+        self.db
+            .read(move |conn| vectors::rejections(conn, &ids))
             .await
     }
 

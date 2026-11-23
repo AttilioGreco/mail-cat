@@ -37,7 +37,7 @@ pub use model::discovery::{DiscoveryPoint, Proposal, ProposalId, ProposalSample,
 pub use model::embedding::{EmbedPurpose, ModelId, ModelOption, ModelProfile, TargetOption};
 pub use model::tagging::{
     AutoApplied, BackgroundProfile, BackgroundSpeed, Confidence, Example, GroupId, LabelExamples,
-    LabelMode, LabelSettings, LabelStats, LabelledVector, Lesson, ModelStats, Scope, Score,
+    LabelMode, LabelSettings, LabelStats, LabelledExample, Lesson, ModelStats, Scope, Score,
     SourceFilter, TagSource, TrainingGroup,
 };
 pub use traits::account_event_source::AccountEventSource;
@@ -72,5 +72,6 @@ pub use traits::search_index::{
 };
 pub use traits::secret_store::{AccountSecrets, OAuthSecrets, SecretStore};
 pub use traits::tagging_store::TaggingStore;
+pub use traits::vector_index::{VectorIndex, VectorSource, vector_key};
 pub use value_objects::contact_id::ContactId;
 pub use value_objects::thread_id::ThreadId;

@@ -355,11 +355,10 @@ pub struct LabelExamples {
     pub per_account: Vec<(AccountId, u32)>,
 }
 
-/// A trained message's embedding with what the model was taught about it.
+/// A trained message with an embedding, and what the model was taught about it.
 #[derive(Debug, Clone)]
-pub struct LabelledVector {
+pub struct LabelledExample {
     pub message_id: MessageId,
-    pub vector: Vec<f32>,
     pub positives: Vec<String>,
     /// Rejected suggestions and undone auto-applies.
     pub negatives: Vec<String>,

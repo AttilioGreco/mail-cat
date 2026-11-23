@@ -6,7 +6,10 @@ use std::collections::HashMap;
 use rusqlite::{Connection, params, params_from_iter};
 use uuid::Uuid;
 
-use mc_domain::{BackgroundSpeed, DomainError, LabelledVector, MessageId, ModelProfile, Scope};
+use async_trait::async_trait;
+use mc_domain::{
+    BackgroundSpeed, DomainError, LabelledExample, MessageId, ModelProfile, Scope, VectorSource,
+};
 
 use super::sources::placeholders;
 use crate::persistence::sqlite::repository::{exec, json_col, query_all, query_one};
@@ -146,27 +149,98 @@ pub(super) fn of(
     Ok(found)
 }
 
-/// What the scope's model was taught, with each message's vector. Rows of
-/// weight 0 are rejections kept through a reset and still say "not this".
+/// What the scope's model was taught, for the messages that have a vector.
+/// Rows of weight 0 are rejections kept through a reset and still say "not
+/// this".
 pub(super) fn scope(
     conn: &Connection,
     scope: Scope,
     model: &str,
-) -> Result<Vec<LabelledVector>, DomainError> {
-    let rows = query_all(
+) -> Result<Vec<LabelledExample>, DomainError> {
+    query_all(
         conn,
-        "SELECT e.message_id, v.vec, e.positives, e.negatives \
+        "SELECT e.message_id, e.positives, e.negatives \
          FROM tag_examples e JOIN tag_vectors v ON v.message_id = e.message_id \
          WHERE e.scope = ?1 AND v.model = ?2",
         params![scope.key(), model],
         |r| {
-            Ok(LabelledVector {
+            Ok(LabelledExample {
                 message_id: MessageId::from_uuid(r.get(0)?),
-                vector: decode(&r.get::<_, Vec<u8>>(1)?).unwrap_or_default(),
-                positives: json_col(r, 2)?,
-                negatives: json_col(r, 3)?,
+                positives: json_col(r, 1)?,
+                negatives: json_col(r, 2)?,
             })
         },
+    )
+}
+
+pub(super) fn rejections(
+    conn: &Connection,
+    ids: &[Uuid],
+) -> Result<HashMap<MessageId, Vec<String>>, DomainError> {
+    let mut found = HashMap::new();
+    for chunk in ids.chunks(CHUNK) {
+        let sql = format!(
+            "SELECT message_id, negatives FROM tag_examples \
+             WHERE negatives != '[]' AND message_id IN ({})",
+            placeholders(1, chunk.len())
+        );
+        let rows = query_all(conn, &sql, params_from_iter(chunk), |r| {
+            Ok((
+                MessageId::from_uuid(r.get(0)?),
+                json_col::<Vec<String>>(r, 1)?,
+            ))
+        })?;
+        found.extend(rows);
+    }
+    Ok(found)
+}
+
+pub(super) fn page(
+    conn: &Connection,
+    model: &str,
+    after: Uuid,
+    limit: u32,
+) -> Result<Vec<(MessageId, Vec<f32>)>, DomainError> {
+    let rows = query_all(
+        conn,
+        "SELECT message_id, vec FROM tag_vectors \
+         WHERE model = ?1 AND message_id > ?2 ORDER BY message_id LIMIT ?3",
+        params![model, after, limit],
+        |r| Ok((MessageId::from_uuid(r.get(0)?), r.get::<_, Vec<u8>>(1)?)),
     )?;
-    Ok(rows.into_iter().filter(|v| !v.vector.is_empty()).collect())
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, blob)| Some((id, decode(&blob)?)))
+        .collect())
+}
+
+pub(super) fn count(conn: &Connection, model: &str) -> Result<u64, DomainError> {
+    Ok(query_one(
+        conn,
+        "SELECT COUNT(*) FROM tag_vectors WHERE model = ?1",
+        [model],
+        |r| r.get::<_, i64>(0),
+    )?
+    .unwrap_or_default() as u64)
+}
+
+#[async_trait]
+impl VectorSource for super::SqliteTaggingStore {
+    async fn vector_page(
+        &self,
+        model: &str,
+        after: Option<MessageId>,
+        limit: u32,
+    ) -> Result<Vec<(MessageId, Vec<f32>)>, DomainError> {
+        let model = model.to_owned();
+        let after = after.map_or_else(Uuid::nil, |m| *m.as_uuid());
+        self.db
+            .read(move |conn| page(conn, &model, after, limit))
+            .await
+    }
+
+    async fn vector_count(&self, model: &str) -> Result<u64, DomainError> {
+        let model = model.to_owned();
+        self.db.read(move |conn| count(conn, &model)).await
+    }
 }

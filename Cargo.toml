@@ -75,6 +75,7 @@ zstd = "0.14"
 
 # Search
 tantivy = "0.27"
+usearch = "2.26.6"
 
 # Local sentence embeddings (ONNX runtime, downloaded at build time). Pinned:
 # the model files in `mc-infrastructure/src/embedding` are verified by hash and

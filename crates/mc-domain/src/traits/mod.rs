@@ -17,3 +17,4 @@ pub mod repository;
 pub mod search_index;
 pub mod secret_store;
 pub mod tagging_store;
+pub mod vector_index;

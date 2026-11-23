@@ -9,7 +9,7 @@ use crate::model::account::AccountId;
 use crate::model::discovery::{DiscoveryPoint, Proposal, ProposalId, ProposalStatus};
 use crate::model::embedding::ModelProfile;
 use crate::model::tagging::{
-    AutoApplied, BackgroundSpeed, Example, GroupId, LabelExamples, LabelSettings, LabelledVector,
+    AutoApplied, BackgroundSpeed, Example, GroupId, LabelExamples, LabelSettings, LabelledExample,
     Lesson, ModelStats, Scope, SourceFilter, TagSource, TrainingGroup,
 };
 use crate::value_objects::message_id::MessageId;
@@ -138,12 +138,18 @@ pub trait TaggingStore: Send + Sync {
         model: &str,
         ids: &[MessageId],
     ) -> Result<HashMap<MessageId, Vec<f32>>, DomainError>;
-    /// Vectors of the messages the scope's model was taught from.
-    async fn scope_vectors(
+    /// The messages the scope's model was taught from that have a vector of
+    /// `model`, without the vectors.
+    async fn scope_examples(
         &self,
         scope: Scope,
         model: &str,
-    ) -> Result<Vec<LabelledVector>, DomainError>;
+    ) -> Result<Vec<LabelledExample>, DomainError>;
+    /// Per message of `ids` that has any, the labels it was rejected for.
+    async fn rejections(
+        &self,
+        ids: &[MessageId],
+    ) -> Result<HashMap<MessageId, Vec<String>>, DomainError>;
     /// Messages of the accounts the model can read, of that kind.
     async fn count_sources(
         &self,
