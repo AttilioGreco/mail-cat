@@ -24,7 +24,7 @@ use crate::error::ApplicationError;
 const RETRAIN_WAIT: Duration = Duration::from_secs(1);
 /// Wait before trying again after a failure (offline, disk full, ...).
 const RETRY: Duration = Duration::from_secs(600);
-/// A scope's vectors are read again after this; new examples show up then.
+/// A scope's examples are read again after this; new examples show up then.
 const POOL_TTL: Duration = Duration::from_secs(60);
 /// Characters of the body that are embedded, about the model's token window.
 const BODY_CHARS: usize = 1200;
@@ -257,6 +257,9 @@ where
         if self.retraining().await? {
             return Ok(Step::Retraining);
         }
+        if let Some(index) = &self.vectors {
+            index.ensure(&embedder.model().to_string()).await?;
+        }
         Ok(if self.embed_next(embedder, before, batch).await? {
             Step::Embedded
         } else {
@@ -297,6 +300,9 @@ where
         }
         let batch: Vec<_> = ids.into_iter().zip(vectors).collect();
         self.store.put_vectors(&model.to_string(), &batch).await?;
+        if let Some(index) = &self.vectors {
+            index.add(&model.to_string(), &batch);
+        }
         self.lock_activity()
             .record(Instant::now(), batch.len() as u32);
         debug!(count = batch.len(), "embeddings: batch stored");
@@ -310,7 +316,12 @@ where
         scope: Scope,
         ids: &[MessageId],
     ) -> Result<HashMap<MessageId, Nearest>, ApplicationError> {
-        let Some(embedder) = self.embedder.as_ref().filter(|_| self.embeddings_enabled()) else {
+        let Some((embedder, index)) = self
+            .embedder
+            .as_ref()
+            .zip(self.vectors.clone())
+            .filter(|_| self.embeddings_enabled())
+        else {
             return Ok(HashMap::new());
         };
         let model = embedder.model().to_string();
@@ -318,12 +329,12 @@ where
         if queries.is_empty() {
             return Ok(HashMap::new());
         }
+        index.ensure(&model).await?;
         let pool = self.pool(scope, &model).await?;
-        // 200 messages against 20k vectors is a second of arithmetic.
         tokio::task::spawn_blocking(move || {
             queries
                 .into_iter()
-                .map(|(id, query)| (id, pool.nearest(&query, id)))
+                .map(|(id, query)| (id, pool.nearest(index.as_ref(), &model, &query, id)))
                 .collect()
         })
         .await
@@ -345,7 +356,7 @@ where
         ) {
             return Ok(pool);
         }
-        let pool = Arc::new(Pool::new(self.store.scope_vectors(scope, model).await?));
+        let pool = Arc::new(Pool::new(self.store.scope_examples(scope, model).await?));
         let mut pools = self
             .pools
             .lock()

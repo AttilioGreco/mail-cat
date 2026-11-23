@@ -1,13 +1,16 @@
 //! Nearest neighbours over message embeddings: what the messages most like
-//! this one were labelled. Brute force over unit vectors (cosine is a dot
-//! product).
+//! this one were labelled. The vectors live in a `VectorIndex`; the `Pool`
+//! only knows the labels of the scope's examples.
 //!
-//! ponytail: a linear scan, a few ms at 20k vectors (see the ignored timing
-//! test). Past ~200k, put an ANN index (HNSW) behind `Pool::nearest`.
+//! ponytail: the index holds every embedded message and the pool's examples
+//! are a filter over it, so a sparse scope makes the filtered search walk far.
+//! Past what that costs, index the examples apart from the rest.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use mc_domain::{LabelledVector, MessageId};
+use async_trait::async_trait;
+use mc_domain::{DomainError, LabelledExample, MessageId, VectorIndex, vector_key};
 
 use super::training::UNLABELLED_WEIGHT;
 
@@ -19,75 +22,113 @@ const K: usize = 15;
 const FLOOR: f32 = 0.8;
 
 struct Item {
-    id: MessageId,
     positives: Vec<String>,
     /// Unlabelled mail only says "probably none of the labels".
     weight: f64,
 }
 
-/// The labelled vectors of one scope, in one allocation. A message rejected
-/// for a label is kept with no positives, so it counts against it.
+/// The labelled mail of one scope. A message rejected for a label is kept
+/// with no positives, so it counts against it.
 pub struct Pool {
-    dim: usize,
-    data: Vec<f32>,
     items: Vec<Item>,
+    /// Index key to position in `items`.
+    by_key: HashMap<u64, usize>,
 }
 
 impl Pool {
-    pub fn new(vectors: impl IntoIterator<Item = LabelledVector>) -> Self {
+    pub fn new(examples: impl IntoIterator<Item = LabelledExample>) -> Self {
         let mut pool = Self {
-            dim: 0,
-            data: Vec::new(),
             items: Vec::new(),
+            by_key: HashMap::new(),
         };
-        for v in vectors {
-            if pool.dim == 0 {
-                pool.dim = v.vector.len();
-            }
-            if v.vector.len() != pool.dim {
-                continue;
-            }
-            pool.data.extend_from_slice(&v.vector);
+        for e in examples {
+            pool.by_key
+                .insert(vector_key(&e.message_id), pool.items.len());
             pool.items.push(Item {
-                weight: if v.positives.is_empty() && v.negatives.is_empty() {
+                weight: if e.positives.is_empty() && e.negatives.is_empty() {
                     UNLABELLED_WEIGHT
                 } else {
                     1.0
                 },
-                id: v.message_id,
-                positives: v.positives,
+                positives: e.positives,
             });
         }
         pool
     }
 
-    /// The `K` most similar messages to `query`, `me` excluded.
-    pub fn nearest(self: &Arc<Self>, query: &[f32], me: MessageId) -> Nearest {
-        let mut sims: Vec<(f32, usize)> = Vec::new();
-        if query.len() == self.dim && self.dim > 0 {
-            sims = self
-                .data
-                .chunks_exact(self.dim)
-                .zip(&self.items)
-                .enumerate()
-                .filter(|(_, (_, item))| item.id != me)
-                .map(|(i, (v, _))| (v.iter().zip(query).map(|(a, b)| a * b).sum(), i))
-                .collect();
-        }
-        if sims.len() > K {
-            sims.select_nth_unstable_by(K, |a, b| b.0.total_cmp(&a.0));
-            sims.truncate(K);
-        }
+    /// The `K` most similar examples to `query`, `me` excluded.
+    pub fn nearest(
+        self: &Arc<Self>,
+        index: &dyn VectorIndex,
+        model: &str,
+        query: &[f32],
+        me: MessageId,
+    ) -> Nearest {
+        let me = vector_key(&me);
+        let found = index.nearest(model, query, K, &|key| {
+            key != me && self.by_key.contains_key(&key)
+        });
         Nearest {
             pool: Arc::clone(self),
-            hits: sims
+            hits: found
                 .into_iter()
-                .map(|(sim, i)| {
+                .map(|(key, sim)| {
+                    let i = self.by_key[&key];
                     let closeness = f64::from(((sim - FLOOR) / (1.0 - FLOOR)).clamp(0.0, 1.0));
                     (closeness * self.items[i].weight, i)
                 })
                 .collect(),
         }
+    }
+}
+
+/// Exact search over vectors held in memory, for the held-out evaluation and
+/// the tests, where there is no database to build a file from.
+#[derive(Default)]
+pub struct ExactIndex(std::sync::Mutex<Vec<(u64, Vec<f32>)>>);
+
+#[async_trait]
+impl VectorIndex for ExactIndex {
+    fn add(&self, _model: &str, vectors: &[(MessageId, Vec<f32>)]) {
+        let mut all = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        all.extend(vectors.iter().map(|(id, v)| (vector_key(id), v.clone())));
+    }
+
+    fn remove(&self, id: &MessageId) {
+        let key = vector_key(id);
+        let mut all = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        all.retain(|(k, _)| *k != key);
+    }
+
+    fn nearest(
+        &self,
+        _model: &str,
+        query: &[f32],
+        k: usize,
+        keep: &dyn Fn(u64) -> bool,
+    ) -> Vec<(u64, f32)> {
+        let all = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sims: Vec<(u64, f32)> = all
+            .iter()
+            .filter(|(key, v)| v.len() == query.len() && keep(*key))
+            .map(|(key, v)| (*key, v.iter().zip(query).map(|(a, b)| a * b).sum()))
+            .collect();
+        sims.sort_by(|a, b| b.1.total_cmp(&a.1));
+        sims.truncate(k);
+        sims
+    }
+
+    async fn ensure(&self, _model: &str) -> Result<(), DomainError> {
+        Ok(())
     }
 }
 

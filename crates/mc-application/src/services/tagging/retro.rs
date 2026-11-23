@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tracing::{info, warn};
@@ -28,6 +28,15 @@ const TOKEN_CHUNK: usize = 1000;
 pub(super) const BATCH: usize = 25;
 pub(super) const BATCH_PAUSE: Duration = Duration::from_secs(1);
 const SAMPLE: usize = 5;
+/// How long the plan of a preview can still be applied as it was.
+const PREVIEW_TTL: Duration = Duration::from_secs(300);
+
+/// The last preview's plan, for the confirmation that follows it.
+pub(super) struct Previewed {
+    at: Instant,
+    key: (AccountId, String, LabelMode, f64),
+    plan: Plan,
+}
 
 #[derive(Debug, Clone)]
 pub struct PreviewItem {
@@ -144,6 +153,12 @@ impl Plan {
     }
 }
 
+fn rejected(rejections: &HashMap<MessageId, Vec<String>>, id: MessageId, label: &str) -> bool {
+    rejections
+        .get(&id)
+        .is_some_and(|labels| labels.iter().any(|l| l == label))
+}
+
 impl<S, R, C> TaggingService<S, R, C>
 where
     S: TaggingStore + 'static,
@@ -182,12 +197,13 @@ where
             let stats = self.stats_for(scope, wanted.collect()).await?;
             let ids: Vec<MessageId> = candidates.iter().map(|(s, _)| s.id).collect();
             let nearest = self.nearest(scope, &ids).await?;
+            let rejections = self.store.rejections(&ids).await?;
             for (source, tokens) in candidates {
                 let Some(score) = bayes::score(&stats, label, &tokens, nearest.get(&source.id))
                 else {
                     return Ok(plan);
                 };
-                if score < threshold || self.rejected(source.id, label).await? {
+                if score < threshold || rejected(&rejections, source.id, label) {
                     continue;
                 }
                 plan.consider(source, score, threshold, mode, &group, label);
@@ -221,14 +237,6 @@ where
         Ok(all)
     }
 
-    async fn rejected(&self, id: MessageId, label: &str) -> Result<bool, ApplicationError> {
-        Ok(self
-            .store
-            .example(id)
-            .await?
-            .is_some_and(|e| e.negatives.iter().any(|l| l == label)))
-    }
-
     /// What enabling the mode on the label would do to existing mail.
     pub async fn preview_apply(
         &self,
@@ -237,10 +245,35 @@ where
         mode: LabelMode,
         threshold: f64,
     ) -> Result<Preview, ApplicationError> {
-        Ok(self
-            .plan(account, &label_key(label), mode, threshold)
-            .await?
-            .preview())
+        let label = label_key(label);
+        let plan = self.plan(account, &label, mode, threshold).await?;
+        let preview = plan.preview();
+        *self
+            .previewed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Previewed {
+            at: Instant::now(),
+            key: (account, label, mode, threshold),
+            plan,
+        });
+        Ok(preview)
+    }
+
+    /// The plan the preview just made for the same request, if it is recent.
+    fn take_previewed(
+        &self,
+        account: AccountId,
+        label: &str,
+        mode: LabelMode,
+        threshold: f64,
+    ) -> Option<Plan> {
+        let previewed = self
+            .previewed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()?;
+        let same = previewed.key == (account, label.to_owned(), mode, threshold);
+        (same && previewed.at.elapsed() < PREVIEW_TTL).then_some(previewed.plan)
     }
 
     /// Save the mode and start labelling existing mail in the background.
@@ -259,7 +292,10 @@ where
         }
         let label = label_key(label);
         self.set_label(account, &label, mode, threshold).await?;
-        let plan = self.plan(account, &label, mode, threshold).await?;
+        let plan = match self.take_previewed(account, &label, mode, threshold) {
+            Some(plan) => plan,
+            None => self.plan(account, &label, mode, threshold).await?,
+        };
         let preview = plan.preview();
         let service = Arc::clone(self);
         tokio::spawn(async move { service.run(plan.picks, label, false, None).await });
@@ -378,6 +414,7 @@ where
             let stats = self.stats_for(scope, wanted.collect()).await?;
             let ids: Vec<MessageId> = candidates.iter().map(|(s, _)| s.id).collect();
             let nearest = self.nearest(scope, &ids).await?;
+            let rejections = self.store.rejections(&ids).await?;
             for (source, tokens) in candidates {
                 for ((label, set, _), plan) in labels.iter().zip(&mut plans) {
                     let Some(score) = bayes::score(&stats, label, &tokens, nearest.get(&source.id))
@@ -386,7 +423,7 @@ where
                     };
                     if score < set.threshold
                         || source.labels.contains(label)
-                        || self.rejected(source.id, label).await?
+                        || rejected(&rejections, source.id, label)
                     {
                         continue;
                     }

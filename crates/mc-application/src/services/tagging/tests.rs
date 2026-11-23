@@ -348,9 +348,9 @@ fn eval_reports_precision_and_recall_on_held_out_mail() {
 mod neighbours {
     use std::sync::Arc;
 
-    use mc_domain::{LabelledVector, MessageId, ModelStats};
+    use mc_domain::{LabelledExample, MessageId, ModelStats, VectorIndex};
 
-    use super::super::knn::Pool;
+    use super::super::knn::{ExactIndex, Pool};
     use super::super::vectors::embedding_text;
     use super::{bayes, features, source, trained};
 
@@ -359,24 +359,38 @@ mod neighbours {
         v.iter().map(|x| x / n).collect()
     }
 
-    fn item(vector: &[f32], positives: &[&str], negatives: &[&str]) -> LabelledVector {
-        LabelledVector {
+    fn item(vector: &[f32], positives: &[&str], negatives: &[&str]) -> (LabelledExample, Vec<f32>) {
+        let example = LabelledExample {
             message_id: MessageId::new(),
-            vector: unit(vector),
             positives: positives.iter().map(|l| l.to_string()).collect(),
             negatives: negatives.iter().map(|l| l.to_string()).collect(),
-        }
+        };
+        (example, unit(vector))
+    }
+
+    /// A pool of the items and the index holding their vectors.
+    fn pool_of<const N: usize>(items: [(LabelledExample, Vec<f32>); N]) -> (Arc<Pool>, ExactIndex) {
+        let index = ExactIndex::default();
+        let vectors: Vec<_> = items
+            .iter()
+            .map(|(e, v)| (e.message_id, v.clone()))
+            .collect();
+        index.add("m", &vectors);
+        (
+            Arc::new(Pool::new(items.into_iter().map(|(e, _)| e))),
+            index,
+        )
     }
 
     #[test]
     fn the_share_is_the_labelled_part_of_the_closest() {
-        let pool = Arc::new(Pool::new([
+        let (pool, index) = pool_of([
             item(&[1.0, 0.0], &["newsletter"], &[]),
             item(&[1.0, 0.1], &["newsletter"], &[]),
             item(&[1.0, 0.2], &["lavoro"], &[]),
             item(&[0.0, 1.0], &["lavoro"], &[]),
-        ]));
-        let near = pool.nearest(&unit(&[1.0, 0.05]), MessageId::new());
+        ]);
+        let near = pool.nearest(&index, "m", &unit(&[1.0, 0.05]), MessageId::new());
         let share = near.share("newsletter").unwrap();
         assert!(share > 0.6 && share < 0.8, "{share}");
         assert!(near.share("lavoro").unwrap() < share);
@@ -386,9 +400,9 @@ mod neighbours {
     #[test]
     fn a_message_is_not_its_own_neighbour() {
         let mine = item(&[1.0, 0.0], &["newsletter"], &[]);
-        let me = mine.message_id;
-        let pool = Arc::new(Pool::new([mine, item(&[1.0, 0.0], &["lavoro"], &[])]));
-        let near = pool.nearest(&unit(&[1.0, 0.0]), me);
+        let me = mine.0.message_id;
+        let (pool, index) = pool_of([mine, item(&[1.0, 0.0], &["lavoro"], &[])]);
+        let near = pool.nearest(&index, "m", &unit(&[1.0, 0.0]), me);
         assert_eq!(near.share("newsletter"), Some(0.0));
         assert_eq!(near.share("lavoro"), Some(1.0));
     }
@@ -396,21 +410,18 @@ mod neighbours {
     #[test]
     fn rejected_and_unlabelled_neighbours_count_against_the_label() {
         let v = [1.0, 0.0];
-        let pool = Arc::new(Pool::new([
+        let (pool, index) = pool_of([
             item(&v, &["newsletter"], &[]),
             item(&v, &[], &["newsletter"]),
-        ]));
+        ]);
         let share = pool
-            .nearest(&unit(&v), MessageId::new())
+            .nearest(&index, "m", &unit(&v), MessageId::new())
             .share("newsletter");
         assert_eq!(share, Some(0.5), "a rejection weighs as much as an example");
 
-        let pool = Arc::new(Pool::new([
-            item(&v, &["newsletter"], &[]),
-            item(&v, &[], &[]),
-        ]));
+        let (pool, index) = pool_of([item(&v, &["newsletter"], &[]), item(&v, &[], &[])]);
         let share = pool
-            .nearest(&unit(&v), MessageId::new())
+            .nearest(&index, "m", &unit(&v), MessageId::new())
             .share("newsletter")
             .unwrap();
         assert!(
@@ -421,15 +432,16 @@ mod neighbours {
 
     #[test]
     fn nothing_close_says_nothing() {
-        let pool = Arc::new(Pool::new([item(&[1.0, 0.0], &["newsletter"], &[])]));
+        let (pool, index) = pool_of([item(&[1.0, 0.0], &["newsletter"], &[])]);
         assert_eq!(
-            pool.nearest(&unit(&[0.0, 1.0]), MessageId::new())
+            pool.nearest(&index, "m", &unit(&[0.0, 1.0]), MessageId::new())
                 .share("newsletter"),
             None
         );
         // Nor does a vector from another model (other size).
         assert_eq!(
-            pool.nearest(&[1.0], MessageId::new()).share("newsletter"),
+            pool.nearest(&index, "m", &[1.0], MessageId::new())
+                .share("newsletter"),
             None
         );
     }
@@ -465,8 +477,8 @@ mod neighbours {
         let scored = bayes::scores(&stats, ["newsletter"], &tokens, None);
         assert_eq!(scored[0].score, words);
 
-        let pool = Arc::new(Pool::new([item(&[1.0, 0.0], &["lavoro"], &[])]));
-        let near = pool.nearest(&unit(&[1.0, 0.0]), s.id);
+        let (pool, index) = pool_of([item(&[1.0, 0.0], &["lavoro"], &[])]);
+        let near = pool.nearest(&index, "m", &unit(&[1.0, 0.0]), s.id);
         let with = bayes::scores(&stats, ["newsletter"], &tokens, Some(&near));
         assert!(
             with[0].score < words,
@@ -485,35 +497,5 @@ mod neighbours {
         s.subject.clear();
         s.body = None;
         assert_eq!(embedding_text(&s), None);
-    }
-
-    /// `cargo test --release -p mc-application scan_time -- --ignored --nocapture`
-    #[test]
-    #[ignore = "timing"]
-    fn scan_time_at_20k_vectors() {
-        let mut seed = 1u64;
-        let mut next = move || {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
-        };
-        let mut random = || (0..384).map(|_| next()).collect::<Vec<f32>>();
-        let start = std::time::Instant::now();
-        let pool = Arc::new(Pool::new((0..20_000).map(|i| {
-            item(
-                &random(),
-                if i % 4 == 0 { &["newsletter"] } else { &[] },
-                &[],
-            )
-        })));
-        println!("build: {:?}", start.elapsed());
-        let query = unit(&random());
-        let me = MessageId::new();
-        let start = std::time::Instant::now();
-        for _ in 0..50 {
-            std::hint::black_box(pool.nearest(&query, me).share("newsletter"));
-        }
-        println!("per query at 20k x 384: {:?}", start.elapsed() / 50);
     }
 }

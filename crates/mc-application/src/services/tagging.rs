@@ -36,6 +36,7 @@ use mc_domain::{
     AccountId, AutoApplied, BackgroundSpeed, Confidence, DomainEvent, Embedder, EventEnvelope,
     Flag, GroupId, LabelMode, LabelNamer, LabelSettings, Mailbox, MailboxId, MailboxReadRepository,
     MailboxType, MessageId, ModelProfile, Scope, TagSource, TaggingStore, TrainingGroup,
+    VectorIndex,
 };
 
 use crate::bus::{CommandBus, EventSubscriber};
@@ -114,6 +115,8 @@ pub struct TaggingService<S, R, C> {
     inbox: Mutex<Option<mpsc::UnboundedReceiver<AutoJob>>>,
     /// `None` where no model is wired in: the classifier is words only.
     embedder: Option<Arc<dyn Embedder>>,
+    /// Where the neighbours of a message come from; none, none found.
+    vectors: Option<Arc<dyn VectorIndex>>,
     /// The user's consent, mirrored from the store so scoring need not ask.
     embedding_on: AtomicBool,
     /// Rouses the embedding worker: a body arrived, or consent was given.
@@ -136,6 +139,7 @@ pub struct TaggingService<S, R, C> {
     /// not hammer the providers with all of them at once.
     apply_turn: tokio::sync::Mutex<()>,
     pools: Mutex<Pools>,
+    previewed: Mutex<Option<retro::Previewed>>,
 }
 
 /// Runs `work` polled on a thread of its own at background priority, for the
@@ -202,6 +206,7 @@ where
             jobs,
             inbox: Mutex::new(Some(inbox)),
             embedder: None,
+            vectors: None,
             embedding_on: AtomicBool::new(false),
             wake: Notify::new(),
             namer: Arc::new(KeywordNamer),
@@ -214,6 +219,7 @@ where
             activity: Mutex::default(),
             apply_turn: tokio::sync::Mutex::new(()),
             pools: Mutex::new(HashMap::new()),
+            previewed: Mutex::new(None),
         }
     }
 
@@ -221,6 +227,13 @@ where
     #[must_use]
     pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
+        self
+    }
+
+    /// Find neighbours in `index`, which the embedding backlog keeps current.
+    #[must_use]
+    pub fn with_vector_index(mut self, index: Arc<dyn VectorIndex>) -> Self {
+        self.vectors = Some(index);
         self
     }
 

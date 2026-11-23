@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mc_domain::{
-    AccountId, LabelSettings, LabelledVector, Lesson, MailboxReadRepository, MessageId, ModelStats,
-    Score, SourceFilter, TagSource, TaggingStore,
+    AccountId, LabelSettings, LabelledExample, Lesson, MailboxReadRepository, MessageId,
+    ModelStats, Score, SourceFilter, TagSource, TaggingStore, VectorIndex,
 };
 
-use super::knn::{Nearest, Pool};
+use super::knn::{ExactIndex, Nearest, Pool};
 use super::training::{UNLABELLED_SAMPLE, UNLABELLED_WEIGHT};
 use super::{TaggingService, bayes, features};
 use crate::bus::CommandBus;
@@ -74,17 +74,30 @@ pub(super) fn evaluate(
             },
         );
     }
-    let pool = Arc::new(Pool::new(train.iter().filter_map(|s| {
-        Some(LabelledVector {
-            message_id: s.id,
-            vector: vectors.get(&s.id)?.clone(),
-            positives: s.labels.clone(),
-            negatives: Vec::new(),
-        })
+    let held: Vec<_> = train
+        .iter()
+        .filter(|s| vectors.contains_key(&s.id))
+        .collect();
+    let index = ExactIndex::default();
+    index.add(
+        "",
+        &held
+            .iter()
+            .map(|s| (s.id, vectors[&s.id].clone()))
+            .collect::<Vec<_>>(),
+    );
+    let pool = Arc::new(Pool::new(held.iter().map(|s| LabelledExample {
+        message_id: s.id,
+        positives: s.labels.clone(),
+        negatives: Vec::new(),
     })));
     let neighbours: Vec<Option<Nearest>> = test
         .iter()
-        .map(|s| vectors.get(&s.id).map(|v| pool.nearest(v, s.id)))
+        .map(|s| {
+            vectors
+                .get(&s.id)
+                .map(|v| pool.nearest(&index, "", v, s.id))
+        })
         .collect();
     let scored = |with_neighbours: bool| -> Vec<(Vec<Score>, &TagSource)> {
         test.iter()
