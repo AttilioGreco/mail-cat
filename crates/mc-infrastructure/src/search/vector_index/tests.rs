@@ -186,3 +186,44 @@ async fn a_model_without_vectors_has_no_file() {
     );
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
+
+/// `cargo test --release -p mc-infrastructure sparse_filter -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "timing"]
+async fn sparse_filter_time_at_100k_vectors() {
+    let dir = tempfile::tempdir().unwrap();
+    let (index, source) = open(dir.path());
+    let mut seed = 1u64;
+    let mut random = move || {
+        (0..384)
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+            })
+            .collect::<Vec<f32>>()
+    };
+    let ids: Vec<_> = (0..100_000).map(|_| MessageId::new()).collect();
+    for id in &ids {
+        let v = random();
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        seed_vec(&source, *id, v.iter().map(|x| x / n).collect());
+    }
+    let start = std::time::Instant::now();
+    index.ensure(MODEL).await.unwrap();
+    println!("build: {:?}", start.elapsed());
+    let wanted: std::collections::HashSet<u64> = ids.iter().step_by(100).map(vector_key).collect();
+    let q = unit([1.0, 0.0, 0.0]);
+    let q: Vec<f32> = q.iter().cycle().take(384).copied().collect();
+    let start = std::time::Instant::now();
+    let mut found = 0;
+    for _ in 0..20 {
+        found = index.nearest(MODEL, &q, 15, &|k| wanted.contains(&k)).len();
+    }
+    println!("1% filter, per query: {:?}, found {found}", start.elapsed() / 20);
+}
+
+fn seed_vec(source: &Source, id: MessageId, v: Vec<f32>) {
+    source.0.lock().insert(*id.as_uuid(), v);
+}

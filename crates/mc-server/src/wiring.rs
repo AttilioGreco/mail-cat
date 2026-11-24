@@ -15,11 +15,11 @@ use mc_application::{
 };
 use mc_domain::{
     AccountId, AccountReadRepository, AccountWriteRepository, AggregateType, DomainError,
-    DomainEvent, EventEnvelope, EventStore, MailboxPath,
+    DomainEvent, EventEnvelope, EventStore, MailboxPath, VectorIndex,
 };
 use mc_infrastructure::{
     AnyProvider, CatalogEmbedder, InMemoryProviderRegistry, SqliteDb, SqliteEventStore,
-    SqliteRepository, SqliteTaggingStore, TantivySearchIndex,
+    SqliteRepository, SqliteTaggingStore, TantivySearchIndex, UsearchIndex,
 };
 use mc_interfaces::grpc::services::{
     AccountServiceImpl, CalendarServiceImpl, ContactServiceImpl, MailboxServiceImpl,
@@ -217,11 +217,19 @@ impl AppContext {
         // Search index is an event-sourced projection with its own checkpoint,
         // refreshing messages from the read model. Shared across boot catch-up,
         // the live subscriber, and post-sync catch-up.
-        let search_handler = Arc::new(SearchProjectionHandler::new(
-            search_index.clone(),
-            bare_repository.clone(),
-            bare_repository.clone(),
+        // Embeddings are searched in a file per model next to the database.
+        let vectors: Arc<dyn VectorIndex> = Arc::new(UsearchIndex::new(
+            db_path.parent().unwrap_or(db_path).join("vectors"),
+            SqliteTaggingStore::new(db.clone()),
         ));
+        let search_handler = Arc::new(
+            SearchProjectionHandler::new(
+                search_index.clone(),
+                bare_repository.clone(),
+                bare_repository.clone(),
+            )
+            .with_vector_index(vectors.clone()),
+        );
         // The model is downloaded next to the database only once the user
         // agrees, and is dropped from memory after 5 minutes unused.
         let models = db_path.parent().unwrap_or(db_path).join("models");
@@ -232,7 +240,8 @@ impl AppContext {
                 bare_repository.clone(),
                 command_bus.clone(),
             )
-            .with_embedder(embedder),
+            .with_embedder(embedder)
+            .with_vector_index(vectors),
         );
         let projection_handler =
             ProjectionEventHandler::new(bare_repository.clone(), bare_repository);

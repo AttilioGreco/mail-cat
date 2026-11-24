@@ -80,6 +80,14 @@ impl World {
         envelope
     }
 
+    /// A vector index over the database's vectors, in the world's folder.
+    fn vectors(&self) -> Arc<mc_infrastructure::UsearchIndex<SqliteTaggingStore>> {
+        Arc::new(mc_infrastructure::UsearchIndex::new(
+            self._dir.path().join("vectors"),
+            SqliteTaggingStore::new(self.db.clone()),
+        ))
+    }
+
     async fn open() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db = SqliteDb::open(&dir.path().join("mail-cat.db")).unwrap();

@@ -114,7 +114,8 @@ async fn neighbours_join_the_words_once_the_user_agrees() {
             world.repo.clone(),
             Arc::new(Recording::default()),
         )
-        .with_embedder(fake.clone()),
+        .with_embedder(fake.clone())
+        .with_vector_index(world.vectors()),
     );
     let store = SqliteTaggingStore::new(world.db.clone());
     // `group_with_taught_label` made 8 labelled "offerte" and 8 plain "cena".
@@ -214,7 +215,8 @@ async fn the_backlog_waits_while_a_scope_is_being_retrained() {
             world.repo.clone(),
             Arc::new(Recording::default()),
         )
-        .with_embedder(fake.clone()),
+        .with_embedder(fake.clone())
+        .with_vector_index(world.vectors()),
     );
     let store = SqliteTaggingStore::new(world.db.clone());
     let accounts = vec![world.account];
@@ -274,7 +276,8 @@ async fn a_new_model_embeds_the_mail_again_and_a_refused_target_changes_nothing(
             world.repo.clone(),
             Arc::new(Recording::default()),
         )
-        .with_embedder(fake.clone()),
+        .with_embedder(fake.clone())
+        .with_vector_index(world.vectors()),
     );
     let store = SqliteTaggingStore::new(world.db.clone());
     let accounts = vec![world.account];

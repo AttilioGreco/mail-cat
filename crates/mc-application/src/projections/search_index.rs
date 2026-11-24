@@ -17,6 +17,7 @@
 //! (read-model catch-up runs before search catch-up on boot; the live subscriber
 //! chains read-model then search per event).
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
@@ -24,7 +25,8 @@ use tracing::{debug, info};
 
 use mc_domain::{
     AccountId, AccountReadRepository, DomainEvent, EventEnvelope, EventStore,
-    MailboxReadRepository, MessageReadRepository, ProjectionCheckpoint, SearchIndex,
+    MailboxReadRepository, MessageId, MessageReadRepository, ProjectionCheckpoint, SearchIndex,
+    VectorIndex,
 };
 
 use crate::error::ApplicationError;
@@ -43,6 +45,8 @@ pub struct SearchProjectionHandler<SI, R, C> {
     search_index: SI,
     read_repo: R,
     checkpoint: C,
+    /// Dropped messages leave the embedding index too.
+    vectors: Option<Arc<dyn VectorIndex>>,
     /// Set while [`Self::rebuild`] runs.
     rebuilding: AtomicBool,
 }
@@ -58,19 +62,32 @@ where
             search_index,
             read_repo,
             checkpoint,
+            vectors: None,
             rebuilding: AtomicBool::new(false),
         }
+    }
+
+    #[must_use]
+    pub fn with_vector_index(mut self, vectors: Arc<dyn VectorIndex>) -> Self {
+        self.vectors = Some(vectors);
+        self
+    }
+
+    async fn remove(&self, message_id: &MessageId) -> Result<(), ApplicationError> {
+        if let Some(vectors) = &self.vectors {
+            vectors.remove(message_id);
+        }
+        self.search_index
+            .remove_message(message_id)
+            .await
+            .map_err(ApplicationError::Domain)
     }
 
     /// Refresh the index for the message an event refers to. Idempotent.
     async fn project(&self, envelope: &EventEnvelope) -> Result<(), ApplicationError> {
         let message_id = match &envelope.payload {
             DomainEvent::MessageDeleted { message_id, .. } => {
-                self.search_index
-                    .remove_message(message_id)
-                    .await
-                    .map_err(ApplicationError::Domain)?;
-                return Ok(());
+                return self.remove(message_id).await;
             }
             DomainEvent::MessageReceived { message_id, .. }
             | DomainEvent::MessageBodyFetched { message_id, .. }
@@ -95,11 +112,7 @@ where
             .map_err(ApplicationError::Domain)?
         {
             Some(msg) => self.index(&msg, &mut LabelingCache::new()).await,
-            None => self
-                .search_index
-                .remove_message(message_id)
-                .await
-                .map_err(ApplicationError::Domain),
+            None => self.remove(message_id).await,
         }
     }
 
